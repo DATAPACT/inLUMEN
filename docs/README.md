@@ -2,7 +2,7 @@
 
 Powered by
 
-[![SINTEF](./images/sintef-logo.tif)](https://www.sintef.no/)
+[![SINTEF](./images/download.png)](https://www.sintef.no/)
 
 | Project Links |
 | ------------- | 	
