@@ -1,0 +1,41 @@
+version: '2.4'
+
+services:
+  neo4j-datapact:
+    image: neo4j:5-community
+    container_name: neo4j-datapact
+    hostname: neo4j-datapact
+    mem_limit: 4G
+    restart: unless-stopped
+    ports:
+      - "7474:7474"   # Neo4j Browser
+      - "7687:7687"   # Bolt protocol
+    volumes:
+      - ./neo4j_data_volume:/data
+      - ./neo4j_logs_volume:/logs
+      - ./neo4j_import_volume:/import
+      - ./neo4j_plugins_volume:/plugins
+    environment:
+      - NEO4J_AUTH=neo4j/password
+      - NEO4J_PLUGINS=["apoc","graph-data-science"]
+      - NEO4J_dbms.security.procedures.allowlist=apoc.*,gds.*
+      - NEO4J_apoc.import.file.enabled=true
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "password", "RETURN 1;"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio-datapact:
+    image: minio/minio:latest
+    container_name: minio-datapact
+    hostname: minio-datapact
+    command: server --address 0.0.0.0:9000 --console-address ":9099" /data
+    environment:
+      - MINIO_ROOT_USER=datapact_minio
+      - MINIO_ROOT_PASSWORD=datapact_minio
+    ports:
+      - "9000:9000"
+      - "9099:9099"
+    volumes:
+      - minio_data:/data

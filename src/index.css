@@ -1,0 +1,97 @@
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 20% 12%;
+    --foreground: 210 20% 98%;
+
+    --card: 220 25% 15%;
+    --card-foreground: 210 20% 98%;
+
+    --popover: 220 25% 15%;
+    --popover-foreground: 210 20% 98%;
+
+    --primary: 250 80% 70%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 30% 20%;
+    --secondary-foreground: 210 20% 98%;
+
+    --muted: 220 25% 20%;
+    --muted-foreground: 220 10% 70%;
+
+    --accent: 250 80% 70%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 80% 60%;
+    --destructive-foreground: 210 20% 98%;
+
+    --border: 220 25% 20%;
+    --input: 220 25% 18%;
+    --ring: 250 80% 70%;
+
+    --radius: 0.5rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background font-sans text-foreground;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  
+  /* Custom scrollbar styles */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  
+  ::-webkit-scrollbar-track {
+    background: hsl(var(--muted));
+    border-radius: 8px;
+  }
+  
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted-foreground));
+    border-radius: 8px;
+  }
+  
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--accent));
+  }
+  
+  /* Node connection line */
+  .react-flow__edge-path {
+    stroke: hsl(var(--accent));
+    stroke-width: 1.5;
+    filter: drop-shadow(0 0 8px rgba(var(--accent), 0.4));
+  }
+  
+  /* Node customization */
+  .node-custom {
+    transition: all 0.2s ease;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+    backdrop-filter: blur(8px);
+  }
+  
+  .node-custom:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+  }
+  
+  .flow-canvas {
+    background-color: theme('colors.canvas.DEFAULT');
+    background-image: 
+      linear-gradient(theme('colors.canvas.grid') 1px, transparent 1px),
+      linear-gradient(90deg, theme('colors.canvas.grid') 1px, transparent 1px);
+    background-size: 20px 20px;
+  }
+}
