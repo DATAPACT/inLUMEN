@@ -59,6 +59,26 @@ services:
     networks:
       - app_network
 
+  llm-datapact:
+    image: ollama/ollama:latest
+    container_name: llm-datapact
+    networks:
+      - app_network
+    ports:
+      - 11434:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+    tty: true
+    volumes: 
+      - ./ollama-volume:/root/.ollama
+    restart: unless-stopped
+
 networks:
   app_network:
     driver: bridge

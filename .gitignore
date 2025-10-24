@@ -58,3 +58,4 @@ neo4j_logs_volume/
 neo4j_plugins_volume/
 minio_data/
 neo4j_import_volume/
+ollama-volume/
