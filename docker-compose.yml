@@ -25,6 +25,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    networks:
+      - app_network
 
   minio-datapact:
     image: minio/minio:latest
@@ -32,10 +34,31 @@ services:
     hostname: minio-datapact
     command: server --address 0.0.0.0:9000 --console-address ":9099" /data
     environment:
-      - MINIO_ROOT_USER=datapact_minio
-      - MINIO_ROOT_PASSWORD=datapact_minio
+      - MINIO_ROOT_USER=minio
+      - MINIO_ROOT_PASSWORD=password
     ports:
       - "9000:9000"
       - "9099:9099"
     volumes:
-      - minio_data:/data
+      - ./minio_data:/data
+    networks:
+      - app_network
+
+  frontend-datapact:
+    build: ./frontend
+    container_name: frontend-datapact
+    hostname: frontend-datapact
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      NODE_ENV: development
+    command: npm run dev -- --host
+    networks:
+      - app_network
+
+networks:
+  app_network:
+    driver: bridge

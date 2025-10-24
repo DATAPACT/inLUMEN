@@ -1,24 +1,60 @@
-# Logs
-logs
-*.log
-npm-debug.log*
+*.credential
+openaiapi.ini
+.idea
+*.iml
+*.pem
+*.cert
+*.passphrase
+node_modules
+build
+target
+/node_modules
+/.pnp
+.pnp.js
+.vscode
+
+# testing
+/coverage
+cypress/plugins
+cypress/support
+cypress/videos
+
+# production
+/build
+/dist
+
+# misc
+.DS_Store
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 yarn-debug.log*
 yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
 
+# Ignore builds
+*.tgz
+
+# package directories
 node_modules
-dist
-dist-ssr
-*.local
+jspm_packages
 
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
-.DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
+# Serverless directories
+.serverless
+
+# temporary files
+*.swp
+__pycache__/
+*.pyc
+
+# later additions
+downloads/
+outputs/
+temp/
+.cache/
+buckets/
+neo4j_data_volume/
+neo4j_logs_volume/
+neo4j_plugins_volume/
+minio_data/
+neo4j_import_volume/

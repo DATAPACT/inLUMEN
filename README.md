@@ -43,17 +43,13 @@ n/a TODO
 
 ## **How To Install**
 Step 1: Navigate to the project directory.
-Step 2: Install the necessary dependencies using the following command:
+Step 2: Run the following command:
 ```
-npm i
-```
-Step 3: Start the development server using the following command:
-```
-npm run dev
+docker compose up --build
 ```
 
 ### Requirements
-
+Requirement: [Docker Desktop](https://www.docker.com/%20products/docker-desktop/) installed. 
 Requirement: Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
 
 ### Software
