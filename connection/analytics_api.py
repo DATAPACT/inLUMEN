@@ -1,8 +1,22 @@
 from flask import Flask, request, jsonify
 from openai import OpenAI
-from autogen import ConversableAgent, GroupChat, GroupChatManager, register_function, Agent, gather_usage_summary
-from autogen.cache import Cache
-from autogen.coding import LocalCommandLineCodeExecutor, DockerCommandLineCodeExecutor
+from autogen_ext.code_executors.local import LocalCommandLineCodeExecutor
+from autogen_ext.code_executors.docker import DockerCommandLineCodeExecutor
+from autogen_agentchat.tools import AgentTool, TeamTool
+from autogen_ext.models.openai import OpenAIChatCompletionClient
+from autogen_ext.models.ollama import OllamaChatCompletionClient
+from autogen_agentchat.conditions import TextMessageTermination, SourceMatchTermination, MaxMessageTermination, TextMentionTermination
+from autogen_agentchat.agents import AssistantAgent, CodeExecutorAgent, UserProxyAgent
+from autogen_agentchat.teams import SelectorGroupChat
+from autogen_core.model_context import BufferedChatCompletionContext, ChatCompletionContext
+from autogen_agentchat.ui import Console
+from autogen_agentchat.messages import BaseAgentEvent, BaseChatMessage, ModelClientStreamingChunkEvent
+from autogen_core.tools import BaseTool, FunctionTool, Workbench
+from autogen_ext.tools.code_execution import PythonCodeExecutionTool
+from autogen_core.models import CreateResult, SystemMessage, ChatCompletionClient
+from autogen_core import CancellationToken
+from autogen_agentchat.base import Response
+from pathlib import Path
 import tempfile
 import configparser
 import io
@@ -16,40 +30,110 @@ import json
 import csv
 import time
 from pydantic import BaseModel, Field
-from typing import Annotated, Literal
-from datetime import datetime
+from typing import Annotated, Literal, List, Optional, Union, Sequence, Any, Callable, Dict, Mapping, AsyncGenerator
+from datetime import datetime, timedelta
 
+import asyncio
+import nest_asyncio
+
+# Create a single global event loop for all requests
+global_loop = asyncio.new_event_loop()
+nest_asyncio.apply()
+asyncio.set_event_loop(global_loop)
+
+def run_async(coro):
+    """Run async coroutine safely using the persistent global loop."""
+    global global_loop
+    if global_loop.is_closed():
+        # Recreate if something closed it accidentally
+        global_loop = asyncio.new_event_loop()
+        nest_asyncio.apply()
+        asyncio.set_event_loop(global_loop)
+    return global_loop.run_until_complete(coro)
+
+# OpenAI version - if key is available:
 config = configparser.ConfigParser(allow_no_value = True)
 config.read('openaiapi.ini')
 openai_api_key = config.get('openai', 'OPENAI_API_KEY')
 
-openai_llm_config = {
-    "config_list": [{"model": "gpt-4o", "api_key": openai_api_key, "api_rate_limit": 10.0, "tags": ["gpt4o", "openai"]}],
-    "temperature": 1,
-    "max_tokens": 10000
-}
+openai_model_client = OpenAIChatCompletionClient(
+    model = "gpt-4.1",
+    api_key = openai_api_key,
+)
 
-gemma_llm_config = {"config_list": [
-  {
-    "model": "gemma3:27b",
-    "base_url": "http://llm:11434/v1",
-    "api_key": "ollama",
-  },
-] }
+# Must disable parallel tool calls to avoid concurrency issues in AgentTool/TeamTool
+openai_model_client_no_parallel_calls = OpenAIChatCompletionClient(
+    model = "gpt-4.1",
+    api_key = openai_api_key,
+    parallel_tool_calls=False,  
+)
 
-# All agents get following config. Change LLM config 
-current_llm_config = gemma_llm_config
+# Assuming Ollama server is running locally on port 11434:
+ollama_model_client = OllamaChatCompletionClient(model="llama3.1:8b", host= "http://llm:11434")
 
-# Decide if there is human interaction or not
-DEBUG_MODE = False
+# All agents get following config. Change LLM config to experiment:
+current_model_client = openai_model_client_no_parallel_calls
 
-class TimeseriesInput(BaseModel):
-    bucket: Annotated[str, Field(description="The bucket ID in InfluxDB.")]
-    start_time: Annotated[str, Field(description="The start time (use ISO 8601 datetime-local format: YYYY-MM-DDTHH:mm).")]
-    end_time: Annotated[str, Field(description="The end time (use ISO 8601 datetime-local format: YYYY-MM-DDTHH:mm).")]
-
-class StaticInput(BaseModel):
-    bucket: Annotated[str, Field(description="The bucket ID in MinIO.")]
+class ForcedAssistantAgent(AssistantAgent):
+    """AssistantAgent that always enforces tool calling."""
+    @classmethod
+    async def _call_llm(
+        cls,
+        model_client: ChatCompletionClient,
+        model_client_stream: bool,
+        system_messages: List[SystemMessage],
+        model_context: ChatCompletionContext,
+        workbench: Sequence[Workbench],
+        handoff_tools: List[BaseTool[Any, Any]],
+        agent_name: str,
+        cancellation_token: CancellationToken,
+        output_content_type: type[BaseModel] | None,
+        message_id: str,
+    ) -> AsyncGenerator[Union[CreateResult, ModelClientStreamingChunkEvent], None]:
+        """Call the language model with given context and configuration.
+        Args:
+            model_client: Client for model inference
+            model_client_stream: Whether to stream responses
+            system_messages: System messages to include
+            model_context: Context containing message history
+            workbench: Available workbenches
+            handoff_tools: Tools for handling handoffs
+            agent_name: Name of the agent
+            cancellation_token: Token for cancelling operation
+            output_content_type: Optional type for structured output
+        Returns:
+            Generator yielding model results or streaming chunks
+        """
+        all_messages = await model_context.get_messages()
+        llm_messages = cls._get_compatible_context(model_client=model_client, messages=system_messages + all_messages)
+        tools = [tool for wb in workbench for tool in await wb.list_tools()] + handoff_tools
+        if model_client_stream:
+            model_result: Optional[CreateResult] = None
+            async for chunk in model_client.create_stream(
+                llm_messages,
+                tools=tools,
+                tool_choice="required",   # Needs to be added to enforce tool call!
+                json_output=output_content_type,
+                cancellation_token=cancellation_token,
+            ):
+                if isinstance(chunk, CreateResult):
+                    model_result = chunk
+                elif isinstance(chunk, str):
+                    yield ModelClientStreamingChunkEvent(content=chunk, source=agent_name, full_message_id=message_id)
+                else:
+                    raise RuntimeError(f"Invalid chunk type: {type(chunk)}")
+            if model_result is None:
+                raise RuntimeError("No final model result in streaming mode.")
+            yield model_result
+        else:
+            model_result = await model_client.create(
+                llm_messages,
+                tools=tools,
+                tool_choice="required", # Needs to be added to enforce tool call!
+                cancellation_token=cancellation_token,
+                json_output=output_content_type,
+            )
+            yield model_result
 
 
 app = Flask(__name__)
@@ -66,323 +150,395 @@ def add_cors_headers(response):
 def apply_cors(response):
     return add_cors_headers(response)
 
-@app.route('/analytics_generate_and_run_code', methods=['GET'])
-def analytics_generate_and_run_code():
-
+@app.route('/analytics_agents', methods=['GET'])
+def analytics_agents():
     task = request.args.get('task')
-    llm_work_dir = "./downloads"
+    # User proxy:
+    user_proxy = UserProxyAgent("user_proxy")
+    # _________________________________Pipeline Editor______________________________________
 
-    def query_neo4j(query: str) -> str:
+    DB_SCHEMA = """
+    Nodes:
+    (:PIPELINE) represents one AI/data workflow. Properties:
+        - uid: string (generated via randomUUID)
+        - name: string
+        - description: string
+        - version: string
+        - created_at: datetime
+        - updated_at: datetime
+        - status: string ("design"|"simulated"|"runtime")
+    (:STEP) represents a single node in the pipeline graph. Properties:
+        - uid: string (generated via randomUUID)
+        - type: string ("input"|"config"|"output"|"action"|"storage"|"api")
+        - name: string 
+        - description: string
+        - content: string 
+        - has_files: string ("yes"|"no") - default: "no"
+        - endpoint: string
+        - database: string - default : "minio"
+        - param: dict
+    (:FILE) represents a single file associated with a step. Properties:
+        - uid: string (generated via randomUUID)
+        - name: string
+        - extension: string 
+        - created_at: datetime
+        - bucket: string
+    Relationships:
+    (:PIPELINE)-[:HAS_STEP]->(:STEP)
+    (:STEP)-[:FLOWS_TO]->(:STEP)
+    (:STEP)-[:USES_FILE]->(:FILE)
+    """
+
+    async def run_query(query: str, query_type: str) -> str:
+        """ Runs any Cypher query in Neo4j. Returns String representation. """
         try:
-            api_url = "http://localhost:5001/neo4j_run_query"  # Update this if the API runs on a different host
+            api_url = "http://localhost:5001/neo4j_run_query"  # Adjust if API host differs
             payload = {"query": query}
             headers = {"Content-Type": "application/json"}
-            response = requests.post(api_url, data=json.dumps(payload), headers=headers)
-            # Handle response
+            # Run the API call in a thread (since requests is blocking)
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: requests.post(api_url, data=json.dumps(payload), headers=headers)
+            )
+            # Check response status and return:
             if response.status_code == 200:
-                return response.text  # Or response.json() if you want to return structured data
+                records = response.text 
+                return repr(records) + f"<({query_type})>"
             else:
-                return f"Error: {response.status_code} - {response.text}"
+                return repr({"Error in graph_operator": f"{response.status_code} - {response.text}"})
         except Exception as e:
-            return repr(e)
+            return repr({"Error in graph_operator": str(e)})
+    # TODO: Use later
+    async def list_pipelines() -> str:
+        """ Lists all pipelines and the number of steps they have."""
+        try:
+            query_type = "list_pipelines"
+            query = f"""
+            MATCH (p:PIPELINE)
+            OPTIONAL MATCH (p)-[:HAS_STEP]->(s:STEP)
+            RETURN p, count(DISTINCT s) AS step_count
+            ORDER BY p.name;
+            """
+            result = await run_query(query, query_type)
+            return repr(result)
+        except Exception as e:
+            return repr({"Error in graph_operator": str(e)})
 
-    graph_operator = ConversableAgent(
-        "GraphOperator",
-        llm_config=False,  # Turn off LLM for this agent.
-        code_execution_config=False,
-        human_input_mode= "ALWAYS" if DEBUG_MODE else "NEVER",
-        is_termination_msg=lambda msg: (msg["content"]) and ("TERMINATE" in msg["content"])
-    )
+    # TODO: Use later
+    async def get_pipeline_steps(pipeline_uid: str) -> str:
+        """Gets the steps present in a pipeline."""
+        try:
+            query_type = "get_pipeline_steps"
+            query = f"""
+            MATCH (p:PIPELINE {{uid: '{pipeline_uid}'}})-[:HAS_STEP]->(s:STEP)
+            OPTIONAL MATCH (s)-[r:FLOWS_TO]->(t:STEP)
+            RETURN p, s, r, t;
+            """
+            result = await run_query(query, query_type)
+            return repr(result)
+        except Exception as e:
+            return repr({"Error in graph_operator": str(e)})
 
-    # KUBERNETES DEPLOYMENT VERSION:
-    #"""
-    graph_explorer = ConversableAgent(
-        "GraphExplorer",
-        system_message = "Your name is GraphOperator. You can answer questions by querying a Neo4j Graph Database. Generate Cypher queries and use the registered tool to execute the query. \
-        The graph follows a strict schema:  \
-        (1) STEP node has properties: name, description, order, status, and uid. A STEP always connects to one or more DATASOURCE nodes. \
-        (2) DATASOURCE node has properties: name, type (type of data), format (data format), bucket, endpoint, and uid. To get bucket, use the relation: (ds:DATASOURCE)<-[:UsesDataSource]-(s:STEP). \
-        (3) Steps can also be chained together in a workflow using the relation: (s1:STEP)-[:NextStep]->(s2:STEP). \
-        (4) Queries must always respect direction of relationships. Only one statement per query is allowed.",
-        llm_config = current_llm_config,
-        code_execution_config=False,
-        human_input_mode= "ALWAYS" if DEBUG_MODE else "NEVER"
-    )
-    #"""
-
-    register_function(
-        query_neo4j,
-        caller = graph_explorer,
-        executor = graph_operator,
-        description = "Query or modify the neo4j graph database. The input is a CYPHER query, and the output is a list of records returned from the query."
-    )
-
-    nested_chats_graph = [
-        {
-            "recipient": graph_explorer,
-            "max_turns": 2,
-            "summary_method": "reflection_with_llm"
-        }
-    ]
-
-    graph_operator.register_nested_chats(
-        nested_chats_graph, 
-        trigger = lambda sender: sender not in [graph_explorer]
-    )
-
-    # Create nested chat agent for FileExporter:
-
-    def getFilepathTimeseries(input: Annotated[TimeseriesInput, "Return file path of data saved locally from InfluxDB."]) -> str:
-        response = requests.get(
-            "http://localhost:4999/influxdb_download_data",
-            params={
-                "endpoint": input.bucket,
-                "start": input.start_time,
-                "end": input.end_time
-            }
-        )
-        # Check the response status and content
-        if response.ok:
-            json_response = response.json()
-            # output = json_response['output']
-            file_path = json_response['filename']
-            return file_path
-        else:
-            print("Error:", response.status_code, response.text)
-            return ""
-
-    def getFilepathStatic(input: Annotated[StaticInput, "Return file path of data saved locally from MinIO."]) -> str:
-        response = requests.get(
-            "http://localhost:5000/minio_lumen_download",
-            params={
-                'endpoint': input.bucket
-            }
-        )
-        if response.ok:
-            json_response = response.json()
-            print(json_response)
-            file_path = json_response["file_path"]
-            return file_path
-        else:
-            print(f"API call failed with status code: {response.status_code}")
-            return ""
+    # TODO: Use later
+    async def inspect_step(step_uid: str) -> str:
+        """ Inspects a step: returns incoming/outgoing neighbors and used files."""
+        try:
+            query_type = "inspect_step"
+            query = f"""
+            MATCH (s:STEP {{uid: '{step_uid}'}})
+            OPTIONAL MATCH (prev:STEP)-[rin:FLOWS_TO]->(s)
+            OPTIONAL MATCH (s)-[rout:FLOWS_TO]->(next:STEP)
+            OPTIONAL MATCH (s)-[:USES_FILE]->(f:FILE)
+            RETURN s,
+            collect(DISTINCT {{prev: prev, rel: rin}})  AS incoming_neighbors,
+            collect(DISTINCT {{next: next, rel: rout}}) AS outgoing_neighbors,
+            collect(DISTINCT f)                         AS used_files;
+            """
+            result = await run_query(query, query_type)
+            return repr(result)
+        except Exception as e:
+            return repr({"Error in graph_operator": str(e)})
         
-    filepath_driver = ConversableAgent(
-        "FilePathDriver",
-        llm_config=False,  # Turn off LLM for this agent.
-        code_execution_config=False,
-        human_input_mode= "ALWAYS" if DEBUG_MODE else "NEVER",
-        is_termination_msg=lambda msg: (msg["content"]) and ("TERMINATE" in msg["content"])
-    )
+    async def overview() -> str:
+        """Gives an overview of all the pipelines and the steps present in each pipeline."""
+        try:
+            query_type = "overview"
+            query = """
+            MATCH (p:PIPELINE)
+            OPTIONAL MATCH (p)-[hs:HAS_STEP]->(s:STEP)
+            OPTIONAL MATCH (s)-[r:FLOWS_TO]->(t:STEP)
+            RETURN
+            p  AS pipeline,
+            s  AS step,
+            hs AS step_link,
+            hs.order_index AS step_order,
+            r  AS flow,
+            t  AS next_step
+            ORDER BY p.name, hs.order_index;
+            """
+            result = await run_query(query, query_type)
+            return repr(result)
+        except Exception as e:
+            return repr({"Error in graph_operator": str(e)})
 
-    filepath_exporter = ConversableAgent(
-        "FilePathExporter",
-        system_message = "Your name is FilePathDriver. Given a task and a bucket ID, you save the data locally and return the file path for relevant data files using the registered tools. If what you require is not provided, explain your problem. "
-        "You can obtain both MinIO (static data) and InfluxDB (time-series data) file paths through two registered functions by creating the necessary function argument(s). If you retrieve time-series, mention that it will be saved as a CSV file with columns: timestamp, measurement, field and value.",
-        llm_config = current_llm_config,
-        code_execution_config=False,
-        human_input_mode= "ALWAYS" if DEBUG_MODE else "NEVER"
-    )
-
-    register_function(
-        getFilepathTimeseries,
-        caller = filepath_exporter,
-        executor = filepath_driver,
-        description = "Returns the file path of data saved from InfluxDB (time-series) given a bucket ID and a time selection."
-    )
-
-    register_function(
-        getFilepathStatic,
-        caller = filepath_exporter,
-        executor = filepath_driver,
-        description = "Returns the file path of object saved from MinIO (static) given a bucket ID."
-    )
-
-    nested_chats_filepath = [
+    async def create_pipeline(params: str) -> str:
+        """ Creates a PIPELINE node.
+        params JSON:
         {
-            "recipient": filepath_exporter,
-            "max_turns": 2,
-            "summary_method": "last_msg"
+        "name": "<string>",
+        "description": "<string>",
+        "version": "<x.x>"
         }
-    ]
+        """
+        try:
+            query_type = "create_pipeline"
+            data = json.loads(params)
+            name        = data.get("name", "").replace("'", "\\'")
+            description = data.get("description", "").replace("'", "\\'")
+            version     = str(data.get("version", "1.0")).replace("'", "\\'")
 
-    filepath_driver.register_nested_chats(
-        nested_chats_filepath, 
-        trigger = lambda sender: sender not in [filepath_exporter]
+            query = f"""
+            CREATE (p:PIPELINE {{
+            uid:        randomUUID(),
+            name:       '{name}',
+            description:'{description}',
+            version:    '{version}',
+            created_at: datetime(),
+            updated_at: datetime(),
+            status:     'design'
+            }})
+            RETURN p;
+            """
+
+            result = await run_query(query, query_type)
+            return repr(result)
+        except Exception as e:
+            return repr({"Error in graph_operator": str(e)})
+
+    async def create_step(params: str) -> str:
+        """ Creates new STEP and connects it after the last STEP (if any is present).
+        params JSON:
+        {
+        "name": "<string>",
+        "description": "<string>",
+        "type": "action|input|output|config|storage|api",
+        }
+        """
+        try:
+            query_type = "create_step"
+            data = json.loads(params)
+            step_type   = data["type"].replace("'", "\\'")
+            name        = data.get("name", "").replace("'", "\\'")
+            description = data.get("description", "").replace("'", "\\'")
+            step_type_lower = step_type.lower()
+            props_lines = [
+                "uid:        randomUUID()",
+                f"type:       '{step_type}'",
+                f"name:       '{name}'",
+                f"description:'{description}'"
+            ]
+            if step_type_lower == "input":
+                props_lines.append("content: ''")
+                props_lines.append("has_files: 'no'")
+            elif step_type_lower == "config":
+                props_lines.append("param: {}")
+            elif step_type_lower == "action":
+                props_lines.append("has_files: 'no'")
+            elif step_type_lower == "storage":
+                props_lines.append("endpoint: ''")
+                props_lines.append("database: 'minio'")
+            props_str = ",\n            ".join(props_lines)
+
+            query = f"""
+            MATCH (p:PIPELINE)
+            OPTIONAL MATCH (p)-[hs:HAS_STEP]->(prev:STEP)
+            WITH p, prev, hs
+            ORDER BY hs.order_index DESC
+            LIMIT 1
+            WITH
+            p,
+            prev,
+            coalesce(hs.order_index, 0) AS maxIndex
+            CREATE (s:STEP {{
+                {props_str}
+            }})
+            MERGE (p)-[:HAS_STEP {{
+            order_index: maxIndex + 1
+            }}]->(s)
+            FOREACH (_ IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |
+            MERGE (prev)-[:FLOWS_TO]->(s)
+            )
+            RETURN s;
+            """
+
+            result = await run_query(query, query_type)
+            return repr(result)
+        except Exception as e:
+            return repr({"Error in graph_operator": str(e)})
+
+    async def delete_step(params: str) -> str:
+        """Deletes a STEP.
+        params JSON:
+        {
+        "step_uid": "<uid>"
+        }
+        """
+        try:
+            query_type = "delete_step"
+            data = json.loads(params)
+            step_uid = data["step_uid"].replace("'", "\\'")
+
+            query = f"""
+            MATCH (s:STEP {{uid: '{step_uid}'}})
+            OPTIONAL MATCH (prev:STEP)-[rin:FLOWS_TO]->(s)
+            OPTIONAL MATCH (s)-[rout:FLOWS_TO]->(next:STEP)
+            WITH s,
+                collect(DISTINCT prev) AS prevs,
+                collect(DISTINCT next) AS nexts,
+                collect(rin)           AS r_in,
+                collect(rout)          AS r_out
+            FOREACH (p IN prevs |
+            FOREACH (n IN nexts |
+                MERGE (p)-[:FLOWS_TO]->(n)
+            )
+            )
+            WITH s, r_in, r_out
+            FOREACH (r IN r_in | DELETE r)
+            FOREACH (r IN r_out | DELETE r)
+            OPTIONAL MATCH (s)<-[hs:HAS_STEP]-(:PIPELINE)
+            DELETE hs
+            DETACH DELETE s;
+            """
+
+            result = await run_query(query, query_type)
+            return repr(result)
+        except Exception as e:
+            return repr({"Error in graph_operator": str(e)})
+
+    pipeline_editor = AssistantAgent(
+        name = "pipeline_editor",
+        model_client = current_model_client,
+        tools = [create_pipeline, create_step, delete_step, overview], 
+        description = f"An agent that designs AI/data pipelines given a user request.",
+        system_message = f""" You design AI/data pipelines using your registered tools. Call one or multiple tools to create or modify a pipeline as requested by the user.
+                          A PIPELINE is composed of one or several STEPs. Use overview to check if there are any pipelines. If the user request is unclear or incomplete, ask for more details.
+                        - [overview]: calling this tool will give you an overview of the current pipeline content, if any. 
+                        - [create_pipeline]: calling this tool will create a pipeline.
+                        - [create_step]: calling this tool will create a new step in a pipeline (will always place it last).
+                        - [delete_step]: calling this tool will delete a step in a pipeline.
+                          """,  
+        max_tool_iterations = 15,
+        reflect_on_tool_use = False,
     )
 
-    # Human proxy to initiate the chat:
-    human_proxy = ConversableAgent(
-        "HumanProxy",
-        llm_config=False,  # no LLM used for human proxy
-        code_execution_config=False,
-        human_input_mode="ALWAYS" if DEBUG_MODE else "NEVER",  # always ask for human input
-    )
+    # TODO: Align later for FILE fetching functionality:
+    #async def readFile(bucket: str) -> str:
+    #    """Reads the file from a bucket."""
+    #    try:
+    #        response = requests.get(
+    #            "http://localhost:5000/minio_lumen_download",
+    #            params={
+    #                'endpoint': bucket
+    #            }
+    #        )
+    #        if response.ok:
+    #            json_response = response.json()
+    #            # print(json_response)
+    #            file_path = json_response["file_path"]
+    #            mime = magic.Magic(mime=True) 
+    #            file_type = mime.from_file("./downloads/" + file_path)
+    #            print(f"[MinIO] filepath_driver saved static data to path: {file_path}, MIME type: {file_type}")
+    #            return "File path: "+file_path+" | File type: "+file_type
+    #        print(f"[MinIO] filepath_driver HTTP error <(BUCKET_ERROR)> {response.status_code}: {response.text}")
+    #        return f"[MinIO] filepath_driver HTTP error <(BUCKET_ERROR)> {response.status_code}: {response.text}"
+    #    except Exception as e:
+    #        print(f"[MinIO] Error in filepath_driver <(BUCKET_ERROR)>: {e}")
+    #        return f"[MinIO] Error in filepath_driver <(BUCKET_ERROR)>: {e}"
 
-    task_planner = ConversableAgent(
-        "TaskPlanner",
-        system_message = "Your name is TaskPlanner. You create detailed plans for specialized agents that you will be introduced to. If not succesful, construct a new plan for the agents that failed. If your plan is succesful, write TERMINATE. If asked for a choice or a reminder, choose wisely and provide all the information needed."
-        "Given a task, break it down into sub-tasks, each of which should be performed by one agent. Not all agents need to participate, it depends on the task."
-        "[CONTEXT] A knowledge graph represents a network topology of assets (ASSET nodes). Agents can access data through the bucket property of data nodes (STATICDATA and DATASOURCE nodes holding information about data stored in MinIO and InfluxDB)."
-        "If the task asks to analyze specific data, file paths to locally downloaded data files can be used when generating code that reads the file and analyzes the content. If the requested data is time-series, the file-path agent needs a time range too. Some tasks only require information of the knowledge graph. ",
-        llm_config = current_llm_config,
-        code_execution_config=False,  # Turn off code execution for this agent.
-        human_input_mode = "ALWAYS"  if DEBUG_MODE else "NEVER"
-    )
-
-
-    code_generator = ConversableAgent("CodeGenerator",
-        llm_config=current_llm_config,
-        system_message = '''
-            Your name is CodeGenerator. You generate Python code, with no explanations. You may be asked to revise previous code later. \
-            You will get a task or revision request, and a path to a file (of a specific type). If not provided, only explain what's missing. \
-            Otherwise, generate one function called solve_task(file_path) that tries to solve the task. If the file content is unknown, investigate it first. \
-            If the task is abstract or ambiguous, you may create multiple conditional branches to cover the possible variations. If task is impossible, write TERMINATE instead of the code. \
-            At the end, include one line of code to call solve_task function. Do not use the __main__ segment! \
-            At the end, always print the result as a presentation to the user. Before printing, make sure the result is short (under 1K tokens) to avoid rate limit errors.  \
-            Assume these dependencies/packages are already installed: numpy, scapy, pandas, matplotlib, dpkt (preferred for PCAP analysis).  \
-        ''',
-        code_execution_config=False,  
-        human_input_mode="ALWAYS" if DEBUG_MODE else "NEVER",  
-        is_termination_msg=lambda msg: "TERMINATE" in msg["content"],
-    )
-
-    # Create an evaluator:
-    output_repeater = ConversableAgent("OutputRepeater",
-        llm_config=current_llm_config,
-        system_message = "Your name is OutputRepeater. Given a task and an answer, respond following one of the two alternatives:\
-                    1. If the answer satisfies the task, repeat the exact answer, and write TERMINATE at the end. Do not add any explanations unless the answer is purely numerical! \
-                    2. If the answer contains an error, does not make sense, or is plainly wrong, repeat the answer and explain the problem.",
-        code_execution_config=False, 
-        human_input_mode="ALWAYS" if DEBUG_MODE else "NEVER",  
-    )
-
-    # Create a local command line code executor.
-    local_executor = LocalCommandLineCodeExecutor(
-    timeout=180,  # Timeout (3 min)
-    work_dir=llm_work_dir,  
-    )
-
-    # Create an agent with code executor configuration.
-    code_executor = ConversableAgent("CodeExecutor",
-        llm_config=False, 
-        code_execution_config={"executor": local_executor}, 
-        human_input_mode="ALWAYS" if DEBUG_MODE else "NEVER",  
-    )
-
-    # Comment out descriptions to use system message instead.
-    task_planner.description = "Provides a plan/sub-tasks for agents, given a task. This agent should be the first to engage and can be re-called to improve previous plans or give more context."
-    graph_operator.description = "Has access to knowledge graph. Generates CYPHER queries and executes them. Can search for bucket IDs. "
-    filepath_driver.description = "Saves data files locally and provides their file path, given a task and a bucket ID."
-    code_generator.description = "Generates Python code, given a task and a file path."
-    code_executor.description = "Executes generated Python code and prints the execution output."
-    output_repeater.description = "Repeats an output/answer and stops the chat if task is solved. This agent should be the last to engage."
-    # human_proxy.description = "Provides additional human input, in case the task is missing information or unclear."
-   
-    allowed_transitions = {
-        task_planner: [graph_operator, code_generator, task_planner, output_repeater, filepath_driver],
-        graph_operator: [filepath_driver, output_repeater, graph_operator, task_planner],
-        filepath_driver: [code_generator, output_repeater, task_planner],
-        code_generator: [code_executor,],
-        code_executor: [output_repeater,],
-        output_repeater: [task_planner, code_generator],
-        # human_proxy: [task_planner, human_proxy],
-    }
-
-    group_chat = GroupChat(agents=[task_planner, graph_operator, filepath_driver, code_generator, code_executor, output_repeater], messages=[], send_introductions = True, allowed_or_disallowed_speaker_transitions=allowed_transitions, speaker_transitions_type="allowed", max_round = 25)
-
-    group_chat_manager = GroupChatManager(
-        groupchat=group_chat,
-        llm_config=current_llm_config,
-        is_termination_msg=lambda msg: "TERMINATE" in msg["content"],
-    )
-
-    current_date = datetime.now()
+    #read_file_tool = FunctionTool(readFile, description="Reads the file from the bucket in which it is stored.")
     
-    # Time execution: 
-    start_time = time.time() 
-    chat_result = human_proxy.initiate_chat(
-        group_chat_manager,
-        message=f" Task: {task}. Current date: {current_date}",
-        summary_method="reflection_with_llm",
+     #__________________________________File Reader__________________________________________
+    # TODO: Align
+    #file_reader = ForcedAssistantAgent(
+    #    name = "file_reader",
+    #    model_client = current_model_client,
+    #    tools = [read_file_tool],
+    #    description = "An agent that reads the file(s) associated with a pipeline step. ",
+    #    system_message = """<TODO>""",
+    #    max_tool_iterations = 1,
+    #    reflect_on_tool_use = False 
+    #)
+
+    #__________________________________Code Generator__________________________________________
+    # TODO: Align
+    #executor =  LocalCommandLineCodeExecutor(timeout = 600, work_dir = llm_work_dir)
+    #execute_code = PythonCodeExecutionTool(executor) # Tool that executes Python code 
+    # Agent that generates and executes tests (monitored version)
+    #code_generator = ForcedAssistantAgent(
+    #    name = "code_generator",
+    #    model_client = current_model_client,
+    #    tools = [execute_code],
+    #    description = "An agent that generates Python code to print the file content and executes it via registered tool. ",
+    #    system_message = "Generate Python code to <TODO>. Call main() at the end. Only output the code. No structural assumptions. Pre-installed packages: tabulate, numpy, scapy, pandas, matplotlib, dpkt (for PCAP files). ",
+    #    max_tool_iterations = 1,
+    #    model_context=BufferedChatCompletionContext(buffer_size=1)
+    #)
+
+    # Team of agents
+    outer_termination = TextMentionTermination("exit", sources=["user_proxy"])
+    max_messages_termination = MaxMessageTermination(max_messages = 25)
+    termination = outer_termination | max_messages_termination
+
+    def selector_func(messages: Sequence[BaseAgentEvent | BaseChatMessage]) -> str | None:
+        if len(messages) == 0:
+            return "user_proxy"
+        if messages[-1].source == "user_proxy":
+            return "pipeline_editor"
+        if messages[-1].source == "pipeline_editor":
+            # TODO: Align the KEYs accordingly.
+            if "<(TODO)>" in messages[-1].to_text():
+                print("TODO")
+            return user_proxy
+        # TODO: Add agents that remain
+        return None
+    
+    # Create the group chat
+    selector_team = SelectorGroupChat(
+        [user_proxy, pipeline_editor],
+        model_client=current_model_client,
+        selector_func=selector_func,
+        allow_repeated_speaker=True,
+        termination_condition=termination
     )
-    end_time = time.time()
-    exec_time = end_time - start_time
-    # print(f"Execution Time: {execution_time:.4f} seconds")
 
-    # Extract result:
-    result = ""
-    kg = False
-    all_agents = []
-    msg_count = 0
-    generator_loops = 0
-    explorer_loops = 0
-    task_planner_loops = 0
-    driver_loops = 0
-    full_response = ""
-    for message in group_chat.messages:
-        msg_count = msg_count + 1
-        all_agents.append(message['name'])
-        if message['name'] == "OutputRepeater":
-            result = message['content']
-            full_response = full_response + " \n --------NEXT AGENT:--------- " + message['name'] + result
-        elif message['name'] == "GraphOperator":
-            kg = True
-            explorer_loops = explorer_loops + 1
-            full_response = full_response + " \n --------NEXT AGENT:--------- " + message['name'] + message['content']
-        elif message['name'] == "CodeGenerator":
-            generator_loops = generator_loops + 1
-            full_response = full_response + " \n --------NEXT AGENT:--------- " + message['name'] + message['content']
-        elif message['name'] == "TaskPlanner":
-            task_planner_loops = task_planner_loops + 1
-            full_response = full_response + " \n --------NEXT AGENT:--------- " + message['name'] + message['content']
-        elif message['name'] == "GraphExplorer":
-            full_response = full_response + " \n --------NEXT AGENT:--------- " + message['name'] + message['content']
-        elif message['name'] == "CodeExecutor":
-            full_response = full_response + " \n --------NEXT AGENT:--------- " + message['name'] + message['content']
-        elif message['name'] == "FilePathDriver":
-            driver_loops = driver_loops + 1
-            full_response = full_response + " \n --------NEXT AGENT:--------- " + message['name'] + message['content']
-        # print("Msg "+ str(msg_count) + " Name: " + message['name'])
-    # Remove TERMINATE from answer before returning and saving:
-    result = result.replace("TERMINATE", "")
-    response_content = {'result': result}
-    active_agents = set(all_agents)
-    generator_loops = generator_loops if generator_loops >= 2 else 0 # If only used once --> no loops
-    explorer_loops = explorer_loops if explorer_loops >= 2 else 0 # If only used once --> no loops
-    filepathdriver_loops = driver_loops if driver_loops >= 2 else 0 # If used once --> no loops
-    task_planner_loops = task_planner_loops if task_planner_loops >= 2 else 0 # If used once --> no loops
-    usage_summary = gather_usage_summary([human_proxy, task_planner, graph_operator, filepath_driver, code_generator, code_executor, output_repeater])
-    ### LUMEN EXPERIMENTS: task - final answer -  KG (YES/NO) - ACTIVE AGENTS - NUMBER ACTIVE AGENTS - EXEC TIME - LOOPS COUNT for GENERATOR/EXPLORER/TASKPLANNER - TOTAL NUM MESSAGES EXCHANGED - COST  -
-    print("[analytics_api.py] Recording:")
-    print([task, result, kg, active_agents, len(active_agents), exec_time, explorer_loops, generator_loops, task_planner_loops,filepathdriver_loops, msg_count, usage_summary["usage_including_cached_inference"]])
-    record_task_result(task, result, kg, active_agents, len(active_agents), exec_time, explorer_loops, generator_loops, task_planner_loops, filepathdriver_loops, msg_count, usage_summary["usage_including_cached_inference"])
-    # Return the output as JSON:
-    return jsonify(response_content)  
+    async def run_team():
+        await selector_team.reset()
+        # await executor.start()
+        result_text = ""
+        async for event in selector_team.run_stream(task="I want to design a pipeline."):
+            if hasattr(event, "source") and getattr(event, "source", "") == "output_repeater":
+                print("[analytics_inlumen.py] Message Source: " + getattr(event, "source", ""))
+                print(event.to_text())
+                result_text += event.to_text()
+            else:
+                if isinstance(event, BaseChatMessage) or isinstance(event, BaseAgentEvent):
+                    if hasattr(event, "source"):
+                        print("[analytics_inlumen.py] Message Source: " + getattr(event, "source", ""))
+                    else:
+                        print("[analytics_inlumen.py] Message Type: EVENT")
+                    print(event.to_text())
+        # await executor.stop()
+        await selector_team.reset()
+        return result_text
 
-def get_unique_filename(base_path):
-    if not os.path.exists(base_path):
-        return base_path
-    base, ext = os.path.splitext(base_path)
-    counter = 1
-    while True:
-        new_path = f"{base}_({counter}){ext}"
-        if not os.path.exists(new_path):
-            return new_path
-        counter += 1
+    # Run async safely
+    result = run_async(run_team())
 
-def record_task_result(task, answer, kg, active_agents, num_active_agents, exec_time, explorer_loops, generator_loops, task_planner_loops, filepathdriver_loops, num_messages, cost):
-    filename = './downloads/lumen_report.csv'
-    unique_filename = get_unique_filename(filename)
-    file_exists = os.path.isfile(unique_filename)
+    # Cleanup result
+    response_content = {"result": result}
+    return jsonify(response_content)
 
-    with open(unique_filename, mode='a', newline='', encoding='utf-8') as file:
-        writer = csv.writer(file, quotechar='"', quoting=csv.QUOTE_MINIMAL)
-        # Automatically creates file with headers if it doesn't exist
-        if not file_exists:
-            writer.writerow(['Task', 'Answer', 'UseKG', 'ActiveAgents', 'NumActiveAgents', 'ExecutionTime', 'GraphExplorerLoops', 'CodeGeneratorLoops', 'TaskPlannerLoops', "FilePathDriverLoops",'NumMessageExchanges','Cost', "SubjSummary"])
-        # Append data
-        writer.writerow([task, answer, kg, active_agents, num_active_agents, exec_time, explorer_loops, generator_loops, task_planner_loops, filepathdriver_loops, num_messages, cost, "\"OK\""])
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5002)

@@ -59,10 +59,10 @@ def neo4j_clear_all():
 @app.route('/neo4j_save_graph', methods=['GET'])
 def neo4j_save_graph():
     query = """
-    MATCH (n:Step)-[r]->(m:Step)
+    MATCH (n:STEP)-[r]->(m:STEP)
     RETURN n, r, m
     UNION
-    MATCH (n:Step)
+    MATCH (n:STEP)
     WHERE NOT (n)--()
     RETURN n, null AS r, null AS m
     """
@@ -154,8 +154,8 @@ def neo4j_load_graph():
 
                 if start_uid and end_uid:
                     query = f"""
-                    MATCH (a:Step {{uid: $start_uid}})
-                    MATCH (b:Step {{uid: $end_uid}})
+                    MATCH (a:STEP {{uid: $start_uid}})
+                    MATCH (b:STEP {{uid: $end_uid}})
                     CREATE (a)-[r:{rel_type}]->(b)
                     SET r = $props
                     """
@@ -166,7 +166,7 @@ def neo4j_load_graph():
                     })
             # 4. Collect all buckets - UIDs used as bucket names in MinIO
             bucket_query = """
-                MATCH (fn:Step)
+                MATCH (fn:STEP)
                 RETURN fn.uid AS uid
             """
             result = session.run(bucket_query)
@@ -186,7 +186,7 @@ def neo4j_get_graph():
 
 def neo4j_graph():
     query = f"""
-    MATCH (n:Step)-[r]->(m:Step)
+    MATCH (n:STEP)-[r]->(m:STEP)
     RETURN n, r, m
     """
     try:
@@ -236,7 +236,7 @@ def neo4j_add_node():
    
     # Construct the Cypher query with safe string formatting
     query = f"""
-        CREATE (d:Step {{
+        CREATE (d:STEP {{
             user_label: "{user_label}",
             description: "{description}"
         }})
@@ -254,23 +254,23 @@ def neo4j_add_node():
         return jsonify({"error": str(e)}), 500
     
 
-@app.route('/neo4j_update_user_label', methods=['POST'])
-def neo4j_update_user_label():
+@app.route('/neo4j_update_name', methods=['POST'])
+def neo4j_update_name():
     data = request.json
     # Extracting fields from the request
-    user_label = data.get("user_label", "")
+    name = data.get("name", "")
     uid = data.get("uid", "")
    
     # Construct the Cypher query
     query = """
-        MATCH (d:Step { uid: $uid })
-        SET d.user_label = $user_label
+        MATCH (d:STEP { uid: $uid })
+        SET d.name = $name
         RETURN d
     """
     print("[neo4j_api.py] Received query to execute in Neo4j:\n", query)
     try:
         with driver.session() as session:
-            session_result = session.run(query, {"uid": uid, "user_label": user_label})
+            session_result = session.run(query, {"uid": uid, "name": name})
             results = [record["d"] for record in session_result] 
             return jsonify([dict(r) for r in results]), 200
     except Exception as e:
@@ -287,7 +287,7 @@ def neo4j_update_description():
    
     # Construct the Cypher query 
     query = """
-        MATCH (d:Step { uid: $uid })
+        MATCH (d:STEP { uid: $uid })
         SET d.description = $description
         RETURN d
     """
