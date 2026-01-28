@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   Brain, MessageCircle, FileText, Zap, Database, Settings, Clipboard, PlusCircle,
-  Upload, X, Trash2, Eye, Edit, Save
+  Upload, X, Eye, Edit, Save
 } from 'lucide-react';
 
 interface PropertiesPanelProps {
@@ -211,42 +211,55 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate }: PropertiesPanelP
     debouncedUpdatePropertyToNeo4J(selectedNode.id, neo4jProps);
   };
 
+  /**
+   * IMPORTANT FIX:
+   * Only re-initialize panel state when the *selected node changes* (by id),
+   * not on every selectedNode object reference update. Otherwise uploads get wiped.
+   */
   useEffect(() => {
-    if (selectedNode) {
-      setLabel(selectedNode.data.label || '');
-      setDescription(selectedNode.data.description || '');
-
-      // content only for input/output
-      setContent(typeHasContent(nodeType) ? (selectedNode.data.content || '') : '');
-
-      // files only for input/output/action/custom
-      setFiles(typeHasFiles(nodeType) ? (selectedNode.data.files || []) : []);
-
-      // param only for config
-      if (nodeType === "config") {
-        const p = selectedNode.data.param;
-        setParam((p && typeof p === "object" && !Array.isArray(p)) ? p : {});
-      } else {
-        setParam({});
-      }
-
-      // endpoint only for storage/api
-      setEndpoint(typeHasEndpoint(nodeType) ? (selectedNode.data.endpoint || "") : "");
-
-      // database only for storage
-      if (nodeType === "storage") {
-        const db = selectedNode.data.database || "MinIO";
-        setDatabaseName((STORAGE_DATABASE_OPTIONS.includes(db) ? db : "MinIO") as any);
-      } else {
-        setDatabaseName("MinIO");
-      }
-    } else {
+    if (!selectedNode) {
       setLabel('');
       setDescription('');
       setContent('');
       setFiles([]);
       setParam({});
       setEndpoint("");
+      setDatabaseName("MinIO");
+
+      setPreviewFile(null);
+      setPreviewContent('');
+      setPreviewType('text');
+      setIsEditing(false);
+      setEditedContent('');
+      setPreviewFileIndex(-1);
+      return;
+    }
+
+    setLabel(selectedNode.data.label || '');
+    setDescription(selectedNode.data.description || '');
+
+    // content only for input/output
+    setContent(typeHasContent(nodeType) ? (selectedNode.data.content || '') : '');
+
+    // files only for input/output/action/custom
+    setFiles(typeHasFiles(nodeType) ? (selectedNode.data.files || []) : []);
+
+    // param only for config
+    if (nodeType === "config") {
+      const p = selectedNode.data.param;
+      setParam((p && typeof p === "object" && !Array.isArray(p)) ? p : {});
+    } else {
+      setParam({});
+    }
+
+    // endpoint only for storage/api
+    setEndpoint(typeHasEndpoint(nodeType) ? (selectedNode.data.endpoint || "") : "");
+
+    // database only for storage
+    if (nodeType === "storage") {
+      const db = selectedNode.data.database || "MinIO";
+      setDatabaseName((STORAGE_DATABASE_OPTIONS.includes(db) ? db : "MinIO") as any);
+    } else {
       setDatabaseName("MinIO");
     }
 
@@ -257,7 +270,8 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate }: PropertiesPanelP
     setIsEditing(false);
     setEditedContent('');
     setPreviewFileIndex(-1);
-  }, [selectedNode]);
+
+  }, [selectedNode?.id]); // ✅ only when node selection changes
 
   const handleLabelChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setLabel(e.target.value);
@@ -286,11 +300,19 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate }: PropertiesPanelP
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!typeHasFiles(nodeType)) return;
+
     if (e.target.files) {
       const newFiles = Array.from(e.target.files);
       const updatedFiles = [...files, ...newFiles];
+
+      // Update panel-local state immediately (so user sees it right away)
       setFiles(updatedFiles);
-      pushNodeUpdate({ files: updatedFiles }); // has_files derived internally + updates Neo4j
+
+      // Also push into node data (may be persisted/sanitized by parent depending on your setup)
+      pushNodeUpdate({ files: updatedFiles });
+
+      // ✅ allow selecting the same file again later
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 

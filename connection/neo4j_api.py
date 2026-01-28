@@ -201,6 +201,7 @@ def neo4j_clear_nodes():
 def neo4j_delete_node(flow_id):
     print(f"[neo4j_api.py] Delete STEP node.")
     # TODO: Update to UID instead of flow_id once neo4j --> frontend connection is established
+    # TODO: If its last node, delete PIPELINE too. 
     query = """
         MATCH (n:STEP {flow_id: $flow_id})
         DETACH DELETE n
