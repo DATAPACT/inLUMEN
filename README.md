@@ -47,6 +47,7 @@ Step 2: Run the following command:
 ```
 docker compose up --build
 ```
+Step 3: In a different terminal, navigate to the connection directory. Run the commands found in command.txt, in the given order.
 
 ### Requirements
 Requirement: [Docker Desktop](https://www.docker.com/%20products/docker-desktop/) installed. 
@@ -57,7 +58,8 @@ n/a TODO
 
 ### Summary of installation steps
 
-Currently offered as a service at localhost:8080.
+Frontend currently offered as a service at localhost:8080.
+Backend services (databases) currently offered at localhost:7474 (Neo4J).
 
 ### Detailed steps
 

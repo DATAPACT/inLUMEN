@@ -39,7 +39,7 @@ def neo4j_add_node():
     properties.setdefault("type", step_type)
     properties.setdefault("label", properties.get("label", ""))
     properties.setdefault("description", properties.get("description", ""))
-    # properties.setdefault("flow_id", properties.get("flow_id")) # Not necessary for now
+    properties.setdefault("flow_id", properties.get("flow_id")) # Not necessary for now
     # Add type-specific properties:
     if step_type == "input":
         properties.setdefault("content", "")
@@ -57,6 +57,8 @@ def neo4j_add_node():
     elif step_type == "output":
         properties.setdefault("content", "")
         properties.setdefault("has_files", "no")
+    elif step_type == "custom":
+        properties.setdefault("has_files", "no")
     # Construct the Cypher query 
     query = f"""
         CREATE (n:STEP)
@@ -72,6 +74,68 @@ def neo4j_add_node():
     except Exception as e:
         print("[neo4j_api.py] Error executing Neo4j query:", e)
         return jsonify({"error": str(e)}), 500
+    
+
+# Updates a pipeline step in Neo4J:
+@app.route('/neo4j_update_node', methods=['POST'])
+def neo4j_update_node():
+    print("[neo4j_api.py] Received query to update STEP node in Neo4j.")
+    data = request.json
+    properties = data.get("properties", {}) 
+    flow_id = data.get("flow_id") or properties.get("flow_id")
+    properties["flow_id"] = flow_id  # Cannot change
+    step_type = str(properties.get("type", "")).lower().strip()
+    properties["type"] = step_type  # Cannot change
+    # Changes in label/description
+    properties["label"] = properties.get("label", "")
+    properties["description"] = properties.get("description", "")
+    # Changes specific to config step type:
+    if step_type == "config":
+        # Convert param dict -> JSON string
+        param_obj = properties.get("param")
+        if not isinstance(param_obj, dict):
+            param_obj = {}
+        properties["param_json"] = json.dumps(param_obj)
+        properties.pop("param", None)
+    # Changes specific to input/output step type:
+    elif step_type in ("input", "output"):
+        properties["content"] =  properties.get("content", "")
+        properties["has_files"] = str(properties.get("has_files")).lower().strip()
+    # Changes specific to action/custom step type:
+    elif step_type in ("action", "custom"):
+        properties["has_files"] = str(properties.get("has_files")).lower().strip()
+    # Changes specific to storage step type:
+    elif step_type == "storage":
+        properties["endpoint"] = properties.get("endpoint", "")
+        # Database (lowercase)
+        db = str(properties.get("database", "minio")).lower().strip()
+        if db not in ("minio", "sqlite", "chromadb"):
+            db = "minio"
+        properties["database"] = db
+    # Changes specific to api step type:
+    elif step_type == "api":
+        properties["endpoint"] = properties.get("endpoint", "")
+    # Ensure we never attempt to store maps / File objects
+    properties.pop("files", None)
+    # ---- Cypher update ----
+    # We match by flow_id (since you send flow_id from the canvas)
+    query = """
+        MATCH (n:STEP {flow_id: $flow_id})
+        SET n += $props
+        RETURN n
+    """
+    # TODO: Update to UID instead of flow_id once neo4j --> frontend connection is established
+    try:
+        with driver.session() as session:
+            result = session.run(query, {"flow_id": flow_id, "props": properties})
+            record = result.single()
+            if not record:
+                return jsonify({"error": f"[neo4j_api.py] No STEP node found with flow_id={flow_id}"}), 404
+            return jsonify(record["n"]._properties), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error executing Neo4j query:", e)
+        return jsonify({"error": str(e)}), 500
+
 
 # (Internal) Run query by LLM
 @app.route('/neo4j_run_query', methods=['POST'])

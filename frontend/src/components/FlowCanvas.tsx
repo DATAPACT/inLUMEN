@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
 import ReactFlow, {
   Node,
   Edge,
@@ -28,6 +28,10 @@ interface FlowCanvasProps {
   isLightMode?: boolean;
 }
 
+export interface FlowCanvasRef {
+  updateNode: (id: string, data: any) => void;
+}
+
 let nodeId = 1;
 
 const addNodeToNeo4j = async (node: Node) => {
@@ -39,9 +43,8 @@ const addNodeToNeo4j = async (node: Node) => {
         properties: {
           flow_id: node.id,
           label: node.data.label,
-          type: node.type,
-          description: node.data?.description || "",
-          ...node.data,
+          type: node.data?.type,
+          description: node.data?.description || ""
         }
       })
     });
@@ -68,7 +71,7 @@ const deleteNodeFromNeo4j = async (nodeId: string) => {
   }
 };
 
-export function FlowCanvas({ onNodeSelect, onNodesChange, onRemoveNode, onRemoveEdge, isLightMode }: FlowCanvasProps) {
+export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSelect, onNodesChange, onRemoveNode, onRemoveEdge, isLightMode }, ref) => {
   const [nodes, setNodes] = useState<Node[]>(() => {
     const savedNodes = localStorage.getItem('ai-flow-nodes');
     return savedNodes ? JSON.parse(savedNodes) : [];
@@ -82,6 +85,30 @@ export function FlowCanvas({ onNodeSelect, onNodesChange, onRemoveNode, onRemove
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<any>(null);
+
+  // Expose updateNode method via ref for PropertiesPanel to call
+  const updateNode = useCallback((id: string, data: any) => {
+    setNodes((nds) =>
+      nds.map((node) => {
+        if (node.id === id) {
+          const updatedNode = { ...node, data: { ...node.data, ...data } };
+          return updatedNode;
+        }
+        return node;
+      })
+    );
+    // Also update selected node if it's the one being edited
+    setSelectedNode((prev) => {
+      if (prev?.id === id) {
+        return { ...prev, data: { ...prev.data, ...data } };
+      }
+      return prev;
+    });
+  }, []);
+  useImperativeHandle(ref, () => ({
+    updateNode,
+  }), [updateNode]);
+
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const triggerImport = () => fileInputRef.current?.click();
 
@@ -360,10 +387,14 @@ export function FlowCanvas({ onNodeSelect, onNodesChange, onRemoveNode, onRemove
       </ReactFlow>
     </div>
   );
+});
+
+interface WrappedFlowCanvasProps extends FlowCanvasProps {
+  flowCanvasRef?: React.RefObject<FlowCanvasRef>;
 }
 
-export const WrappedFlowCanvas = ({ onNodeSelect, onNodesChange, isLightMode }: FlowCanvasProps) => (
+export const WrappedFlowCanvas = ({ onNodeSelect, onNodesChange, isLightMode, flowCanvasRef }: WrappedFlowCanvasProps) => (
   <ReactFlowProvider>
-    <FlowCanvas onNodeSelect={onNodeSelect} onNodesChange={onNodesChange} isLightMode={isLightMode} />
+    <FlowCanvas ref={flowCanvasRef} onNodeSelect={onNodeSelect} onNodesChange={onNodesChange} isLightMode={isLightMode} />
   </ReactFlowProvider>
 );

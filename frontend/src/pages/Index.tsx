@@ -1,8 +1,8 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Sidebar } from '@/components/Sidebar';
 import { PropertiesPanel } from '@/components/PropertiesPanel';
 import { Toolbar } from '@/components/Toolbar';
-import { WrappedFlowCanvas } from '@/components/FlowCanvas';
+import { WrappedFlowCanvas, FlowCanvasRef } from '@/components/FlowCanvas';
 import { toast } from 'sonner';
 import { 
   PlayCircle, 
@@ -45,6 +45,7 @@ const Index = () => {
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
   const [conversation, setConversation] = useState<{role: 'user' | 'assistant', content: string}[]>([]);
   const [isLightMode, setIsLightMode] = useState(false);
+  const flowCanvasRef = useRef<FlowCanvasRef>(null);
   
   const [configs, setConfigs] = useState<ChatbotConfig[]>([]);
   const [selectedConfig, setSelectedConfig] = useState<ChatbotConfig | null>(null);
@@ -85,6 +86,12 @@ const Index = () => {
   }, []);
 
   const onNodeUpdate = useCallback((id: string, data: any) => {
+    // Update both the local flowNodes state AND the FlowCanvas internal state via ref
+    setFlowNodes(prev => prev.map(node => 
+      node.id === id ? { ...node, data: { ...node.data, ...data } } : node
+    ));
+    // Also update the FlowCanvas internal nodes via ref
+    flowCanvasRef.current?.updateNode(id, data);
   }, []);
 
   const onNodesChange = useCallback((nodes: Node[]) => {
@@ -353,6 +360,7 @@ ${flowNodes.map(node => `  - name: ${node.id}
                   onRemoveNode={handleRemoveNode}
                   onRemoveEdge={handleRemoveEdge}
                   isLightMode={isLightMode}
+                  flowCanvasRef={flowCanvasRef}
                 />
               </div>
             </ResizablePanel>
