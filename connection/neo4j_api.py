@@ -19,7 +19,7 @@ driver = GraphDatabase.driver(config_neo4j.get('neo4j','uri'), auth=(config_neo4
 # Define a function to set the CORS headers
 def add_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = 'http://localhost:8080'  # allowed origin
-    response.headers['Access-Control-Allow-Methods'] = 'OPTIONS, GET, POST'  # Adjust as needed
+    response.headers['Access-Control-Allow-Methods'] = 'OPTIONS, GET, POST, DELETE'  # Adjust as needed
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
     return response
 
@@ -66,6 +66,7 @@ def neo4j_add_node():
         SET n.uid = randomUUID()
         RETURN n
     """
+    # TODO: If first step, then create pipeline too.
     try:
         with driver.session() as session:
             result = session.run(query, {"props": properties})
@@ -136,7 +137,40 @@ def neo4j_update_node():
         print("[neo4j_api.py] Error executing Neo4j query:", e)
         return jsonify({"error": str(e)}), 500
 
+# Deletes all nodes and relationships:
+@app.route('/neo4j_clear_nodes', methods=['DELETE'])
+def neo4j_clear_nodes():
+    print("[neo4j_api.py] Clearing all nodes from Neo4j")
+    # TODO: Filter by pipeline once that information is available once neo4j --> frontend connection is established
+    query = """
+        MATCH (n)
+        DETACH DELETE n
+    """
+    try:
+        with driver.session() as session:
+            session.run(query)
+        return jsonify({"status": "ok", "message": "All nodes deleted"}), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error clearing Neo4j:", e)
+        return jsonify({"error": str(e)}), 500
 
+# Deletes one STEP node and relationships:
+@app.route('/neo4j_delete_node/<flow_id>', methods=['DELETE'])
+def neo4j_delete_node(flow_id):
+    print(f"[neo4j_api.py] Delete STEP node.")
+    # TODO: Update to UID instead of flow_id once neo4j --> frontend connection is established
+    query = """
+        MATCH (n:STEP {flow_id: $flow_id})
+        DETACH DELETE n
+    """
+    try:
+        with driver.session() as session:
+            session.run(query, {"flow_id": flow_id})
+        return jsonify({"status": "ok", "deleted": flow_id}), 200
+    except Exception as e:
+        print("[neo4j_api.py] Delete error:", e)
+        return jsonify({"error": str(e)}), 500
+    
 # (Internal) Run query by LLM
 @app.route('/neo4j_run_query', methods=['POST'])
 def neo4j_run_query():
@@ -149,20 +183,6 @@ def neo4j_run_query():
         results = [record.data() for record in session_result]
         return jsonify(results)
     
-@app.route('/neo4j_clear_all', methods=['DELETE'])
-def neo4j_clear_all():
-    # Construct the Cypher query with safe string formatting
-    query = f"""
-        MATCH (n) DETACH DELETE n
-    """
-    print("[neo4j_api.py] Received query to execute in Neo4j:\n", query)
-    try:
-        with driver.session() as session:
-            session.run(query)
-        return jsonify({"status": "Graph cleared."}), 200
-    except Exception as e:
-        print("[neo4j_api.py] Error executing Neo4j query:", e)
-        return jsonify({"error": str(e)}), 500
 
 @app.route('/neo4j_save_graph', methods=['GET'])
 def neo4j_save_graph():

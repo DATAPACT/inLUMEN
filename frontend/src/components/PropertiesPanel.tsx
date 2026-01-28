@@ -14,7 +14,6 @@ import {
 interface PropertiesPanelProps {
   selectedNode: any;
   onNodeUpdate: (id: string, data: any) => void;
-  onRemoveNode?: (nodeId: string) => void;
 }
 
 type StepType =
@@ -90,7 +89,7 @@ function pickNeo4jUpdatableProps(nodeId: string, nodeData: any, nodeType: StepTy
   return props;
 }
 
-export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: PropertiesPanelProps) {
+export function PropertiesPanel({ selectedNode, onNodeUpdate }: PropertiesPanelProps) {
   const nodeType: StepType = normalizeType(selectedNode?.data?.type ?? selectedNode?.type);
 
   const [label, setLabel] = useState('');
@@ -445,17 +444,6 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
               Configure the selected node
             </p>
           </div>
-          {selectedNode && onRemoveNode && (
-            <Button
-              onClick={() => onRemoveNode(selectedNode.id)}
-              variant="destructive"
-              size="sm"
-              className="ml-2"
-            >
-              <Trash2 className="w-4 h-4 mr-1" />
-              Remove
-            </Button>
-          )}
         </div>
       </div>
 

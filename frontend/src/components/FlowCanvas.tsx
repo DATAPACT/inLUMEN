@@ -71,6 +71,20 @@ const deleteNodeFromNeo4j = async (nodeId: string) => {
   }
 };
 
+const clearNeo4j = async () => {
+  try {
+    const response = await fetch('http://localhost:5001/neo4j_clear_nodes', {
+      method: 'DELETE',
+    });
+
+    if (!response.ok) throw new Error('Failed to clear Neo4j');
+    const result = await response.json();
+    console.log("Neo4j cleared:", result);
+  } catch (err) {
+    console.error("Neo4j clear error:", err);
+  }
+};
+
 export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSelect, onNodesChange, onRemoveNode, onRemoveEdge, isLightMode }, ref) => {
   const [nodes, setNodes] = useState<Node[]>(() => {
     const savedNodes = localStorage.getItem('ai-flow-nodes');
@@ -293,7 +307,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
     }
   };
 
-  const clearCanvas = () => {
+  const clearCanvas = async () => {
     setNodes([]);
     setEdges([]);
     localStorage.removeItem('ai-flow');
@@ -301,11 +315,11 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
     localStorage.removeItem('ai-flow-edges');
     nodeId = 1;
 
+    await clearNeo4j(); 
+
     toast.success('Canvas cleared', {
       description: 'All nodes and edges have been removed',
     });
-
-    // Optional: implement backend deletion here if desired
   };
 
   return (
