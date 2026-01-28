@@ -60,11 +60,51 @@ def neo4j_add_node():
     elif step_type == "custom":
         properties.setdefault("has_files", "no")
     # Construct the Cypher query 
-    query = f"""
-        CREATE (n:STEP)
-        SET n += $props
-        SET n.uid = randomUUID()
-        RETURN n
+    query = """
+    WITH $props AS props
+    OPTIONAL MATCH (s:STEP)
+    WITH props, count(s) AS stepCount
+
+    CALL (stepCount) {
+    WITH stepCount
+    WITH stepCount AS stepCount
+    WHERE stepCount = 0
+    CREATE (p:PIPELINE {
+        uid:        randomUUID(),
+        label:       '',
+        description: '',
+        version:    '1.1',
+        created_at: datetime(),
+        updated_at: datetime(),
+        status:     'design'
+    })
+    RETURN p
+
+    UNION
+
+    WITH stepCount
+    WITH stepCount AS stepCount
+    WHERE stepCount <> 0
+    MERGE (p:PIPELINE {status: 'design'})
+    ON CREATE SET
+        p.uid = randomUUID(),
+        p.label = '',
+        p.description = '',
+        p.version = '1.1',
+        p.created_at = datetime(),
+        p.updated_at = datetime()
+    ON MATCH SET
+        p.updated_at = datetime()
+    RETURN p
+    }
+
+    WITH props, p
+    CREATE (n:STEP)
+    SET n += props
+    SET n.uid = randomUUID()
+    MERGE (p)-[:HAS_STEP]->(n)
+    SET p.updated_at = datetime()
+    RETURN n, p
     """
     # TODO: If first step, then create pipeline too.
     try:
@@ -121,9 +161,11 @@ def neo4j_update_node():
     # ---- Cypher update ----
     # We match by flow_id (since you send flow_id from the canvas)
     query = """
-        MATCH (n:STEP {flow_id: $flow_id})
-        SET n += $props
-        RETURN n
+    MATCH (n:STEP {flow_id: $flow_id})
+    OPTIONAL MATCH (p:PIPELINE)-[:HAS_STEP]->(n)
+    SET n += $props
+    SET p.updated_at = datetime()
+    RETURN n
     """
     # TODO: Update to UID instead of flow_id once neo4j --> frontend connection is established
     try:
