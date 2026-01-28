@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 from neo4j import GraphDatabase
-
+import uuid
 import configparser
 import json
 import os
@@ -28,6 +28,50 @@ def add_cors_headers(response):
 def apply_cors(response):
     return add_cors_headers(response)
 
+# Adds a pipeline step into Neo4J:
+@app.route('/neo4j_add_node', methods=['POST'])
+def neo4j_add_node():
+    print("[neo4j_api.py] Received query to add STEP node in Neo4j.")
+    data = request.json
+    properties = data.get("properties", {})
+    step_type = str(properties.get("type")).lower()
+    # Set default properties:
+    properties.setdefault("type", step_type)
+    properties.setdefault("label", properties.get("label", ""))
+    properties.setdefault("description", properties.get("description", ""))
+    # properties.setdefault("flow_id", properties.get("flow_id")) # Not necessary for now
+    # Add type-specific properties:
+    if step_type == "input":
+        properties.setdefault("content", "")
+        properties.setdefault("has_files", "no")
+    elif step_type == "config":
+        properties.setdefault("param_json", json.dumps(properties.get("param", {})))
+        properties.pop("param", None) 
+    elif step_type == "action":
+        properties.setdefault("has_files", "no")
+    elif step_type == "storage":
+        properties.setdefault("endpoint", "")
+        properties.setdefault("database", "minio")
+    elif step_type == "api":
+        properties.setdefault("endpoint", "")
+    elif step_type == "output":
+        properties.setdefault("content", "")
+        properties.setdefault("has_files", "no")
+    # Construct the Cypher query 
+    query = f"""
+        CREATE (n:STEP)
+        SET n += $props
+        SET n.uid = randomUUID()
+        RETURN n
+    """
+    try:
+        with driver.session() as session:
+            result = session.run(query, {"props": properties})
+            record = result.single()
+            return jsonify(record["n"]._properties), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error executing Neo4j query:", e)
+        return jsonify({"error": str(e)}), 500
 
 # (Internal) Run query by LLM
 @app.route('/neo4j_run_query', methods=['POST'])
@@ -227,32 +271,23 @@ def neo4j_graph():
         print(f"An error occurred: {e}")
         return []
 
-@app.route('/neo4j_add_node', methods=['POST'])
-def neo4j_add_node():
-    data = request.json
-    # Extracting fields from the request
-    user_label = data.get("user_label", "")
-    description = data.get("description", "")
-   
-    # Construct the Cypher query with safe string formatting
-    query = f"""
-        CREATE (d:STEP {{
-            user_label: "{user_label}",
-            description: "{description}"
-        }})
-        SET d.uid = apoc.create.uuid()
-        RETURN d
+
+
+@app.route('/neo4j_delete_node/<uid>', methods=['DELETE'])
+def delete_node(uid):
+    query = """
+        MATCH (n:STEP { uid: $uid })
+        DETACH DELETE n
     """
-    print("[neo4j_api.py] Received query to execute in Neo4j:\n", query)
+    print(f"[neo4j_api.py] Deleting node with uid={uid}")
     try:
         with driver.session() as session:
-            session_result = session.run(query)
-            results = [record["d"] for record in session_result] 
-            return jsonify([dict(r) for r in results]), 200
+            session.run(query, {"uid": uid})
+        return jsonify({"status": f"Node with uid={uid} deleted"}), 200
     except Exception as e:
-        print("[neo4j_api.py] Error executing Neo4j query:", e)
+        print("[neo4j_api.py] Error deleting node:", e)
         return jsonify({"error": str(e)}), 500
-    
+
 
 @app.route('/neo4j_update_name', methods=['POST'])
 def neo4j_update_name():

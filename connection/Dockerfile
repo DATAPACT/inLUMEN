@@ -1,7 +1,7 @@
 FROM python:3.10.18
 
 # Create and set the working directory
-WORKDIR /usr/lumen
+WORKDIR /usr/inlumen
 RUN pip install --upgrade pip
 
 # Copy requirements.txt. 

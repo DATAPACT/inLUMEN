@@ -30,38 +30,78 @@ interface FlowCanvasProps {
 
 let nodeId = 1;
 
+const addNodeToNeo4j = async (node: Node) => {
+  try {
+    const response = await fetch('http://localhost:5001/neo4j_add_node', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        properties: {
+          flow_id: node.id,
+          label: node.data.label,
+          type: node.type,
+          description: node.data?.description || "",
+          ...node.data,
+        }
+      })
+    });
+
+    if (!response.ok) throw new Error('Failed to add node to Neo4j');
+    const result = await response.json();
+    console.log("[FlowCanvas.tsx] Neo4j add_node:", result);
+  } catch (err) {
+    console.error("[FlowCanvas.tsx] Neo4j add node error:", err);
+  }
+};
+
+const deleteNodeFromNeo4j = async (nodeId: string) => {
+  try {
+    const response = await fetch(`http://localhost:5001/neo4j_delete_node/${nodeId}`, {
+      method: 'DELETE'
+    });
+
+    if (!response.ok) throw new Error('Failed to delete node from Neo4j');
+    const result = await response.json();
+    console.log("Neo4j delete_node:", result);
+  } catch (err) {
+    console.error("Neo4j delete node error:", err);
+  }
+};
+
 export function FlowCanvas({ onNodeSelect, onNodesChange, onRemoveNode, onRemoveEdge, isLightMode }: FlowCanvasProps) {
   const [nodes, setNodes] = useState<Node[]>(() => {
     const savedNodes = localStorage.getItem('ai-flow-nodes');
     return savedNodes ? JSON.parse(savedNodes) : [];
   });
-  
+
   const [edges, setEdges] = useState<Edge[]>(() => {
     const savedEdges = localStorage.getItem('ai-flow-edges');
     return savedEdges ? JSON.parse(savedEdges) : [];
   });
-  
+
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<any>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const triggerImport = () => {
-    fileInputRef.current?.click();
-  };
+  const triggerImport = () => fileInputRef.current?.click();
 
-  // Persist state to localStorage
   useEffect(() => {
     localStorage.setItem('ai-flow-nodes', JSON.stringify(nodes));
     localStorage.setItem('ai-flow-edges', JSON.stringify(edges));
   }, [nodes, edges]);
 
-  // Notify parent of node changes
   useEffect(() => {
     if (onNodesChange) onNodesChange(nodes);
   }, [nodes, onNodesChange]);
 
   const onNodesChangeInternal = useCallback(
     (changes: NodeChange[]) => {
+      const removedNodeIds = changes
+        .filter(change => change.type === 'remove')
+        .map(change => change.id);
+
+      removedNodeIds.forEach(deleteNodeFromNeo4j);
+
       const newNodes = applyNodeChanges(changes, nodes);
       setNodes(newNodes);
 
@@ -134,18 +174,21 @@ export function FlowCanvas({ onNodeSelect, onNodesChange, onRemoveNode, onRemove
         id: `${nodeId++}`,
         type: nodeData.type,
         position,
-        data: { 
+        data: {
           ...nodeData.data,
           content: nodeData.data.type === 'input' ? '{input}' : '',
         },
       };
 
-      setNodes((nds) => nds.concat(newNode));
+      setNodes((nds) => {
+        const updated = nds.concat(newNode);
+        addNodeToNeo4j(newNode); // 🔁 Sync to Neo4j
+        return updated;
+      });
     },
     [reactFlowInstance]
   );
 
-  // Save flow to localStorage
   const saveFlow = () => {
     try {
       if (reactFlowInstance) {
@@ -163,7 +206,6 @@ export function FlowCanvas({ onNodeSelect, onNodesChange, onRemoveNode, onRemove
     }
   };
 
-  // Export as JSON
   const exportFlow = () => {
     try {
       if (reactFlowInstance) {
@@ -188,7 +230,6 @@ export function FlowCanvas({ onNodeSelect, onNodesChange, onRemoveNode, onRemove
     }
   };
 
-  // Import from JSON
   const importFlow = (e: React.ChangeEvent<HTMLInputElement>) => {
     try {
       const fileReader = new FileReader();
@@ -225,7 +266,6 @@ export function FlowCanvas({ onNodeSelect, onNodesChange, onRemoveNode, onRemove
     }
   };
 
-  // 🧹 Clear Canvas Function
   const clearCanvas = () => {
     setNodes([]);
     setEdges([]);
@@ -237,6 +277,8 @@ export function FlowCanvas({ onNodeSelect, onNodesChange, onRemoveNode, onRemove
     toast.success('Canvas cleared', {
       description: 'All nodes and edges have been removed',
     });
+
+    // Optional: implement backend deletion here if desired
   };
 
   return (
@@ -261,25 +303,23 @@ export function FlowCanvas({ onNodeSelect, onNodesChange, onRemoveNode, onRemove
       >
         <Controls className="bg-card border border-border rounded-md p-1" />
 
-        {/* ✅ Updated MiniMap color mapping */}
-        <MiniMap 
+        <MiniMap
           nodeColor={n => {
             switch (n.data.type) {
-              case 'config': return '#0EA5E9';          // sky
-              case 'input': return '#3B82F6';           // blue
-              case 'action': return '#84CC16';          // lime/yellow for processing steps
-              case 'output': return '#10B981';          // green
-              case 'api': return '#F43F5E';             // rose
-              case 'storage': return '#14B8A6';         // teal
-              case 'custom': return '#8B5CF6';          // violet
-              default: return '#6B7280';                // gray
+              case 'config': return '#0EA5E9';
+              case 'input': return '#3B82F6';
+              case 'action': return '#84CC16';
+              case 'output': return '#10B981';
+              case 'api': return '#F43F5E';
+              case 'storage': return '#14B8A6';
+              case 'custom': return '#8B5CF6';
+              default: return '#6B7280';
             }
           }}
           maskColor="rgba(0, 0, 0, 0.1)"
           className="bg-card/70 border border-border rounded-md"
         />
 
-        {/* Top Toolbar */}
         <Panel position="top-center" className="mt-2">
           <div className="bg-card/90 backdrop-blur-sm border border-border rounded-lg py-1.5 px-3 text-xs flex items-center gap-2">
             <Button size="sm" variant="outline" onClick={saveFlow} className="flex items-center gap-1 h-7">
