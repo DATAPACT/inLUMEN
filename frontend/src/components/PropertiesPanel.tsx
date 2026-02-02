@@ -105,6 +105,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
 
   // config param state (config only)
   const [param, setParam] = useState<Record<string, string>>({});
+  const [draftKeys, setDraftKeys] = useState<Record<string, string>>({});
 
   // endpoint state (storage/api only)
   const [endpoint, setEndpoint] = useState('');
@@ -381,15 +382,18 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
   const renameParamKey = (oldKey: string, newKeyRaw: string) => {
     const newKey = newKeyRaw.trim();
     if (!newKey || newKey === oldKey) return;
-
     const next: Record<string, string> = {};
     Object.entries(param).forEach(([k, v]) => {
       if (k === oldKey) next[newKey] = v ?? "";
       else next[k] = v ?? "";
     });
-
     setParam(next);
     pushNodeUpdate({ param: next });
+    setDraftKeys((prev) => {
+      const copy = { ...prev };
+      delete copy[oldKey];
+      return copy;
+    });
   };
 
   const setParamValue = (key: string, value: string) => {
@@ -403,6 +407,11 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
     delete next[key];
     setParam(next);
     pushNodeUpdate({ param: next });
+    setDraftKeys((prev) => {
+      const copy = { ...prev };
+      delete copy[key];
+      return copy;
+    });
   };
 
   const getTypeIcon = (type: string) => {
@@ -445,17 +454,6 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
               Configure the selected node
             </p>
           </div>
-          {selectedNode && onRemoveNode && (
-            <Button
-              onClick={() => onRemoveNode(selectedNode.id)}
-              variant="destructive"
-              size="sm"
-              className="ml-2"
-            >
-              <Trash2 className="w-4 h-4 mr-1" />
-              Remove
-            </Button>
-          )}
         </div>
       </div>
 
@@ -536,9 +534,34 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
                   {Object.entries(param).map(([k, v]) => (
                     <div key={k} className="grid grid-cols-[1fr_1fr_auto] gap-2 items-center">
                       <Input
-                        value={k}
-                        onChange={(e) => renameParamKey(k, e.target.value)}
+                        value={draftKeys[k] ?? k}
                         placeholder="key"
+                        onChange={(e) => {
+                          e.stopPropagation();
+                          setDraftKeys((prev) => ({ ...prev, [k]: e.target.value }));
+                        }}
+                        onKeyDown={(e) => {
+                          e.stopPropagation();
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            const newKey = (draftKeys[k] ?? "").trim();
+                            if (newKey && newKey !== k) renameParamKey(k, newKey);
+                            setDraftKeys((prev) => {
+                              const copy = { ...prev };
+                              delete copy[k];
+                              return copy;
+                            });
+                          }
+                        }}
+                        onBlur={() => {
+                          const newKey = (draftKeys[k] ?? "").trim();
+                          if (newKey && newKey !== k) renameParamKey(k, newKey);
+                          setDraftKeys((prev) => {
+                            const copy = { ...prev };
+                            delete copy[k];
+                            return copy;
+                          });
+                        }}
                       />
                       <Input
                         value={v ?? ""}
