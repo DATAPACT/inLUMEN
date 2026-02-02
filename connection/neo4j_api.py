@@ -179,7 +179,7 @@ def neo4j_update_node():
         print("[neo4j_api.py] Error executing Neo4j query:", e)
         return jsonify({"error": str(e)}), 500
 
-# Deletes all nodes and relationships:
+# Deletes all nodes and edges:
 @app.route('/neo4j_clear_nodes', methods=['DELETE'])
 def neo4j_clear_nodes():
     print("[neo4j_api.py] Clearing all nodes from Neo4j")
@@ -196,7 +196,7 @@ def neo4j_clear_nodes():
         print("[neo4j_api.py] Error clearing Neo4j:", e)
         return jsonify({"error": str(e)}), 500
 
-# Deletes one STEP node and relationships:
+# Deletes one STEP node and edges:
 @app.route('/neo4j_delete_node/<flow_id>', methods=['DELETE'])
 def neo4j_delete_node(flow_id):
     print(f"[neo4j_api.py] Delete STEP node.")
@@ -219,13 +219,14 @@ def neo4j_delete_node(flow_id):
         print("[neo4j_api.py] Delete error:", e)
         return jsonify({"error": str(e)}), 500
 
-# Add relation between two steps
-@app.route('/neo4j_add_relation', methods=['POST'])
-def neo4j_add_relation():
+# Add edge between two steps
+@app.route('/neo4j_add_edge', methods=['POST'])
+def neo4j_add_edge():
     print("[neo4j_api.py] Received request to add relation FLOWS_TO.")
-    data = request.json or {}
-    from_flow_id = data.get("from_flow_id")
-    to_flow_id = data.get("to_flow_id")
+    data = request.json
+    properties = data.get("properties", {})
+    from_flow_id = properties.get("flow_id_source")
+    to_flow_id = properties.get("flow_id_target")
     if not from_flow_id or not to_flow_id:
         return jsonify({"error": "Missing from_flow_id or to_flow_id"}), 400
     if str(from_flow_id) == str(to_flow_id):
@@ -234,6 +235,43 @@ def neo4j_add_relation():
     MATCH (prev:STEP {flow_id: $from_flow_id})
     MATCH (next:STEP {flow_id: $to_flow_id})
     MERGE (prev)-[:FLOWS_TO]->(next)
+    WITH prev, next
+    OPTIONAL MATCH (p:PIPELINE)-[:HAS_STEP]->(prev)
+    SET p.updated_at = datetime()
+    RETURN prev.flow_id AS from_flow_id, next.flow_id AS to_flow_id
+    """
+    try:
+        with driver.session() as session:
+            record = session.run(query, {
+                "from_flow_id": str(from_flow_id),
+                "to_flow_id": str(to_flow_id)
+            }).single()
+            if not record:
+                return jsonify({"error": "STEP node(s) not found for given flow_id(s)"}), 404
+            return jsonify({
+                "from_flow_id": record["from_flow_id"],
+                "to_flow_id": record["to_flow_id"],
+                "rel_type": "FLOWS_TO"
+            }), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error executing Neo4j relation query:", e)
+        return jsonify({"error": str(e)}), 500
+    
+# Remove edge between two steps
+@app.route('/neo4j_delete_edge', methods=['DELETE'])
+def neo4j_delete_edge():
+    print("[neo4j_api.py] Received request to add relation FLOWS_TO.")
+    data = request.json
+    properties = data.get("properties", {}) 
+    from_flow_id = properties.get("flow_id_source")
+    to_flow_id = properties.get("flow_id_target")
+    if not from_flow_id or not to_flow_id:
+        return jsonify({"error": "Missing from_flow_id or to_flow_id"}), 400
+    query = """
+    MATCH (prev:STEP {flow_id: $from_flow_id})
+    MATCH (next:STEP {flow_id: $to_flow_id})
+    OPTIONAL MATCH (prev)-[r]->(next)
+    DELETE r
     WITH prev, next
     OPTIONAL MATCH (p:PIPELINE)-[:HAS_STEP]->(prev)
     SET p.updated_at = datetime()

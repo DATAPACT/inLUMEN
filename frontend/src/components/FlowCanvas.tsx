@@ -57,6 +57,48 @@ const addNodeToNeo4j = async (node: Node) => {
   }
 };
 
+const addEdgeToNeo4j = async (source_node: Node, target_node: Node) => {
+  try {
+    const response = await fetch('http://localhost:5001/neo4j_add_edge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        properties: {
+          flow_id_source: source_node.id,
+          flow_id_target: target_node.id
+        }
+      })
+    });
+
+    if (!response.ok) throw new Error('Failed to add edge to Neo4j');
+    const result = await response.json();
+    console.log("[FlowCanvas.tsx] Neo4j adding edge:", result);
+  } catch (err) {
+    console.error("[FlowCanvas.tsx] Neo4j adding edge error:", err);
+  }
+};
+
+const deleteEdgeToNeo4j = async (source_node: Node, target_node: Node) => {
+  try {
+    const response = await fetch('http://localhost:5001/neo4j_delete_edge', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        properties: {
+          flow_id_source: source_node.id,
+          flow_id_target: target_node.id
+        }
+      })
+    });
+
+    if (!response.ok) throw new Error('Failed to delete edge to Neo4j');
+    const result = await response.json();
+    console.log("[FlowCanvas.tsx] Neo4j deleting edge:", result);
+  } catch (err) {
+    console.error("[FlowCanvas.tsx] Neo4j delete edge error:", err);
+  }
+};
+
 const deleteNodeFromNeo4j = async (nodeId: string) => {
   try {
     const response = await fetch(`http://localhost:5001/neo4j_delete_node/${nodeId}`, {
@@ -100,7 +142,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<any>(null);
 
-  // Expose updateNode method via ref for PropertiesPanel to call
+  // Expose updateNode 
   const updateNode = useCallback((id: string, data: any) => {
     setNodes((nds) =>
       nds.map((node) => {
@@ -111,7 +153,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
         return node;
       })
     );
-    // Also update selected node if it's the one being edited
+    // Also update selected node 
     setSelectedNode((prev) => {
       if (prev?.id === id) {
         return { ...prev, data: { ...prev.data, ...data } };
@@ -158,28 +200,66 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
   );
 
   const onEdgesChange = useCallback(
-    (changes: EdgeChange[]) => setEdges((eds) => applyEdgeChanges(changes, eds)),
-    []
+    (changes: EdgeChange[]) => {
+      const removedEdgeIds = changes
+        .filter((c) => c.type === "remove")
+        .map((c) => c.id);
+      if (removedEdgeIds.length > 0) {
+        setEdges((eds) => {
+          const removedEdges = eds.filter((e) => removedEdgeIds.includes(e.id));
+          removedEdges.forEach((edge) => {
+            const sourceNode = nodes.find((n) => n.id === edge.source);
+            const targetNode = nodes.find((n) => n.id === edge.target);
+            if (!sourceNode || !targetNode) {
+              console.warn(
+                "[FlowCanvas.tsx] Could not find source/target nodes for edge removal:",
+                edge.id
+              );
+              return;
+            }
+            deleteEdgeToNeo4j(sourceNode, targetNode);
+          });
+          return applyEdgeChanges(changes, eds);
+        });
+        return;
+      }
+      setEdges((eds) => applyEdgeChanges(changes, eds));
+    },
+    [nodes] 
   );
 
   const onConnect = useCallback(
-    (params: Connection) => {
+    async (params: Connection) => {
+      if (!params.source || !params.target) return;
+
       if (params.source === params.target) {
         toast("Cannot connect a node to itself", { description: "Please connect to a different node" });
         return;
       }
 
-      const connectionExists = edges.some(
-        edge => edge.source === params.source && edge.target === params.target
-      );
-      if (connectionExists) {
+      // prevent duplicates 
+      let duplicate = false;
+      setEdges((eds) => {
+        duplicate = eds.some((e) => e.source === params.source && e.target === params.target);
+        if (duplicate) return eds;
+        return addEdge(params, eds);
+      });
+
+      if (duplicate) {
         toast("Connection already exists", { description: "This connection is already in place" });
         return;
       }
 
-      setEdges((eds) => addEdge(params, eds));
+      // Find the actual Node objects
+      const sourceNode = nodes.find((n) => n.id === params.source);
+      const targetNode = nodes.find((n) => n.id === params.target);
+      if (!sourceNode || !targetNode) {
+        console.warn("[FlowCanvas.tsx] Could not find source/target nodes for Neo4j edge creation.");
+        return;
+      }
+      await addEdgeToNeo4j(sourceNode, targetNode);
     },
-    [edges]
+    [nodes] 
   );
 
   const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
