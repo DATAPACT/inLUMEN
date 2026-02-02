@@ -201,14 +201,19 @@ def neo4j_clear_nodes():
 def neo4j_delete_node(flow_id):
     print(f"[neo4j_api.py] Delete STEP node.")
     # TODO: Update to UID instead of flow_id once neo4j --> frontend connection is established
-    # TODO: If its last node, delete pipeline 
-    query = """
-        MATCH (n:STEP {flow_id: $flow_id})
-        DETACH DELETE n
-    """
     try:
         with driver.session() as session:
-            session.run(query, {"flow_id": flow_id})
+            result = session.run(
+                "MATCH (s:STEP) RETURN count(s) AS stepCount",
+            )
+            step_count = result.single()["stepCount"]
+            if step_count == 1:
+                session.run("MATCH (n) DETACH DELETE n")
+            elif step_count > 1:
+                session.run(
+                    "MATCH (s:STEP {flow_id: $flow_id}) DETACH DELETE s",
+                    flow_id=flow_id,
+                )
         return jsonify({"status": "ok", "deleted": flow_id}), 200
     except Exception as e:
         print("[neo4j_api.py] Delete error:", e)
