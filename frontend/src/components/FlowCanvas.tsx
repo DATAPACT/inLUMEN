@@ -391,6 +391,40 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
     }
   };
 
+  const exportFlowYAML = async () => {
+    try {
+      const response = await fetch("http://localhost:5002/agentic_generate_YAML", {
+        method: "GET",
+      });
+      if (!response.ok) {
+        const errText = await response.text().catch(() => "");
+        throw new Error(`Failed: ${response.status} ${response.statusText} ${errText}`);
+      }
+      // Expect YAML as plain text
+      const yamlText = await response.text();
+      // Create downloadable file
+      const blob = new Blob([yamlText], {
+        type: "application/x-yaml;charset=utf-8",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "ai-pipeline.yaml"; // or .yml
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success("Flow exported successfully", {
+        description: "Your AI pipeline has been exported as YAML",
+      });
+    } catch (error) {
+      console.error("Error exporting flow:", error);
+      toast.error("Failed to export flow", {
+        description: "There was an error exporting your pipeline",
+      });
+    }
+  };
+
   const importFlow = (e: React.ChangeEvent<HTMLInputElement>) => {
     try {
       const fileReader = new FileReader();
@@ -489,7 +523,11 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
             </Button>
             <Button size="sm" variant="outline" onClick={exportFlow} className="flex items-center gap-1 h-7">
               <Download className="h-3.5 w-3.5" />
-              Export
+              Export to JSON
+            </Button>
+            <Button size="sm" variant="outline" onClick={exportFlowYAML} className="flex items-center gap-1 h-7">
+              <Download className="h-3.5 w-3.5" />
+              Export to YAML
             </Button>
             <Button
               size="sm"
