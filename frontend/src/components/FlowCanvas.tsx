@@ -99,31 +99,71 @@ const deleteEdgeToNeo4j = async (source_node: Node, target_node: Node) => {
   }
 };
 
-const deleteNodeFromNeo4j = async (nodeId: string) => {
+const deleteNodeFromNeo4jAndMinIO = async (nodeId: string) => {
   try {
-    const response = await fetch(`http://localhost:5001/neo4j_delete_node/${nodeId}`, {
-      method: 'DELETE'
-    });
-
+    // 1) Delete node from Neo4j
+    const response = await fetch(
+      `http://localhost:5001/neo4j_delete_node/${nodeId}`,
+      { method: 'DELETE' }
+    );
     if (!response.ok) throw new Error('Failed to delete node from Neo4j');
     const result = await response.json();
-    console.log("Neo4j delete_node:", result);
+    console.log("[FlowCanvas.tsx] Neo4j delete_node:", result);
+
+    // 2) Clear corresponding MinIO bucket
+    try {
+      const minioResponse = await fetch(
+        `http://localhost:5000/minio_clear_bucket?bucket_id=${nodeId}`,
+        { method: 'DELETE' }
+      );
+      if (!minioResponse.ok) throw new Error('Failed to clear MinIO bucket');
+      const minioResult = await minioResponse.json().catch(() => null);
+      console.log(
+        `[FlowCanvas.tsx] MinIO bucket cleared for nodeId=${nodeId}`,
+        minioResult
+      );
+    } catch (minioErr) {
+      // Neo4j deletion already succeeded; don't fail the whole operation
+      console.warn(
+        `[FlowCanvas.tsx] Neo4j node deleted, but MinIO cleanup failed for nodeId=${nodeId}`,
+        minioErr
+      );
+    }
   } catch (err) {
-    console.error("Neo4j delete node error:", err);
+    console.error("[FlowCanvas.tsx] deleteNodeFromNeo4jAndMinIO error:", err);
   }
 };
 
-const clearNeo4j = async () => {
+const clearNeo4jAndMinIO = async () => {
   try {
-    const response = await fetch('http://localhost:5001/neo4j_clear_nodes', {
+    // Neo4j and get deleted STEP flow_ids
+    const neoResponse = await fetch('http://localhost:5001/neo4j_clear_nodes', {
       method: 'DELETE',
     });
-
-    if (!response.ok) throw new Error('Failed to clear Neo4j');
-    const result = await response.json();
+    if (!neoResponse.ok) throw new Error('Failed to clear Neo4j');
+    const result = await neoResponse.json();
+    const ids: string[] = result?.deleted_step_flow_ids ?? [];
     console.log("Neo4j cleared:", result);
+
+    // For each flow_id, clear the corresponding MinIO bucket
+    for (const id of ids) {
+      try {
+        const minioResponse = await fetch(
+          `http://localhost:5000/minio_clear_bucket?bucket_id=${id}`,
+          { method: 'DELETE' }
+        );
+        if (!minioResponse.ok) {
+          const txt = await minioResponse.text().catch(() => "");
+          throw new Error(`MinIO clear failed (${minioResponse.status}): ${txt}`);
+        }
+        const minioResult = await minioResponse.json().catch(() => null);
+        console.log(`[FlowCanvas.tsx] MinIO bucket cleared for flow_id=${id}`, minioResult);
+      } catch (minioErr) {
+        console.warn(`[FlowCanvas.tsx] Failed to clear MinIO bucket for flow_id=${id}`, minioErr);
+      }
+    }
   } catch (err) {
-    console.error("Neo4j clear error:", err);
+    console.error("[FlowCanvas.tsx] clearNeo4jAndMinIO error:", err);
   }
 };
 
@@ -183,7 +223,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
         .filter(change => change.type === 'remove')
         .map(change => change.id);
 
-      removedNodeIds.forEach(deleteNodeFromNeo4j);
+      removedNodeIds.forEach(deleteNodeFromNeo4jAndMinIO);
 
       const newNodes = applyNodeChanges(changes, nodes);
       setNodes(newNodes);
@@ -395,7 +435,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
     localStorage.removeItem('ai-flow-edges');
     nodeId = 1;
 
-    await clearNeo4j(); 
+    await clearNeo4jAndMinIO(); 
 
     toast.success('Canvas cleared', {
       description: 'All nodes and edges have been removed',

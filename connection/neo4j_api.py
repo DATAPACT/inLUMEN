@@ -236,20 +236,30 @@ def neo4j_update_node():
     except Exception as e:
         print("[neo4j_api.py] Error executing Neo4j query:", e)
         return jsonify({"error": str(e)}), 500
-
-# Deletes all nodes and edges:
+    
+# Deletes all nodes and edges, returns STEP flow_ids deleted
 @app.route('/neo4j_clear_nodes', methods=['DELETE'])
 def neo4j_clear_nodes():
     print("[neo4j_api.py] Clearing all nodes from Neo4j")
-    # TODO: Filter by pipeline once that information is available once neo4j --> frontend connection is established
-    query = """
-        MATCH (n)
-        DETACH DELETE n
+    query_get = """
+    MATCH (s:STEP)
+    WHERE s.flow_id IS NOT NULL
+    RETURN collect(toString(s.flow_id)) AS flow_ids
+    """
+    query_delete = """
+    MATCH (n)
+    DETACH DELETE n
     """
     try:
         with driver.session() as session:
-            session.run(query)
-        return jsonify({"status": "ok", "message": "All nodes deleted"}), 200
+            record = session.run(query_get).single()
+            flow_ids = record["flow_ids"] if record and record["flow_ids"] else []
+            session.run(query_delete)
+        return jsonify({
+            "status": "ok",
+            "message": "All nodes deleted",
+            "deleted_step_flow_ids": flow_ids
+        }), 200
     except Exception as e:
         print("[neo4j_api.py] Error clearing Neo4j:", e)
         return jsonify({"error": str(e)}), 500
