@@ -23,9 +23,20 @@ import {
   PlusCircle,
   Save,
   Upload,
-  FileDown
+  FileDown,
+  BarChart3,
+  Calendar,
+  Hash,
+  Paperclip
 } from 'lucide-react';
 import { Separator } from "@/components/ui/separator";
+
+interface PipelineOverview {
+  version: string;
+  lastUpdate: string;
+  stepCount: number;
+  fileCount: number;
+}
 
 interface SidebarProps {
   className?: string;
@@ -39,6 +50,7 @@ interface SidebarProps {
   onExportPipeline?: () => void;
   onImportPipeline?: () => void;
   onSaveToYAML?: () => void;
+  pipelineOverview?: PipelineOverview;
 }
 
 interface NodeTypeItem {
@@ -132,7 +144,8 @@ export function Sidebar({
   onSavePipeline,
   onExportPipeline,
   onImportPipeline,
-  onSaveToYAML
+  onSaveToYAML,
+  pipelineOverview
 }: SidebarProps) {
   const [showToken, setShowToken] = useState(false);
 
@@ -140,12 +153,16 @@ export function Sidebar({
     <div className={cn("w-64 border-r border-border bg-card flex flex-col", className)}>
       
       <Tabs value={activeTab} onValueChange={onTabChange} className="w-full">
-        <TabsList className="grid grid-cols-2 w-full rounded-none border-b border-border">
-          <TabsTrigger value="lab" className="flex items-center gap-1.5">
+        <TabsList className="grid grid-cols-3 w-full rounded-none border-b border-border">
+          <TabsTrigger value="lab" className="flex items-center gap-1.5 text-xs">
             <Beaker className="w-4 h-4" />
             Lab
           </TabsTrigger>
-          <TabsTrigger value="simulate" className="flex items-center gap-1.5">
+          <TabsTrigger value="overview" className="flex items-center gap-1.5 text-xs">
+            <BarChart3 className="w-4 h-4" />
+            Overview
+          </TabsTrigger>
+          <TabsTrigger value="simulate" className="flex items-center gap-1.5 text-xs">
             <PlayCircle className="w-4 h-4" />
             Simulate
           </TabsTrigger>
@@ -184,6 +201,50 @@ export function Sidebar({
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "overview" && (
+          <div className="py-4 space-y-4">
+            <div>
+              <h3 className="text-sm font-medium mb-3 flex items-center gap-2">
+                <BarChart3 className="w-4 h-4" />
+                Pipeline Overview
+              </h3>
+              <div className="space-y-3">
+                <div className="p-3 rounded-lg border border-border bg-muted/30">
+                  <div className="flex items-center gap-2 text-muted-foreground mb-1">
+                    <Hash className="w-3.5 h-3.5" />
+                    <span className="text-xs font-medium">Pipeline Version</span>
+                  </div>
+                  <p className="text-sm font-semibold">{pipelineOverview?.version || '1.0.0'}</p>
+                </div>
+                
+                <div className="p-3 rounded-lg border border-border bg-muted/30">
+                  <div className="flex items-center gap-2 text-muted-foreground mb-1">
+                    <Calendar className="w-3.5 h-3.5" />
+                    <span className="text-xs font-medium">Last Update</span>
+                  </div>
+                  <p className="text-sm font-semibold">{pipelineOverview?.lastUpdate || 'Never'}</p>
+                </div>
+                
+                <div className="p-3 rounded-lg border border-border bg-muted/30">
+                  <div className="flex items-center gap-2 text-muted-foreground mb-1">
+                    <LayoutGrid className="w-3.5 h-3.5" />
+                    <span className="text-xs font-medium">Number of Steps</span>
+                  </div>
+                  <p className="text-sm font-semibold">{pipelineOverview?.stepCount ?? 0}</p>
+                </div>
+                
+                <div className="p-3 rounded-lg border border-border bg-muted/30">
+                  <div className="flex items-center gap-2 text-muted-foreground mb-1">
+                    <Paperclip className="w-3.5 h-3.5" />
+                    <span className="text-xs font-medium">Number of Files</span>
+                  </div>
+                  <p className="text-sm font-semibold">{pipelineOverview?.fileCount ?? 0}</p>
+                </div>
               </div>
             </div>
           </div>

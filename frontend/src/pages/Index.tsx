@@ -37,7 +37,7 @@ import {
 
 const Index = () => {
   const [selectedNode, setSelectedNode] = useState<any>(null);
-  const [activeTab, setActiveTab] = useState('lab'); // 'lab' or 'test'
+  const [activeTab, setActiveTab] = useState('lab'); // 'lab', 'overview', or 'simulate'
   const [userInput, setUserInput] = useState('');
   const [aiResponse, setAiResponse] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -46,16 +46,37 @@ const Index = () => {
   const [conversation, setConversation] = useState<{role: 'user' | 'assistant', content: string}[]>([]);
   const [isLightMode, setIsLightMode] = useState(false);
   const flowCanvasRef = useRef<FlowCanvasRef>(null);
+  const [pipelineLastUpdate, setPipelineLastUpdate] = useState<string>('Never');
   
   const [configs, setConfigs] = useState<ChatbotConfig[]>([]);
   const [selectedConfig, setSelectedConfig] = useState<ChatbotConfig | null>(null);
   const [isConfigFormOpen, setIsConfigFormOpen] = useState(false);
   const [configToEdit, setConfigToEdit] = useState<ChatbotConfig | undefined>(undefined);
 
+   // Compute pipeline overview from flowNodes
+  const pipelineOverview = React.useMemo(() => {
+    const fileCount = flowNodes.reduce((count, node) => {
+      const files = node.data?.files || [];
+      return count + files.length;
+    }, 0);
+    
+    return {
+      version: '1.0.0',
+      lastUpdate: pipelineLastUpdate,
+      stepCount: flowNodes.length,
+      fileCount
+    };
+  }, [flowNodes, pipelineLastUpdate]);
+
   useEffect(() => {
     const savedToken = localStorage.getItem('github_token');
     if (savedToken) {
       setGithubToken(savedToken);
+    }
+    // Load saved pipeline timestamp
+    const savedTimestamp = localStorage.getItem('saved-pipeline-timestamp');
+    if (savedTimestamp) {
+      setPipelineLastUpdate(new Date(savedTimestamp).toLocaleString());
     }
     
     loadConfigurations();
@@ -222,8 +243,10 @@ const Index = () => {
   };
 
   const handleSavePipeline = () => {
+    const timestamp = new Date().toISOString();
     localStorage.setItem('saved-pipeline-nodes', JSON.stringify(flowNodes));
-    localStorage.setItem('saved-pipeline-timestamp', new Date().toISOString());
+    localStorage.setItem('saved-pipeline-timestamp', timestamp);
+    setPipelineLastUpdate(new Date(timestamp).toLocaleString());
     toast.success("Pipeline saved", {
       description: "Your pipeline will persist on next visit"
     });
@@ -348,9 +371,10 @@ ${flowNodes.map(node => `  - name: ${node.id}
           onExportPipeline={handleExportPipeline}
           onImportPipeline={handleImportPipeline}
           onSaveToYAML={handleSaveToYAML}
+          pipelineOverview={pipelineOverview}
         />
         
-        {activeTab === 'lab' ? (
+        {(activeTab === 'lab' || activeTab === 'overview') ? (
           <ResizablePanelGroup direction="horizontal" className="flex-1">
             <ResizablePanel defaultSize={60} minSize={40}>
               <div className={`h-full ${isLightMode ? 'bg-gray-50' : 'bg-canvas-DEFAULT'}`}>
