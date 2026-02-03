@@ -48,6 +48,7 @@ Step 2: Run the following command:
 docker compose up --build
 ```
 Step 3: In a different terminal, navigate to the connection directory. Run the commands found in command.txt, in the given order.
+Step 4: Open localhost:9099 and generate an access/secret key called minio-datapact.
 
 ### Requirements
 Requirement: [Docker Desktop](https://www.docker.com/%20products/docker-desktop/) installed. 

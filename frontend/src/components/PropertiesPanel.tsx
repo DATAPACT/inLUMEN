@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   Brain, MessageCircle, FileText, Zap, Database, Settings, Clipboard, PlusCircle,
-  Upload, X, Trash2, Eye, Edit, Save
+  Upload, X, Eye, Edit, Save
 } from 'lucide-react';
 
 interface PropertiesPanelProps {
@@ -157,6 +157,60 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
     };
   }, []);
 
+  // --- MinIO upload function ---
+  const uploadFileToMinio = useCallback(async (nodeId: string, file: File) => {
+    try {
+      const form = new FormData();
+      form.append("file", file);           
+      form.append("bucket_id", nodeId);    
+      const res = await fetch("http://localhost:5000/minio_upload_file", {
+        method: "POST",
+        body: form,
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`MinIO upload failed (${res.status}): ${txt}`);
+      }
+      const json = await res.json().catch(() => null);
+      console.log("[PropertiesPanel.tsx] MinIO upload ok:", {
+        nodeId,
+        fileName: file.name,
+        response: json,
+      });
+      return json;
+    } catch (err) {
+      console.error("[PropertiesPanel.tsx] MinIO upload error:", err);
+      throw err;
+    }
+  }, []);
+
+   // --- MinIO remove function ---
+  const removeFileInMinio = useCallback(async (nodeId: string, file: File) => {
+    try {
+      const form = new FormData();
+      form.append("filename", file.name);           
+      form.append("bucket_id", nodeId);    
+      const res = await fetch("http://localhost:5000/minio_remove_file", {
+        method: "DELETE",
+        body: form,
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`MinIO removal failed (${res.status}): ${txt}`);
+      }
+      const json = await res.json().catch(() => null);
+      console.log("[PropertiesPanel.tsx] MinIO removal ok:", {
+        nodeId,
+        fileName: file.name,
+        response: json,
+      });
+      return json;
+    } catch (err) {
+      console.error("[PropertiesPanel.tsx] MinIO removal error:", err);
+      throw err;
+    }
+  }, []);
+
   // Enforce type-specific rules before persisting into node.data
   const pushNodeUpdate = (patch: Record<string, any>) => {
     if (!selectedNode) return;
@@ -259,7 +313,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
     setIsEditing(false);
     setEditedContent('');
     setPreviewFileIndex(-1);
-  }, [selectedNode]);
+  }, [selectedNode]); // nodeType derived from selectedNode, ok to depend on selectedNode only
 
   const handleLabelChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setLabel(e.target.value);
@@ -286,20 +340,51 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
     pushNodeUpdate({ database: val });
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Upload newly added files to MinIO (bucket_id = selectedNode.id)
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!typeHasFiles(nodeType)) return;
+    if (!selectedNode) return;
+
     if (e.target.files) {
       const newFiles = Array.from(e.target.files);
       const updatedFiles = [...files, ...newFiles];
+
+      // 1) Update UI/state + Neo4j
       setFiles(updatedFiles);
-      pushNodeUpdate({ files: updatedFiles }); // has_files derived internally + updates Neo4j
+      pushNodeUpdate({ files: updatedFiles });
+
+      // 2) Upload the *newly added* files to MinIO
+      const nodeId = selectedNode.id;
+
+      const results = await Promise.allSettled(
+        newFiles.map((f) => uploadFileToMinio(nodeId, f))
+      );
+
+      const failed = results.filter((r) => r.status === "rejected");
+      if (failed.length > 0) {
+        console.warn(
+          `[PropertiesPanel.tsx] ${failed.length}/${newFiles.length} MinIO uploads failed for node ${nodeId}`
+        );
+      }
+
+      // Allow selecting same file again
+      e.target.value = "";
     }
   };
 
-  const removeFile = (index: number) => {
+  const removeFile = async (index: number) => {
+    if (!selectedNode) return;
+
+    const fileToRemove = files[index];
+    if (!fileToRemove) return;
     const updatedFiles = files.filter((_, i) => i !== index);
     setFiles(updatedFiles);
-    pushNodeUpdate({ files: updatedFiles }); // has_files derived internally + updates Neo4j
+    pushNodeUpdate({ files: updatedFiles });
+    try {
+      await removeFileInMinio(selectedNode.id, fileToRemove);
+    } catch (err) {
+      console.warn("[PropertiesPanel.tsx] Removed locally, but MinIO removal failed:", err);
+    }
   };
 
   const viewFile = async (file: File, index: number) => {
@@ -347,7 +432,9 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
     }
   };
 
+  // Save edited text file and re-upload to MinIO
   const saveFileChanges = async () => {
+    if (!selectedNode) return;
     if (previewFileIndex === -1 || !previewFile || previewType !== 'text') return;
 
     const blob = new Blob([editedContent], { type: previewFile.type });
@@ -358,8 +445,18 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
 
     const updatedFiles = [...files];
     updatedFiles[previewFileIndex] = newFile;
+
+    // 1) Update UI/state + Neo4j
     setFiles(updatedFiles);
-    pushNodeUpdate({ files: updatedFiles }); // has_files derived internally + updates Neo4j
+    pushNodeUpdate({ files: updatedFiles });
+
+    // 2) Upload updated file to MinIO
+    try {
+      await uploadFileToMinio(selectedNode.id, newFile);
+    } catch {
+      // keep UI changes even if MinIO upload fails
+      console.warn("[PropertiesPanel.tsx] File saved locally, but MinIO upload failed.");
+    }
 
     setPreviewContent(editedContent);
     setPreviewFile(newFile);
@@ -665,7 +762,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
                               type="button"
                               variant="ghost"
                               size="sm"
-                              onClick={() => removeFile(index)}
+                              onClick={() => { void removeFile(index); }}
                             >
                               <X className="w-3 h-3" />
                             </Button>

@@ -166,7 +166,7 @@ def download_last_object(bucket_name, file_path, prefix = None, version_id=None)
     except S3Error as exc:
         print("[minio_access.py] Error occurred:", exc)
 
-def download_lumen_object(bucket_name, file_path, prefix = None, version_id=None):
+def download_inlumen_object(bucket_name, file_path, prefix = None, version_id=None):
     '''
         Download lastly modified/added object data from given bucket (and eventual prefix) to given path and return path. 
     '''
