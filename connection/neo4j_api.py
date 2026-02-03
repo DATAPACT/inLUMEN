@@ -106,7 +106,6 @@ def neo4j_add_node():
     SET p.updated_at = datetime()
     RETURN n, p
     """
-    # TODO: If first step, then create pipeline too.
     try:
         with driver.session() as session:
             result = session.run(query, {"props": properties})
@@ -115,7 +114,66 @@ def neo4j_add_node():
     except Exception as e:
         print("[neo4j_api.py] Error executing Neo4j query:", e)
         return jsonify({"error": str(e)}), 500
-    
+
+# Adds (or updates) a FILE node once a file is added
+@app.route('/neo4j_add_file', methods=['POST'])
+def neo4j_add_file():
+    print("[neo4j_api.py] Received query to add/update FILE node in Neo4j.")
+    data = request.json or {}
+    properties = data.get("properties", {}) or {}
+    # TODO: Use uid instead of flow_id
+    flow_id = str(properties.get("flow_id") or "")
+    filename = str(properties.get("filename") or "")
+    query = """
+    MATCH (n:STEP {flow_id: $flow_id})
+    OPTIONAL MATCH (p:PIPELINE)-[:HAS_STEP]->(n)
+    SET p.updated_at = datetime()
+    MERGE (f:FILE {
+      filename: $filename,
+      bucket: "files-step-id-" + $flow_id
+    })
+    SET f.added_at = datetime()
+    MERGE (n)-[:HAS_FILE]->(f)
+    RETURN n
+    """
+    try:
+        with driver.session() as session:
+            result = session.run(query, {"flow_id": flow_id, "filename": filename})
+            record = result.single()
+            return jsonify(record["n"]._properties), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error executing Neo4j query:", e)
+        return jsonify({"error": str(e)}), 500
+
+# Removes a FILE node once a file is removed (if several alike - delete most recent)
+@app.route('/neo4j_delete_file', methods=['DELETE'])
+def neo4j_delete_file():
+    print("[neo4j_api.py] Received query to remove FILE node in Neo4j.")
+    data = request.json
+    properties = data.get("properties", {})
+    # TODO: Use uid instead of flow_id
+    flow_id = str(properties.get("flow_id"))
+    filename = str(properties.get("filename"))
+    query = """
+    MATCH (n:STEP {flow_id: $flow_id})
+    MATCH (n)-[:HAS_FILE]->(f:FILE {filename: $filename})
+    WHERE f.bucket = "files-step-id-" + $flow_id
+    WITH n, f
+    ORDER BY f.added_at DESC
+    LIMIT 1
+    OPTIONAL MATCH (p:PIPELINE)-[:HAS_STEP]->(n)
+    SET p.updated_at = datetime()
+    DETACH DELETE f
+    RETURN n
+    """
+    try:
+        with driver.session() as session:
+            result = session.run(query, {"flow_id": flow_id, "filename": filename})
+            record = result.single()
+            return jsonify(record["n"]._properties), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error executing Neo4j query:", e)
+        return jsonify({"error": str(e)}), 500
 
 # Updates a pipeline step in Neo4J:
 @app.route('/neo4j_update_node', methods=['POST'])

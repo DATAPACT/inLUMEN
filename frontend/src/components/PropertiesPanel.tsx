@@ -157,12 +157,12 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
     };
   }, []);
 
-  // --- MinIO upload function ---
+  // --- File upload function (MinIO + Neo4J) ---
   const uploadFileToMinio = useCallback(async (nodeId: string, file: File) => {
     try {
       const form = new FormData();
-      form.append("file", file);           
-      form.append("bucket_id", nodeId);    
+      form.append("file", file);
+      form.append("bucket_id", nodeId);
       const res = await fetch("http://localhost:5000/minio_upload_file", {
         method: "POST",
         body: form,
@@ -177,19 +177,41 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
         fileName: file.name,
         response: json,
       });
-      return json;
+
+      // After MinIO upload: create FILE node + relationship in Neo4j
+      const neoRes = await fetch("http://localhost:5001/neo4j_add_file", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          properties: {
+            flow_id: nodeId,       
+            filename: file.name,
+          },
+        }),
+      });
+
+      if (!neoRes.ok) {
+        const txt = await neoRes.text().catch(() => "");
+        throw new Error(`Neo4j add file failed (${neoRes.status}): ${txt}`);
+      }
+      const neoJson = await neoRes.json().catch(() => null);
+      console.log("[PropertiesPanel.tsx] Neo4j add_file ok:", neoJson);
+      // Return both if you want to use them in the UI
+      return { minio: json, neo4j: neoJson };
     } catch (err) {
       console.error("[PropertiesPanel.tsx] MinIO upload error:", err);
       throw err;
     }
   }, []);
 
-   // --- MinIO remove function ---
+
+   // --- File remove function (MinIO + Neo4J) ---
   const removeFileInMinio = useCallback(async (nodeId: string, file: File) => {
     try {
+      //  Remove from MinIO 
       const form = new FormData();
-      form.append("filename", file.name);           
-      form.append("bucket_id", nodeId);    
+      form.append("filename", file.name);
+      form.append("bucket_id", nodeId);
       const res = await fetch("http://localhost:5000/minio_remove_file", {
         method: "DELETE",
         body: form,
@@ -204,12 +226,31 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
         fileName: file.name,
         response: json,
       });
-      return json;
+
+      // Remove one FILE node in Neo4j (latest added)
+      const neoRes = await fetch("http://localhost:5001/neo4j_delete_file", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          properties: {
+            flow_id: nodeId,      
+            filename: file.name,
+          },
+        }),
+      });
+      if (!neoRes.ok) {
+        const txt = await neoRes.text().catch(() => "");
+        throw new Error(`Neo4j delete file failed (${neoRes.status}): ${txt}`);
+      }
+      const neoJson = await neoRes.json().catch(() => null);
+      console.log("[PropertiesPanel.tsx] Neo4j delete_file ok:", neoJson);
+      return { minio: json, neo4j: neoJson };
     } catch (err) {
       console.error("[PropertiesPanel.tsx] MinIO removal error:", err);
       throw err;
     }
   }, []);
+
 
   // Enforce type-specific rules before persisting into node.data
   const pushNodeUpdate = (patch: Record<string, any>) => {
@@ -340,41 +381,47 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
     pushNodeUpdate({ database: val });
   };
 
-  // Upload newly added files to MinIO (bucket_id = selectedNode.id)
+  // Upload newly added files to MinIO (bucket_id = selectedNode.id). Overwrite behavior in UI: same filename replaces older entry
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!typeHasFiles(nodeType)) return;
     if (!selectedNode) return;
-
-    if (e.target.files) {
-      const newFiles = Array.from(e.target.files);
-      const updatedFiles = [...files, ...newFiles];
-
-      // 1) Update UI/state + Neo4j
-      setFiles(updatedFiles);
-      pushNodeUpdate({ files: updatedFiles });
-
-      // 2) Upload the *newly added* files to MinIO
-      const nodeId = selectedNode.id;
-
-      const results = await Promise.allSettled(
-        newFiles.map((f) => uploadFileToMinio(nodeId, f))
-      );
-
-      const failed = results.filter((r) => r.status === "rejected");
-      if (failed.length > 0) {
-        console.warn(
-          `[PropertiesPanel.tsx] ${failed.length}/${newFiles.length} MinIO uploads failed for node ${nodeId}`
-        );
+    const picked = e.target.files ? Array.from(e.target.files) : [];
+    if (picked.length === 0) return;
+    const existing = files;
+    // Map filename -> index in existing array
+    const nameToIndex = new Map<string, number>();
+    existing.forEach((f, idx) => nameToIndex.set(f.name, idx));
+    const updatedFiles = [...existing];
+    const changedFiles: File[] = [];
+    for (const f of picked) {
+      const idx = nameToIndex.get(f.name);
+      if (idx != null) {
+        // Replace existing file with same name
+        updatedFiles[idx] = f;
+      } else {
+        // Add new file
+        updatedFiles.push(f);
+        nameToIndex.set(f.name, updatedFiles.length - 1);
       }
-
-      // Allow selecting same file again
-      e.target.value = "";
+      changedFiles.push(f);
     }
+    setFiles(updatedFiles);
+    pushNodeUpdate({ files: updatedFiles });
+    const nodeId = selectedNode.id;
+    const results = await Promise.allSettled(
+      changedFiles.map((f) => uploadFileToMinio(nodeId, f))
+    );
+    const failed = results.filter((r) => r.status === "rejected");
+    if (failed.length > 0) {
+      console.warn(
+        `[PropertiesPanel.tsx] ${failed.length}/${changedFiles.length} uploads failed for node ${nodeId}`
+      );
+    }
+    e.target.value = "";
   };
 
   const removeFile = async (index: number) => {
     if (!selectedNode) return;
-
     const fileToRemove = files[index];
     if (!fileToRemove) return;
     const updatedFiles = files.filter((_, i) => i !== index);

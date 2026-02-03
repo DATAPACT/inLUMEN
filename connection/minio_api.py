@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-from minio_access import remove_object, download_last_object, get_url_last_object, list_objects, upload_object, create_bucket, get_object, print_info_object, download_inlumen_object
+from minio_access import remove_bucket, remove_object, download_last_object, get_url_last_object, list_objects, upload_object, create_bucket, get_object, print_info_object, download_inlumen_object
 import os
 import datetime
 
@@ -62,9 +62,25 @@ def minio_remove_file():
         print(f"[minio_api.py] Received request to remove file {filename} from bucket {bucket_id}")
         remove_object(bucket_id, filename)
         now = datetime.datetime.now()
+        # TODO: If last file, remove bucket too
     except Exception as e:
         return jsonify({'status': 500, 'error': 'Failed to remove file from MinIO', 'details': str(e)}), 500
-    return jsonify({'status': 200, 'file_name':filename, 'add_date':now.strftime("%Y-%m-%d %H:%M:%S"), 'format':filename.split(".")[-1]})
+    return jsonify({'status': 200, 'file_name':filename, 'removal_date':now.strftime("%Y-%m-%d %H:%M:%S"), 'format':filename.split(".")[-1]})
+
+# Remove bucket from MinIO
+@app.route('/minio_clear_bucket', methods=['DELETE'])
+def minio_clear_bucket():
+    bucket_id = "files-step-id-"+ str(request.form.get('bucket_id'))
+    bucket_id = bucket_id.lower() 
+    try:
+        # Remove file to MinIO
+        print(f"[minio_api.py] Received request to remove bucket content from bucket {bucket_id}")
+        remove_bucket(bucket_id)
+        now = datetime.datetime.now()
+        # TODO: If last file, remove bucket too
+    except Exception as e:
+        return jsonify({'status': 500, 'error': 'Failed to remove bucket from MinIO', 'details': str(e)}), 500
+    return jsonify({'status': 200, 'clear_date':now.strftime("%Y-%m-%d %H:%M:%S")})
 
 @app.route('/minio_local_download', methods=['GET'])
 def minio_local_download():
