@@ -240,27 +240,6 @@ def agentic_generate_dockerfiles():
         print("[analytics_api.py] Error generating dockerfiles:", e)
         return jsonify({"error": str(e)}), 500
 
-@app.route('/test_agentic_generate_dockerfiles', methods=['POST', 'OPTIONS'])
-def test_agentic_generate_dockerfiles():
-    # Preflight
-    if request.method == 'OPTIONS':
-        return make_response("", 200)
-    data = request.get_json() or {}
-    files = data.get("files", [])
-    filenames = [f["filename"] for f in files]
-    buckets = [f["bucket"] for f in files]
-    print("[analytics_api.py] Filenames received:", filenames)
-    print("[analytics_api.py] Bucket received:", buckets)
-    # TODO: Agent to generate Dockerfiles:
-    # Dummy test response for now
-    return jsonify({
-        "dockerfiles": [
-            {
-                "dockerfile": f"# Dockerfile for {f['filename']} in {f['bucket']}"
-            }
-            for f in files
-        ]
-    })
 
 @app.route('/agentic_generate_yaml', methods=['POST', 'OPTIONS'])
 def agentic_generate_yaml(): 
@@ -274,7 +253,119 @@ def agentic_generate_yaml():
     # Agent to fetch full pipeline overview
     # Agent to read files
     # Agent to Generate YAML file
-    yaml_text = "YAML"  # replace with real YAML later
+    yaml_text = """
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: sentiment-audio-pipeline-compliant-
+spec:
+  entrypoint: run-sim-pipeline
+  volumes:
+    - name: out-volume
+      emptyDir: {}
+
+  templates:
+    - name: run-sim-pipeline
+      dag:
+        tasks:
+          - name: transcribe-audio
+            template: transcribe-audio
+            arguments:
+              parameters:
+              - name: input-frequency
+                value: "1"
+          - name: pseudonymize-transcript
+            template: pseudonymize-transcript
+            dependencies: [transcribe-audio]
+            arguments:
+              artifacts:
+              - name: transcript
+                from: "{{tasks.transcribe-audio.outputs.artifacts.transcript}}"
+              parameters:
+              - name: input-frequency
+                value: "1"
+          - name: analyze-sentiment
+            template: analyze-sentiment
+            dependencies: [pseudonymize-transcript]
+            arguments:
+              artifacts:
+              - name: transcript
+                from: "{{tasks.pseudonymize-transcript.outputs.artifacts.transcript}}"
+              parameters:
+              - name: input-frequency
+                value: "1"
+
+    - name: transcribe-audio
+      inputs:
+        artifacts:
+        - name: Input
+          path: /in/input.wav
+          raw:
+            data: provide sample wav file
+        parameters:
+          - name: input-frequency
+      container:
+        image: ghcr.io/datapact/01-sim-pipe-test-transcribe-audio
+        env:
+          - name: INPUT_FREQUENCY
+            value: "{{inputs.parameters.input-frequency}}"
+        command: ["/app/transcribe.sh", "10"]
+        volumeMounts:
+          - name: out-volume
+            mountPath: /out
+      outputs:
+        artifacts:
+        - name: transcript
+          path: /out/transcript.txt
+          archive:
+            none: {}
+
+    - name: pseudonymize-transcript
+      inputs:
+        artifacts:
+        - name: transcript
+          path: /in/transcript.txt
+        parameters:
+          - name: input-frequency
+      container:
+        image: ghcr.io/datapact/015-sim-pipe-test-pseudonymize
+        env:
+          - name: INPUT_FREQUENCY
+            value: "{{inputs.parameters.input-frequency}}"
+        command: ["/app/pseudonymize.sh", "10"]
+        volumeMounts:
+          - name: out-volume
+            mountPath: /out
+      outputs:
+        artifacts:
+        - name: transcript
+          path: /out/transcript_pseudonymized.txt
+          archive:
+            none: {}
+
+    - name: analyze-sentiment
+      inputs:
+        artifacts:
+        - name: transcript
+          path: /in/transcript.txt
+        parameters:
+          - name: input-frequency
+      container:
+        image: ghcr.io/datapact/02-sim-pipe-test-sentiment-analyze-compliant
+        env:
+          - name: INPUT_FREQUENCY
+            value: "{{inputs.parameters.input-frequency}}"
+        command: ["/app/analyze.sh", "10"]
+        volumeMounts:
+          - name: out-volume
+            mountPath: /out
+      outputs:
+        artifacts:
+        - name: sentiment_output
+          path: /out/sentiment_output.txt
+          archive:
+            none: {}
+    """  # replace with real YAML later
     resp = make_response(yaml_text, 200)
     resp.headers["Content-Type"] = "application/x-yaml; charset=utf-8"
     return resp
