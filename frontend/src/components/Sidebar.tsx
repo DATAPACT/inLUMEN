@@ -22,7 +22,8 @@ import {
   BarChart3,
   Calendar,
   Hash,
-  Paperclip
+  Paperclip,
+  Download
 } from 'lucide-react';
 
 interface PipelineOverview {
@@ -129,6 +130,7 @@ const nodeTypes: NodeTypeItem[] = [
 ];
 
 type DockerfileDownload = { name: string; url: string };
+type YamlDownload = { name: string; url: string };
 
 export function Sidebar({
   className,
@@ -146,82 +148,93 @@ export function Sidebar({
 }: SidebarProps) {
   const [showKey, setShowKey] = useState(false);
 
-  // --- New: OpenAI API key + dockerfile downloads (Simulate tab)
+  // --- OpenAI API key
   const [openaiKey, setOpenaiKey] = useState<string>(() => {
     return localStorage.getItem("openai_api_key") || "";
   });
-  const [isGenerating, setIsGenerating] = useState(false);
+
+  // --- Dockerfiles state
+  const [isGeneratingDockerfiles, setIsGeneratingDockerfiles] = useState(false);
   const [dockerfileDownloads, setDockerfileDownloads] = useState<DockerfileDownload[]>([]);
   const [dockerfileError, setDockerfileError] = useState<string>("");
 
-  // Cleanup blob URLs on unmount / regeneration
+  // --- YAML state
+  const [isGeneratingYaml, setIsGeneratingYaml] = useState(false);
+  const [yamlDownload, setYamlDownload] = useState<YamlDownload | null>(null);
+  const [yamlError, setYamlError] = useState<string>("");
+
+  // Cleanup blob URLs on unmount
   useEffect(() => {
     return () => {
       dockerfileDownloads.forEach((d) => URL.revokeObjectURL(d.url));
+      if (yamlDownload?.url) URL.revokeObjectURL(yamlDownload.url);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const handleOpenaiKeyChange = (val: string) => {
+    setOpenaiKey(val);
+    localStorage.setItem("openai_api_key", val);
+  };
 
   const clearDockerfileDownloads = () => {
     setDockerfileDownloads((prev) => {
       prev.forEach((d) => URL.revokeObjectURL(d.url));
       return [];
     });
+    setDockerfileError("");
+  };
+
+  const clearYamlDownload = () => {
+    setYamlDownload((prev) => {
+      if (prev?.url) URL.revokeObjectURL(prev.url);
+      return null;
+    });
+    setYamlError("");
+  };
+
+  const fetchNeo4jFiles = async () => {
+    const filesRes = await fetch("http://localhost:5001/neo4j_get_all_files", { method: "GET" });
+    if (!filesRes.ok) {
+      const errText = await filesRes.text().catch(() => "");
+      throw new Error(`Failed to fetch files: ${filesRes.status} ${filesRes.statusText} ${errText}`);
+    }
+    return await filesRes.json(); // expected: [{filename,bucket}, ...]
+  };
+
+  const generateDockerfiles = async (files: any) => {
+    const genRes = await fetch("http://localhost:5002/agentic_generate_dockerfiles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        files,
+        // openai_api_key: openaiKey, // enable when backend supports it
+      }),
+    });
+
+    if (!genRes.ok) {
+      const errText = await genRes.text().catch(() => "");
+      throw new Error(`Failed to generate Dockerfiles: ${genRes.status} ${genRes.statusText} ${errText}`);
+    }
+
+    return await genRes.json(); // expected: { dockerfiles: [{dockerfile_filename, content}, ...] }
   };
 
   const handleGenerateDockerfiles = async () => {
     try {
       setDockerfileError("");
-      setIsGenerating(true);
-
-      // clear previous downloads
+      setIsGeneratingDockerfiles(true);
       clearDockerfileDownloads();
 
-      // 1) fetch Neo4j files
-      const filesRes = await fetch("http://localhost:5001/neo4j_get_all_files", {
-        method: "GET",
-      });
+      const files = await fetchNeo4jFiles();
+      const dockerfile_json = await generateDockerfiles(files);
 
-      if (!filesRes.ok) {
-        const errText = await filesRes.text().catch(() => "");
-        throw new Error(`Failed to fetch files: ${filesRes.status} ${filesRes.statusText} ${errText}`);
-      }
-
-      const files = await filesRes.json(); // expected: [{filename,bucket}, ...]
-
-      // 2) call agent to generate dockerfiles
-      const genRes = await fetch("http://localhost:5002/agentic_generate_dockerfiles", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          files,
-        }),
-      });
-
-      // TODO To allow OpenAI API key from frontend: 
-      //const genRes = await fetch("http://localhost:5002/agentic_generate_dockerfiles", {
-      //  method: "POST",
-      //  headers: { "Content-Type": "application/json" },
-      //  body: JSON.stringify({
-      //    files,
-      //    openai_api_key: openaiKey, // backend can use this if you wire it
-      //  }),
-      //});
-
-      if (!genRes.ok) {
-        const errText = await genRes.text().catch(() => "");
-        throw new Error(`Failed to generate Dockerfiles: ${genRes.status} ${genRes.statusText} ${errText}`);
-      }
-
-      const dockerfile_json = await genRes.json();
       const dockerfiles = dockerfile_json?.dockerfiles ?? [];
-
       if (!Array.isArray(dockerfiles) || dockerfiles.length === 0) {
         setDockerfileError("No Dockerfiles were generated (dockerfiles array is empty).");
         return;
       }
 
-      // 3) Create visible download links (Blob URLs)
       const links: DockerfileDownload[] = dockerfiles.map(
         (df: { dockerfile_filename: string; content: string }, idx: number) => {
           const name = df?.dockerfile_filename || `Dockerfile_${idx + 1}`;
@@ -236,13 +249,45 @@ export function Sidebar({
       console.error("[Sidebar.tsx] Generate Dockerfiles error:", e);
       setDockerfileError(e?.message || "Failed to generate Dockerfiles.");
     } finally {
-      setIsGenerating(false);
+      setIsGeneratingDockerfiles(false);
     }
   };
 
-  const handleOpenaiKeyChange = (val: string) => {
-    setOpenaiKey(val);
-    localStorage.setItem("openai_api_key", val);
+  const handleGenerateYaml = async () => {
+    try {
+      setYamlError("");
+      setIsGeneratingYaml(true);
+      clearYamlDownload();
+
+      // Get files -> dockerfiles -> YAML
+      const files = await fetchNeo4jFiles();
+      const dockerfile_json = await generateDockerfiles(files);
+
+      const yamlRes = await fetch("http://localhost:5002/agentic_generate_yaml", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dockerfile_json,
+          // openai_api_key: openaiKey, // enable when backend supports it
+        }),
+      });
+
+      if (!yamlRes.ok) {
+        const errText = await yamlRes.text().catch(() => "");
+        throw new Error(`Failed to generate YAML: ${yamlRes.status} ${yamlRes.statusText} ${errText}`);
+      }
+
+      const yamlText = await yamlRes.text();
+      const blob = new Blob([yamlText], { type: "application/x-yaml;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+
+      setYamlDownload({ name: `ai-pipeline-${Date.now()}.yaml`, url });
+    } catch (e: any) {
+      console.error("[Sidebar.tsx] Generate YAML error:", e);
+      setYamlError(e?.message || "Failed to generate YAML.");
+    } finally {
+      setIsGeneratingYaml(false);
+    }
   };
 
   return (
@@ -349,7 +394,7 @@ export function Sidebar({
 
         {activeTab === "simulate" && (
           <div className="py-4 space-y-4">
-            {/* OpenAI key + generation */}
+            {/* OpenAI key */}
             <div className="p-4 border rounded-lg border-border">
               <h3 className="text-sm font-medium mb-2 flex items-center gap-2">
                 <Key className="w-4 h-4" />
@@ -378,6 +423,7 @@ export function Sidebar({
               </div>
             </div>
 
+            {/* Dockerfiles */}
             <div className="p-4 border rounded-lg border-border">
               <h3 className="text-sm font-medium mb-2">Generate Dockerfiles</h3>
               <p className="text-xs text-muted-foreground mb-3">
@@ -387,9 +433,9 @@ export function Sidebar({
               <Button
                 className="w-full"
                 onClick={handleGenerateDockerfiles}
-                disabled={isGenerating}
+                disabled={isGeneratingDockerfiles || isGeneratingYaml}
               >
-                {isGenerating ? "Generating..." : "Generate Dockerfiles"}
+                {isGeneratingDockerfiles ? "Generating..." : "Generate Dockerfiles"}
               </Button>
 
               {dockerfileError && (
@@ -398,30 +444,73 @@ export function Sidebar({
                 </div>
               )}
 
-              {/* Download links */}
               {dockerfileDownloads.length > 0 && (
                 <div className="mt-4">
-                  <div className="text-xs font-medium mb-2">Downloads</div>
+                  <div className="text-xs font-medium mb-2">Dockerfile Downloads</div>
                   <div className="space-y-1">
                     {dockerfileDownloads.map((d) => (
                       <a
                         key={d.url}
                         href={d.url}
                         download={d.name}
-                        className="block text-xs underline"
+                        className="flex items-center gap-2 text-xs underline"
                       >
-                        {d.name}
+                        <Download className="w-3.5 h-3.5" />
+                        <span className="truncate">{d.name}</span>
                       </a>
                     ))}
                   </div>
-
                   <Button
                     variant="outline"
                     size="sm"
                     className="mt-3 w-full"
                     onClick={clearDockerfileDownloads}
                   >
-                    Clear Downloads
+                    Clear Dockerfile Links
+                  </Button>
+                </div>
+              )}
+            </div>
+
+            {/* YAML */}
+            <div className="p-4 border rounded-lg border-border">
+              <h3 className="text-sm font-medium mb-2">Generate YAML</h3>
+              <p className="text-xs text-muted-foreground mb-3">
+                Generates YAML via the agent service (uses generated Dockerfiles as input).
+              </p>
+
+              <Button
+                className="w-full"
+                onClick={handleGenerateYaml}
+                disabled={isGeneratingYaml || isGeneratingDockerfiles}
+              >
+                {isGeneratingYaml ? "Generating..." : "Generate YAML"}
+              </Button>
+
+              {yamlError && (
+                <div className="mt-3 text-xs text-red-400">
+                  {yamlError}
+                </div>
+              )}
+
+              {yamlDownload && (
+                <div className="mt-4">
+                  <div className="text-xs font-medium mb-2">YAML Download</div>
+                  <a
+                    href={yamlDownload.url}
+                    download={yamlDownload.name}
+                    className="flex items-center gap-2 text-xs underline"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span className="truncate">{yamlDownload.name}</span>
+                  </a>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-3 w-full"
+                    onClick={clearYamlDownload}
+                  >
+                    Clear YAML Link
                   </Button>
                 </div>
               )}
