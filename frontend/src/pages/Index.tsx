@@ -4,29 +4,27 @@ import { PropertiesPanel } from '@/components/PropertiesPanel';
 import { Toolbar } from '@/components/Toolbar';
 import { WrappedFlowCanvas, FlowCanvasRef } from '@/components/FlowCanvas';
 import { toast } from 'sonner';
-import { 
-  PlayCircle, 
-  Save, 
-  MessageSquare, 
-  Settings,
+import {
+  Save,
   Send,
   PlusCircle,
   ChevronDown,
   Edit,
-  Trash2
+  Trash2,
+  Settings,
 } from 'lucide-react';
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { callAzureAI } from '@/utils/azureAI';
 import { Node } from 'reactflow';
-import { 
-  ChatbotConfig, 
+import {
+  ChatbotConfig,
   fetchChatbotConfigs,
-  deleteChatbotConfig 
+  deleteChatbotConfig
 } from '@/services/chatbotService';
 import { ChatbotConfigForm } from '@/components/ChatbotConfigForm';
-import { 
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -43,23 +41,23 @@ const Index = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [githubToken, setGithubToken] = useState('');
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
-  const [conversation, setConversation] = useState<{role: 'user' | 'assistant', content: string}[]>([]);
+  const [conversation, setConversation] = useState<{ role: 'user' | 'assistant', content: string }[]>([]);
   const [isLightMode, setIsLightMode] = useState(false);
   const flowCanvasRef = useRef<FlowCanvasRef>(null);
   const [pipelineLastUpdate, setPipelineLastUpdate] = useState<string>('Never');
-  
+
   const [configs, setConfigs] = useState<ChatbotConfig[]>([]);
   const [selectedConfig, setSelectedConfig] = useState<ChatbotConfig | null>(null);
   const [isConfigFormOpen, setIsConfigFormOpen] = useState(false);
   const [configToEdit, setConfigToEdit] = useState<ChatbotConfig | undefined>(undefined);
 
-   // Compute pipeline overview from flowNodes
+  // Compute pipeline overview from flowNodes
   const pipelineOverview = React.useMemo(() => {
     const fileCount = flowNodes.reduce((count, node) => {
       const files = node.data?.files || [];
       return count + files.length;
     }, 0);
-    
+
     return {
       version: '1.0.0',
       lastUpdate: pipelineLastUpdate,
@@ -78,7 +76,7 @@ const Index = () => {
     if (savedTimestamp) {
       setPipelineLastUpdate(new Date(savedTimestamp).toLocaleString());
     }
-    
+
     loadConfigurations();
   }, []);
 
@@ -86,7 +84,7 @@ const Index = () => {
     try {
       const configsList = await fetchChatbotConfigs();
       setConfigs(configsList);
-      
+
       if (configsList.length > 0 && !selectedConfig) {
         setSelectedConfig(configsList[0]);
       }
@@ -107,11 +105,9 @@ const Index = () => {
   }, []);
 
   const onNodeUpdate = useCallback((id: string, data: any) => {
-    // Update both the local flowNodes state AND the FlowCanvas internal state via ref
-    setFlowNodes(prev => prev.map(node => 
+    setFlowNodes(prev => prev.map(node =>
       node.id === id ? { ...node, data: { ...node.data, ...data } } : node
     ));
-    // Also update the FlowCanvas internal nodes via ref
     flowCanvasRef.current?.updateNode(id, data);
   }, []);
 
@@ -128,7 +124,7 @@ const Index = () => {
     toast.success("Running AI Flow", {
       description: "Executing your custom thinking model",
     });
-    setActiveTab('test');
+    setActiveTab('simulate');
   };
 
   const handleTabChange = (value: string) => {
@@ -154,15 +150,15 @@ const Index = () => {
 
     try {
       const response = await callAzureAI(
-        updatedConversation.map(msg => ({ 
-          role: msg.role, 
-          content: msg.content 
-        })), 
-        githubToken, 
+        updatedConversation.map(msg => ({
+          role: msg.role,
+          content: msg.content
+        })),
+        githubToken,
         flowNodes,
         selectedConfig || undefined
       );
-      
+
       setConversation(prev => [...prev, { role: 'assistant', content: response }]);
       setAiResponse(response);
       setUserInput('');
@@ -206,11 +202,11 @@ const Index = () => {
         if (success) {
           const updatedConfigs = await fetchChatbotConfigs();
           setConfigs(updatedConfigs);
-          
+
           if (selectedConfig?.id === id) {
             setSelectedConfig(updatedConfigs.length > 0 ? updatedConfigs[0] : null);
           }
-          
+
           toast.success("Configuration deleted successfully");
         }
       } catch (error) {
@@ -294,25 +290,6 @@ const Index = () => {
   };
 
   const handleSaveToYAML = () => {
-    const workflow = {
-      apiVersion: 'argoproj.io/v1alpha1',
-      kind: 'Workflow',
-      metadata: {
-        generateName: 'pipeline-',
-      },
-      spec: {
-        entrypoint: 'pipeline',
-        templates: flowNodes.map(node => ({
-          name: node.id,
-          container: {
-            image: 'alpine:latest',
-            command: ['echo'],
-            args: [node.data.label || 'Node'],
-          },
-        })),
-      },
-    };
-    
     const yamlStr = `# Argo Workflow generated from inLUMEN pipeline
 apiVersion: argoproj.io/v1alpha1
 kind: Workflow
@@ -327,7 +304,7 @@ ${flowNodes.map(node => `  - name: ${node.id}
       command: [echo]
       args: ["${node.data.label || 'Node'}"]`).join('\n')}
 `;
-    
+
     const dataBlob = new Blob([yamlStr], { type: 'text/yaml' });
     const url = URL.createObjectURL(dataBlob);
     const link = document.createElement('a');
@@ -347,22 +324,23 @@ ${flowNodes.map(node => `  - name: ${node.id}
   };
 
   const handleRemoveEdge = (edgeId: string) => {
-    // This will be implemented in FlowCanvas
     toast.success("Connection removed");
   };
 
+  const showFlowLayout = activeTab === 'lab' || activeTab === 'overview' || activeTab === 'simulate';
+
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden animate-fade-in bg-[#1A1A1D]">
-      <Toolbar 
-        onRunFlow={handleRunFlow} 
+      <Toolbar
+        onRunFlow={handleRunFlow}
         isLightMode={isLightMode}
         onToggleLightMode={() => setIsLightMode(!isLightMode)}
       />
-      
+
       <div className="flex-1 flex overflow-hidden">
-        <Sidebar 
-          onDragStart={onDragStart} 
-          activeTab={activeTab} 
+        <Sidebar
+          onDragStart={onDragStart}
+          activeTab={activeTab}
           onTabChange={handleTabChange}
           githubToken={githubToken}
           setGithubToken={setGithubToken}
@@ -373,13 +351,13 @@ ${flowNodes.map(node => `  - name: ${node.id}
           onSaveToYAML={handleSaveToYAML}
           pipelineOverview={pipelineOverview}
         />
-        
-        {(activeTab === 'lab' || activeTab === 'overview') ? (
+
+        {showFlowLayout ? (
           <ResizablePanelGroup direction="horizontal" className="flex-1">
             <ResizablePanel defaultSize={60} minSize={40}>
               <div className={`h-full ${isLightMode ? 'bg-gray-50' : 'bg-canvas-DEFAULT'}`}>
-                <WrappedFlowCanvas 
-                  onNodeSelect={onNodeSelect} 
+                <WrappedFlowCanvas
+                  onNodeSelect={onNodeSelect}
                   onNodesChange={onNodesChange}
                   onRemoveNode={handleRemoveNode}
                   onRemoveEdge={handleRemoveEdge}
@@ -388,40 +366,129 @@ ${flowNodes.map(node => `  - name: ${node.id}
                 />
               </div>
             </ResizablePanel>
-            
+
             <ResizableHandle withHandle />
-            
+
             <ResizablePanel defaultSize={40} minSize={30}>
               <ResizablePanelGroup direction="horizontal">
                 <ResizablePanel defaultSize={60} minSize={30}>
-                  <PropertiesPanel 
-                    selectedNode={selectedNode} 
+                  <PropertiesPanel
+                    selectedNode={selectedNode}
                     onNodeUpdate={onNodeUpdate}
                     onRemoveNode={handleRemoveNode}
                   />
                 </ResizablePanel>
-                
+
                 <ResizableHandle withHandle />
-                
+
                 <ResizablePanel defaultSize={40} minSize={20} maxSize={60}>
                   <div className="h-full bg-white border-l border-border flex flex-col">
-                    <div className="p-4 border-b border-border">
-                      <h3 className="text-sm font-medium text-gray-900">AI-assisted Pipeline Design Chat</h3>
+                    <div className="p-4 border-b border-border flex items-center justify-between gap-2">
+                      <h3 className="text-sm font-medium text-gray-900">
+                        AI-assisted Pipeline Design Chat
+                      </h3>
+
+                      <div className="flex items-center gap-2">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="outline" className="gap-1" size="sm">
+                              <Settings className="w-4 h-4" />
+                              {selectedConfig ? (
+                                <span className="hidden md:inline-flex">
+                                  {selectedConfig.name}
+                                </span>
+                              ) : (
+                                <span className="hidden md:inline-flex">
+                                  Configuration
+                                </span>
+                              )}
+                              <ChevronDown className="w-3 h-3 opacity-50" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-56">
+                            <DropdownMenuLabel>Chatbot Configurations</DropdownMenuLabel>
+                            <DropdownMenuSeparator />
+                            {configs.map((config) => (
+                              <DropdownMenuItem
+                                key={config.id}
+                                className="flex justify-between cursor-pointer"
+                                onClick={() => handleSelectConfig(config)}
+                              >
+                                <span className={selectedConfig?.id === config.id ? "font-bold" : ""}>
+                                  {config.name}
+                                </span>
+                                <div className="flex items-center gap-1">
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-6 w-6"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleEditConfig(config);
+                                    }}
+                                  >
+                                    <Edit className="h-3 w-3" />
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-6 w-6 text-destructive"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (config.id) handleDeleteConfig(config.id);
+                                    }}
+                                  >
+                                    <Trash2 className="h-3 h-3" />
+                                  </Button>
+                                </div>
+                              </DropdownMenuItem>
+                            ))}
+
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              className="flex items-center gap-2 cursor-pointer"
+                              onClick={handleCreateConfig}
+                            >
+                              <PlusCircle className="h-4 w-4" />
+                              <span>New Configuration</span>
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={handleClearConversation}
+                          className="text-xs"
+                        >
+                          Clear Chat
+                        </Button>
+
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={handleSaveWorkflow}
+                          className="text-xs flex items-center gap-1"
+                        >
+                          <Save className="w-3 h-3" />
+                          Save
+                        </Button>
+                      </div>
                     </div>
+
                     <div className="flex-1 overflow-y-auto p-4">
                       {conversation.length > 0 ? (
                         <div className="space-y-3">
                           {conversation.map((msg, index) => (
-                            <div 
+                            <div
                               key={index}
                               className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
                             >
-                              <div 
-                                className={`max-w-[80%] p-3 rounded-lg ${
-                                  msg.role === 'user' 
-                                    ? 'bg-blue-600 text-white' 
-                                    : 'bg-gray-100 text-gray-900'
-                                }`}
+                              <div
+                                className={`max-w-[80%] p-3 rounded-lg ${msg.role === 'user'
+                                  ? 'bg-blue-600 text-white'
+                                  : 'bg-gray-100 text-gray-900'
+                                  }`}
                               >
                                 <div className="text-sm whitespace-pre-wrap">
                                   {msg.content}
@@ -436,16 +503,23 @@ ${flowNodes.map(node => `  - name: ${node.id}
                         </div>
                       )}
                     </div>
+
                     <div className="p-4 border-t border-border">
                       <div className="flex gap-2">
-                        <Textarea 
-                          className="flex-1 text-gray-900 border-gray-300 bg-white" 
+                        <Textarea
+                          className="flex-1 text-gray-900 border-gray-300 bg-white"
                           placeholder="Describe your pipeline"
                           value={userInput}
                           onChange={(e) => setUserInput(e.target.value)}
                           rows={1}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              handleSendMessage();
+                            }
+                          }}
                         />
-                        <Button 
+                        <Button
                           onClick={handleSendMessage}
                           disabled={isProcessing || !userInput.trim()}
                           className="bg-blue-600 hover:bg-blue-700 text-white"
@@ -460,186 +534,12 @@ ${flowNodes.map(node => `  - name: ${node.id}
             </ResizablePanel>
           </ResizablePanelGroup>
         ) : (
-          <ResizablePanelGroup direction="horizontal" className="flex-1">
-            <ResizablePanel defaultSize={75} minSize={50}>
-              <div className="h-full bg-canvas-DEFAULT flex items-center justify-center">
-                <div className="max-w-2xl w-full h-[80vh] p-6 bg-card/30 backdrop-blur-sm border border-border rounded-lg flex flex-col">
-                  <div className="flex items-center justify-between mb-4">
-                    <h2 className="text-2xl font-bold flex items-center gap-2">
-                      <MessageSquare className="w-5 h-5" />
-                      AI-assisted Pipeline Design Chat
-                    </h2>
-                <div className="flex items-center gap-2">
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="outline" className="gap-1">
-                        <Settings className="w-4 h-4" />
-                        {selectedConfig ? (
-                          <span className="hidden md:inline-flex">
-                            {selectedConfig.name}
-                          </span>
-                        ) : (
-                          <span className="hidden md:inline-flex">
-                            Configuration
-                          </span>
-                        )}
-                        <ChevronDown className="w-3 h-3 opacity-50" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-56">
-                      <DropdownMenuLabel>Chatbot Configurations</DropdownMenuLabel>
-                      <DropdownMenuSeparator />
-                      {configs.map((config) => (
-                        <DropdownMenuItem 
-                          key={config.id}
-                          className="flex justify-between cursor-pointer"
-                          onClick={() => handleSelectConfig(config)}
-                        >
-                          <span className={selectedConfig?.id === config.id ? "font-bold" : ""}>
-                            {config.name}
-                          </span>
-                          <div className="flex items-center gap-1">
-                            <Button 
-                              variant="ghost" 
-                              size="icon" 
-                              className="h-6 w-6"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleEditConfig(config);
-                              }}
-                            >
-                              <Edit className="h-3 w-3" />
-                            </Button>
-                            <Button 
-                              variant="ghost" 
-                              size="icon" 
-                              className="h-6 w-6 text-destructive"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (config.id) handleDeleteConfig(config.id);
-                              }}
-                            >
-                              <Trash2 className="h-3 w-3" />
-                            </Button>
-                          </div>
-                        </DropdownMenuItem>
-                      ))}
-                      
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem 
-                        className="flex items-center gap-2 cursor-pointer"
-                        onClick={handleCreateConfig}
-                      >
-                        <PlusCircle className="h-4 w-4" />
-                        <span>New Configuration</span>
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                  
-                  <Button 
-                    variant="outline"
-                    size="sm"
-                    onClick={handleClearConversation}
-                    className="text-xs"
-                  >
-                    Clear Chat
-                  </Button>
-                </div>
-              </div>
-              
-              <div className="flex-1 overflow-y-auto mb-4 p-4 bg-gradient-to-b from-gray-900 to-gray-950 rounded-md border border-border">
-                {conversation.length > 0 ? (
-                  <div className="space-y-3">
-                    {conversation.map((msg, index) => (
-                      <div 
-                        key={index}
-                        className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                      >
-                        <div 
-                          className={`max-w-[80%] p-3 rounded-lg ${
-                            msg.role === 'user' 
-                              ? 'bg-emerald-700 text-white rounded-tr-none' 
-                              : 'bg-gray-800 text-white rounded-tl-none'
-                          }`}
-                        >
-                          <div className="text-sm whitespace-pre-wrap">
-                            {msg.content}
-                          </div>
-                          <div className="text-[10px] opacity-70 text-right mt-1">
-                            {new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="h-full flex flex-col items-center justify-center text-center text-muted-foreground">
-                    <MessageSquare className="h-12 w-12 mb-4 opacity-20" />
-                    <p className="text-lg font-medium">Your chat is empty</p>
-                    <p className="max-w-xs mx-auto mt-2 text-sm">
-                      Send a message to start chatting with your AI assistant
-                    </p>
-                  </div>
-                )}
-              </div>
-              
-              <div className="relative">
-                <Textarea 
-                  className="w-full pr-12 py-3 rounded-full text-sm bg-gray-800 border-gray-700 placeholder:text-gray-500 resize-none" 
-                  placeholder="Type a message..."
-                  value={userInput}
-                  onChange={(e) => setUserInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSendMessage();
-                    }
-                  }}
-                  rows={1}
-                />
-                <Button 
-                  className="absolute right-1 bottom-1 p-2 h-9 w-9 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white"
-                  onClick={handleSendMessage}
-                  disabled={isProcessing || !githubToken || !userInput.trim()}
-                >
-                  <Send className="h-4 w-4" />
-                </Button>
-              </div>
-              
-              <div className="text-xs text-muted-foreground pt-4 flex justify-between items-center mt-2">
-                <div>
-                  <p>
-                    {selectedConfig 
-                      ? `Using: ${selectedConfig.name} (${selectedConfig.model}, temp: ${selectedConfig.temperature})`
-                      : 'No configuration selected'}
-                  </p>
-                </div>
-                <Button 
-                  variant="outline"
-                  size="sm"
-                  onClick={handleSaveWorkflow}
-                  className="text-xs flex items-center gap-1"
-                >
-                  <Save className="w-3 h-3" />
-                  Save Workflow
-                </Button>
-              </div>
-            </div>
+          <div className="flex-1 flex items-center justify-center text-muted-foreground">
+            Select a tab.
           </div>
-        </ResizablePanel>
-        <ResizableHandle />
-        <ResizablePanel defaultSize={25} minSize={20} maxSize={50}>
-          <div className="h-full p-4 bg-muted/30">
-            <h3 className="text-sm font-medium mb-2">Pipeline Overview</h3>
-            <div className="text-xs text-muted-foreground">
-              Additional tools and information can be added here
-            </div>
-          </div>
-        </ResizablePanel>
-      </ResizablePanelGroup>
         )}
       </div>
-      
+
       <ChatbotConfigForm
         isOpen={isConfigFormOpen}
         onClose={() => setIsConfigFormOpen(false)}

@@ -240,6 +240,22 @@ def agentic_generate_dockerfiles():
         print("[analytics_api.py] Error generating dockerfiles:", e)
         return jsonify({"error": str(e)}), 500
 
+@app.route('/new_agentic_generate_yaml', methods=['POST', 'OPTIONS'])
+def new_agentic_generate_yaml(): 
+    # Preflight
+    if request.method == 'OPTIONS':
+        return make_response("", 200)
+    data = request.get_json() or {}
+    dockerfile_json = data.get("dockerfile_json")
+    print("[analytics_api.py] Dockerfile received:", dockerfile_json)
+    # TODO:
+    # Agent to fetch full pipeline overview
+    # Agent to read files
+    # Agent to Generate YAML file
+    yaml_text = """ REPLACE """  # replace with real YAML later
+    resp = make_response(yaml_text, 200)
+    resp.headers["Content-Type"] = "application/x-yaml; charset=utf-8"
+    return resp
 
 @app.route('/agentic_generate_yaml', methods=['POST', 'OPTIONS'])
 def agentic_generate_yaml(): 
