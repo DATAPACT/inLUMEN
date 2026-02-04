@@ -1,21 +1,25 @@
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, make_response
 from openai import OpenAI
 from autogen_ext.code_executors.local import LocalCommandLineCodeExecutor
 from autogen_ext.code_executors.docker import DockerCommandLineCodeExecutor
 from autogen_agentchat.tools import AgentTool, TeamTool
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 from autogen_ext.models.ollama import OllamaChatCompletionClient
-from autogen_agentchat.conditions import TextMessageTermination, SourceMatchTermination, MaxMessageTermination, TextMentionTermination
+from autogen_agentchat.conditions import TextMessageTermination, SourceMatchTermination, MaxMessageTermination, TextMentionTermination, FunctionalTermination
 from autogen_agentchat.agents import AssistantAgent, CodeExecutorAgent, UserProxyAgent
-from autogen_agentchat.teams import SelectorGroupChat
-from autogen_core.model_context import BufferedChatCompletionContext, ChatCompletionContext
+from autogen_core.model_context import BufferedChatCompletionContext, ChatCompletionContext, TokenLimitedChatCompletionContext
 from autogen_agentchat.ui import Console
-from autogen_agentchat.messages import BaseAgentEvent, BaseChatMessage, ModelClientStreamingChunkEvent
-from autogen_core.tools import BaseTool, FunctionTool, Workbench
+from autogen_agentchat.messages import BaseAgentEvent, BaseChatMessage, ModelClientStreamingChunkEvent, HandoffMessage
+from autogen_core.tools import BaseTool, FunctionTool, Workbench,  StaticStreamWorkbench, ToolResult
 from autogen_ext.tools.code_execution import PythonCodeExecutionTool
-from autogen_core.models import CreateResult, SystemMessage, ChatCompletionClient
-from autogen_core import CancellationToken
+from autogen_core.models import CreateResult, SystemMessage, ChatCompletionClient, UserMessage, FunctionExecutionResultMessage, FunctionExecutionResult
+from autogen_core import CancellationToken,  Component, ComponentModel, FunctionCall
 from autogen_agentchat.base import Response as AgentResponse
+from autogen_agentchat.base import Handoff as HandoffBase
+from autogen_agentchat.tools import AgentTool, TeamTool
+# from autogen_ext.code_executors.jupyter import JupyterCodeExecutor
+from autogen_agentchat.teams import RoundRobinGroupChat, SelectorGroupChat, Swarm
+from autogen_core.memory import ListMemory, MemoryContent, MemoryMimeType, Memory
 from pathlib import Path
 import tempfile
 import configparser
@@ -29,12 +33,17 @@ import requests
 import json
 import csv
 import time
+import re
+import uuid, json
 from pydantic import BaseModel, Field
 from typing import Annotated, Literal, List, Optional, Union, Sequence, Any, Callable, Dict, Mapping, AsyncGenerator
 from datetime import datetime, timedelta
-
+from getpass import getpass
 import asyncio
 import nest_asyncio
+from neo4j import GraphDatabase
+from minio import Minio
+from minio.error import S3Error
 
 # Create a single global event loop for all requests
 global_loop = asyncio.new_event_loop()
@@ -57,13 +66,13 @@ config.read('openaiapi.ini')
 openai_api_key = config.get('openai', 'OPENAI_API_KEY')
 
 openai_model_client = OpenAIChatCompletionClient(
-    model = "gpt-4.1",
+    model = "gpt-4o",
     api_key = openai_api_key,
 )
 
 # Must disable parallel tool calls to avoid concurrency issues in AgentTool/TeamTool
 openai_model_client_no_parallel_calls = OpenAIChatCompletionClient(
-    model = "gpt-4.1",
+    model = "gpt-4o",
     api_key = openai_api_key,
     parallel_tool_calls=False,  
 )
@@ -72,7 +81,39 @@ openai_model_client_no_parallel_calls = OpenAIChatCompletionClient(
 ollama_model_client = OllamaChatCompletionClient(model="llama3.1:8b", host= "http://llm:11434")
 
 # All agents get following config. Change LLM config to experiment:
-current_model_client = openai_model_client_no_parallel_calls
+current_model_client = openai_model_client
+
+# Database Schema (METAMODEL)
+DB_SCHEMA = """
+    Nodes:
+    (:PIPELINE) represents one AI/data workflow. Properties:
+        - uid: string (generated via randomUUID)
+        - label: string
+        - description: string
+        - version: string
+        - created_at: datetime
+        - updated_at: datetime
+        - status: string ("design"|"simulated"|"runtime") - default "design"
+    (:STEP) represents a single node in the pipeline graph. Properties:
+        - uid: string (generated via randomUUID)
+        - type: string ("input"|"config"|"output"|"action"|"storage"|"api")
+        - label: string 
+        - description: string
+        - content: string 
+        - has_files: string ("yes"|"no") - default: "no"
+        - endpoint: string
+        - database: string - default : "minio"
+        - param: string
+    (:FILE) represents a single file associated with a step. Properties:
+        - uid: string (generated via randomUUID)
+        - filename: string
+        - added_at: datetime
+        - bucket: string
+    Relationships:
+    (:PIPELINE)-[:HAS_STEP]->(:STEP)
+    (:STEP)-[:FLOWS_TO]->(:STEP)
+    (:STEP)-[:HAS_FILE]->(:FILE)
+    """
 
 class ForcedAssistantAgent(AssistantAgent):
     """AssistantAgent that always enforces tool calling."""
@@ -135,13 +176,12 @@ class ForcedAssistantAgent(AssistantAgent):
             )
             yield model_result
 
-
 app = Flask(__name__)
 
 # Define a function to set the CORS headers
 def add_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = 'http://localhost:8080'  # allowed origin
-    response.headers['Access-Control-Allow-Methods'] = 'GET'  # Adjust as needed
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'  # Adjust as needed
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     return response
 
@@ -150,91 +190,100 @@ def add_cors_headers(response):
 def apply_cors(response):
     return add_cors_headers(response)
 
-@app.route('/agentic_generate_YAML', methods=['GET'])
-def agentic_generate_YAML():
-    # TODO
-    # Agent to fetch full overview
-    # Agent to read all file contents
-    # Agent to Generate Dockerfiles
-    # Agent to Generate YAML file
-    test_yaml = """\
-        apiVersion: v1
-        kind: AIPipeline
-        metadata:
-        name: test-pipeline
-        version: "0.1.0"
-        spec:
-        description: Test YAML generated by agent_generate_YAML
-        steps:
-            - id: step-1
-            name: Load Data
-            type: datasource
-            config:
-                source: s3://example-bucket/data.csv
-            - id: step-2
-            name: Analyze Data
-            type: llm-agent
-            depends_on:
-                - step-1
-            config:
-                model: gpt-4
-                temperature: 0.2
-            - id: step-3
-            name: Store Results
-            type: sink
-            depends_on:
-                - step-2
-            config:
-                target: minio://results/output.json
-        """
-    return Response(
-        test_yaml,
-        mimetype="application/x-yaml",
-        headers={
-            "Content-Disposition": "attachment; filename=ai-pipeline-test.yaml"
-        },
+class ListDockerfilesResponse(BaseModel):
+    class DockerfileItem(BaseModel):
+        dockerfile_filename: str
+        content: str
+    dockerfiles: list[DockerfileItem]
+
+async def _generate_dockerfiles_with_agent(filenames: list[str]) -> ListDockerfilesResponse:
+    sh_files = [fn for fn in filenames if fn.lower().endswith(".sh")]
+    dockerfile_generator = AssistantAgent(
+        name="dockerfile_generator",
+        model_client=current_model_client,
+        description="An agent that generates Dockerfiles.",
+        system_message=f""" You will be given a list of files. Only consider files with .sh extension. Generate a Dockerfile per .sh file by replacing <insert filename> with the actual filename in the content below and name the Dockerfile.<insert filename with no extension>:
+        FROM ubuntu:latest
+        ENV DEBIAN_FRONTEND=noninteractive
+        RUN apt-get update && apt-get install -y \
+            bash \
+            bc \
+            && rm -rf /var/lib/apt/lists/*
+        WORKDIR /app
+        COPY ./<insert filename> /app/<insert filename>
+        RUN chmod +x /app/<insert filename>
+        CMD ["/app/<insert filename>", "10"]
+        """,
+        output_content_type=ListDockerfilesResponse,
     )
 
+    result = await dockerfile_generator.run(task="List of files: " + str(sh_files))
+    print("[analytics_api.py] Dockerfile generator response:")
+    print(result.messages[-1].content)
+    return result.messages[-1].content
+
+@app.route('/agentic_generate_dockerfiles', methods=['POST', 'OPTIONS'])
+def agentic_generate_dockerfiles():
+    # Preflight
+    if request.method == 'OPTIONS':
+        return make_response("", 200)
+    data = request.get_json() or {}
+    files = data.get("files", [])
+    filenames = [f["filename"] for f in files]
+    #buckets = [f["bucket"] for f in files]
+    print("[analytics_api.py] Filenames received:", filenames)
+    #print("[analytics_api.py] Buckets received:", buckets)
+    try:
+        parsed: ListDockerfilesResponse = run_async(_generate_dockerfiles_with_agent(filenames))
+        return jsonify(parsed.model_dump()), 200
+    except Exception as e:
+        print("[analytics_api.py] Error generating dockerfiles:", e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/test_agentic_generate_dockerfiles', methods=['POST', 'OPTIONS'])
+def test_agentic_generate_dockerfiles():
+    # Preflight
+    if request.method == 'OPTIONS':
+        return make_response("", 200)
+    data = request.get_json() or {}
+    files = data.get("files", [])
+    filenames = [f["filename"] for f in files]
+    buckets = [f["bucket"] for f in files]
+    print("[analytics_api.py] Filenames received:", filenames)
+    print("[analytics_api.py] Bucket received:", buckets)
+    # TODO: Agent to generate Dockerfiles:
+    # Dummy test response for now
+    return jsonify({
+        "dockerfiles": [
+            {
+                "dockerfile": f"# Dockerfile for {f['filename']} in {f['bucket']}"
+            }
+            for f in files
+        ]
+    })
+
+@app.route('/agentic_generate_yaml', methods=['POST', 'OPTIONS'])
+def agentic_generate_yaml(): 
+    # Preflight
+    if request.method == 'OPTIONS':
+        return make_response("", 200)
+    data = request.get_json() or {}
+    dockerfile_json = data.get("dockerfile_json")
+    print("[analytics_api.py] Dockerfile received:", dockerfile_json)
+    # TODO:
+    # Agent to fetch full pipeline overview
+    # Agent to read files
+    # Agent to Generate YAML file
+    yaml_text = "YAML"  # replace with real YAML later
+    resp = make_response(yaml_text, 200)
+    resp.headers["Content-Type"] = "application/x-yaml; charset=utf-8"
+    return resp
 
 @app.route('/agentic_pipeline_editor', methods=['GET'])
 def agentic_pipeline_editor():
     task = request.args.get('task')
     # User proxy:
     user_proxy = UserProxyAgent("user_proxy")
-    # _________________________________Pipeline Editor______________________________________
-
-    DB_SCHEMA = """
-    Nodes:
-    (:PIPELINE) represents one AI/data workflow. Properties:
-        - uid: string (generated via randomUUID)
-        - name: string
-        - description: string
-        - version: string
-        - created_at: datetime
-        - updated_at: datetime
-        - status: string ("design"|"simulated"|"runtime")
-    (:STEP) represents a single node in the pipeline graph. Properties:
-        - uid: string (generated via randomUUID)
-        - type: string ("input"|"config"|"output"|"action"|"storage"|"api")
-        - name: string 
-        - description: string
-        - content: string 
-        - has_files: string ("yes"|"no") - default: "no"
-        - endpoint: string
-        - database: string - default : "minio"
-        - param: dict
-    (:FILE) represents a single file associated with a step. Properties:
-        - uid: string (generated via randomUUID)
-        - name: string
-        - extension: string 
-        - created_at: datetime
-        - bucket: string
-    Relationships:
-    (:PIPELINE)-[:HAS_STEP]->(:STEP)
-    (:STEP)-[:FLOWS_TO]->(:STEP)
-    (:STEP)-[:USES_FILE]->(:FILE)
-    """
-
     async def run_query(query: str, query_type: str) -> str:
         """ Runs any Cypher query in Neo4j. Returns String representation. """
         try:

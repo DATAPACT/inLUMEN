@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
@@ -10,8 +10,6 @@ import {
   FileText,
   Zap,
   Settings,
-  Settings2,
-  PanelLeft,
   Clipboard,
   Database,
   Plus,
@@ -21,15 +19,11 @@ import {
   PlayCircle,
   Key,
   PlusCircle,
-  Save,
-  Upload,
-  FileDown,
   BarChart3,
   Calendar,
   Hash,
   Paperclip
 } from 'lucide-react';
-import { Separator } from "@/components/ui/separator";
 
 interface PipelineOverview {
   version: string;
@@ -104,11 +98,13 @@ const nodeTypes: NodeTypeItem[] = [
     icon: <Zap className="w-4 h-4" />,
     color: 'bg-purple-500/20 text-purple-300 border-purple-500/30'
   },
-  { type: 'output',
+  {
+    type: 'output',
     label: 'AI/ML Output',
     description: 'AI/ML pipeline results',
     icon: <MessageCircle className="w-4 h-4" />,
-    color: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' },
+    color: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+  },
   {
     type: 'api',
     label: 'API Call',
@@ -132,13 +128,14 @@ const nodeTypes: NodeTypeItem[] = [
   }
 ];
 
+type DockerfileDownload = { name: string; url: string };
 
-export function Sidebar({ 
-  className, 
-  onDragStart, 
-  activeTab, 
-  onTabChange, 
-  githubToken, 
+export function Sidebar({
+  className,
+  onDragStart,
+  activeTab,
+  onTabChange,
+  githubToken,
   setGithubToken,
   onBlankPipeline,
   onSavePipeline,
@@ -147,11 +144,109 @@ export function Sidebar({
   onSaveToYAML,
   pipelineOverview
 }: SidebarProps) {
-  const [showToken, setShowToken] = useState(false);
+  const [showKey, setShowKey] = useState(false);
+
+  // --- New: OpenAI API key + dockerfile downloads (Simulate tab)
+  const [openaiKey, setOpenaiKey] = useState<string>(() => {
+    return localStorage.getItem("openai_api_key") || "";
+  });
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [dockerfileDownloads, setDockerfileDownloads] = useState<DockerfileDownload[]>([]);
+  const [dockerfileError, setDockerfileError] = useState<string>("");
+
+  // Cleanup blob URLs on unmount / regeneration
+  useEffect(() => {
+    return () => {
+      dockerfileDownloads.forEach((d) => URL.revokeObjectURL(d.url));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const clearDockerfileDownloads = () => {
+    setDockerfileDownloads((prev) => {
+      prev.forEach((d) => URL.revokeObjectURL(d.url));
+      return [];
+    });
+  };
+
+  const handleGenerateDockerfiles = async () => {
+    try {
+      setDockerfileError("");
+      setIsGenerating(true);
+
+      // clear previous downloads
+      clearDockerfileDownloads();
+
+      // 1) fetch Neo4j files
+      const filesRes = await fetch("http://localhost:5001/neo4j_get_all_files", {
+        method: "GET",
+      });
+
+      if (!filesRes.ok) {
+        const errText = await filesRes.text().catch(() => "");
+        throw new Error(`Failed to fetch files: ${filesRes.status} ${filesRes.statusText} ${errText}`);
+      }
+
+      const files = await filesRes.json(); // expected: [{filename,bucket}, ...]
+
+      // 2) call agent to generate dockerfiles
+      const genRes = await fetch("http://localhost:5002/agentic_generate_dockerfiles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          files,
+        }),
+      });
+
+      // TODO To allow OpenAI API key from frontend: 
+      //const genRes = await fetch("http://localhost:5002/agentic_generate_dockerfiles", {
+      //  method: "POST",
+      //  headers: { "Content-Type": "application/json" },
+      //  body: JSON.stringify({
+      //    files,
+      //    openai_api_key: openaiKey, // backend can use this if you wire it
+      //  }),
+      //});
+
+      if (!genRes.ok) {
+        const errText = await genRes.text().catch(() => "");
+        throw new Error(`Failed to generate Dockerfiles: ${genRes.status} ${genRes.statusText} ${errText}`);
+      }
+
+      const dockerfile_json = await genRes.json();
+      const dockerfiles = dockerfile_json?.dockerfiles ?? [];
+
+      if (!Array.isArray(dockerfiles) || dockerfiles.length === 0) {
+        setDockerfileError("No Dockerfiles were generated (dockerfiles array is empty).");
+        return;
+      }
+
+      // 3) Create visible download links (Blob URLs)
+      const links: DockerfileDownload[] = dockerfiles.map(
+        (df: { dockerfile_filename: string; content: string }, idx: number) => {
+          const name = df?.dockerfile_filename || `Dockerfile_${idx + 1}`;
+          const blob = new Blob([df?.content ?? ""], { type: "text/plain;charset=utf-8" });
+          const url = URL.createObjectURL(blob);
+          return { name, url };
+        }
+      );
+
+      setDockerfileDownloads(links);
+    } catch (e: any) {
+      console.error("[Sidebar.tsx] Generate Dockerfiles error:", e);
+      setDockerfileError(e?.message || "Failed to generate Dockerfiles.");
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const handleOpenaiKeyChange = (val: string) => {
+    setOpenaiKey(val);
+    localStorage.setItem("openai_api_key", val);
+  };
 
   return (
     <div className={cn("w-64 border-r border-border bg-card flex flex-col", className)}>
-      
       <Tabs value={activeTab} onValueChange={onTabChange} className="w-full">
         <TabsList className="grid grid-cols-3 w-full rounded-none border-b border-border">
           <TabsTrigger value="lab" className="flex items-center gap-1.5 text-xs">
@@ -168,7 +263,7 @@ export function Sidebar({
           </TabsTrigger>
         </TabsList>
       </Tabs>
-      
+
       <ScrollArea className="flex-1 px-4">
         {activeTab === "lab" && (
           <div className="py-4 space-y-6">
@@ -182,14 +277,16 @@ export function Sidebar({
                   <div
                     key={nodeType.type}
                     draggable
-                    onDragStart={(event) => onDragStart(event, { 
-                      type: 'custom', 
-                      data: { 
-                        label: nodeType.label,
-                        description: nodeType.description,
-                        type: nodeType.type
-                      } 
-                    })}
+                    onDragStart={(event) =>
+                      onDragStart(event, {
+                        type: 'custom',
+                        data: {
+                          label: nodeType.label,
+                          description: nodeType.description,
+                          type: nodeType.type
+                        }
+                      })
+                    }
                     className="flex items-start gap-3 p-2.5 rounded-md border border-border cursor-move hover:bg-muted/50 transition-colors"
                   >
                     <div className={cn("p-1.5 rounded-md", nodeType.color.split(' ')[0])}>
@@ -221,7 +318,7 @@ export function Sidebar({
                   </div>
                   <p className="text-sm font-semibold">{pipelineOverview?.version || '1.0.0'}</p>
                 </div>
-                
+
                 <div className="p-3 rounded-lg border border-border bg-muted/30">
                   <div className="flex items-center gap-2 text-muted-foreground mb-1">
                     <Calendar className="w-3.5 h-3.5" />
@@ -229,7 +326,7 @@ export function Sidebar({
                   </div>
                   <p className="text-sm font-semibold">{pipelineOverview?.lastUpdate || 'Never'}</p>
                 </div>
-                
+
                 <div className="p-3 rounded-lg border border-border bg-muted/30">
                   <div className="flex items-center gap-2 text-muted-foreground mb-1">
                     <LayoutGrid className="w-3.5 h-3.5" />
@@ -237,7 +334,7 @@ export function Sidebar({
                   </div>
                   <p className="text-sm font-semibold">{pipelineOverview?.stepCount ?? 0}</p>
                 </div>
-                
+
                 <div className="p-3 rounded-lg border border-border bg-muted/30">
                   <div className="flex items-center gap-2 text-muted-foreground mb-1">
                     <Paperclip className="w-3.5 h-3.5" />
@@ -249,46 +346,85 @@ export function Sidebar({
             </div>
           </div>
         )}
-        
+
         {activeTab === "simulate" && (
-          <div className="py-4">
-            <div className="flex flex-col space-y-4">
-              <div className="p-4 border rounded-lg border-border">
-                <h3 className="text-sm font-medium mb-2">GitHub Token</h3>
-                <p className="text-xs text-muted-foreground mb-4">
-                  A GitHub token is required to authenticate with Azure AI.
-                </p>
-                <div className="flex items-center gap-2 mb-2">
-                  <Input
-                    type={showToken ? "text" : "password"}
-                    value={githubToken}
-                    onChange={(e) => setGithubToken(e.target.value)}
-                    placeholder="Enter GitHub token"
-                    className="flex-1"
-                  />
-                  <Button 
-                    variant="outline" 
-                    size="icon" 
-                    onClick={() => setShowToken(!showToken)}
-                    title={showToken ? "Hide token" : "Show token"}
+          <div className="py-4 space-y-4">
+            {/* OpenAI key + generation */}
+            <div className="p-4 border rounded-lg border-border">
+              <h3 className="text-sm font-medium mb-2 flex items-center gap-2">
+                <Key className="w-4 h-4" />
+                OpenAI API Key
+              </h3>
+              <p className="text-xs text-muted-foreground mb-3">
+                Used by the LLM agents. Stored in your browser localStorage.
+              </p>
+
+              <div className="flex items-center gap-2">
+                <Input
+                  type={showKey ? "text" : "password"}
+                  value={openaiKey}
+                  onChange={(e) => handleOpenaiKeyChange(e.target.value)}
+                  placeholder="sk-..."
+                  className="flex-1"
+                />
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={() => setShowKey(!showKey)}
+                  title={showKey ? "Hide key" : "Show key"}
+                >
+                  <Key className="w-4 h-4" />
+                </Button>
+              </div>
+            </div>
+
+            <div className="p-4 border rounded-lg border-border">
+              <h3 className="text-sm font-medium mb-2">Generate Dockerfiles</h3>
+              <p className="text-xs text-muted-foreground mb-3">
+                Fetches FILE nodes from Neo4j and generates Dockerfiles via the agent service.
+              </p>
+
+              <Button
+                className="w-full"
+                onClick={handleGenerateDockerfiles}
+                disabled={isGenerating}
+              >
+                {isGenerating ? "Generating..." : "Generate Dockerfiles"}
+              </Button>
+
+              {dockerfileError && (
+                <div className="mt-3 text-xs text-red-400">
+                  {dockerfileError}
+                </div>
+              )}
+
+              {/* Download links */}
+              {dockerfileDownloads.length > 0 && (
+                <div className="mt-4">
+                  <div className="text-xs font-medium mb-2">Downloads</div>
+                  <div className="space-y-1">
+                    {dockerfileDownloads.map((d) => (
+                      <a
+                        key={d.url}
+                        href={d.url}
+                        download={d.name}
+                        className="block text-xs underline"
+                      >
+                        {d.name}
+                      </a>
+                    ))}
+                  </div>
+
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-3 w-full"
+                    onClick={clearDockerfileDownloads}
                   >
-                    <Key className="w-4 h-4" />
+                    Clear Downloads
                   </Button>
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  Your token is stored in your browser's localStorage.
-                </p>
-              </div>
-              
-              <div className="p-4 border rounded-lg border-border">
-                <h3 className="text-sm font-medium mb-2">Test Your AI Model</h3>
-                <p className="text-xs text-muted-foreground mb-4">
-                  Execute your AI thinking flow and test its responses.
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  Use the main test panel to run your AI model.
-                </p>
-              </div>
+              )}
             </div>
           </div>
         )}

@@ -133,6 +133,7 @@ def neo4j_add_file():
       bucket: "files-step-id-" + $flow_id
     })
     SET f.added_at = datetime()
+    SET f.uid = randomUUID()
     MERGE (n)-[:HAS_FILE]->(f)
     RETURN n
     """
@@ -360,6 +361,28 @@ def neo4j_delete_edge():
             }), 200
     except Exception as e:
         print("[neo4j_api.py] Error executing Neo4j relation query:", e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/neo4j_get_all_files', methods=['GET'])
+def neo4j_get_all_files():
+    print("[neo4j_api.py] Received request to get all filenames and buckets.")
+    query = """
+    MATCH (n:STEP)-[:HAS_FILE]->(f:FILE)
+    RETURN f.filename AS filename, f.bucket AS bucket
+    """
+    try:
+        with driver.session() as session:
+            result = session.run(query)
+            files = [
+                {
+                    "filename": record["filename"],
+                    "bucket": record["bucket"]
+                }
+                for record in result
+            ]
+            return jsonify(files), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error executing Neo4j query:", e)
         return jsonify({"error": str(e)}), 500
 
 # (Internal) Run query by LLM

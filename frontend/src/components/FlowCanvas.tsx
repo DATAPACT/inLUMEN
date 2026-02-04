@@ -178,6 +178,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
     return savedEdges ? JSON.parse(savedEdges) : [];
   });
 
+  const [dockerfileDownloads, setDockerfileDownloads] = useState<{ name: string; url: string }[]>([]);
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<any>(null);
@@ -393,15 +394,64 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
 
   const exportFlowYAML = async () => {
     try {
-      const response = await fetch("http://localhost:5002/agentic_generate_YAML", {
+      // Fetch all file endpoints:
+      const filesRes = await fetch("http://localhost:5001/neo4j_get_all_files", {
         method: "GET",
       });
+
+      if (!filesRes.ok) {
+        const errText = await filesRes.text().catch(() => "");
+        throw new Error(
+          `Failed to fetch files: ${filesRes.status} ${filesRes.statusText} ${errText}`
+        );
+      }
+      const files = await filesRes.json();
+      console.log("[FlowCanvas.tsx] Fetched filenames.");
+      // Pass result to agentic_generate_dockerfile
+      const response = await fetch(
+        "http://localhost:5002/agentic_generate_dockerfiles",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            files, 
+          }),
+        }
+      );
+
       if (!response.ok) {
         const errText = await response.text().catch(() => "");
-        throw new Error(`Failed: ${response.status} ${response.statusText} ${errText}`);
+        throw new Error(
+          `Failed: ${response.status} ${response.statusText} ${errText}`
+        );
+      }
+
+      const dockerfiles_json = await response.json(); 
+      console.log("[FlowCanvas.tsx] Agents generated Dockerfile(s):", dockerfiles_json);
+
+      const responseYAML = await fetch(
+        "http://localhost:5002/agentic_generate_yaml",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            dockerfiles_json, 
+          }),
+        }
+      );
+
+      if (!responseYAML.ok) {
+        const errText = await responseYAML.text().catch(() => "");
+        throw new Error(
+          `Failed: ${responseYAML.status} ${responseYAML.statusText} ${errText}`
+        );
       }
       // Expect YAML as plain text
-      const yamlText = await response.text();
+      const yamlText = await responseYAML.text();
       // Create downloadable file
       const blob = new Blob([yamlText], {
         type: "application/x-yaml;charset=utf-8",
@@ -409,7 +459,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "ai-pipeline.yaml"; // or .yml
+      a.download = `ai-pipeline-${Date.now()}.yaml`;
       document.body.appendChild(a);
       a.click();
       a.remove();
