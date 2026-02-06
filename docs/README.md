@@ -1,4 +1,4 @@
-# inLUMEN (inSwitch + LUMEN)
+# inLUMEN: AI-assisted Pipeline Design Editor Tool
 
 Powered by
 
