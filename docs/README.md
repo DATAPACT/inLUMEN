@@ -2,7 +2,7 @@
 
 Powered by
 
-[![SINTEF](./docs/images/download.png)](https://www.sintef.no/)
+[![SINTEF](./images/download.png)](https://www.sintef.no/)
 
 | Project Links |
 | ------------- | 	
@@ -15,13 +15,13 @@ Powered by
 
 ## **Architecture**
 
-[![inLUMEN Architecture](./docs/images/conceptual_diagram_datapact_lumen.png)]
+[![inLUMEN Architecture](./images/conceptual_diagram_datapact_lumen.png)]
 
 ## **Component Definition**
-[![Component Diagram](./docs/images/component-image.png)]
+[![Component Diagram](./images/component-image.png)]
 
 ## **Screenshots**
-[![Dashboard](./docs/images/dashboard.png)]
+[![Dashboard](./images/dashboard.png)]
 
 ## **Commercial Information**
 
