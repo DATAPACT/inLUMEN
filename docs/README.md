@@ -11,7 +11,13 @@ Powered by
 
 ## **General Description**
 
-**inLUMEN** is a DATAPACT tool that evolves traditional AI/ML/data pipeline design tools into AI agent-driven co-design environments. The story begins with simple visions (or intents) and context provided by the user. In DATAPACT, the **intent** translates to the pipeline goal: both in terms of structure, use and compliance goals. The **context** is the input data, code snippets, artifacts, constraints/rules/requirements, and resources. The user remains in control of the design - however supported by dedidated agents whose role is to make these visions come to life. inLUMEN materializes their intents by generating the pipeline steps as a directed graph - and gives recommandations on compliance-strengthening design choices. Additionally, it generates deployment artifacts such as containers and workflow blueprints needed to simulate/run the pipeline. Provenance is given via tracking reports on decisions taken by the user and agents during the design process. 
+**inLUMEN** is a DATAPACT tool that evolves traditional AI/ML/data pipeline design tools into AI agent-driven co-design environments. The story begins with simple visions (or intents) and context provided by the user.
+
+In DATAPACT, the **intent** translates to the pipeline goal: both in terms of structure, use and compliance goals. The **context** is the input data, code snippets, artifacts, constraints/rules/requirements, and resources.
+
+The user remains in control of the design, however supported by dedidated agents whose role is to make these visions come to life. inLUMEN materializes their intents by generating the pipeline steps as a directed graph, and gives recommandations on compliance-strengthening design choices.
+
+Additionally, it generates deployment artifacts such as containers and workflow blueprints needed to simulate/run the pipeline. Provenance is given via tracking reports on decisions taken by the user and agents during the design process. 
 
 ## **Architecture**
 
@@ -32,10 +38,10 @@ Table with the organisation, license nature (Open Source, Commercial ... ) and t
 
 ## **Top Features**
 
-- Agentic AI: LLM agents can serve as helpful assistants in pipeline design, translating high-level business-level intents to pure AI/data pipeline design choices. inLUMEN agents reason on user intents and context, draw pipeline steps, and give recommandations according to compliance insights provided by the user or via tool integrations. They can also support deployment artitfact generation, making pipelines deployable.  NOTE:  UNDER DEVELOPMENT
-- Human in the Loop: Chat function to enable co-design approach to generating pipeline designs. Lab tab allows manual modifications of nodes and provides common pipeline steps.  NOTE:  UNDER DEVELOPMENT
-- Visually-pleasing: User-friendly graphic interface. LLM configuration enabled. Dark/light modes.
-- Integrates with DATAPACT tools such as SIM-PIPE and LexAlign. NOTE:  UNDER DEVELOPMENT
+- **Agentic AI**: LLM agents can serve as helpful assistants in pipeline design, translating high-level business-level intents to pure AI/data pipeline design choices. inLUMEN agents reason on user intents and context, draw pipeline steps, and give recommandations according to compliance insights provided by the user or via tool integrations. They can also support deployment artitfact generation, making pipelines deployable.  NOTE:  UNDER DEVELOPMENT
+- **Human in the Loop**: Chat function to enable co-design approach to generating pipeline designs. Lab tab allows manual modifications of nodes and provides common pipeline steps.  NOTE:  UNDER DEVELOPMENT
+- **Visual Aesthetics**: User-friendly graphic interface. Dark/light modes.
+- **Integrated and Configurable**: Integrates with DATAPACT tools such as SIM-PIPE and LexAlign. LLM configuration enabled. NOTE:  UNDER DEVELOPMENT
 
 ## **How To Install**
 
