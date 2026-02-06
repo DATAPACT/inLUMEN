@@ -31,10 +31,8 @@ Additionally, it generates deployment artifacts such as containers and workflow 
 
 ## **Commercial Information**
 
-Table with the organisation, license nature (Open Source, Commercial ... ) and the license. Replace with the values of your module.
-
 | Organisation (s) | License Nature | License |
-| ---------------  | -------------- | ------- |
+| TODO  | TODO | TODO |
 
 ## **Top Features**
 
