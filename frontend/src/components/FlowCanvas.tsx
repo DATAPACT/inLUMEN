@@ -374,7 +374,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
         const flow = reactFlowInstance.toObject();
         const dataStr = JSON.stringify(flow);
         const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr);
-        const exportFileDefaultName = 'ai-flow.json';
+        const exportFileDefaultName = 'inlumen-flow.json';
         const linkElement = document.createElement('a');
         linkElement.setAttribute('href', dataUri);
         linkElement.setAttribute('download', exportFileDefaultName);
@@ -475,41 +475,56 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
     }
   };
 
-  const importFlow = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const importFlow = async (e: React.ChangeEvent<HTMLInputElement>) => {
     try {
-      const fileReader = new FileReader();
-      fileReader.onload = (event) => {
-        if (event.target && event.target.result) {
-          const flowData = JSON.parse(event.target.result as string);
-
-          if (flowData.nodes && flowData.edges) {
-            setNodes(flowData.nodes);
-            setEdges(flowData.edges);
-
-            const maxNodeId = Math.max(...flowData.nodes.map((node: Node) => parseInt(node.id.toString(), 10)));
-            nodeId = maxNodeId + 1;
-
-            toast.success('Flow imported successfully', {
-              description: 'Your AI pipeline has been imported',
-            });
-          } else {
-            toast.error('Invalid flow file', {
-              description: 'The selected file does not contain a valid flow',
-            });
-          }
-        }
-      };
-
-      if (e.target.files && e.target.files.length > 0) {
-        fileReader.readAsText(e.target.files[0]);
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const text = await file.text();
+      const flowData = JSON.parse(text);
+      if (!flowData.nodes || !flowData.edges) {
+        toast.error('Invalid flow file', {
+          description: 'The selected file does not contain a valid flow',
+        });
+        return;
       }
+      const importedNodes: Node[] = flowData.nodes;
+      const importedEdges: any[] = flowData.edges; 
+      await clearNeo4jAndMinIO();
+      for (const n of importedNodes) {
+        await addNodeToNeo4j(n);
+      }
+      const nodeById = new Map(importedNodes.map((n) => [n.id, n]));
+      for (const e of importedEdges) {
+        const sourceNode = nodeById.get(e.source);
+        const targetNode = nodeById.get(e.target);
+        if (!sourceNode || !targetNode) {
+          console.warn(
+            `[FlowCanvas.tsx] Skipping edge; missing source/target node for edge id=${e.id}`,
+            e
+          );
+          continue;
+        }
+        await addEdgeToNeo4j(sourceNode, targetNode);
+      }
+      setNodes(importedNodes);
+      setEdges(importedEdges);
+      const maxNodeId = Math.max(
+        ...importedNodes.map((node: Node) => parseInt(node.id.toString(), 10))
+      );
+      nodeId = maxNodeId + 1;
+      toast.success('Flow imported successfully', {
+        description: 'Imported flow + backend reconstructed (Neo4j/MinIO)',
+      });
     } catch (error) {
       console.error('Error importing flow:', error);
       toast.error('Failed to import flow', {
         description: 'There was an error importing your pipeline',
       });
+    } finally {
+      if (e.target) e.target.value = '';
     }
   };
+
 
   const clearCanvas = async () => {
     setNodes([]);
@@ -518,9 +533,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
     localStorage.removeItem('ai-flow-nodes');
     localStorage.removeItem('ai-flow-edges');
     nodeId = 1;
-
     await clearNeo4jAndMinIO(); 
-
     toast.success('Canvas cleared', {
       description: 'All nodes and edges have been removed',
     });

@@ -61,8 +61,13 @@ def minio_remove_file():
         # Remove file to MinIO
         print(f"[minio_api.py] Received request to remove file {filename} from bucket {bucket_id}")
         remove_object(bucket_id, filename)
+        # List objects left in bucket, if empty --> remove bucket
+        objects_in_bucket = list_objects(bucket_name=bucket_id)
+        bucket_size = len(list(objects_in_bucket))
+        if bucket_size == 0:
+            remove_bucket(bucket_id)
+            print(f"[minio_api.py] Removed bucket {bucket_id} due to empty state.")
         now = datetime.datetime.now()
-        # TODO: If last file, remove bucket too
     except Exception as e:
         return jsonify({'status': 500, 'error': 'Failed to remove file from MinIO', 'details': str(e)}), 500
     return jsonify({'status': 200, 'file_name':filename, 'removal_date':now.strftime("%Y-%m-%d %H:%M:%S"), 'format':filename.split(".")[-1]})
