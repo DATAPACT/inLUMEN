@@ -384,6 +384,35 @@ def neo4j_get_all_files():
     except Exception as e:
         print("[neo4j_api.py] Error executing Neo4j query:", e)
         return jsonify({"error": str(e)}), 500
+    
+@app.route('/neo4j_get_overview_properties', methods=['GET'])
+def neo4j_get_overview_properties():
+    print("[neo4j_api.py] Received request to get pipeline overview properties.")
+    query = """
+    MATCH (p:PIPELINE)
+    RETURN 
+      p.version AS version, 
+      toString(p.updated_at) AS updated_at, 
+      toString(p.created_at) AS created_at
+    """
+    try:
+        with driver.session() as session:
+            result = session.run(query)
+            record = result.single()
+            if record is None:
+                return jsonify({
+                    "version": None,
+                    "created_at": None,
+                    "updated_at": None
+                }), 200
+            return jsonify({
+                "version": record["version"],
+                "created_at": record["created_at"],
+                "updated_at": record["updated_at"]
+            }), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error executing Neo4j query:", e)
+        return jsonify({"error": str(e)}), 500
 
 # (Internal) Run query by LLM
 @app.route('/neo4j_run_query', methods=['POST'])

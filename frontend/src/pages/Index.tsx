@@ -45,7 +45,7 @@ const Index = () => {
   const [isLightMode, setIsLightMode] = useState(false);
   const flowCanvasRef = useRef<FlowCanvasRef>(null);
   const [pipelineLastUpdate, setPipelineLastUpdate] = useState<string>('Never');
-
+  const [pipelineCreatedAt, setPipelineCreatedAt] = useState<string>('Never'); // ✅ added
   const [configs, setConfigs] = useState<ChatbotConfig[]>([]);
   const [selectedConfig, setSelectedConfig] = useState<ChatbotConfig | null>(null);
   const [isConfigFormOpen, setIsConfigFormOpen] = useState(false);
@@ -61,20 +61,28 @@ const Index = () => {
     return {
       version: '1.0.0',
       lastUpdate: pipelineLastUpdate,
+      createdAt: pipelineCreatedAt, 
       stepCount: flowNodes.length,
       fileCount
     };
-  }, [flowNodes, pipelineLastUpdate]);
+  }, [flowNodes, pipelineLastUpdate, pipelineCreatedAt]);
 
   useEffect(() => {
     const savedToken = localStorage.getItem('github_token');
     if (savedToken) {
       setGithubToken(savedToken);
     }
-    // Load saved pipeline timestamp
+
+    // Load saved pipeline timestamp (last update)
     const savedTimestamp = localStorage.getItem('saved-pipeline-timestamp');
     if (savedTimestamp) {
       setPipelineLastUpdate(new Date(savedTimestamp).toLocaleString());
+    }
+
+    // Load created-at (if you have it)
+    const savedCreatedAt = localStorage.getItem('saved-pipeline-createdAt');
+    if (savedCreatedAt) {
+      setPipelineCreatedAt(new Date(savedCreatedAt).toLocaleString());
     }
 
     loadConfigurations();
@@ -240,79 +248,19 @@ const Index = () => {
 
   const handleSavePipeline = () => {
     const timestamp = new Date().toISOString();
+    const existingCreatedAt = localStorage.getItem('saved-pipeline-createdAt');
+    if (!existingCreatedAt) {
+      localStorage.setItem('saved-pipeline-createdAt', timestamp);
+      setPipelineCreatedAt(new Date(timestamp).toLocaleString());
+    } else {
+      setPipelineCreatedAt(new Date(existingCreatedAt).toLocaleString());
+    }
     localStorage.setItem('saved-pipeline-nodes', JSON.stringify(flowNodes));
     localStorage.setItem('saved-pipeline-timestamp', timestamp);
     setPipelineLastUpdate(new Date(timestamp).toLocaleString());
     toast.success("Pipeline saved", {
       description: "Your pipeline will persist on next visit"
     });
-  };
-
-  const handleExportPipeline = () => {
-    const pipelineData = {
-      nodes: flowNodes,
-      timestamp: new Date().toISOString()
-    };
-    const dataStr = JSON.stringify(pipelineData, null, 2);
-    const dataBlob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(dataBlob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `pipeline-${Date.now()}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-    toast.success("Pipeline exported");
-  };
-
-  const handleImportPipeline = () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.json';
-    input.onchange = (e) => {
-      const file = (e.target as HTMLInputElement).files?.[0];
-      if (file) {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          try {
-            const data = JSON.parse(e.target?.result as string);
-            if (data.nodes) {
-              setFlowNodes(data.nodes);
-              toast.success("Pipeline imported");
-            }
-          } catch (error) {
-            toast.error("Invalid pipeline file");
-          }
-        };
-        reader.readAsText(file);
-      }
-    };
-    input.click();
-  };
-
-  const handleSaveToYAML = () => {
-    const yamlStr = `# Argo Workflow generated from inLUMEN pipeline
-apiVersion: argoproj.io/v1alpha1
-kind: Workflow
-metadata:
-  generateName: pipeline-
-spec:
-  entrypoint: pipeline
-  templates:
-${flowNodes.map(node => `  - name: ${node.id}
-    container:
-      image: alpine:latest
-      command: [echo]
-      args: ["${node.data.label || 'Node'}"]`).join('\n')}
-`;
-
-    const dataBlob = new Blob([yamlStr], { type: 'text/yaml' });
-    const url = URL.createObjectURL(dataBlob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `argo-workflow-${Date.now()}.yaml`;
-    link.click();
-    URL.revokeObjectURL(url);
-    toast.success("Workflow saved to YAML");
   };
 
   const handleRemoveNode = (nodeId: string) => {
@@ -346,9 +294,6 @@ ${flowNodes.map(node => `  - name: ${node.id}
           setGithubToken={setGithubToken}
           onBlankPipeline={handleBlankPipeline}
           onSavePipeline={handleSavePipeline}
-          onExportPipeline={handleExportPipeline}
-          onImportPipeline={handleImportPipeline}
-          onSaveToYAML={handleSaveToYAML}
           pipelineOverview={pipelineOverview}
         />
 

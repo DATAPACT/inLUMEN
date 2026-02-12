@@ -29,6 +29,7 @@ import {
 interface PipelineOverview {
   version: string;
   lastUpdate: string;
+  createdAt: string; 
   stepCount: number;
   fileCount: number;
 }
@@ -42,9 +43,6 @@ interface SidebarProps {
   setGithubToken: (token: string) => void;
   onBlankPipeline?: () => void;
   onSavePipeline?: () => void;
-  onExportPipeline?: () => void;
-  onImportPipeline?: () => void;
-  onSaveToYAML?: () => void;
   pipelineOverview?: PipelineOverview;
 }
 
@@ -141,12 +139,14 @@ export function Sidebar({
   setGithubToken,
   onBlankPipeline,
   onSavePipeline,
-  onExportPipeline,
-  onImportPipeline,
-  onSaveToYAML,
   pipelineOverview
 }: SidebarProps) {
   const [showKey, setShowKey] = useState(false);
+
+  // --- overview state (fetched when Overview tab is opened)
+  const [overviewData, setOverviewData] = useState<Partial<PipelineOverview> | null>(null);
+  const [overviewError, setOverviewError] = useState<string>("");
+  const [isLoadingOverview, setIsLoadingOverview] = useState(false);
 
   // --- OpenAI API key
   const [openaiKey, setOpenaiKey] = useState<string>(() => {
@@ -220,6 +220,43 @@ export function Sidebar({
     return await genRes.json(); // expected: { dockerfiles: [{dockerfile_filename, content}, ...] }
   };
 
+  // fetch overview properties when opening Overview tab
+  const fetchPipelineOverview = async () => {
+    const res = await fetch("http://localhost:5001/neo4j_get_overview_properties", { method: "GET" });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(`Failed to fetch overview: ${res.status} ${res.statusText} ${errText}`);
+    }
+    return await res.json(); // expected: { version, created_at, updated_at }
+  };
+
+  useEffect(() => {
+    if (activeTab !== "overview") return;
+    let isCancelled = false;
+    (async () => {
+      try {
+        setOverviewError("");
+        setIsLoadingOverview(true);
+        const data = await fetchPipelineOverview();
+        if (isCancelled) return;
+        setOverviewData({
+          version: data?.version ?? "",
+          createdAt: data?.created_at ?? "",
+          lastUpdate: data?.updated_at ?? "",
+        });
+      } catch (e: any) {
+        if (isCancelled) return;
+        console.error("[Sidebar.tsx] Overview fetch error:", e);
+        setOverviewError(e?.message || "Failed to fetch overview.");
+      } finally {
+        if (!isCancelled) setIsLoadingOverview(false);
+      }
+    })();
+    return () => {
+      isCancelled = true;
+    };
+  }, [activeTab]);
+
   const handleGenerateDockerfiles = async () => {
     try {
       setDockerfileError("");
@@ -290,6 +327,12 @@ export function Sidebar({
     }
   };
 
+  // Choose fetched overview first, fall back to prop if still pass it in
+  const overview = {
+    ...pipelineOverview,
+    ...overviewData,
+  } as PipelineOverview;
+
   return (
     <div className={cn("w-64 border-r border-border bg-card flex flex-col", className)}>
       <Tabs value={activeTab} onValueChange={onTabChange} className="w-full">
@@ -355,13 +398,21 @@ export function Sidebar({
                 <BarChart3 className="w-4 h-4" />
                 Pipeline Overview
               </h3>
+
+              {isLoadingOverview && (
+                <div className="text-xs text-muted-foreground mb-2">Refreshing overview…</div>
+              )}
+              {overviewError && (
+                <div className="text-xs text-red-400 mb-2">{overviewError}</div>
+              )}
+
               <div className="space-y-3">
                 <div className="p-3 rounded-lg border border-border bg-muted/30">
                   <div className="flex items-center gap-2 text-muted-foreground mb-1">
                     <Hash className="w-3.5 h-3.5" />
                     <span className="text-xs font-medium">Pipeline Version</span>
                   </div>
-                  <p className="text-sm font-semibold">{pipelineOverview?.version || '1.0.0'}</p>
+                  <p className="text-sm font-semibold">{overview?.version || '0.0.0'}</p>
                 </div>
 
                 <div className="p-3 rounded-lg border border-border bg-muted/30">
@@ -369,7 +420,15 @@ export function Sidebar({
                     <Calendar className="w-3.5 h-3.5" />
                     <span className="text-xs font-medium">Last Update</span>
                   </div>
-                  <p className="text-sm font-semibold">{pipelineOverview?.lastUpdate || 'Never'}</p>
+                  <p className="text-sm font-semibold">{overview?.lastUpdate || 'Never'}</p>
+                </div>
+
+                <div className="p-3 rounded-lg border border-border bg-muted/30">
+                  <div className="flex items-center gap-2 text-muted-foreground mb-1">
+                    <Calendar className="w-3.5 h-3.5" />
+                    <span className="text-xs font-medium">Created At</span>
+                  </div>
+                  <p className="text-sm font-semibold">{overview?.createdAt || 'Never'}</p>
                 </div>
 
                 <div className="p-3 rounded-lg border border-border bg-muted/30">
@@ -377,7 +436,7 @@ export function Sidebar({
                     <LayoutGrid className="w-3.5 h-3.5" />
                     <span className="text-xs font-medium">Number of Steps</span>
                   </div>
-                  <p className="text-sm font-semibold">{pipelineOverview?.stepCount ?? 0}</p>
+                  <p className="text-sm font-semibold">{overview?.stepCount ?? 0}</p>
                 </div>
 
                 <div className="p-3 rounded-lg border border-border bg-muted/30">
@@ -385,7 +444,7 @@ export function Sidebar({
                     <Paperclip className="w-3.5 h-3.5" />
                     <span className="text-xs font-medium">Number of Files</span>
                   </div>
-                  <p className="text-sm font-semibold">{pipelineOverview?.fileCount ?? 0}</p>
+                  <p className="text-sm font-semibold">{overview?.fileCount ?? 0}</p>
                 </div>
               </div>
             </div>
