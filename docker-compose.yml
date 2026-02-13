@@ -63,9 +63,10 @@ services:
     networks:
       - datapact_network
 
-  datapact-llm:
+  datapact_llm:
     image: ollama/ollama:latest
-    container_name: datapact-llm
+    container_name: datapact_llm
+    hostname: datapact-llm
     networks:
       - datapact_network
     ports:

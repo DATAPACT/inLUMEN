@@ -16,7 +16,6 @@ import {
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
-import { callAzureAI } from '@/utils/azureAI';
 import { Node } from 'reactflow';
 import {
   ChatbotConfig,
@@ -33,6 +32,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
+const SIMPLE_CHAT_SESSION_KEY = "simple-chat-session-id";
+
 const Index = () => {
   const [selectedNode, setSelectedNode] = useState<any>(null);
   const [activeTab, setActiveTab] = useState('lab'); // 'lab', 'overview', or 'simulate'
@@ -45,11 +46,37 @@ const Index = () => {
   const [isLightMode, setIsLightMode] = useState(false);
   const flowCanvasRef = useRef<FlowCanvasRef>(null);
   const [pipelineLastUpdate, setPipelineLastUpdate] = useState<string>('Never');
-  const [pipelineCreatedAt, setPipelineCreatedAt] = useState<string>('Never'); // ✅ added
+  const [pipelineCreatedAt, setPipelineCreatedAt] = useState<string>('Never');
   const [configs, setConfigs] = useState<ChatbotConfig[]>([]);
   const [selectedConfig, setSelectedConfig] = useState<ChatbotConfig | null>(null);
   const [isConfigFormOpen, setIsConfigFormOpen] = useState(false);
   const [configToEdit, setConfigToEdit] = useState<ChatbotConfig | undefined>(undefined);
+
+  // Backend session id
+  const [chatSessionId, setChatSessionId] = useState<string>(() => {
+    return localStorage.getItem(SIMPLE_CHAT_SESSION_KEY) || "";
+  });
+
+  useEffect(() => {
+    if (chatSessionId) {
+      localStorage.setItem(SIMPLE_CHAT_SESSION_KEY, chatSessionId);
+    }
+  }, [chatSessionId]);
+
+  // Helper to display model labels
+  const formatModelLabel = (model?: string) => {
+    if (!model) return "Llama 3.1";
+    const m = model.toLowerCase();
+    if (m === "llama3.1") return "Llama 3.1";
+    if (m === "gpt-4o") return "GPT-4o";
+    return model;
+  };
+
+  // Local fallback config so UI shows default model even before configs exist
+  const defaultConfig: ChatbotConfig = {
+    name: "Configuration",
+    model: "llama3.1",
+  };
 
   // Compute pipeline overview from flowNodes
   const pipelineOverview = React.useMemo(() => {
@@ -61,7 +88,7 @@ const Index = () => {
     return {
       version: '1.0.0',
       lastUpdate: pipelineLastUpdate,
-      createdAt: pipelineCreatedAt, 
+      createdAt: pipelineCreatedAt,
       stepCount: flowNodes.length,
       fileCount
     };
@@ -93,12 +120,19 @@ const Index = () => {
       const configsList = await fetchChatbotConfigs();
       setConfigs(configsList);
 
-      if (configsList.length > 0 && !selectedConfig) {
-        setSelectedConfig(configsList[0]);
+      if (!selectedConfig) {
+        if (configsList.length > 0) {
+          const llamaPreferred =
+            configsList.find(c => (c.model || "").toLowerCase() === "llama3.1") || configsList[0];
+          setSelectedConfig(llamaPreferred);
+        } else {
+          setSelectedConfig(defaultConfig);
+        }
       }
     } catch (error) {
       console.error("Error loading configurations:", error);
       toast.error("Failed to load configurations");
+      if (!selectedConfig) setSelectedConfig(defaultConfig);
     }
   };
 
@@ -157,18 +191,32 @@ const Index = () => {
     setConversation(updatedConversation);
 
     try {
-      const response = await callAzureAI(
-        updatedConversation.map(msg => ({
-          role: msg.role,
-          content: msg.content
-        })),
-        githubToken,
-        flowNodes,
-        selectedConfig || undefined
-      );
+      const activeCfg = selectedConfig || defaultConfig;
 
-      setConversation(prev => [...prev, { role: 'assistant', content: response }]);
-      setAiResponse(response);
+      const res = await fetch("http://localhost:5002/simple_chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: chatSessionId || null,
+          user_message: userInput,
+          model: activeCfg.model || "llama3.1",
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`simple_chat failed (${res.status}): ${errText}`);
+      }
+
+      const data = await res.json();
+
+      if (data.session_id && data.session_id !== chatSessionId) {
+        setChatSessionId(data.session_id);
+      }
+
+      const responseText = data.assistant_message ?? "";
+      setConversation(prev => [...prev, { role: 'assistant', content: responseText }]);
+      setAiResponse(responseText);
       setUserInput('');
     } catch (error) {
       console.error("Error processing request:", error);
@@ -178,12 +226,27 @@ const Index = () => {
     }
   };
 
-  const handleClearConversation = () => {
+  const handleClearConversation = async () => {
     setConversation([]);
     setAiResponse('');
     toast.success("Conversation cleared", {
       description: "Your conversation history has been reset",
     });
+
+    if (chatSessionId) {
+      try {
+        await fetch("http://localhost:5002/simple_chat/reset", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: chatSessionId }),
+        });
+      } catch (e) {
+        console.warn("Failed to reset backend simple_chat session:", e);
+      }
+    }
+
+    setChatSessionId("");
+    localStorage.removeItem(SIMPLE_CHAT_SESSION_KEY);
   };
 
   const handleSaveWorkflow = () => {
@@ -212,7 +275,13 @@ const Index = () => {
           setConfigs(updatedConfigs);
 
           if (selectedConfig?.id === id) {
-            setSelectedConfig(updatedConfigs.length > 0 ? updatedConfigs[0] : null);
+            if (updatedConfigs.length > 0) {
+              const llamaPreferred =
+                updatedConfigs.find(c => (c.model || "").toLowerCase() === "llama3.1") || updatedConfigs[0];
+              setSelectedConfig(llamaPreferred);
+            } else {
+              setSelectedConfig(defaultConfig);
+            }
           }
 
           toast.success("Configuration deleted successfully");
@@ -233,7 +302,7 @@ const Index = () => {
   const handleSelectConfig = (config: ChatbotConfig) => {
     setSelectedConfig(config);
     toast.info(`Activated: ${config.name}`, {
-      description: `Using ${config.model} with temperature ${config.temperature}`
+      description: `Using ${formatModelLabel(config.model)}`
     });
   };
 
@@ -276,6 +345,10 @@ const Index = () => {
   };
 
   const showFlowLayout = activeTab === 'lab' || activeTab === 'overview' || activeTab === 'simulate';
+
+  // label for main configuration button
+  const activeConfig = selectedConfig || defaultConfig;
+  const configButtonLabel = `${activeConfig.name} (${formatModelLabel(activeConfig.model)})`;
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden animate-fade-in bg-[#1A1A1D]">
@@ -338,21 +411,17 @@ const Index = () => {
                           <DropdownMenuTrigger asChild>
                             <Button variant="outline" className="gap-1" size="sm">
                               <Settings className="w-4 h-4" />
-                              {selectedConfig ? (
-                                <span className="hidden md:inline-flex">
-                                  {selectedConfig.name}
-                                </span>
-                              ) : (
-                                <span className="hidden md:inline-flex">
-                                  Configuration
-                                </span>
-                              )}
+                              <span className="hidden md:inline-flex">
+                                {configButtonLabel}
+                              </span>
                               <ChevronDown className="w-3 h-3 opacity-50" />
                             </Button>
                           </DropdownMenuTrigger>
+
                           <DropdownMenuContent align="end" className="w-56">
                             <DropdownMenuLabel>Chatbot Configurations</DropdownMenuLabel>
                             <DropdownMenuSeparator />
+
                             {configs.map((config) => (
                               <DropdownMenuItem
                                 key={config.id}
@@ -360,7 +429,7 @@ const Index = () => {
                                 onClick={() => handleSelectConfig(config)}
                               >
                                 <span className={selectedConfig?.id === config.id ? "font-bold" : ""}>
-                                  {config.name}
+                                  {config.name} ({formatModelLabel(config.model)})
                                 </span>
                                 <div className="flex items-center gap-1">
                                   <Button

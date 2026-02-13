@@ -83,6 +83,36 @@ ollama_model_client = OllamaChatCompletionClient(model="llama3.1:8b", host= "htt
 # All agents get following config. Change LLM config to experiment:
 current_model_client = openai_model_client
 
+STATE_DIR = Path("./state")
+STATE_DIR.mkdir(exist_ok=True)
+
+def _state_file(session_id: str) -> Path:
+    return STATE_DIR / f"{session_id}.json"
+
+def load_state_from_disk(session_id: str):
+    p = _state_file(session_id)
+    if not p.exists():
+        return None
+    return json.loads(p.read_text("utf-8"))
+
+def save_state_to_disk(session_id: str, team_state):
+    _state_file(session_id).write_text(json.dumps(team_state), encoding="utf-8")
+
+
+def build_team(model: str) -> RoundRobinGroupChat:
+    print("[analytics_api.py] Returning team with model " + model + " configuration.")
+    if model == "gpt-4o":
+        model_client = OpenAIChatCompletionClient(model="gpt-4o", api_key = openai_api_key)
+    else:
+        model_client = OllamaChatCompletionClient(model="llama3.1:8b", host= "http://datapact-llm:11434")
+    # Team building: 
+    assistant = AssistantAgent(
+        name="assistant",
+        system_message="You are a helpful assistant.",
+        model_client=model_client,
+    )
+    return RoundRobinGroupChat([assistant], max_turns=1)
+
 # Database Schema (METAMODEL)
 DB_SCHEMA = """
     Nodes:
@@ -385,6 +415,50 @@ spec:
     resp = make_response(yaml_text, 200)
     resp.headers["Content-Type"] = "application/x-yaml; charset=utf-8"
     return resp
+
+@app.route("/simple_chat", methods=["POST", "OPTIONS"])
+def simple_chat():
+    if request.method == "OPTIONS":
+        return make_response("", 200)  # preflight OK
+    payload = request.get_json(force=True) or {}
+    user_message = (payload.get("user_message") or "").strip()
+    if not user_message:
+        return jsonify({"error": "Missing user_message"}), 400
+    session_id = payload.get("session_id") or str(uuid.uuid4())
+    model = payload.get("model") or "gpt-4o-mini"
+    async def run_turn():
+        team = build_team(model=model)
+        team_state = load_state_from_disk(session_id)
+        if team_state:
+            await team.load_state(team_state)
+        result = await team.run(task=user_message)
+        new_state = await team.save_state()
+        save_state_to_disk(session_id, new_state)
+        assistant_text = ""
+        for msg in reversed(result.messages or []):
+            if getattr(msg, "source", None) in ("assistant", "assistant_agent") and hasattr(msg, "content"):
+                assistant_text = msg.content
+                break
+        if not assistant_text and result.messages:
+            assistant_text = getattr(result.messages[-1], "content", "")
+        return assistant_text
+    try:
+        assistant_message = asyncio.run(run_turn())
+        return jsonify({"session_id": session_id, "assistant_message": assistant_message}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/simple_chat/reset", methods=["POST", "OPTIONS"])
+def simple_chat_reset():
+    if request.method == "OPTIONS":
+        return make_response("", 200)  # preflight OK
+    payload = request.get_json(force=True) or {}
+    session_id = payload.get("session_id")
+    if session_id:
+        p = _state_file(session_id)
+        if p.exists():
+            p.unlink()
+    return jsonify({"ok": True}), 200
 
 @app.route('/agentic_pipeline_editor', methods=['GET'])
 def agentic_pipeline_editor():

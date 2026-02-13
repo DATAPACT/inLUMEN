@@ -89,7 +89,11 @@ Then:
 docker run -p 5000:5000 -p 5001:5001 -p 5002:5002 -v ${PWD}/downloads:/usr/inlumen/downloads --network=datapact_network -it inlumenapi
 ```
 
-Step 6: Install different models into your Llama service.
+Step 6: Install the base Ollama model into your Llama service by accessing *datapact-llm* in Docker Desktop and executing (in Exec) the following line:
+
+```
+ollama run llama3.1:8b
+```
 
 Note: building the containers may take around 5 minutes, please wait until Neo4J is fully started.  
 
