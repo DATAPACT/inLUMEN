@@ -77,7 +77,16 @@ docker compose up --build
 
 Step 4: Open localhost:9099, log in, and generate an access/secret key called minio-datapact.
 
-Step 5: In a separate terminal/shell, navigate to the inLUMEN/connection directory. Run the commands found in inLUMEN/connection/command.txt, in the given order:
+Step 5: In a separate terminal/shell, navigate to the inLUMEN/connection directory.
+
+Create a openaiapi.ini file in this directory and add your OpenAI API key inside this file, if you wish to use GPT models. The content of this .ini file must look like:
+
+```
+[openai]
+OPENAI_API_KEY = sk-xxxx-(...)-xxxx
+```
+
+Then, run the commands found in inLUMEN/connection/command.txt, in the given order:
 
 First:
 ```
