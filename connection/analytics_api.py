@@ -37,7 +37,7 @@ import re
 import uuid, json
 from pydantic import BaseModel, Field
 from typing import Annotated, Literal, List, Optional, Union, Sequence, Any, Callable, Dict, Mapping, AsyncGenerator
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from getpass import getpass
 import asyncio
 import nest_asyncio
@@ -81,6 +81,7 @@ openai_model_client_no_parallel_calls = OpenAIChatCompletionClient(
 ollama_model_client = OllamaChatCompletionClient(model="llama3.1:8b", host= "http://llm:11434")
 
 # All agents get following config. Change LLM config to experiment:
+# TODO: For Dockerfile/YAML --> Update so user chooses this via frontend
 current_model_client = openai_model_client
 
 STATE_DIR = Path("./state")
@@ -97,53 +98,6 @@ def load_state_from_disk(session_id: str):
 
 def save_state_to_disk(session_id: str, team_state):
     _state_file(session_id).write_text(json.dumps(team_state), encoding="utf-8")
-
-
-def build_team(model: str) -> RoundRobinGroupChat:
-    print("[analytics_api.py] Returning team with model " + model + " configuration.")
-    if model == "gpt-4o":
-        model_client = OpenAIChatCompletionClient(model="gpt-4o", api_key = openai_api_key)
-    else:
-        model_client = OllamaChatCompletionClient(model="llama3.1:8b", host= "http://datapact-llm:11434")
-    # Team building: 
-    assistant = AssistantAgent(
-        name="assistant",
-        system_message="You are a helpful assistant.",
-        model_client=model_client,
-    )
-    return RoundRobinGroupChat([assistant], max_turns=1)
-
-# Database Schema (METAMODEL)
-DB_SCHEMA = """
-    Nodes:
-    (:PIPELINE) represents one AI/data workflow. Properties:
-        - uid: string (generated via randomUUID)
-        - label: string
-        - description: string
-        - version: string
-        - created_at: datetime
-        - updated_at: datetime
-        - status: string ("design"|"simulated"|"runtime") - default "design"
-    (:STEP) represents a single node in the pipeline graph. Properties:
-        - uid: string (generated via randomUUID)
-        - type: string ("input"|"config"|"output"|"action"|"storage"|"api")
-        - label: string 
-        - description: string
-        - content: string 
-        - has_files: string ("yes"|"no") - default: "no"
-        - endpoint: string
-        - database: string - default : "minio"
-        - param: string
-    (:FILE) represents a single file associated with a step. Properties:
-        - uid: string (generated via randomUUID)
-        - filename: string
-        - added_at: datetime
-        - bucket: string
-    Relationships:
-    (:PIPELINE)-[:HAS_STEP]->(:STEP)
-    (:STEP)-[:FLOWS_TO]->(:STEP)
-    (:STEP)-[:HAS_FILE]->(:FILE)
-    """
 
 class ForcedAssistantAgent(AssistantAgent):
     """AssistantAgent that always enforces tool calling."""
@@ -205,6 +159,329 @@ class ForcedAssistantAgent(AssistantAgent):
                 json_output=output_content_type,
             )
             yield model_result
+
+def build_pipeline_editing_team(model: str) -> RoundRobinGroupChat:
+    print("[analytics_api.py] Building pipeline editing team with model " + model + " configuration.")
+    # Configure the model client used behind the agents according to selection:
+    if model == "gpt-4o":
+        model_client = OpenAIChatCompletionClient(model="gpt-4o", api_key = openai_api_key)
+    else:
+        # Defaults to Ollama:
+        model_client = OllamaChatCompletionClient(model="llama3.1:8b", host= "http://datapact-llm:11434")
+    # Database Schema (METAMODEL) - TODO: hidden for now
+    DB_SCHEMA = """
+        Nodes:
+        (:PIPELINE) represents one AI/data workflow. Properties:
+            - uid: string (generated via randomUUID)
+            - label: string
+            - description: string
+            - version: string
+            - created_at: datetime
+            - updated_at: datetime
+            - status: string ("design"|"simulated"|"runtime") - default "design"
+        (:STEP) represents a single node in the pipeline graph. Properties:
+            - uid: string (generated via randomUUID)
+            - flow_id: string (unique int: number of step generated: 1,2 ... N)
+            - type: string ("input"|"config"|"output"|"action"|"storage"|"api")
+            - label: string 
+            - description: string
+            - content: string 
+            - has_files: string ("yes"|"no") - default: "no"
+            - endpoint: string
+            - database: string - default : "minio"
+            - param_json: string - default "\{\}"
+        (:FILE) represents a single file associated with a step. Properties:
+            - uid: string (generated via randomUUID)
+            - filename: string
+            - added_at: datetime
+            - bucket: string
+        Relationships:
+        (:PIPELINE)-[:HAS_STEP]->(:STEP)
+        (:STEP)-[:FLOWS_TO]->(:STEP)
+        (:STEP)-[:HAS_FILE]->(:FILE)
+    """
+    # TODO: Add graph observer
+    # observer_memory = ListMemory()
+    # current_time_str = datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M:%S")
+    # observer_memory.add(MemoryContent(content=f"Graph content at time (UTC) {current_time_str} is:" + "\{\}", mime_type=MemoryMimeType.TEXT))
+    # Function to allow execution of Neo4J queries:
+    async def run_query(query: str,  query_type:str) -> str:
+        """Run a Cypher query against Neo4j and return results. Returns String representation."""
+        try:
+            print("[analytics_api.py] Executing Neo4J query of type: "+ query_type)
+            api_url = "http://localhost:5001/neo4j_run_query"  # Adjust if API host differs
+            payload = {"query": query}
+            headers = {"Content-Type": "application/json"}
+            # Run the API call in a thread (since requests is blocking)
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: requests.post(api_url, data=json.dumps(payload), headers=headers)
+            )
+            # Check response and parse content:
+            if response.status_code == 200:
+                records = response.text 
+                return repr(records)
+            else:
+                return repr({"Error": f"{response.status_code} - {response.text}"})
+        except Exception as e:
+            return repr({"error": str(e)})
+    # Unused but helpful function:
+    async def list_pipelines() -> str:
+        """ Lists all pipelines and the number of steps they have."""
+        try:
+            query_type = "list_pipelines"
+            query = f"""
+            MATCH (p:PIPELINE)
+            OPTIONAL MATCH (p)-[:HAS_STEP]->(s:STEP)
+            RETURN p, count(DISTINCT s) AS step_count
+            ORDER BY p.name;
+            """
+            result = await run_query(query, query_type)
+            return repr(result)
+        except Exception as e:
+            return repr({"Error in graph_operator": str(e)})
+     # Unused but helpful function:
+    async def get_pipeline_steps(pipeline_uid: str) -> str:
+        """Gets the steps present in a pipeline."""
+        try:
+            query_type = "get_pipeline_steps"
+            query = f"""
+            MATCH (p:PIPELINE {{uid: '{pipeline_uid}'}})-[:HAS_STEP]->(s:STEP)
+            OPTIONAL MATCH (s)-[r:FLOWS_TO]->(t:STEP)
+            RETURN p, s, r, t;
+            """
+            result = await run_query(query, query_type)
+            return repr(result)
+        except Exception as e:
+            return repr({"Error in graph_operator": str(e)})
+     # Unused but helpful function:
+    async def inspect_step(step_uid: str) -> str:
+        """ Inspects a step: returns incoming/outgoing neighbors and used files."""
+        try:
+            query_type = "inspect_step"
+            query = f"""
+            MATCH (s:STEP {{uid: '{step_uid}'}})
+            OPTIONAL MATCH (prev:STEP)-[rin:FLOWS_TO]->(s)
+            OPTIONAL MATCH (s)-[rout:FLOWS_TO]->(next:STEP)
+            OPTIONAL MATCH (s)-[:HAS_FILE]->(f:FILE)
+            RETURN s,
+            collect(DISTINCT {{prev: prev, rel: rin}})  AS incoming_neighbors,
+            collect(DISTINCT {{next: next, rel: rout}}) AS outgoing_neighbors,
+            collect(DISTINCT f)                         AS used_files;
+            """
+            result = await run_query(query, query_type)
+            return repr(result)
+        except Exception as e:
+            return repr({"Error in graph_operator": str(e)})
+    # Dedicated function to obtain overview:
+    async def overview() -> str:
+        """Gives an overview of the pipeline, the present steps and files linked within."""
+        try:
+            query_type = "overview"
+            query = """
+            MATCH (p:PIPELINE)
+            OPTIONAL MATCH (p)-[hs:HAS_STEP]->(s:STEP)
+            OPTIONAL MATCH (s)-[r:FLOWS_TO]->(t:STEP)
+            OPTIONAL MATCH (s)-[:HAS_FILE]->(f:FILE)
+            RETURN
+            p { .*,
+                created_at: toString(p.created_at),
+                updated_at: toString(p.updated_at)
+                } AS pipeline,
+            s AS step,
+            hs AS step_link,
+            hs.order_index AS step_order,
+            r AS flow,
+            t AS next_step,
+            collect(
+                DISTINCT f { .*,
+                added_at: toString(f.added_at)
+                }
+            ) AS files_linked_to_step
+            ORDER BY pipeline.label, step_order;
+            """
+            result = await run_query(query, query_type)
+            # TODO Update memory of observer: 
+            # current_time_str = datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M:%S")
+            # await observer_memory.add(MemoryContent(content=f"Graph content at time (UTC) {current_time_str} is:" + result, mime_type=MemoryMimeType.TEXT))
+            return repr(result)
+        except Exception as e:
+            return repr({"Error in graph_operator": str(e)})
+    # Dedicated function to create a pipeline:
+    async def create_pipeline(params: str) -> str:
+        """ Creates a PIPELINE node.
+        params JSON:
+        {
+        "name": "<string>",
+        "description": "<string>",
+        "version": "<x.x>"
+        }
+        """
+        try:
+            query_type = "create_pipeline"
+            data = json.loads(params)
+            name        = data.get("name", "").replace("'", "\\'")
+            description = data.get("description", "").replace("'", "\\'")
+            version     = str(data.get("version", "1.0")).replace("'", "\\'")
+            query = f"""
+            CREATE (p:PIPELINE {{
+            uid:        randomUUID(),
+            name:       '{name}',
+            description:'{description}',
+            version:    '{version}',
+            created_at: datetime(),
+            updated_at: datetime(),
+            status:     'design'
+            }})
+            RETURN p;
+            """
+            result = await run_query(query, query_type)
+            return repr(result)
+        except Exception as e:
+            return repr({"Error in graph_operator": str(e)})
+    # Dedicated function to create a step:
+    async def create_step(params: str) -> str:
+        """ Creates new STEP and connects it after the last STEP (if any is present).
+        params JSON:
+        {
+        "label": "<string>",
+        "description": "<string>",
+        "flow_id": "<string>",
+        "type": "action|input|output|config|storage|api",
+        }
+        """
+        try:
+            query_type = "create_step"
+            data = json.loads(params)
+            step_type   = data["type"].replace("'", "\\'")
+            label        = data.get("label", "").replace("'", "\\'")
+            description = data.get("description", "").replace("'", "\\'")
+            flow_id = data.get("flow_id", "").replace("'", "\\'")
+            step_type_lower = step_type.lower()
+            props_lines = [
+                "uid:        randomUUID()",
+                f"type:       '{step_type}'",
+                f"label:       '{label}'",
+                f"description:'{description}'",
+                f"flow_id:'{flow_id}'"
+            ]
+            if step_type_lower == "input":
+                props_lines.append("content: ''")
+                props_lines.append("has_files: 'no'")
+            elif step_type_lower == "config":
+                props_lines.append("param_json: {}")
+            elif step_type_lower == "action":
+                props_lines.append("has_files: 'no'")
+            elif step_type_lower == "storage":
+                props_lines.append("endpoint: ''")
+                props_lines.append("database: 'minio'")
+            elif step_type_lower == "api":
+                props_lines.append("endpoint: ''")
+            elif step_type_lower == "output":
+                props_lines.append("content: ''")
+                props_lines.append("has_files: 'no'")
+            props_str = ",\n            ".join(props_lines)
+
+            query = f"""
+            MATCH (p:PIPELINE)
+            OPTIONAL MATCH (p)-[hs:HAS_STEP]->(prev:STEP)
+            WITH p, prev, hs
+            ORDER BY hs.order_index DESC
+            LIMIT 1
+            WITH
+            p,
+            prev,
+            coalesce(hs.order_index, 0) AS maxIndex
+            CREATE (s:STEP {{
+                {props_str}
+            }})
+            MERGE (p)-[:HAS_STEP {{
+            order_index: maxIndex + 1
+            }}]->(s)
+            FOREACH (_ IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |
+            MERGE (prev)-[:FLOWS_TO]->(s)
+            )
+            WITH p, s
+            SET p.updated_at = datetime()
+            RETURN s;
+            """
+            result = await run_query(query, query_type)
+            return repr(result)
+        except Exception as e:
+            return repr({"Error in graph_operator": str(e)})
+    # Dedicated function to remove a step:
+    async def delete_step(params: str) -> str:
+        """Deletes a STEP.
+        params JSON:
+        {
+        "step_uid": "<uid>"
+        }
+        """
+        try:
+            query_type = "delete_step"
+            data = json.loads(params)
+            step_uid = data["step_uid"].replace("'", "\\'")
+
+            query = f"""
+            MATCH (s:STEP {{uid: '{step_uid}'}})
+            OPTIONAL MATCH (prev:STEP)-[rin:FLOWS_TO]->(s)
+            OPTIONAL MATCH (s)-[rout:FLOWS_TO]->(next:STEP)
+            WITH s,
+                collect(DISTINCT prev) AS prevs,
+                collect(DISTINCT next) AS nexts,
+                collect(rin)           AS r_in,
+                collect(rout)          AS r_out
+            FOREACH (p IN prevs |
+            FOREACH (n IN nexts |
+                MERGE (p)-[:FLOWS_TO]->(n)
+                )
+            )
+            WITH s, r_in, r_out
+            FOREACH (r IN r_in | DELETE r)
+            FOREACH (r IN r_out | DELETE r)
+            WITH s
+            OPTIONAL MATCH (s)<-[hs:HAS_STEP]-(p:PIPELINE)
+            WITH s, collect(DISTINCT p) AS pipelines, collect(DISTINCT hs) AS hs_rels
+            FOREACH (rel IN hs_rels | DELETE rel)
+            FOREACH (pl IN pipelines | SET pl.updated_at = datetime())
+            DETACH DELETE s;
+            """
+            result = await run_query(query, query_type)
+            return repr(result)
+        except Exception as e:
+            return repr({"Error in graph_operator": str(e)})
+    # Team building:
+    user_proxy = UserProxyAgent("user_proxy")
+    pipeline_editor = AssistantAgent(
+        name = "pipeline_editor",
+        model_client = current_model_client,
+        tools = [create_pipeline, create_step, delete_step, overview], 
+        description = f"An agent that designs AI/data pipelines given a user request.",
+        system_message = f""" You design AI/data pipelines using your registered tools. Call one or multiple tools to create or modify a pipeline as requested by the user.
+                          A PIPELINE is composed of one or several STEPs. Use overview to check if there are any pipelines. If the user request is unclear or incomplete, ask for more details.
+                        - [overview]: calling this tool will give you an overview of the current pipeline content, if any. 
+                        - [create_pipeline]: calling this tool will create a pipeline. 
+                        - [create_step]: calling this tool will create a new step in a pipeline (will always place it last).
+                        - [delete_step]: calling this tool will delete a step in a pipeline.
+                        Tool calls MUST use a single string argument named params. The value of params MUST be a JSON-encoded string matching the "params JSON" schema in the docstring.
+                        """,  
+        max_tool_iterations = 10,
+        reflect_on_tool_use = True,
+    )
+    # TODO: Add observer
+    #pipeline_observer = AssistantAgent(
+    #    name = "pipeline_observer",
+    #    model_client = current_model_client,
+    #    tools = [overview], 
+    #    description = f"An agent that reports changes or modifications recorded in a graph database.",
+    #    system_message = f"""Each time you are called, you call the [overview] tool to get an overview of the current graph content. Return "NO" if there are no changes from the previous version. Return "YES" if you see any differences from the previous version. """,  
+    #    max_tool_iterations = 1,
+    #    reflect_on_tool_use = True,
+    #    model_context = BufferedChatCompletionContext(buffer_size=3),  # Does not need any context (save resources)
+    #    memory=[observer_memory],
+    # )
+    return RoundRobinGroupChat([pipeline_editor], max_turns=1)
 
 app = Flask(__name__)
 
@@ -303,7 +580,7 @@ def agentic_generate_yaml():
 apiVersion: argoproj.io/v1alpha1
 kind: Workflow
 metadata:
-  generateName: sentiment-audio-pipeline-compliant-
+  generateName: sentiment-audio-pipeline-
 spec:
   entrypoint: run-sim-pipeline
   volumes:
@@ -320,23 +597,13 @@ spec:
               parameters:
               - name: input-frequency
                 value: "1"
-          - name: pseudonymize-transcript
-            template: pseudonymize-transcript
+          - name: analyze-sentiment
+            template: analyze-sentiment
             dependencies: [transcribe-audio]
             arguments:
               artifacts:
               - name: transcript
                 from: "{{tasks.transcribe-audio.outputs.artifacts.transcript}}"
-              parameters:
-              - name: input-frequency
-                value: "1"
-          - name: analyze-sentiment
-            template: analyze-sentiment
-            dependencies: [pseudonymize-transcript]
-            arguments:
-              artifacts:
-              - name: transcript
-                from: "{{tasks.pseudonymize-transcript.outputs.artifacts.transcript}}"
               parameters:
               - name: input-frequency
                 value: "1"
@@ -365,30 +632,6 @@ spec:
           path: /out/transcript.txt
           archive:
             none: {}
-
-    - name: pseudonymize-transcript
-      inputs:
-        artifacts:
-        - name: transcript
-          path: /in/transcript.txt
-        parameters:
-          - name: input-frequency
-      container:
-        image: ghcr.io/datapact/015-sim-pipe-test-pseudonymize
-        env:
-          - name: INPUT_FREQUENCY
-            value: "{{inputs.parameters.input-frequency}}"
-        command: ["/app/pseudonymize.sh", "10"]
-        volumeMounts:
-          - name: out-volume
-            mountPath: /out
-      outputs:
-        artifacts:
-        - name: transcript
-          path: /out/transcript_pseudonymized.txt
-          archive:
-            none: {}
-
     - name: analyze-sentiment
       inputs:
         artifacts:
@@ -397,7 +640,7 @@ spec:
         parameters:
           - name: input-frequency
       container:
-        image: ghcr.io/datapact/02-sim-pipe-test-sentiment-analyze-compliant
+        image: ghcr.io/datapact/02-sim-pipe-test-sentiment-analyze
         env:
           - name: INPUT_FREQUENCY
             value: "{{inputs.parameters.input-frequency}}"
@@ -411,13 +654,13 @@ spec:
           path: /out/sentiment_output.txt
           archive:
             none: {}
-    """  # replace with real YAML later
+    """  
     resp = make_response(yaml_text, 200)
     resp.headers["Content-Type"] = "application/x-yaml; charset=utf-8"
     return resp
 
-@app.route("/simple_chat", methods=["POST", "OPTIONS"])
-def simple_chat():
+@app.route("/agentic_pipeline_editor", methods=["POST", "OPTIONS"])
+def agentic_pipeline_editor():
     if request.method == "OPTIONS":
         return make_response("", 200)  # preflight OK
     payload = request.get_json(force=True) or {}
@@ -427,7 +670,7 @@ def simple_chat():
     session_id = payload.get("session_id") or str(uuid.uuid4())
     model = payload.get("model") or "gpt-4o-mini"
     async def run_turn():
-        team = build_team(model=model)
+        team = build_pipeline_editing_team(model=model)
         team_state = load_state_from_disk(session_id)
         if team_state:
             await team.load_state(team_state)
@@ -448,8 +691,8 @@ def simple_chat():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/simple_chat/reset", methods=["POST", "OPTIONS"])
-def simple_chat_reset():
+@app.route("/agentic_pipeline_editor/reset", methods=["POST", "OPTIONS"])
+def agentic_pipeline_editor_reset():
     if request.method == "OPTIONS":
         return make_response("", 200)  # preflight OK
     payload = request.get_json(force=True) or {}
@@ -459,362 +702,6 @@ def simple_chat_reset():
         if p.exists():
             p.unlink()
     return jsonify({"ok": True}), 200
-
-@app.route('/agentic_pipeline_editor', methods=['GET'])
-def agentic_pipeline_editor():
-    task = request.args.get('task')
-    # User proxy:
-    user_proxy = UserProxyAgent("user_proxy")
-    async def run_query(query: str, query_type: str) -> str:
-        """ Runs any Cypher query in Neo4j. Returns String representation. """
-        try:
-            api_url = "http://localhost:5001/neo4j_run_query"  # Adjust if API host differs
-            payload = {"query": query}
-            headers = {"Content-Type": "application/json"}
-            # Run the API call in a thread (since requests is blocking)
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: requests.post(api_url, data=json.dumps(payload), headers=headers)
-            )
-            # Check response status and return:
-            if response.status_code == 200:
-                records = response.text 
-                return repr(records) + f"<({query_type})>"
-            else:
-                return repr({"Error in graph_operator": f"{response.status_code} - {response.text}"})
-        except Exception as e:
-            return repr({"Error in graph_operator": str(e)})
-    # TODO: Use later
-    async def list_pipelines() -> str:
-        """ Lists all pipelines and the number of steps they have."""
-        try:
-            query_type = "list_pipelines"
-            query = f"""
-            MATCH (p:PIPELINE)
-            OPTIONAL MATCH (p)-[:HAS_STEP]->(s:STEP)
-            RETURN p, count(DISTINCT s) AS step_count
-            ORDER BY p.name;
-            """
-            result = await run_query(query, query_type)
-            return repr(result)
-        except Exception as e:
-            return repr({"Error in graph_operator": str(e)})
-
-    # TODO: Use later
-    async def get_pipeline_steps(pipeline_uid: str) -> str:
-        """Gets the steps present in a pipeline."""
-        try:
-            query_type = "get_pipeline_steps"
-            query = f"""
-            MATCH (p:PIPELINE {{uid: '{pipeline_uid}'}})-[:HAS_STEP]->(s:STEP)
-            OPTIONAL MATCH (s)-[r:FLOWS_TO]->(t:STEP)
-            RETURN p, s, r, t;
-            """
-            result = await run_query(query, query_type)
-            return repr(result)
-        except Exception as e:
-            return repr({"Error in graph_operator": str(e)})
-
-    # TODO: Use later
-    async def inspect_step(step_uid: str) -> str:
-        """ Inspects a step: returns incoming/outgoing neighbors and used files."""
-        try:
-            query_type = "inspect_step"
-            query = f"""
-            MATCH (s:STEP {{uid: '{step_uid}'}})
-            OPTIONAL MATCH (prev:STEP)-[rin:FLOWS_TO]->(s)
-            OPTIONAL MATCH (s)-[rout:FLOWS_TO]->(next:STEP)
-            OPTIONAL MATCH (s)-[:USES_FILE]->(f:FILE)
-            RETURN s,
-            collect(DISTINCT {{prev: prev, rel: rin}})  AS incoming_neighbors,
-            collect(DISTINCT {{next: next, rel: rout}}) AS outgoing_neighbors,
-            collect(DISTINCT f)                         AS used_files;
-            """
-            result = await run_query(query, query_type)
-            return repr(result)
-        except Exception as e:
-            return repr({"Error in graph_operator": str(e)})
-        
-    async def overview() -> str:
-        """Gives an overview of all the pipelines and the steps present in each pipeline."""
-        try:
-            query_type = "overview"
-            query = """
-            MATCH (p:PIPELINE)
-            OPTIONAL MATCH (p)-[hs:HAS_STEP]->(s:STEP)
-            OPTIONAL MATCH (s)-[r:FLOWS_TO]->(t:STEP)
-            RETURN
-            p  AS pipeline,
-            s  AS step,
-            hs AS step_link,
-            hs.order_index AS step_order,
-            r  AS flow,
-            t  AS next_step
-            ORDER BY p.name, hs.order_index;
-            """
-            result = await run_query(query, query_type)
-            return repr(result)
-        except Exception as e:
-            return repr({"Error in graph_operator": str(e)})
-
-    async def create_pipeline(params: str) -> str:
-        """ Creates a PIPELINE node.
-        params JSON:
-        {
-        "name": "<string>",
-        "description": "<string>",
-        "version": "<x.x>"
-        }
-        """
-        try:
-            query_type = "create_pipeline"
-            data = json.loads(params)
-            name        = data.get("name", "").replace("'", "\\'")
-            description = data.get("description", "").replace("'", "\\'")
-            version     = str(data.get("version", "1.0")).replace("'", "\\'")
-
-            query = f"""
-            CREATE (p:PIPELINE {{
-            uid:        randomUUID(),
-            name:       '{name}',
-            description:'{description}',
-            version:    '{version}',
-            created_at: datetime(),
-            updated_at: datetime(),
-            status:     'design'
-            }})
-            RETURN p;
-            """
-
-            result = await run_query(query, query_type)
-            return repr(result)
-        except Exception as e:
-            return repr({"Error in graph_operator": str(e)})
-
-    async def create_step(params: str) -> str:
-        """ Creates new STEP and connects it after the last STEP (if any is present).
-        params JSON:
-        {
-        "name": "<string>",
-        "description": "<string>",
-        "type": "action|input|output|config|storage|api",
-        }
-        """
-        try:
-            query_type = "create_step"
-            data = json.loads(params)
-            step_type   = data["type"].replace("'", "\\'")
-            name        = data.get("name", "").replace("'", "\\'")
-            description = data.get("description", "").replace("'", "\\'")
-            step_type_lower = step_type.lower()
-            props_lines = [
-                "uid:        randomUUID()",
-                f"type:       '{step_type}'",
-                f"name:       '{name}'",
-                f"description:'{description}'"
-            ]
-            if step_type_lower == "input":
-                props_lines.append("content: ''")
-                props_lines.append("has_files: 'no'")
-            elif step_type_lower == "config":
-                props_lines.append("param: {}")
-            elif step_type_lower == "action":
-                props_lines.append("has_files: 'no'")
-            elif step_type_lower == "storage":
-                props_lines.append("endpoint: ''")
-                props_lines.append("database: 'minio'")
-            props_str = ",\n            ".join(props_lines)
-
-            query = f"""
-            MATCH (p:PIPELINE)
-            OPTIONAL MATCH (p)-[hs:HAS_STEP]->(prev:STEP)
-            WITH p, prev, hs
-            ORDER BY hs.order_index DESC
-            LIMIT 1
-            WITH
-            p,
-            prev,
-            coalesce(hs.order_index, 0) AS maxIndex
-            CREATE (s:STEP {{
-                {props_str}
-            }})
-            MERGE (p)-[:HAS_STEP {{
-            order_index: maxIndex + 1
-            }}]->(s)
-            FOREACH (_ IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |
-            MERGE (prev)-[:FLOWS_TO]->(s)
-            )
-            RETURN s;
-            """
-
-            result = await run_query(query, query_type)
-            return repr(result)
-        except Exception as e:
-            return repr({"Error in graph_operator": str(e)})
-
-    async def delete_step(params: str) -> str:
-        """Deletes a STEP.
-        params JSON:
-        {
-        "step_uid": "<uid>"
-        }
-        """
-        try:
-            query_type = "delete_step"
-            data = json.loads(params)
-            step_uid = data["step_uid"].replace("'", "\\'")
-
-            query = f"""
-            MATCH (s:STEP {{uid: '{step_uid}'}})
-            OPTIONAL MATCH (prev:STEP)-[rin:FLOWS_TO]->(s)
-            OPTIONAL MATCH (s)-[rout:FLOWS_TO]->(next:STEP)
-            WITH s,
-                collect(DISTINCT prev) AS prevs,
-                collect(DISTINCT next) AS nexts,
-                collect(rin)           AS r_in,
-                collect(rout)          AS r_out
-            FOREACH (p IN prevs |
-            FOREACH (n IN nexts |
-                MERGE (p)-[:FLOWS_TO]->(n)
-            )
-            )
-            WITH s, r_in, r_out
-            FOREACH (r IN r_in | DELETE r)
-            FOREACH (r IN r_out | DELETE r)
-            OPTIONAL MATCH (s)<-[hs:HAS_STEP]-(:PIPELINE)
-            DELETE hs
-            DETACH DELETE s;
-            """
-
-            result = await run_query(query, query_type)
-            return repr(result)
-        except Exception as e:
-            return repr({"Error in graph_operator": str(e)})
-
-    pipeline_editor = AssistantAgent(
-        name = "pipeline_editor",
-        model_client = current_model_client,
-        tools = [create_pipeline, create_step, delete_step, overview], 
-        description = f"An agent that designs AI/data pipelines given a user request.",
-        system_message = f""" You design AI/data pipelines using your registered tools. Call one or multiple tools to create or modify a pipeline as requested by the user.
-                          A PIPELINE is composed of one or several STEPs. Use overview to check if there are any pipelines. If the user request is unclear or incomplete, ask for more details.
-                        - [overview]: calling this tool will give you an overview of the current pipeline content, if any. 
-                        - [create_pipeline]: calling this tool will create a pipeline.
-                        - [create_step]: calling this tool will create a new step in a pipeline (will always place it last).
-                        - [delete_step]: calling this tool will delete a step in a pipeline.
-                          """,  
-        max_tool_iterations = 15,
-        reflect_on_tool_use = False,
-    )
-
-    # TODO: Align later for FILE fetching functionality:
-    #async def readFile(bucket: str) -> str:
-    #    """Reads the file from a bucket."""
-    #    try:
-    #        response = requests.get(
-    #            "http://localhost:5000/minio_lumen_download",
-    #            params={
-    #                'endpoint': bucket
-    #            }
-    #        )
-    #        if response.ok:
-    #            json_response = response.json()
-    #            # print(json_response)
-    #            file_path = json_response["file_path"]
-    #            mime = magic.Magic(mime=True) 
-    #            file_type = mime.from_file("./downloads/" + file_path)
-    #            print(f"[MinIO] filepath_driver saved static data to path: {file_path}, MIME type: {file_type}")
-    #            return "File path: "+file_path+" | File type: "+file_type
-    #        print(f"[MinIO] filepath_driver HTTP error <(BUCKET_ERROR)> {response.status_code}: {response.text}")
-    #        return f"[MinIO] filepath_driver HTTP error <(BUCKET_ERROR)> {response.status_code}: {response.text}"
-    #    except Exception as e:
-    #        print(f"[MinIO] Error in filepath_driver <(BUCKET_ERROR)>: {e}")
-    #        return f"[MinIO] Error in filepath_driver <(BUCKET_ERROR)>: {e}"
-
-    #read_file_tool = FunctionTool(readFile, description="Reads the file from the bucket in which it is stored.")
-    
-     #__________________________________File Reader__________________________________________
-    # TODO: Align
-    #file_reader = ForcedAssistantAgent(
-    #    name = "file_reader",
-    #    model_client = current_model_client,
-    #    tools = [read_file_tool],
-    #    description = "An agent that reads the file(s) associated with a pipeline step. ",
-    #    system_message = """<TODO>""",
-    #    max_tool_iterations = 1,
-    #    reflect_on_tool_use = False 
-    #)
-
-    #__________________________________Code Generator__________________________________________
-    # TODO: Align
-    #executor =  LocalCommandLineCodeExecutor(timeout = 600, work_dir = llm_work_dir)
-    #execute_code = PythonCodeExecutionTool(executor) # Tool that executes Python code 
-    # Agent that generates and executes tests (monitored version)
-    #code_generator = ForcedAssistantAgent(
-    #    name = "code_generator",
-    #    model_client = current_model_client,
-    #    tools = [execute_code],
-    #    description = "An agent that generates Python code to print the file content and executes it via registered tool. ",
-    #    system_message = "Generate Python code to <TODO>. Call main() at the end. Only output the code. No structural assumptions. Pre-installed packages: tabulate, numpy, scapy, pandas, matplotlib, dpkt (for PCAP files). ",
-    #    max_tool_iterations = 1,
-    #    model_context=BufferedChatCompletionContext(buffer_size=1)
-    #)
-
-    # Team of agents
-    outer_termination = TextMentionTermination("exit", sources=["user_proxy"])
-    max_messages_termination = MaxMessageTermination(max_messages = 25)
-    termination = outer_termination | max_messages_termination
-
-    def selector_func(messages: Sequence[BaseAgentEvent | BaseChatMessage]) -> str | None:
-        if len(messages) == 0:
-            return "user_proxy"
-        if messages[-1].source == "user_proxy":
-            return "pipeline_editor"
-        if messages[-1].source == "pipeline_editor":
-            # TODO: Align the KEYs accordingly.
-            if "<(TODO)>" in messages[-1].to_text():
-                print("TODO")
-            return user_proxy
-        # TODO: Add agents that remain
-        return None
-    
-    # Create the group chat
-    selector_team = SelectorGroupChat(
-        [user_proxy, pipeline_editor],
-        model_client=current_model_client,
-        selector_func=selector_func,
-        allow_repeated_speaker=True,
-        termination_condition=termination
-    )
-
-    async def run_team():
-        await selector_team.reset()
-        # await executor.start()
-        result_text = ""
-        async for event in selector_team.run_stream(task="I want to design a pipeline."):
-            if hasattr(event, "source") and getattr(event, "source", "") == "output_repeater":
-                print("[analytics_inlumen.py] Message Source: " + getattr(event, "source", ""))
-                print(event.to_text())
-                result_text += event.to_text()
-            else:
-                if isinstance(event, BaseChatMessage) or isinstance(event, BaseAgentEvent):
-                    if hasattr(event, "source"):
-                        print("[analytics_inlumen.py] Message Source: " + getattr(event, "source", ""))
-                    else:
-                        print("[analytics_inlumen.py] Message Type: EVENT")
-                    print(event.to_text())
-        # await executor.stop()
-        await selector_team.reset()
-        return result_text
-
-    # Run async safely
-    result = run_async(run_team())
-
-    # Cleanup result
-    response_content = {"result": result}
-    return jsonify(response_content)
-
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5002)
