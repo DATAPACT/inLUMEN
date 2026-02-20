@@ -44,7 +44,9 @@ const addNodeToNeo4j = async (node: Node) => {
           flow_id: node.id,
           label: node.data.label,
           type: node.data?.type,
-          description: node.data?.description || ""
+          description: node.data?.description || "",
+          x: node.position?.x ?? 0,
+          y: node.position?.y ?? 0
         }
       })
     });
@@ -54,6 +56,22 @@ const addNodeToNeo4j = async (node: Node) => {
     console.log("[FlowCanvas.tsx] Neo4j add_node:", result);
   } catch (err) {
     console.error("[FlowCanvas.tsx] Neo4j add node error:", err);
+  }
+};
+
+const updateNodePositionInNeo4j = async (node: Node) => {
+  try {
+    await fetch("http://localhost:5001/neo4j_update_node_position", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        flow_id: node.id,
+        x: node.position.x,
+        y: node.position.y,
+      }),
+    });
+  } catch (e) {
+    console.warn("[FlowCanvas.tsx] Failed to update node position:", e);
   }
 };
 
@@ -552,6 +570,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
         onInit={setReactFlowInstance}
         onDrop={onDrop}
         onDragOver={onDragOver}
+        onNodeDragStop={(_, node) => updateNodePositionInNeo4j(node)}
         nodeTypes={nodeTypes}
         fitView
         className={cn(

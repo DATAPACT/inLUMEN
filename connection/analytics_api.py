@@ -291,7 +291,11 @@ def build_pipeline_editing_team(model: str) -> RoundRobinGroupChat:
                 } AS pipeline,
             s AS step,
             hs AS step_link,
-            hs.order_index AS step_order,
+            CASE
+                WHEN s IS NULL OR s.flow_id IS NULL THEN NULL
+                WHEN toString(s.flow_id) =~ '^[0-9]+$' THEN toInteger(s.flow_id)
+                ELSE NULL
+            END AS step_order,
             r AS flow,
             t AS next_step,
             collect(
@@ -334,37 +338,43 @@ def build_pipeline_editing_team(model: str) -> RoundRobinGroupChat:
             updated_at: datetime(),
             status:     'design'
             }})
-            RETURN p;
+            RETURN {{
+            uid: p.uid,
+            name: p.name,
+            description: p.description,
+            version: p.version,
+            status: p.status,
+            created_at: toString(p.created_at),
+            updated_at: toString(p.updated_at)
+            }} AS pipeline;
             """
             result = await run_query(query, query_type)
             return repr(result)
         except Exception as e:
             return repr({"Error in graph_operator": str(e)})
     # Dedicated function to create a step:
+    #TODO Extend to any position 
     async def create_step(params: str) -> str:
-        """ Creates new STEP and connects it after the last STEP (if any is present).
+        """Creates new STEP and connects it after the last STEP (if any is present).
         params JSON:
         {
         "label": "<string>",
         "description": "<string>",
-        "flow_id": "<string>",
-        "type": "action|input|output|config|storage|api",
+        "type": "action|input|output|config|storage|api|custom"
         }
         """
         try:
             query_type = "create_step"
             data = json.loads(params)
-            step_type   = data["type"].replace("'", "\\'")
-            label        = data.get("label", "").replace("'", "\\'")
-            description = data.get("description", "").replace("'", "\\'")
-            flow_id = data.get("flow_id", "").replace("'", "\\'")
+            step_type = str(data.get("type", "")).replace("'", "\\'").strip()
             step_type_lower = step_type.lower()
+            label = str(data.get("label", "")).replace("'", "\\'")
+            description = str(data.get("description", "")).replace("'", "\\'")
             props_lines = [
                 "uid:        randomUUID()",
                 f"type:       '{step_type}'",
-                f"label:       '{label}'",
-                f"description:'{description}'",
-                f"flow_id:'{flow_id}'"
+                f"label:      '{label}'",
+                f"description:'{description}'"
             ]
             if step_type_lower == "input":
                 props_lines.append("content: ''")
@@ -381,30 +391,45 @@ def build_pipeline_editing_team(model: str) -> RoundRobinGroupChat:
             elif step_type_lower == "output":
                 props_lines.append("content: ''")
                 props_lines.append("has_files: 'no'")
+            elif step_type_lower == "custom":
+                props_lines.append("has_files: 'no'")
             props_str = ",\n            ".join(props_lines)
-
             query = f"""
-            MATCH (p:PIPELINE)
-            OPTIONAL MATCH (p)-[hs:HAS_STEP]->(prev:STEP)
-            WITH p, prev, hs
-            ORDER BY hs.order_index DESC
-            LIMIT 1
-            WITH
-            p,
-            prev,
-            coalesce(hs.order_index, 0) AS maxIndex
+            MATCH (p:PIPELINE {{status:'design'}})
+            OPTIONAL MATCH (sAll:STEP)
+            WHERE sAll.flow_id IS NOT NULL AND toString(sAll.flow_id) =~ '^[0-9]+$'
+            WITH p, coalesce(max(toInteger(sAll.flow_id)), 0) + 1 AS nextFlowId
+            
+            OPTIONAL MATCH (prev:STEP)
+            WHERE prev.flow_id IS NOT NULL AND toString(prev.flow_id) =~ '^[0-9]+$'
+            WITH p, nextFlowId, prev
+            ORDER BY toInteger(prev.flow_id) DESC
+            WITH p, nextFlowId, head(collect(prev)) AS prev
+
+            WITH p, nextFlowId, prev,
+                coalesce(prev.x, 0.0) AS prevX,
+                coalesce(prev.y, 0.0) AS prevY
             CREATE (s:STEP {{
-                {props_str}
+                {props_str},
+                flow_id: toString(nextFlowId),
+                x: CASE WHEN prev IS NULL THEN 0.0 ELSE prevX + 300.0 END,
+                y: CASE WHEN prev IS NULL THEN 0.0 ELSE prevY END
             }})
-            MERGE (p)-[:HAS_STEP {{
-            order_index: maxIndex + 1
-            }}]->(s)
+            MERGE (p)-[:HAS_STEP]->(s)
             FOREACH (_ IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |
             MERGE (prev)-[:FLOWS_TO]->(s)
             )
-            WITH p, s
             SET p.updated_at = datetime()
-            RETURN s;
+            RETURN {{
+            flow_id: s.flow_id,
+            uid: s.uid,
+            type: s.type,
+            label: s.label,
+            description: s.description,
+            x: s.x,
+            y: s.y,
+            pipeline_updated_at: toString(p.updated_at)
+            }} AS step;
             """
             result = await run_query(query, query_type)
             return repr(result)
@@ -451,6 +476,7 @@ def build_pipeline_editing_team(model: str) -> RoundRobinGroupChat:
             return repr(result)
         except Exception as e:
             return repr({"Error in graph_operator": str(e)})
+    # TODO Add change property of STEP node function.
     # Team building:
     user_proxy = UserProxyAgent("user_proxy")
     pipeline_editor = AssistantAgent(
