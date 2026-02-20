@@ -190,7 +190,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
     const savedNodes = localStorage.getItem('ai-flow-nodes');
     return savedNodes ? JSON.parse(savedNodes) : [];
   });
-
   const [edges, setEdges] = useState<Edge[]>(() => {
     const savedEdges = localStorage.getItem('ai-flow-edges');
     return savedEdges ? JSON.parse(savedEdges) : [];
@@ -200,6 +199,94 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<any>(null);
+  const lastSeenUpdatedAtRef = useRef<string | null>(null);
+  const currentGraphRef = useRef<{ nodes: Node[]; edges: Edge[] } | null>(null);
+  const refreshCooldownUntilRef = useRef<number>(0);
+
+  const markLocalWrite = useCallback((ms = 800) => {
+    refreshCooldownUntilRef.current = Date.now() + ms;
+  }, []);
+
+  const normalizeGraph = useCallback((data: any) => {
+    const incomingNodes: Node[] = Array.isArray(data?.nodes) ? data.nodes : [];
+    const incomingEdges: any[] = Array.isArray(data?.edges) ? data.edges : [];
+
+    const nodesNorm: Node[] = incomingNodes.map((n: any) => ({
+      ...n,
+      id: String(n.id),
+    }));
+
+    const edgesNorm: Edge[] = incomingEdges.map((e: any) => ({
+      ...e,
+      id: e?.id ? String(e.id) : `e-${String(e.source)}-${String(e.target)}`,
+      source: String(e.source),
+      target: String(e.target),
+    }));
+
+    return {
+      updated_at: data?.updated_at ?? null,
+      nodes: nodesNorm,
+      edges: edgesNorm,
+    };
+  }, []);
+
+  const fetchPipelineUpdatedAt = useCallback(async (): Promise<string | null> => {
+    const res = await fetch("http://localhost:5001/neo4j_get_pipeline_updated_at", { method: "GET" });
+    if (!res.ok) throw new Error("Failed to fetch pipeline updated_at");
+    const data = await res.json();
+    return data?.updated_at ?? null;
+  }, []);
+
+  const fetchGraphAndApply = useCallback(async () => {
+    const res = await fetch("http://localhost:5001/neo4j_get_graph", { method: "GET" });
+    if (!res.ok) throw new Error("Failed to fetch neo4j_get_graph");
+    const data = await res.json();
+    const g = normalizeGraph(data);
+    setNodes(g.nodes);
+    setEdges(g.edges);
+    currentGraphRef.current = { nodes: g.nodes, edges: g.edges };
+    lastSeenUpdatedAtRef.current = g.updated_at;
+    // keep local nodeId counter sane
+    const numericIds = g.nodes
+      .map((n) => parseInt(String(n.id), 10))
+      .filter((x) => Number.isFinite(x));
+    if (numericIds.length > 0) nodeId = Math.max(...numericIds) + 1;
+  }, [normalizeGraph]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const initialLoad = async () => {
+      try {
+        await fetchGraphAndApply();
+      } catch (e) {
+        console.warn("[FlowCanvas.tsx] Initial neo4j_get_graph failed:", e);
+      }
+    };
+    const tick = async () => {
+      try {
+        if (Date.now() < refreshCooldownUntilRef.current) return;
+        const updatedAt = await fetchPipelineUpdatedAt();
+        if (cancelled) return;
+        if (lastSeenUpdatedAtRef.current === null) {
+          lastSeenUpdatedAtRef.current = updatedAt;
+          return;
+        }
+        if (updatedAt && updatedAt !== lastSeenUpdatedAtRef.current) {
+          await fetchGraphAndApply();
+        }
+      } catch (e) {
+        console.warn("[FlowCanvas.tsx] Neo4j poll tick failed:", e);
+      }
+    };
+    // Load once at mount, then poll
+    initialLoad();
+    const id = window.setInterval(tick, 1500);
+    tick();
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [fetchPipelineUpdatedAt, fetchGraphAndApply]);
 
   // Expose updateNode 
   const updateNode = useCallback((id: string, data: any) => {
@@ -242,7 +329,10 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
         .filter(change => change.type === 'remove')
         .map(change => change.id);
 
-      removedNodeIds.forEach(deleteNodeFromNeo4jAndMinIO);
+      removedNodeIds.forEach((id) => {
+        markLocalWrite(800);
+        deleteNodeFromNeo4jAndMinIO(id);
+      });
 
       const newNodes = applyNodeChanges(changes, nodes);
       setNodes(newNodes);
@@ -255,7 +345,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
         }
       }
     },
-    [nodes, selectedNode, onNodeSelect]
+    [nodes, selectedNode, onNodeSelect, markLocalWrite]
   );
 
   const onEdgesChange = useCallback(
@@ -276,6 +366,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
               );
               return;
             }
+            markLocalWrite(800);
             deleteEdgeToNeo4j(sourceNode, targetNode);
           });
           return applyEdgeChanges(changes, eds);
@@ -284,7 +375,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
       }
       setEdges((eds) => applyEdgeChanges(changes, eds));
     },
-    [nodes] 
+    [nodes, markLocalWrite]
   );
 
   const onConnect = useCallback(
@@ -316,9 +407,10 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
         console.warn("[FlowCanvas.tsx] Could not find source/target nodes for Neo4j edge creation.");
         return;
       }
+      markLocalWrite(800);
       await addEdgeToNeo4j(sourceNode, targetNode);
     },
-    [nodes] 
+    [nodes, markLocalWrite]
   );
 
   const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
@@ -362,11 +454,12 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
 
       setNodes((nds) => {
         const updated = nds.concat(newNode);
-        addNodeToNeo4j(newNode); // 🔁 Sync to Neo4j
+        markLocalWrite(800);
+        addNodeToNeo4j(newNode); // Sync to Neo4j
         return updated;
       });
     },
-    [reactFlowInstance]
+    [reactFlowInstance, markLocalWrite]
   );
 
   const saveFlow = () => {
@@ -434,7 +527,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            files, 
+            files,
           }),
         }
       );
@@ -446,7 +539,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
         );
       }
 
-      const dockerfiles_json = await response.json(); 
+      const dockerfiles_json = await response.json();
       console.log("[FlowCanvas.tsx] Agents generated Dockerfile(s):", dockerfiles_json);
 
       const responseYAML = await fetch(
@@ -457,7 +550,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            dockerfiles_json, 
+            dockerfiles_json,
           }),
         }
       );
@@ -506,8 +599,10 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
         return;
       }
       const importedNodes: Node[] = flowData.nodes;
-      const importedEdges: any[] = flowData.edges; 
+      const importedEdges: any[] = flowData.edges;
       await clearNeo4jAndMinIO();
+      markLocalWrite(1200); // avoid immediate poll-refresh
+
       for (const n of importedNodes) {
         await addNodeToNeo4j(n);
       }
@@ -543,7 +638,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
     }
   };
 
-
   const clearCanvas = async () => {
     setNodes([]);
     setEdges([]);
@@ -551,7 +645,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
     localStorage.removeItem('ai-flow-nodes');
     localStorage.removeItem('ai-flow-edges');
     nodeId = 1;
-    await clearNeo4jAndMinIO(); 
+    markLocalWrite(1200);
+    await clearNeo4jAndMinIO();
     toast.success('Canvas cleared', {
       description: 'All nodes and edges have been removed',
     });
@@ -570,7 +665,10 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
         onInit={setReactFlowInstance}
         onDrop={onDrop}
         onDragOver={onDragOver}
-        onNodeDragStop={(_, node) => updateNodePositionInNeo4j(node)}
+        onNodeDragStop={(_, node) => {
+          markLocalWrite(800);
+          updateNodePositionInNeo4j(node);
+        }}
         nodeTypes={nodeTypes}
         fitView
         className={cn(

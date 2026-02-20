@@ -484,26 +484,29 @@ def neo4j_update_node_position():
     
 @app.route('/neo4j_get_graph', methods=['GET'])
 def neo4j_get_graph():
-    print("[neo4j_api.py] Received request to get graph (ReactFlow format).")
+    print("[neo4j_api.py] Received request to get graph (ReactFlow export-like).")
     query = """
-    MATCH (p:PIPELINE)
+    MATCH (p:PIPELINE {status:'design'})
     OPTIONAL MATCH (p)-[:HAS_STEP]->(s:STEP)
-    OPTIONAL MATCH (s)-[r:FLOWS_TO]->(t:STEP)
+    OPTIONAL MATCH (s)-[:FLOWS_TO]->(t:STEP)
     RETURN
       toString(p.updated_at) AS updated_at,
       collect(DISTINCT s) AS steps,
-      collect(DISTINCT {source: s.flow_id, target: t.flow_id, relProps: properties(r)}) AS flows
+      collect(DISTINCT {source: s.flow_id, target: t.flow_id}) AS flows
     """
-
     try:
         with driver.session() as session:
             record = session.run(query).single()
             if not record:
-                return jsonify({"updated_at": None, "nodes": [], "edges": []}), 200
+                return jsonify({
+                    "updated_at": None,
+                    "nodes": [],
+                    "edges": [],
+                    "viewport": {"x": 0, "y": 0, "zoom": 1}
+                }), 200
             updated_at = record["updated_at"]
             steps = record["steps"] or []
             flows = record["flows"] or []
-            # --- Build ReactFlow nodes ---
             nodes = []
             for s in steps:
                 if s is None:
@@ -511,33 +514,39 @@ def neo4j_get_graph():
                 props = dict(s.items())
                 flow_id = props.get("flow_id")
                 if flow_id is None:
-                    # skip broken nodes
                     continue
                 node_id = str(flow_id)
                 # position
-                x = props.get("x", 0)
-                y = props.get("y", 0)
                 try:
-                    x = float(x) if x is not None else 0.0
+                    x = float(props.get("x", 0) or 0)
                 except Exception:
                     x = 0.0
                 try:
-                    y = float(y) if y is not None else 0.0
+                    y = float(props.get("y", 0) or 0)
                 except Exception:
                     y = 0.0
-                # ReactFlow node "type"
-                node_type = props.get("type") or "default"
-                node_type = str(node_type)
-                # Put STEP properties into node.data.
-                data = dict(props)
-                data["flow_id"] = node_id
+                step_kind = str(props.get("type") or "custom")
+                data = {
+                    "label": props.get("label", ""),
+                    "description": props.get("description", ""),
+                    "type": step_kind,
+                }
+                if "content" in props:
+                    data["content"] = props.get("content") or ""
+                if "has_files" in props:
+                    data["has_files"] = props.get("has_files")
+                if "endpoint" in props:
+                    data["endpoint"] = props.get("endpoint")
+                if "database" in props:
+                    data["database"] = props.get("database")
+                if "param_json" in props:
+                    data["param_json"] = props.get("param_json")
                 nodes.append({
                     "id": node_id,
-                    "type": node_type,
+                    "type": "custom",
                     "position": {"x": x, "y": y},
-                    "data": data
+                    "data": data,
                 })
-            # --- Build ReactFlow edges ---
             edges = []
             for f in flows:
                 src = f.get("source")
@@ -546,25 +555,19 @@ def neo4j_get_graph():
                     continue
                 src = str(src)
                 tgt = str(tgt)
-                rel_props = f.get("relProps") or {}
-
-                edge_id = rel_props.get("id") or rel_props.get("edge_id") or f"e-{src}-{tgt}"
-                edge_type = rel_props.get("type") or rel_props.get("edge_type") or "default"
-                edge_obj = {
-                    "id": str(edge_id),
+                edges.append({
+                    "id": f"reactflow__edge-{src}-{tgt}",
                     "source": src,
                     "target": tgt,
-                    "type": str(edge_type),
-                }
-                if rel_props:
-                    edge_obj["data"] = rel_props
-                edges.append(edge_obj)
+                    "sourceHandle": None,
+                    "targetHandle": None,
+                })
             return jsonify({
                 "updated_at": updated_at,
                 "nodes": nodes,
-                "edges": edges
+                "edges": edges,
+                "viewport": {"x": 0, "y": 0, "zoom": 1}
             }), 200
-
     except Exception as e:
         print("[neo4j_api.py] Error executing neo4j_get_graph:", e)
         return jsonify({"error": str(e)}), 500

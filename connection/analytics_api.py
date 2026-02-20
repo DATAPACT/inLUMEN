@@ -396,10 +396,12 @@ def build_pipeline_editing_team(model: str) -> RoundRobinGroupChat:
             props_str = ",\n            ".join(props_lines)
             query = f"""
             MATCH (p:PIPELINE {{status:'design'}})
+            SET p.updated_at = datetime() 
+            WITH p
             OPTIONAL MATCH (sAll:STEP)
             WHERE sAll.flow_id IS NOT NULL AND toString(sAll.flow_id) =~ '^[0-9]+$'
             WITH p, coalesce(max(toInteger(sAll.flow_id)), 0) + 1 AS nextFlowId
-            
+
             OPTIONAL MATCH (prev:STEP)
             WHERE prev.flow_id IS NOT NULL AND toString(prev.flow_id) =~ '^[0-9]+$'
             WITH p, nextFlowId, prev
@@ -410,16 +412,16 @@ def build_pipeline_editing_team(model: str) -> RoundRobinGroupChat:
                 coalesce(prev.x, 0.0) AS prevX,
                 coalesce(prev.y, 0.0) AS prevY
             CREATE (s:STEP {{
-                {props_str},
-                flow_id: toString(nextFlowId),
-                x: CASE WHEN prev IS NULL THEN 0.0 ELSE prevX + 300.0 END,
-                y: CASE WHEN prev IS NULL THEN 0.0 ELSE prevY END
+            uid: randomUUID(),
+            {props_str},
+            flow_id: toString(nextFlowId),
+            x: CASE WHEN prev IS NULL THEN 0.0 ELSE prevX + 300.0 END,
+            y: CASE WHEN prev IS NULL THEN 0.0 ELSE prevY END
             }})
             MERGE (p)-[:HAS_STEP]->(s)
             FOREACH (_ IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |
             MERGE (prev)-[:FLOWS_TO]->(s)
             )
-            SET p.updated_at = datetime()
             RETURN {{
             flow_id: s.flow_id,
             uid: s.uid,
