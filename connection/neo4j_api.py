@@ -489,11 +489,24 @@ def neo4j_get_graph():
     MATCH (p:PIPELINE {status:'design'})
     OPTIONAL MATCH (p)-[:HAS_STEP]->(s:STEP)
     OPTIONAL MATCH (s)-[:FLOWS_TO]->(t:STEP)
+    OPTIONAL MATCH (s)-[:HAS_FILE]->(f:FILE)
+    WITH
+      p,
+      s,
+      t,
+      collect(DISTINCT f { .filename, .bucket, added_at: toString(f.added_at) }) AS files_for_step
     RETURN
       toString(p.updated_at) AS updated_at,
-      collect(DISTINCT s) AS steps,
-      collect(DISTINCT {source: s.flow_id, target: t.flow_id}) AS flows
+      collect(DISTINCT {
+        step: s,
+        files: files_for_step
+      }) AS step_rows,
+      collect(DISTINCT {
+        source: s.flow_id,
+        target: t.flow_id
+      }) AS flows
     """
+
     try:
         with driver.session() as session:
             record = session.run(query).single()
@@ -504,18 +517,24 @@ def neo4j_get_graph():
                     "edges": [],
                     "viewport": {"x": 0, "y": 0, "zoom": 1}
                 }), 200
+
             updated_at = record["updated_at"]
-            steps = record["steps"] or []
+            step_rows = record["step_rows"] or []
             flows = record["flows"] or []
+
             nodes = []
-            for s in steps:
+            for row in step_rows:
+                s = row.get("step") if row else None
                 if s is None:
                     continue
+
                 props = dict(s.items())
                 flow_id = props.get("flow_id")
                 if flow_id is None:
                     continue
+
                 node_id = str(flow_id)
+
                 # position
                 try:
                     x = float(props.get("x", 0) or 0)
@@ -525,12 +544,29 @@ def neo4j_get_graph():
                     y = float(props.get("y", 0) or 0)
                 except Exception:
                     y = 0.0
+
                 step_kind = str(props.get("type") or "custom")
+
+                files_for_step = row.get("files") or []
+                # filenames list (simple)
+                filenames = [
+                    f.get("filename")
+                    for f in files_for_step
+                    if isinstance(f, dict) and f.get("filename")
+                ]
+
                 data = {
                     "label": props.get("label", ""),
                     "description": props.get("description", ""),
                     "type": step_kind,
+
+                    # ✅ add files so polling doesn't wipe them
+                    "files": filenames,
+
+                    # optional richer info (bucket + added_at)
+                    "file_buckets": files_for_step,
                 }
+
                 if "content" in props:
                     data["content"] = props.get("content") or ""
                 if "has_files" in props:
@@ -541,16 +577,18 @@ def neo4j_get_graph():
                     data["database"] = props.get("database")
                 if "param_json" in props:
                     data["param_json"] = props.get("param_json")
+
                 nodes.append({
                     "id": node_id,
                     "type": "custom",
                     "position": {"x": x, "y": y},
                     "data": data,
                 })
+
             edges = []
             for f in flows:
-                src = f.get("source")
-                tgt = f.get("target")
+                src = f.get("source") if isinstance(f, dict) else None
+                tgt = f.get("target") if isinstance(f, dict) else None
                 if src is None or tgt is None:
                     continue
                 src = str(src)
@@ -562,12 +600,14 @@ def neo4j_get_graph():
                     "sourceHandle": None,
                     "targetHandle": None,
                 })
+
             return jsonify({
                 "updated_at": updated_at,
                 "nodes": nodes,
                 "edges": edges,
                 "viewport": {"x": 0, "y": 0, "zoom": 1}
             }), 200
+
     except Exception as e:
         print("[neo4j_api.py] Error executing neo4j_get_graph:", e)
         return jsonify({"error": str(e)}), 500

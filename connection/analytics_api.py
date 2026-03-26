@@ -531,13 +531,14 @@ class ListDockerfilesResponse(BaseModel):
         content: str
     dockerfiles: list[DockerfileItem]
 
-async def _generate_dockerfiles_with_agent(filenames: list[str]) -> ListDockerfilesResponse:
-    sh_files = [fn for fn in filenames if fn.lower().endswith(".sh")]
+async def _generate_dockerfiles_with_agent(filenames: list[str], ids: list[str]) -> ListDockerfilesResponse:
     dockerfile_generator = AssistantAgent(
         name="dockerfile_generator",
         model_client=current_model_client,
         description="An agent that generates Dockerfiles.",
-        system_message=f""" You will be given a list of files. Only consider files with .sh extension. Generate a Dockerfile per .sh file by replacing <insert filename> with the actual filename in the content below and name the Dockerfile.<insert filename with no extension>:
+        system_message=f""" You will be given a list of files and another containing their corresponding IDs (files with same ID means they belong to the same folder). Generate a Dockerfile file per folder. Name them Dockerfile.<insert folder ID and no extension>. Follow the rules:
+        1) Start with a base image. 2) Copy files into the container. 3) Install dependencies from requirements file (if present). 4) Make .sh files executable. 5) Set the startup command.
+        See example below: 
         FROM ubuntu:latest
         ENV DEBIAN_FRONTEND=noninteractive
         RUN apt-get update && apt-get install -y \
@@ -551,8 +552,7 @@ async def _generate_dockerfiles_with_agent(filenames: list[str]) -> ListDockerfi
         """,
         output_content_type=ListDockerfilesResponse,
     )
-
-    result = await dockerfile_generator.run(task="List of files: " + str(sh_files))
+    result = await dockerfile_generator.run(task="List of files: " + str(filenames) + ". List of IDs: " +  str(ids))
     print("[analytics_api.py] Dockerfile generator response:")
     print(result.messages[-1].content)
     return result.messages[-1].content
@@ -565,32 +565,17 @@ def agentic_generate_dockerfiles():
     data = request.get_json() or {}
     files = data.get("files", [])
     filenames = [f["filename"] for f in files]
-    #buckets = [f["bucket"] for f in files]
+    buckets = [f["bucket"] for f in files]
+    ids = [re.search(r'files-step-id-(\d+)', item).group(1) for item in buckets]
     print("[analytics_api.py] Filenames received:", filenames)
-    #print("[analytics_api.py] Buckets received:", buckets)
+    print("[analytics_api.py] Buckets received:", buckets)
+    print("[analytics_api.py] Corresponding IDs to filenames that were received:", ids)
     try:
-        parsed: ListDockerfilesResponse = run_async(_generate_dockerfiles_with_agent(filenames))
+        parsed: ListDockerfilesResponse = run_async(_generate_dockerfiles_with_agent(filenames, ids))
         return jsonify(parsed.model_dump()), 200
     except Exception as e:
         print("[analytics_api.py] Error generating dockerfiles:", e)
         return jsonify({"error": str(e)}), 500
-
-@app.route('/new_agentic_generate_yaml', methods=['POST', 'OPTIONS'])
-def new_agentic_generate_yaml(): 
-    # Preflight
-    if request.method == 'OPTIONS':
-        return make_response("", 200)
-    data = request.get_json() or {}
-    dockerfile_json = data.get("dockerfile_json")
-    print("[analytics_api.py] Dockerfile received:", dockerfile_json)
-    # TODO:
-    # Agent to fetch full pipeline overview
-    # Agent to read files
-    # Agent to Generate YAML file
-    yaml_text = """ REPLACE """  # replace with real YAML later
-    resp = make_response(yaml_text, 200)
-    resp.headers["Content-Type"] = "application/x-yaml; charset=utf-8"
-    return resp
 
 @app.route('/agentic_generate_yaml', methods=['POST', 'OPTIONS'])
 def agentic_generate_yaml(): 
@@ -601,88 +586,10 @@ def agentic_generate_yaml():
     dockerfile_json = data.get("dockerfile_json")
     print("[analytics_api.py] Dockerfile received:", dockerfile_json)
     # TODO:
-    # Agent to fetch full pipeline overview
-    # Agent to read files
-    # Agent to Generate YAML file
-    yaml_text = """
-apiVersion: argoproj.io/v1alpha1
-kind: Workflow
-metadata:
-  generateName: sentiment-audio-pipeline-
-spec:
-  entrypoint: run-sim-pipeline
-  volumes:
-    - name: out-volume
-      emptyDir: {}
-
-  templates:
-    - name: run-sim-pipeline
-      dag:
-        tasks:
-          - name: transcribe-audio
-            template: transcribe-audio
-            arguments:
-              parameters:
-              - name: input-frequency
-                value: "1"
-          - name: analyze-sentiment
-            template: analyze-sentiment
-            dependencies: [transcribe-audio]
-            arguments:
-              artifacts:
-              - name: transcript
-                from: "{{tasks.transcribe-audio.outputs.artifacts.transcript}}"
-              parameters:
-              - name: input-frequency
-                value: "1"
-
-    - name: transcribe-audio
-      inputs:
-        artifacts:
-        - name: Input
-          path: /in/input.wav
-          raw:
-            data: provide sample wav file
-        parameters:
-          - name: input-frequency
-      container:
-        image: ghcr.io/datapact/01-sim-pipe-test-transcribe-audio
-        env:
-          - name: INPUT_FREQUENCY
-            value: "{{inputs.parameters.input-frequency}}"
-        command: ["/app/transcribe.sh", "10"]
-        volumeMounts:
-          - name: out-volume
-            mountPath: /out
-      outputs:
-        artifacts:
-        - name: transcript
-          path: /out/transcript.txt
-          archive:
-            none: {}
-    - name: analyze-sentiment
-      inputs:
-        artifacts:
-        - name: transcript
-          path: /in/transcript.txt
-        parameters:
-          - name: input-frequency
-      container:
-        image: ghcr.io/datapact/02-sim-pipe-test-sentiment-analyze
-        env:
-          - name: INPUT_FREQUENCY
-            value: "{{inputs.parameters.input-frequency}}"
-        command: ["/app/analyze.sh", "10"]
-        volumeMounts:
-          - name: out-volume
-            mountPath: /out
-      outputs:
-        artifacts:
-        - name: sentiment_output
-          path: /out/sentiment_output.txt
-          archive:
-            none: {}
-    """  
+    # Agent to fetch full pipeline overview (+ minIO buckets)
+    # Agent to read files & dockerfiles. 
+    # Agent to generate ArgoWorkflow YAML file based on content of files
+    yaml_text = """ REPLACE """  # replace with real YAML later
     resp = make_response(yaml_text, 200)
     resp.headers["Content-Type"] = "application/x-yaml; charset=utf-8"
     return resp
