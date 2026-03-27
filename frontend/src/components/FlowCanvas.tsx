@@ -1,4 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
+import { apiFetch } from '@/utils/apiFetch';
+import { MINIO_API_URL, NEO4J_API_URL, LLM_API_URL } from '@/config/api';
 import ReactFlow, {
   Node,
   Edge,
@@ -36,7 +38,7 @@ let nodeId = 1;
 
 const addNodeToNeo4j = async (node: Node) => {
   try {
-    const response = await fetch('http://localhost:5001/neo4j_add_node', {
+    const response = await apiFetch(`${NEO4J_API_URL}/neo4j_add_node`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -59,7 +61,7 @@ const addNodeToNeo4j = async (node: Node) => {
 
 const addEdgeToNeo4j = async (source_node: Node, target_node: Node) => {
   try {
-    const response = await fetch('http://localhost:5001/neo4j_add_edge', {
+    const response = await apiFetch(`${NEO4J_API_URL}/neo4j_add_edge`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -80,7 +82,7 @@ const addEdgeToNeo4j = async (source_node: Node, target_node: Node) => {
 
 const deleteEdgeToNeo4j = async (source_node: Node, target_node: Node) => {
   try {
-    const response = await fetch('http://localhost:5001/neo4j_delete_edge', {
+    const response = await apiFetch(`${NEO4J_API_URL}/neo4j_delete_edge`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -102,8 +104,8 @@ const deleteEdgeToNeo4j = async (source_node: Node, target_node: Node) => {
 const deleteNodeFromNeo4jAndMinIO = async (nodeId: string) => {
   try {
     // 1) Delete node from Neo4j
-    const response = await fetch(
-      `http://localhost:5001/neo4j_delete_node/${nodeId}`,
+    const response = await apiFetch(
+      `${NEO4J_API_URL}/neo4j_delete_node/${nodeId}`,
       { method: 'DELETE' }
     );
     if (!response.ok) throw new Error('Failed to delete node from Neo4j');
@@ -112,8 +114,8 @@ const deleteNodeFromNeo4jAndMinIO = async (nodeId: string) => {
 
     // 2) Clear corresponding MinIO bucket
     try {
-      const minioResponse = await fetch(
-        `http://localhost:5000/minio_clear_bucket?bucket_id=${nodeId}`,
+      const minioResponse = await apiFetch(
+        `${MINIO_API_URL}/minio_clear_bucket?bucket_id=${nodeId}`,
         { method: 'DELETE' }
       );
       if (!minioResponse.ok) throw new Error('Failed to clear MinIO bucket');
@@ -137,7 +139,7 @@ const deleteNodeFromNeo4jAndMinIO = async (nodeId: string) => {
 const clearNeo4jAndMinIO = async () => {
   try {
     // Neo4j and get deleted STEP flow_ids
-    const neoResponse = await fetch('http://localhost:5001/neo4j_clear_nodes', {
+    const neoResponse = await apiFetch(`${NEO4J_API_URL}/neo4j_clear_nodes`, {
       method: 'DELETE',
     });
     if (!neoResponse.ok) throw new Error('Failed to clear Neo4j');
@@ -148,8 +150,8 @@ const clearNeo4jAndMinIO = async () => {
     // For each flow_id, clear the corresponding MinIO bucket
     for (const id of ids) {
       try {
-        const minioResponse = await fetch(
-          `http://localhost:5000/minio_clear_bucket?bucket_id=${id}`,
+        const minioResponse = await apiFetch(
+          `${MINIO_API_URL}/minio_clear_bucket?bucket_id=${id}`,
           { method: 'DELETE' }
         );
         if (!minioResponse.ok) {
@@ -395,7 +397,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
   const exportFlowYAML = async () => {
     try {
       // Fetch all file endpoints:
-      const filesRes = await fetch("http://localhost:5001/neo4j_get_all_files", {
+      const filesRes = await apiFetch(`${NEO4J_API_URL}/neo4j_get_all_files`, {
         method: "GET",
       });
 
@@ -408,8 +410,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
       const files = await filesRes.json();
       console.log("[FlowCanvas.tsx] Fetched filenames.");
       // Pass result to agentic_generate_dockerfile
-      const response = await fetch(
-        "http://localhost:5002/agentic_generate_dockerfiles",
+      const response = await apiFetch(
+        `${LLM_API_URL}/agentic_generate_dockerfiles`,
         {
           method: "POST",
           headers: {
@@ -431,8 +433,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
       const dockerfiles_json = await response.json(); 
       console.log("[FlowCanvas.tsx] Agents generated Dockerfile(s):", dockerfiles_json);
 
-      const responseYAML = await fetch(
-        "http://localhost:5002/agentic_generate_yaml",
+      const responseYAML = await apiFetch(
+        `${LLM_API_URL}/agentic_generate_yaml`,
         {
           method: "POST",
           headers: {

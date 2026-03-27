@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify, Response, make_response
+from auth_middleware import require_auth
 from openai import OpenAI
 from autogen_ext.code_executors.local import LocalCommandLineCodeExecutor
 from autogen_ext.code_executors.docker import DockerCommandLineCodeExecutor
@@ -212,7 +213,7 @@ app = Flask(__name__)
 def add_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = 'http://localhost:8080'  # allowed origin
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'  # Adjust as needed
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
     return response
 
 # Apply the CORS function to all routes using the after_request decorator
@@ -253,6 +254,7 @@ async def _generate_dockerfiles_with_agent(filenames: list[str]) -> ListDockerfi
     return result.messages[-1].content
 
 @app.route('/agentic_generate_dockerfiles', methods=['POST', 'OPTIONS'])
+@require_auth
 def agentic_generate_dockerfiles():
     # Preflight
     if request.method == 'OPTIONS':
@@ -271,6 +273,7 @@ def agentic_generate_dockerfiles():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/new_agentic_generate_yaml', methods=['POST', 'OPTIONS'])
+@require_auth
 def new_agentic_generate_yaml(): 
     # Preflight
     if request.method == 'OPTIONS':
@@ -288,6 +291,7 @@ def new_agentic_generate_yaml():
     return resp
 
 @app.route('/agentic_generate_yaml', methods=['POST', 'OPTIONS'])
+@require_auth
 def agentic_generate_yaml(): 
     # Preflight
     if request.method == 'OPTIONS':
@@ -417,6 +421,7 @@ spec:
     return resp
 
 @app.route("/simple_chat", methods=["POST", "OPTIONS"])
+@require_auth
 def simple_chat():
     if request.method == "OPTIONS":
         return make_response("", 200)  # preflight OK
@@ -449,6 +454,7 @@ def simple_chat():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/simple_chat/reset", methods=["POST", "OPTIONS"])
+@require_auth
 def simple_chat_reset():
     if request.method == "OPTIONS":
         return make_response("", 200)  # preflight OK
@@ -461,6 +467,7 @@ def simple_chat_reset():
     return jsonify({"ok": True}), 200
 
 @app.route('/agentic_pipeline_editor', methods=['GET'])
+@require_auth
 def agentic_pipeline_editor():
     task = request.args.get('task')
     # User proxy:

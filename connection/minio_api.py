@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from minio_access import remove_bucket, remove_object, download_last_object, get_url_last_object, list_objects, upload_object, create_bucket, get_object, print_info_object, download_inlumen_object
+from auth_middleware import require_auth
 import os
 import datetime
 
@@ -11,7 +12,7 @@ app = Flask(__name__)
 def add_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = 'http://localhost:8080'  # allowed origin
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, DELETE'  # Adjust as needed
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
     return response
 
 # Apply the CORS function to all routes using the after_request decorator
@@ -21,6 +22,7 @@ def apply_cors(response):
 
 # Add file to MinIO
 @app.route('/minio_upload_file', methods=['POST'])
+@require_auth
 def minio_upload_file():
     if 'file' not in request.files:
         return jsonify({'status': 400})
@@ -52,8 +54,11 @@ def minio_upload_file():
     return jsonify({'status': 200, 'file_name':file_name, 'add_date':now.strftime("%Y-%m-%d %H:%M:%S"), 'format':file_name.split(".")[-1]})
 
 # Remove file from MinIO
-@app.route('/minio_remove_file', methods=['DELETE'])
+@app.route('/minio_remove_file', methods=['DELETE', 'OPTIONS'])
+@require_auth
 def minio_remove_file():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
     filename = request.form.get('filename')
     bucket_id = "files-step-id-"+ str(request.form.get('bucket_id'))
     bucket_id = bucket_id.lower() 
@@ -73,8 +78,11 @@ def minio_remove_file():
     return jsonify({'status': 200, 'file_name':filename, 'removal_date':now.strftime("%Y-%m-%d %H:%M:%S"), 'format':filename.split(".")[-1]})
 
 # Remove bucket from MinIO
-@app.route('/minio_clear_bucket', methods=['DELETE'])
+@app.route('/minio_clear_bucket', methods=['DELETE', 'OPTIONS'])
+@require_auth
 def minio_clear_bucket():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
     bucket_id = "files-step-id-"+ str(request.args.get('bucket_id'))
     bucket_id = bucket_id.lower() 
     try:
@@ -87,6 +95,7 @@ def minio_clear_bucket():
     return jsonify({'status': 200, 'clear_date':now.strftime("%Y-%m-%d %H:%M:%S")})
 
 @app.route('/minio_local_download', methods=['GET'])
+@require_auth
 def minio_local_download():
     bucket_name = request.args.get('bucket_id')
     bucket_name = bucket_name.lower() # Bucket names are always low cased
@@ -99,6 +108,7 @@ def minio_local_download():
     return jsonify({'status': 200})
 
 @app.route('/minio_inlumen_download', methods=['GET'])
+@require_auth
 def minio_inlumen_download():
     bucket_name = request.args.get('bucket_id')
     bucket_name = bucket_name.lower() # Bucket names are always low cased
@@ -111,6 +121,7 @@ def minio_inlumen_download():
     return jsonify({'status': 200, 'file_path': file_path})
 
 @app.route('/minio_list_objects', methods=['GET'])
+@require_auth
 def minio_list_objects():
     bucket_name = request.args.get('bucket_name')  
     objects = list_objects(bucket_name=bucket_name)
@@ -120,6 +131,7 @@ def minio_list_objects():
     return jsonify({'objects': object_list})
     
 @app.route('/minio_create_bucket', methods=['GET'])
+@require_auth
 def minio_create_bucket():
     bucket_name = request.args.get('bucket_name')  
     create_bucket(bucket_name=bucket_name)
@@ -127,6 +139,7 @@ def minio_create_bucket():
     return jsonify({'status': 200})
 
 @app.route('/minio_get_object', methods=['GET'])
+@require_auth
 def minio_get_object():
     bucket_name = request.args.get('bucket_name')
     object_name = request.args.get('object_name') 

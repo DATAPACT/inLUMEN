@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from neo4j import GraphDatabase
+from auth_middleware import require_auth
 import uuid
 import configparser
 import json
@@ -30,6 +31,7 @@ def apply_cors(response):
 
 # Adds a pipeline step into Neo4J:
 @app.route('/neo4j_add_node', methods=['POST'])
+@require_auth
 def neo4j_add_node():
     print("[neo4j_api.py] Received query to add STEP node in Neo4j.")
     data = request.json
@@ -117,6 +119,7 @@ def neo4j_add_node():
 
 # Adds (or updates) a FILE node once a file is added
 @app.route('/neo4j_add_file', methods=['POST'])
+@require_auth
 def neo4j_add_file():
     print("[neo4j_api.py] Received query to add/update FILE node in Neo4j.")
     data = request.json or {}
@@ -147,8 +150,11 @@ def neo4j_add_file():
         return jsonify({"error": str(e)}), 500
 
 # Removes a FILE node once a file is removed (if several alike - delete most recent)
-@app.route('/neo4j_delete_file', methods=['DELETE'])
+@app.route('/neo4j_delete_file', methods=['DELETE', 'OPTIONS'])
+@require_auth
 def neo4j_delete_file():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
     print("[neo4j_api.py] Received query to remove FILE node in Neo4j.")
     data = request.json
     properties = data.get("properties", {})
@@ -178,6 +184,7 @@ def neo4j_delete_file():
 
 # Updates a pipeline step in Neo4J:
 @app.route('/neo4j_update_node', methods=['POST'])
+@require_auth
 def neo4j_update_node():
     print("[neo4j_api.py] Received query to update STEP node in Neo4j.")
     data = request.json
@@ -239,8 +246,11 @@ def neo4j_update_node():
         return jsonify({"error": str(e)}), 500
     
 # Deletes all nodes and edges, returns STEP flow_ids deleted
-@app.route('/neo4j_clear_nodes', methods=['DELETE'])
+@app.route('/neo4j_clear_nodes', methods=['DELETE', 'OPTIONS'])
+@require_auth
 def neo4j_clear_nodes():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
     print("[neo4j_api.py] Clearing all nodes from Neo4j")
     query_get = """
     MATCH (s:STEP)
@@ -266,8 +276,11 @@ def neo4j_clear_nodes():
         return jsonify({"error": str(e)}), 500
 
 # Deletes one STEP node and edges:
-@app.route('/neo4j_delete_node/<flow_id>', methods=['DELETE'])
+@app.route('/neo4j_delete_node/<flow_id>', methods=['DELETE', 'OPTIONS'])
+@require_auth
 def neo4j_delete_node(flow_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
     print(f"[neo4j_api.py] Delete STEP node.")
     # TODO: Update to UID instead of flow_id once neo4j --> frontend connection is established
     try:
@@ -290,6 +303,7 @@ def neo4j_delete_node(flow_id):
 
 # Add edge between two steps
 @app.route('/neo4j_add_edge', methods=['POST'])
+@require_auth
 def neo4j_add_edge():
     print("[neo4j_api.py] Received request to add relation FLOWS_TO.")
     data = request.json
@@ -327,11 +341,14 @@ def neo4j_add_edge():
         return jsonify({"error": str(e)}), 500
     
 # Remove edge between two steps
-@app.route('/neo4j_delete_edge', methods=['DELETE'])
+@app.route('/neo4j_delete_edge', methods=['DELETE', 'OPTIONS'])
+@require_auth
 def neo4j_delete_edge():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
     print("[neo4j_api.py] Received request to add relation FLOWS_TO.")
     data = request.json
-    properties = data.get("properties", {}) 
+    properties = data.get("properties", {})
     from_flow_id = properties.get("flow_id_source")
     to_flow_id = properties.get("flow_id_target")
     if not from_flow_id or not to_flow_id:
@@ -364,6 +381,7 @@ def neo4j_delete_edge():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/neo4j_get_all_files', methods=['GET'])
+@require_auth
 def neo4j_get_all_files():
     print("[neo4j_api.py] Received request to get all filenames and buckets.")
     query = """
@@ -386,6 +404,7 @@ def neo4j_get_all_files():
         return jsonify({"error": str(e)}), 500
     
 @app.route('/neo4j_get_overview_properties', methods=['GET'])
+@require_auth
 def neo4j_get_overview_properties():
     print("[neo4j_api.py] Received request to get pipeline overview properties.")
     query = """
@@ -416,6 +435,7 @@ def neo4j_get_overview_properties():
 
 # (Internal) Run query by LLM
 @app.route('/neo4j_run_query', methods=['POST'])
+@require_auth
 def neo4j_run_query():
     data = request.json
     query = data['query']
@@ -428,6 +448,7 @@ def neo4j_run_query():
     
 
 @app.route('/neo4j_save_graph', methods=['GET'])
+@require_auth
 def neo4j_save_graph():
     query = """
     MATCH (n:STEP)-[r]->(m:STEP)
@@ -488,6 +509,7 @@ def neo4j_save_graph():
         return jsonify({"error": str(e)}), 500
     
 @app.route('/neo4j_load_graph', methods=['POST'])
+@require_auth
 def neo4j_load_graph():
     data = request.get_json()
     nodes = data.get("nodes", [])
@@ -550,6 +572,7 @@ def neo4j_load_graph():
 
     
 @app.route('/api/neo4j_get_graph', methods=['GET'])
+@require_auth
 def neo4j_get_graph():
     # API wrap for function obtaining current graph in Neo4J
     data = neo4j_graph() 
@@ -600,8 +623,11 @@ def neo4j_graph():
 
 
 
-@app.route('/neo4j_delete_node/<uid>', methods=['DELETE'])
+@app.route('/neo4j_delete_node/<uid>', methods=['DELETE', 'OPTIONS'])
+@require_auth
 def delete_node(uid):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
     query = """
         MATCH (n:STEP { uid: $uid })
         DETACH DELETE n
@@ -617,6 +643,7 @@ def delete_node(uid):
 
 
 @app.route('/neo4j_update_name', methods=['POST'])
+@require_auth
 def neo4j_update_name():
     data = request.json
     # Extracting fields from the request
@@ -641,6 +668,7 @@ def neo4j_update_name():
     
 
 @app.route('/neo4j_update_description', methods=['POST'])
+@require_auth
 def neo4j_update_description():
     data = request.json
     # Extracting fields from the request
