@@ -560,7 +560,7 @@ def neo4j_get_graph():
                     "description": props.get("description", ""),
                     "type": step_kind,
 
-                    # ✅ add files so polling doesn't wipe them
+                    # add files so polling doesn't wipe them
                     "files": filenames,
 
                     # optional richer info (bucket + added_at)

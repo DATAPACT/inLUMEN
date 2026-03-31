@@ -45,7 +45,7 @@ from neo4j import GraphDatabase
 from minio import Minio
 from minio.error import S3Error
 
-# Create a single global event loop for all requests
+# _________________Create a single global event loop for all requests____________
 global_loop = asyncio.new_event_loop()
 nest_asyncio.apply()
 asyncio.set_event_loop(global_loop)
@@ -60,44 +60,86 @@ def run_async(coro):
         asyncio.set_event_loop(global_loop)
     return global_loop.run_until_complete(coro)
 
+#_________________Model Configuration_________________
 # OpenAI version - if key is available:
 config = configparser.ConfigParser(allow_no_value = True)
 config.read('openaiapi.ini')
 openai_api_key = config.get('openai', 'OPENAI_API_KEY')
-
 openai_model_client = OpenAIChatCompletionClient(
     model = "gpt-4o",
     api_key = openai_api_key,
 )
-
 # Must disable parallel tool calls to avoid concurrency issues in AgentTool/TeamTool
 openai_model_client_no_parallel_calls = OpenAIChatCompletionClient(
     model = "gpt-4o",
     api_key = openai_api_key,
     parallel_tool_calls=False,  
 )
-
 # Assuming Ollama server is running locally on port 11434:
 ollama_model_client = OllamaChatCompletionClient(model="llama3.1:8b", host= "http://llm:11434")
-
 # All agents get following config. Change LLM config to experiment:
-# TODO: For Dockerfile/YAML --> Update so user chooses this via frontend
 current_model_client = openai_model_client
 
+#_________________MinIO Access_________________
+MINIO_CLIENT: Optional[Minio] = None
+def _get_minio_client() -> Minio:
+    """Lazily load a MinIO client using local config."""
+    global MINIO_CLIENT
+    if MINIO_CLIENT is not None:
+        return MINIO_CLIENT
+    config_minio = configparser.ConfigParser()
+    config_minio.read("minio_config.ini")
+    MINIO_CLIENT = Minio(
+        config_minio.get("minio", "endpoint"),
+        access_key=config_minio.get("minio", "access_key"),
+        secret_key=config_minio.get("minio", "secret_key"),
+        secure=config_minio.getboolean("minio", "secure"),
+    )
+    return MINIO_CLIENT
+
+#_________________File state_________________
 STATE_DIR = Path("./state")
 STATE_DIR.mkdir(exist_ok=True)
-
 def _state_file(session_id: str) -> Path:
     return STATE_DIR / f"{session_id}.json"
-
 def load_state_from_disk(session_id: str):
     p = _state_file(session_id)
     if not p.exists():
         return None
     return json.loads(p.read_text("utf-8"))
-
 def save_state_to_disk(session_id: str, team_state):
     _state_file(session_id).write_text(json.dumps(team_state), encoding="utf-8")
+
+# TODO: Move below within build function
+async def _fetch_pipeline_graph() -> dict:
+    """Fetch the current pipeline nodes, files and flows from Neo4j."""
+    api_url = "http://localhost:5001/neo4j_get_graph"
+    try:
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None, lambda: requests.get(api_url, timeout=60)
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to load pipeline graph from Neo4j ({api_url}): {exc}"
+        ) from exc
+
+async def _read_minio_object(bucket_name: str, object_name: str) -> str:
+    """Return the text content of a MinIO object."""
+    def _sync_read() -> str:
+        client = _get_minio_client()
+        response = client.get_object(bucket_name, object_name)
+        try:
+            data = response.read()
+        finally:
+            response.close()
+            response.release_conn()
+        return data.decode("utf-8", errors="ignore")
+
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _sync_read)
 
 class ForcedAssistantAgent(AssistantAgent):
     """AssistantAgent that always enforces tool calling."""
@@ -511,6 +553,223 @@ def build_pipeline_editing_team(model: str) -> RoundRobinGroupChat:
     # )
     return RoundRobinGroupChat([pipeline_editor], max_turns=1)
 
+def _pipeline_design_tool(params: Optional[dict] = None) -> dict:
+    """FunctionTool used by the team to read the Neo4j graph export."""
+    print("[analytics_api.py] _pipeline_design_tool invoked")
+    return run_async(_fetch_pipeline_graph())
+
+def _minio_codefetch_tool(params: Optional[dict] = None) -> dict:
+    """Download code files referenced by the current pipeline steps."""
+    payload = params or {}
+    file_refs = payload.get("files", []) or []
+    retrieved = []
+    print("[analytics_api.py] _minio_codefetch_tool called with entries:", file_refs)
+    for entry in file_refs:
+        bucket = str(entry.get("bucket") or "").lower()
+        filename = str(entry.get("filename") or "")
+        step_id = str(entry.get("step_id") or "")
+        if not bucket or not filename:
+            continue
+        try:
+            content = run_async(_read_minio_object(bucket, filename))
+        except Exception as exc:
+            content = f"[ERROR: {exc}]"
+        retrieved.append(
+            {
+                "step_id": step_id,
+                "bucket": bucket,
+                "filename": filename,
+                "content": content,
+            }
+        )
+        print(
+            f"[analytics_api.py] _minio_codefetch_tool read {filename} from {bucket} "
+            f"(step {step_id}): {'error' if content.startswith('[ERROR') else 'success'}"
+        )
+    return {"files": retrieved}
+
+
+def _generate_argo_yaml_tool(params: Optional[dict] = None) -> str:
+    """Produce the final Argo Workflow YAML from pipeline, code, and dockerfile metadata."""
+    payload = params or {}
+    pipeline = payload.get("pipeline_graph") or {}
+    file_contents = payload.get("file_contents") or []
+    dockerfiles = payload.get("dockerfiles") or []
+
+    steps = []
+    for row in pipeline.get("step_rows", []) or []:
+        step = row.get("step") or {}
+        flow_id = str(step.get("flow_id") or "").strip()
+        if not flow_id:
+            continue
+        steps.append(
+            {
+                "flow_id": flow_id,
+                "label": step.get("label", ""),
+                "description": step.get("description", ""),
+                "type": step.get("type", "custom"),
+                "files": row.get("files") or [],
+            }
+        )
+
+    def _to_int(flow_id: str) -> int:
+        try:
+            return int(flow_id)
+        except Exception:
+            return float("inf")
+
+    ordered_steps = sorted(steps, key=lambda s: _to_int(s["flow_id"]))
+
+    file_lookup: Dict[str, List[dict]] = {}
+    for entry in file_contents:
+        step_id = str(entry.get("step_id") or "")
+        file_lookup.setdefault(step_id, []).append(entry)
+
+    dockerfile_lookup: Dict[str, List[dict]] = {}
+    for entry in dockerfiles:
+        flow_id = str(entry.get("flow_id") or "").strip()
+        if flow_id:
+            dockerfile_lookup.setdefault(flow_id, []).append(entry)
+
+    def _image_name(entry: dict, flow_id: str) -> str:
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            return f"inlumen/step-{flow_id}:latest"
+        base = Path(name).stem if "." in name else name
+        base = re.sub(r"[^a-zA-Z0-9._-]", "-", base)
+        if not base:
+            base = f"step-{flow_id}"
+        return f"inlumen/{base}:latest"
+
+    lines = [
+        "apiVersion: argoproj.io/v1alpha1",
+        "kind: Workflow",
+        "metadata:",
+        "  name: inlumen-pipeline",
+        "spec:",
+        "  entrypoint: pipeline-steps",
+        "  templates:",
+        "  - name: pipeline-steps",
+        "    steps:",
+    ]
+
+    for step in ordered_steps:
+        template = f"step-{step['flow_id']}"
+        lines.append("      - - name: " + template)
+        lines.append("           template: " + template)
+
+    for step in ordered_steps:
+        template = f"step-{step['flow_id']}"
+        files = file_lookup.get(step["flow_id"], [])
+        docker_entries = dockerfile_lookup.get(step["flow_id"], [])
+        script_body = []
+        script_body.append(f"# Step {step['flow_id']}: {step['label'] or 'Unnamed'}")
+        script_body.append(f"# Type: {step['type']}")
+        if docker_entries:
+            script_body.append(
+                f"# Dockerfiles: {', '.join([entry.get('name') or 'unknown' for entry in docker_entries])}"
+            )
+        if step["description"]:
+            script_body.append(f"# Description: {step['description']}")
+        if files:
+            for idx, file_entry in enumerate(files, start=1):
+                script_body.append(
+                    f"# File {idx}: {file_entry['filename']} (bucket {file_entry['bucket']})"
+                )
+                if file_entry["content"]:
+                    script_body.append("")
+                    script_body.extend(file_entry["content"].splitlines() or [""])
+                    script_body.append("")
+        else:
+            script_body.append(f'print("Executing step {step["flow_id"]} ({step["label"]})");')
+
+        image = (
+            _image_name(docker_entries[0], step["flow_id"])
+            if docker_entries
+            else f"python:3.11"
+        )
+
+        lines.extend(
+            [
+                "  - name: " + template,
+                "    script:",
+                f"      image: {image}",
+                "      command: [python]",
+                "      source: |-",
+            ]
+        )
+        for line in script_body:
+            lines.append("        " + line)
+        lines.append("")
+
+    workflow_text = "\n".join(lines)
+    print(
+        "[analytics_api.py] _generate_argo_yaml_tool produced Argo workflow for steps:",
+        [step["flow_id"] for step in ordered_steps],
+    )
+    return workflow_text
+
+
+def build_argo_yaml_team() -> RoundRobinGroupChat:
+    """Construct an AutoGen team that fetches pipeline info, downloads code, and emits Argo YAML."""
+    pipeline_tool = FunctionTool(
+        _pipeline_design_tool,
+        name="fetch_pipeline_design",
+        description="Returns the current pipeline graph (steps, files, flows) from Neo4j.",
+    )
+
+    minio_tool = FunctionTool(
+        _minio_codefetch_tool,
+        name="fetch_code_file_contents",
+        description="Read referenced files from MinIO and return their contents for each step.",
+    )
+
+    yaml_tool = FunctionTool(
+        _generate_argo_yaml_tool,
+        name="generate_argo_workflow",
+        description="Convert the pipeline graph and file contents into an Argo Workflow YAML definition.",
+    )
+
+    pipeline_agent = AssistantAgent(
+        name="pipeline_inspector",
+        model_client=current_model_client,
+        tools=[pipeline_tool],
+        system_message="""You are the pipeline inspector. Call [fetch_pipeline_design] to grab the pipeline graph,
+        including all steps, their flow IDs, labels, types, and linked buckets/files. Replay that information in
+        plain language so downstream agents know which buckets/file names to fetch.""",
+        max_tool_iterations=1,
+        reflect_on_tool_use=True,
+    )
+
+    file_agent = AssistantAgent(
+        name="code_reader",
+        model_client=current_model_client,
+        tools=[minio_tool],
+        system_message="""You are the code reader. Examine the conversation to identify every step (flow_id)
+        and its linked bucket/file names. Call [fetch_code_file_contents] once with all step/bucket/file pairs so we
+        can capture file content, input/output hints, and dependency clues.""",
+        max_tool_iterations=1,
+        reflect_on_tool_use=True,
+    )
+
+    yaml_agent = AssistantAgent(
+        name="argo_composer",
+        model_client=current_model_client,
+        tools=[yaml_tool],
+        system_message="""You are the Argo Workflow composer. Use the pipeline graph message, the code reader
+        message, and the Dockerfile metadata message to craft a single Argo Workflow YAML that sequences every step in flow order.
+        Call [generate_argo_workflow] with parameters containing "pipeline_graph" set to the pipeline tool output,
+        "file_contents" set to the code reader tool output, and "dockerfiles" set to the dockerfile metadata tool output.
+        Return only the YAML document content, no comments.""",
+        max_tool_iterations=1,
+        reflect_on_tool_use=True,
+    )
+
+    return RoundRobinGroupChat(
+        [pipeline_agent, file_agent, yaml_agent],
+        max_turns=25,  # cap overall iterations to protect against loops
+    )
+
 app = Flask(__name__)
 
 # Define a function to set the CORS headers
@@ -585,14 +844,44 @@ def agentic_generate_yaml():
     data = request.get_json() or {}
     dockerfile_json = data.get("dockerfile_json")
     print("[analytics_api.py] Dockerfile received:", dockerfile_json)
-    # TODO:
-    # Agent to fetch full pipeline overview (+ minIO buckets)
-    # Agent to read files & dockerfiles. 
-    # Agent to generate ArgoWorkflow YAML file based on content of files
-    yaml_text = """ REPLACE """  # replace with real YAML later
-    resp = make_response(yaml_text, 200)
-    resp.headers["Content-Type"] = "application/x-yaml; charset=utf-8"
-    return resp
+    task = data.get(
+        "task",
+        "Generate an Argo Workflow YAML file based on the given pipeline design.",
+    )
+    task_message = task
+    # Add dockerfiles to task, if they exist
+    if dockerfile_json:
+        try:
+            dockerfile_dump = json.dumps(dockerfile_json)
+        except Exception:
+            dockerfile_dump = str(dockerfile_json)
+        task_message += "\n\nDockerfile metadata: " + dockerfile_dump
+
+    async def run_team():
+        # Build & Run team
+        team = build_argo_yaml_team()
+        result = await team.run(task=task_message)
+        print("[analytics_api.py] build_argo_yaml_team run result messages:")
+        for idx, msg in enumerate(result.messages or []):
+            source = getattr(msg, "source", None)
+            content = getattr(msg, "content", None)
+            print(f"  message[{idx}] source={source} content_preview={str(content)[:200]}")
+        final_message = ""
+        for msg in reversed(result.messages or []):
+            if getattr(msg, "source", None) in ("assistant", "assistant_agent") and hasattr(msg, "content"):
+                final_message = msg.content
+                break
+        if not final_message and result.messages:
+            final_message = getattr(result.messages[-1], "content", "")
+        return final_message
+    try:
+        yaml_text = asyncio.run(run_team())
+        resp = make_response(yaml_text, 200)
+        resp.headers["Content-Type"] = "application/x-yaml; charset=utf-8"
+        return resp
+    except Exception as e:
+        print("[analytics_api.py] Error generating YAML:", e)
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/agentic_pipeline_editor", methods=["POST", "OPTIONS"])
 def agentic_pipeline_editor():
@@ -604,6 +893,7 @@ def agentic_pipeline_editor():
         return jsonify({"error": "Missing user_message"}), 400
     session_id = payload.get("session_id") or str(uuid.uuid4())
     model = payload.get("model") or "gpt-4o-mini"
+    print("[analytics_api.py] User message sent to pipeline editor; Model used for responses: " + model)
     async def run_turn():
         team = build_pipeline_editing_team(model=model)
         team_state = load_state_from_disk(session_id)
