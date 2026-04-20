@@ -62,6 +62,7 @@ ollama-volume/
 connection/openaiapi.ini
 connection/minio_config.ini
 connection/neo4j_config.ini
+connection/state/
 .env
 docker-compose.override.yml
 frontend/.env

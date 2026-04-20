@@ -1,9 +1,4 @@
 #!/bin/bash
+set -euo pipefail
 
-# Run each Python file in the background
-python -u minio_api.py &
-python -u neo4j_api.py &
-python -u analytics_api.py 
-
-# Wait for all background processes to finish
-wait
+exec python service_runner.py

@@ -62,24 +62,64 @@ def run_async(coro):
     return global_loop.run_until_complete(coro)
 
 #_________________Model Configuration_________________
-# OpenAI version - if key is available:
-config = configparser.ConfigParser(allow_no_value = True)
-config.read('openaiapi.ini')
-openai_api_key = config.get('openai', 'OPENAI_API_KEY')
-openai_model_client = OpenAIChatCompletionClient(
-    model = "gpt-4o",
-    api_key = openai_api_key,
-)
-# Must disable parallel tool calls to avoid concurrency issues in AgentTool/TeamTool
-openai_model_client_no_parallel_calls = OpenAIChatCompletionClient(
-    model = "gpt-4o",
-    api_key = openai_api_key,
-    parallel_tool_calls=False,  
-)
-# Assuming Ollama server is running locally on port 11434:
-ollama_model_client = OllamaChatCompletionClient(model="llama3.1:8b", host= "http://llm:11434")
+# OpenAI version - use env first, then optional ini file.
+config = configparser.ConfigParser(allow_no_value=True)
+config.read("openaiapi.ini")
+
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://llm:11434")
+DEFAULT_CHAT_MODEL = os.getenv("DEFAULT_CHAT_MODEL", "llama3.1")
+NEO4J_API_BASE_URL = os.getenv("NEO4J_API_BASE_URL", "http://127.0.0.1:5001")
+CORS_ALLOWED_ORIGIN = os.getenv("CORS_ALLOWED_ORIGIN", "http://localhost:8080")
+
+openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+if not openai_api_key and config.has_section("openai"):
+    openai_api_key = config.get("openai", "OPENAI_API_KEY", fallback="").strip()
+
+openai_model_client = None
+openai_model_client_no_parallel_calls = None
+if openai_api_key:
+    openai_model_client = OpenAIChatCompletionClient(
+        model=OPENAI_MODEL,
+        api_key=openai_api_key,
+    )
+    # Must disable parallel tool calls to avoid concurrency issues in AgentTool/TeamTool
+    openai_model_client_no_parallel_calls = OpenAIChatCompletionClient(
+        model=OPENAI_MODEL,
+        api_key=openai_api_key,
+        parallel_tool_calls=False,
+    )
+
+ollama_model_client = OllamaChatCompletionClient(model=OLLAMA_MODEL, host=OLLAMA_HOST)
+
+
+def _is_openai_model(model: str | None) -> bool:
+    return bool(model) and model.lower().startswith("gpt-")
+
+
+def _resolve_ollama_model(model: str | None) -> str:
+    if not model:
+        return OLLAMA_MODEL
+    normalized = model.strip()
+    if normalized == "llama3.1":
+        return OLLAMA_MODEL
+    return normalized
+
+
+def _select_model_client(model: str | None) -> ChatCompletionClient:
+    if _is_openai_model(model):
+        if openai_model_client is None:
+            print(
+                f"[analytics_api.py] OpenAI model '{model}' requested but OPENAI_API_KEY is not configured. Falling back to Ollama."
+            )
+        else:
+            return OpenAIChatCompletionClient(model=model, api_key=openai_api_key)
+    return OllamaChatCompletionClient(model=_resolve_ollama_model(model), host=OLLAMA_HOST)
+
+
 # All agents get following config. Change LLM config to experiment:
-current_model_client = openai_model_client
+current_model_client = openai_model_client or ollama_model_client
 
 #_________________MinIO Access_________________
 MINIO_CLIENT: Optional[Minio] = None
@@ -114,7 +154,7 @@ def save_state_to_disk(session_id: str, team_state):
 # TODO: Move below within build function
 async def _fetch_pipeline_graph() -> dict:
     """Fetch the current pipeline nodes, files and flows from Neo4j."""
-    api_url = "http://localhost:5001/neo4j_get_graph"
+    api_url = f"{NEO4J_API_BASE_URL}/neo4j_get_graph"
     try:
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
@@ -206,11 +246,7 @@ class ForcedAssistantAgent(AssistantAgent):
 def build_pipeline_editing_team(model: str) -> RoundRobinGroupChat:
     print("[analytics_api.py] Building pipeline editing team with model " + model + " configuration.")
     # Configure the model client used behind the agents according to selection:
-    if model == "gpt-4o":
-        model_client = OpenAIChatCompletionClient(model="gpt-4o", api_key = openai_api_key)
-    else:
-        # Defaults to Ollama:
-        model_client = OllamaChatCompletionClient(model="llama3.1:8b", host= "http://datapact-llm:11434")
+    model_client = _select_model_client(model)
     # Database Schema (METAMODEL) - TODO: hidden for now
     DB_SCHEMA = """
         Nodes:
@@ -252,7 +288,7 @@ def build_pipeline_editing_team(model: str) -> RoundRobinGroupChat:
         """Run a Cypher query against Neo4j and return results. Returns String representation."""
         try:
             print("[analytics_api.py] Executing Neo4J query of type: "+ query_type)
-            api_url = "http://localhost:5001/neo4j_run_query"  # Adjust if API host differs
+            api_url = f"{NEO4J_API_BASE_URL}/neo4j_run_query"
             payload = {"query": query}
             headers = {"Content-Type": "application/json"}
             # Run the API call in a thread (since requests is blocking)
@@ -775,9 +811,9 @@ app = Flask(__name__)
 
 # Define a function to set the CORS headers
 def add_cors_headers(response):
-    response.headers['Access-Control-Allow-Origin'] = 'http://localhost:8080'  # allowed origin
+    response.headers['Access-Control-Allow-Origin'] = CORS_ALLOWED_ORIGIN
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'  # Adjust as needed
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
     return response
 
 # Apply the CORS function to all routes using the after_request decorator
@@ -886,6 +922,7 @@ def agentic_generate_yaml():
         print("[analytics_api.py] Error generating YAML:", e)
         return jsonify({"error": str(e)}), 500
 
+@app.route("/simple_chat", methods=["POST", "OPTIONS"])
 @app.route("/agentic_pipeline_editor", methods=["POST", "OPTIONS"])
 @require_auth
 def agentic_pipeline_editor():
@@ -896,7 +933,7 @@ def agentic_pipeline_editor():
     if not user_message:
         return jsonify({"error": "Missing user_message"}), 400
     session_id = payload.get("session_id") or str(uuid.uuid4())
-    model = payload.get("model") or "gpt-4o-mini"
+    model = payload.get("model") or DEFAULT_CHAT_MODEL
     print("[analytics_api.py] User message sent to pipeline editor; Model used for responses: " + model)
     async def run_turn():
         team = build_pipeline_editing_team(model=model)
@@ -920,6 +957,7 @@ def agentic_pipeline_editor():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/simple_chat/reset", methods=["POST", "OPTIONS"])
 @app.route("/agentic_pipeline_editor/reset", methods=["POST", "OPTIONS"])
 @require_auth
 def agentic_pipeline_editor_reset():

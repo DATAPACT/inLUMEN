@@ -4,13 +4,14 @@ from auth_middleware import require_auth
 import os
 import datetime
 
+CORS_ALLOWED_ORIGIN = os.getenv("CORS_ALLOWED_ORIGIN", "http://localhost:8080")
 
 app = Flask(__name__)
 
 
 # Define a function to set the CORS headers
 def add_cors_headers(response):
-    response.headers['Access-Control-Allow-Origin'] = 'http://localhost:8080'  # allowed origin
+    response.headers['Access-Control-Allow-Origin'] = CORS_ALLOWED_ORIGIN
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, DELETE'  # Adjust as needed
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
     return response
@@ -149,5 +150,4 @@ def minio_get_object():
     return jsonify({'object': object_response})
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=5000)
-    
+    app.run(host="0.0.0.0", port=5003)

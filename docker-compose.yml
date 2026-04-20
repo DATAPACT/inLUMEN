@@ -1,11 +1,14 @@
-version: '2.4'
+name: inlumen
 
 networks:
   datapact_network:
     name: datapact_network
 
+volumes:
+  frontend_node_modules:
+
 services:
-  datapact_neo4j_db:
+  neo4j:
     image: neo4j:5-community
     container_name: datapact_neo4j_db
     hostname: datapact-neo4j-db
@@ -20,67 +23,130 @@ services:
       - ./neo4j_import_volume:/import
       - ./neo4j_plugins_volume:/plugins
     environment:
-      - NEO4J_AUTH=neo4j/password
-      - NEO4J_PLUGINS=["apoc","graph-data-science"]
-      - NEO4J_dbms.security.procedures.allowlist=apoc.*,gds.*
-      - NEO4J_apoc.import.file.enabled=true
+      NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/password}
+      NEO4J_PLUGINS: '["apoc","graph-data-science"]'
+      NEO4J_dbms.security.procedures.allowlist: apoc.*,gds.*
+      NEO4J_apoc.import.file.enabled: "true"
     healthcheck:
       test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "password", "RETURN 1;"]
       interval: 10s
       timeout: 5s
       retries: 10
     networks:
-      - datapact_network
+      datapact_network:
+        aliases:
+          - datapact-neo4j-db
 
-  datapact_minio_db:
+  minio:
     image: minio/minio:latest
     container_name: datapact_minio_db
     hostname: datapact-minio-db
     command: server --address 0.0.0.0:9000 --console-address ":9099" /data
+    restart: unless-stopped
     environment:
-      - MINIO_ROOT_USER=minio
-      - MINIO_ROOT_PASSWORD=password
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio-datapact}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio-datapact}
     ports:
       - "9000:9000"
       - "9099:9099"
     volumes:
       - ./minio_data:/data
     networks:
+      datapact_network:
+        aliases:
+          - datapact-minio-db
+
+  llm:
+    image: ollama/ollama:latest
+    container_name: datapact_llm
+    hostname: datapact-llm
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    tty: true
+    volumes:
+      - ./ollama-volume:/root/.ollama
+    networks:
+      datapact_network:
+        aliases:
+          - datapact-llm
+
+  llm-init:
+    image: ollama/ollama:latest
+    container_name: datapact_llm_init
+    depends_on:
+      llm:
+        condition: service_started
+    environment:
+      OLLAMA_HOST: http://llm:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+    entrypoint:
+      - /bin/sh
+      - -c
+    command:
+      - until ollama list >/dev/null 2>&1; do sleep 2; done; ollama pull "$${OLLAMA_MODEL}"
+    restart: "no"
+    networks:
       - datapact_network
 
-  datapact_frontend:
-    build: ./frontend
+  connection:
+    build:
+      context: ./connection
+    container_name: datapact_connection
+    hostname: datapact-connection
+    restart: unless-stopped
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      llm-init:
+        condition: service_completed_successfully
+    working_dir: /usr/inlumen
+    ports:
+      - "5003:5000"
+      - "5001:5001"
+      - "5002:5002"
+    volumes:
+      - ./connection:/usr/inlumen
+    environment:
+      PYTHONUNBUFFERED: "1"
+      CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:-http://localhost:8080}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OLLAMA_HOST: http://llm:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+      DEFAULT_CHAT_MODEL: ${DEFAULT_CHAT_MODEL:-llama3.1}
+      AUTH_ENABLED: ${AUTH_ENABLED:-false}
+      KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-}
+      KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:-}
+      WATCH_INTERVAL_SECONDS: ${WATCH_INTERVAL_SECONDS:-1.0}
+    command:
+      - python
+      - dev_runner.py
+    networks:
+      - datapact_network
+
+  frontend:
+    build:
+      context: ./frontend
     container_name: datapact_frontend
     hostname: datapact-frontend
+    restart: unless-stopped
+    depends_on:
+      connection:
+        condition: service_started
     ports:
       - "8080:8080"
     volumes:
       - ./frontend:/app
-      - /app/node_modules
+      - frontend_node_modules:/app/node_modules
     environment:
       NODE_ENV: development
-    command: npm run dev -- --host
+      VITE_MINIO_API_URL: ${VITE_MINIO_API_URL:-http://localhost:5000}
+      VITE_NEO4J_API_URL: ${VITE_NEO4J_API_URL:-http://localhost:5001}
+      VITE_LLM_API_URL: ${VITE_LLM_API_URL:-http://localhost:5002}
+      VITE_AUTH_ENABLED: ${VITE_AUTH_ENABLED:-false}
+    command: npm run dev -- --host 0.0.0.0 --port 8080
     networks:
       - datapact_network
-
-  datapact_llm:
-    image: ollama/ollama:latest
-    container_name: datapact_llm
-    hostname: datapact-llm
-    networks:
-      - datapact_network
-    ports:
-      - 11434:11434
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              capabilities: [gpu]
-    tty: true
-    volumes: 
-      - ./ollama-volume:/root/.ollama
-    restart: unless-stopped
-

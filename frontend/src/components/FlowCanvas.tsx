@@ -63,7 +63,7 @@ const addNodeToNeo4j = async (node: Node) => {
 
 const updateNodePositionInNeo4j = async (node: Node) => {
   try {
-    await fetch("http://localhost:5001/neo4j_update_node_position", {
+    await apiFetch(`${NEO4J_API_URL}/neo4j_update_node_position`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -233,14 +233,14 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
   }, []);
 
   const fetchPipelineUpdatedAt = useCallback(async (): Promise<string | null> => {
-    const res = await fetch("http://localhost:5001/neo4j_get_pipeline_updated_at", { method: "GET" });
+    const res = await apiFetch(`${NEO4J_API_URL}/neo4j_get_pipeline_updated_at`, { method: "GET" });
     if (!res.ok) throw new Error("Failed to fetch pipeline updated_at");
     const data = await res.json();
     return data?.updated_at ?? null;
   }, []);
 
   const fetchGraphAndApply = useCallback(async () => {
-    const res = await fetch("http://localhost:5001/neo4j_get_graph", { method: "GET" });
+    const res = await apiFetch(`${NEO4J_API_URL}/neo4j_get_graph`, { method: "GET" });
     if (!res.ok) throw new Error("Failed to fetch neo4j_get_graph");
     const data = await res.json();
     const g = normalizeGraph(data);
@@ -270,7 +270,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
         const updatedAt = await fetchPipelineUpdatedAt();
         if (cancelled) return;
         if (lastSeenUpdatedAtRef.current === null) {
-          lastSeenUpdatedAtRef.current = updatedAt;
+          if (updatedAt) {
+            await fetchGraphAndApply();
+          }
           return;
         }
         if (updatedAt && updatedAt !== lastSeenUpdatedAtRef.current) {
