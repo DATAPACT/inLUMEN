@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from 'react';
+import { apiFetch } from '@/utils/apiFetch';
+import { NEO4J_API_URL, LLM_API_URL } from '@/config/api';
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
@@ -188,7 +190,7 @@ export function Sidebar({
   };
 
   const fetchNeo4jFiles = async () => {
-    const filesRes = await fetch("http://localhost:5001/neo4j_get_all_files", { method: "GET" });
+    const filesRes = await apiFetch(`${NEO4J_API_URL}/neo4j_get_all_files`, { method: "GET" });
     if (!filesRes.ok) {
       const errText = await filesRes.text().catch(() => "");
       throw new Error(`Failed to fetch files: ${filesRes.status} ${filesRes.statusText} ${errText}`);
@@ -197,7 +199,7 @@ export function Sidebar({
   };
 
   const generateDockerfiles = async (files: any) => {
-    const genRes = await fetch("http://localhost:5002/agentic_generate_dockerfiles", {
+    const genRes = await apiFetch(`${LLM_API_URL}/agentic_generate_dockerfiles`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -216,7 +218,7 @@ export function Sidebar({
 
   // fetch overview properties when opening Overview tab
   const fetchPipelineOverview = async () => {
-    const res = await fetch("http://localhost:5001/neo4j_get_overview_properties", { method: "GET" });
+    const res = await apiFetch(`${NEO4J_API_URL}/neo4j_get_overview_properties`, { method: "GET" });
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
       throw new Error(`Failed to fetch overview: ${res.status} ${res.statusText} ${errText}`);
@@ -277,7 +279,7 @@ export function Sidebar({
 
       setDockerfileDownloads(links);
 
-      const yamlRes = await fetch("http://localhost:5002/agentic_generate_yaml", {
+      const yamlRes = await apiFetch(`${LLM_API_URL}/agentic_generate_yaml`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -340,7 +342,7 @@ export function Sidebar({
               <div className="space-y-2">
                 {nodeTypes.map((nodeType) => (
                   <div
-                    key={nodeType.type}
+                    key={nodeType.label}
                     draggable
                     onDragStart={(event) =>
                       onDragStart(event, {

@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify, Response, make_response
+from auth_middleware import require_auth
 from openai import OpenAI
 from autogen_ext.code_executors.local import LocalCommandLineCodeExecutor
 from autogen_ext.code_executors.docker import DockerCommandLineCodeExecutor
@@ -817,6 +818,7 @@ async def _generate_dockerfiles_with_agent(filenames: list[str], ids: list[str])
     return result.messages[-1].content
 
 @app.route('/agentic_generate_dockerfiles', methods=['POST', 'OPTIONS'])
+@require_auth
 def agentic_generate_dockerfiles():
     # Preflight
     if request.method == 'OPTIONS':
@@ -837,6 +839,7 @@ def agentic_generate_dockerfiles():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/agentic_generate_yaml', methods=['POST', 'OPTIONS'])
+@require_auth
 def agentic_generate_yaml(): 
     # Preflight
     if request.method == 'OPTIONS':
@@ -884,6 +887,7 @@ def agentic_generate_yaml():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/agentic_pipeline_editor", methods=["POST", "OPTIONS"])
+@require_auth
 def agentic_pipeline_editor():
     if request.method == "OPTIONS":
         return make_response("", 200)  # preflight OK
@@ -917,6 +921,7 @@ def agentic_pipeline_editor():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/agentic_pipeline_editor/reset", methods=["POST", "OPTIONS"])
+@require_auth
 def agentic_pipeline_editor_reset():
     if request.method == "OPTIONS":
         return make_response("", 200)  # preflight OK

@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { apiFetch } from '@/utils/apiFetch';
+import { MINIO_API_URL, NEO4J_API_URL } from '@/config/api';
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -124,7 +126,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
   // --- Neo4j update function ---
   const updatePropertyToNeo4J = useCallback(async (nodeId: string, properties: Record<string, any>) => {
     try {
-      const response = await fetch('http://localhost:5001/neo4j_update_node', {
+      const response = await apiFetch(`${NEO4J_API_URL}/neo4j_update_node`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         // Shape assumption: { flow_id, properties }
@@ -163,7 +165,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
       const form = new FormData();
       form.append("file", file);
       form.append("bucket_id", nodeId);
-      const res = await fetch("http://localhost:5000/minio_upload_file", {
+      const res = await apiFetch(`${MINIO_API_URL}/minio_upload_file`, {
         method: "POST",
         body: form,
       });
@@ -179,7 +181,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
       });
 
       // After MinIO upload: create FILE node + relationship in Neo4j
-      const neoRes = await fetch("http://localhost:5001/neo4j_add_file", {
+      const neoRes = await apiFetch(`${NEO4J_API_URL}/neo4j_add_file`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -212,7 +214,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
       const form = new FormData();
       form.append("filename", file.name);
       form.append("bucket_id", nodeId);
-      const res = await fetch("http://localhost:5000/minio_remove_file", {
+      const res = await apiFetch(`${MINIO_API_URL}/minio_remove_file`, {
         method: "DELETE",
         body: form,
       });
@@ -228,7 +230,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
       });
 
       // Remove one FILE node in Neo4j (latest added)
-      const neoRes = await fetch("http://localhost:5001/neo4j_delete_file", {
+      const neoRes = await apiFetch(`${NEO4J_API_URL}/neo4j_delete_file`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

@@ -1,4 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { apiFetch } from '@/utils/apiFetch';
+import { MINIO_API_URL, NEO4J_API_URL, LLM_API_URL } from '@/config/api';
 import { Sidebar } from '@/components/Sidebar';
 import { PropertiesPanel } from '@/components/PropertiesPanel';
 import { Toolbar } from '@/components/Toolbar';
@@ -193,7 +195,7 @@ const Index = () => {
     try {
       const activeCfg = selectedConfig || defaultConfig;
 
-      const res = await fetch("http://localhost:5002/agentic_pipeline_editor", {
+      const res = await apiFetch(`${LLM_API_URL}/simple_chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -235,7 +237,7 @@ const Index = () => {
 
     if (chatSessionId) {
       try {
-        await fetch("http://localhost:5002/agentic_pipeline_editor/reset", {
+        await apiFetch(`${LLM_API_URL}/simple_chat/reset`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ session_id: chatSessionId }),
