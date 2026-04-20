@@ -156,14 +156,10 @@ export function Sidebar({
   });
 
   // --- Dockerfiles state
-  const [isGeneratingDockerfiles, setIsGeneratingDockerfiles] = useState(false);
+  const [isGeneratingDeployment, setIsGeneratingDeployment] = useState(false);
   const [dockerfileDownloads, setDockerfileDownloads] = useState<DockerfileDownload[]>([]);
-  const [dockerfileError, setDockerfileError] = useState<string>("");
-
-  // --- YAML state
-  const [isGeneratingYaml, setIsGeneratingYaml] = useState(false);
   const [yamlDownload, setYamlDownload] = useState<YamlDownload | null>(null);
-  const [yamlError, setYamlError] = useState<string>("");
+  const [deploymentError, setDeploymentError] = useState<string>("");
 
   // Cleanup blob URLs on unmount
   useEffect(() => {
@@ -184,7 +180,6 @@ export function Sidebar({
       prev.forEach((d) => URL.revokeObjectURL(d.url));
       return [];
     });
-    setDockerfileError("");
   };
 
   const clearYamlDownload = () => {
@@ -192,7 +187,6 @@ export function Sidebar({
       if (prev?.url) URL.revokeObjectURL(prev.url);
       return null;
     });
-    setYamlError("");
   };
 
   const fetchNeo4jFiles = async () => {
@@ -259,19 +253,19 @@ export function Sidebar({
     };
   }, [activeTab]);
 
-  const handleGenerateDockerfiles = async () => {
+  const handleGenerateDeploymentArtifacts = async () => {
     try {
-      setDockerfileError("");
-      setIsGeneratingDockerfiles(true);
+      setDeploymentError("");
+      setIsGeneratingDeployment(true);
       clearDockerfileDownloads();
+      clearYamlDownload();
 
       const files = await fetchNeo4jFiles();
       const dockerfile_json = await generateDockerfiles(files);
 
       const dockerfiles = dockerfile_json?.dockerfiles ?? [];
       if (!Array.isArray(dockerfiles) || dockerfiles.length === 0) {
-        setDockerfileError("No Dockerfiles were generated (dockerfiles array is empty).");
-        return;
+        throw new Error("No Dockerfiles were generated (dockerfiles array is empty).");
       }
 
       const links: DockerfileDownload[] = dockerfiles.map(
@@ -284,23 +278,6 @@ export function Sidebar({
       );
 
       setDockerfileDownloads(links);
-    } catch (e: any) {
-      console.error("[Sidebar.tsx] Generate Dockerfiles error:", e);
-      setDockerfileError(e?.message || "Failed to generate Dockerfiles.");
-    } finally {
-      setIsGeneratingDockerfiles(false);
-    }
-  };
-
-  const handleGenerateYaml = async () => {
-    try {
-      setYamlError("");
-      setIsGeneratingYaml(true);
-      clearYamlDownload();
-
-      // Get files -> dockerfiles -> YAML
-      const files = await fetchNeo4jFiles();
-      const dockerfile_json = await generateDockerfiles(files);
 
       const yamlRes = await apiFetch(`${LLM_API_URL}/agentic_generate_yaml`, {
         method: "POST",
@@ -322,10 +299,10 @@ export function Sidebar({
 
       setYamlDownload({ name: `ai-pipeline-${Date.now()}.yaml`, url });
     } catch (e: any) {
-      console.error("[Sidebar.tsx] Generate YAML error:", e);
-      setYamlError(e?.message || "Failed to generate YAML.");
+      console.error("[Sidebar.tsx] Generate deployment artifacts error:", e);
+      setDeploymentError(e?.message || "Failed to generate deployment artifacts.");
     } finally {
-      setIsGeneratingYaml(false);
+      setIsGeneratingDeployment(false);
     }
   };
 
@@ -484,24 +461,24 @@ export function Sidebar({
               </div>
             </div>
 
-            {/* Dockerfiles */}
+            {/* Deployment artifacts */}
             <div className="p-4 border rounded-lg border-border">
-              <h3 className="text-sm font-medium mb-2">Generate Dockerfiles</h3>
+              <h3 className="text-sm font-medium mb-2">Generate Deployment Artifacts</h3>
               <p className="text-xs text-muted-foreground mb-3">
-                Fetches FILE nodes from Neo4j and generates Dockerfiles via the agent service.
+                Produces the Dockerfiles for each step and then builds the Argo Workflow YAML using those artifacts.
               </p>
 
               <Button
                 className="w-full"
-                onClick={handleGenerateDockerfiles}
-                disabled={isGeneratingDockerfiles || isGeneratingYaml}
+                onClick={handleGenerateDeploymentArtifacts}
+                disabled={isGeneratingDeployment}
               >
-                {isGeneratingDockerfiles ? "Generating..." : "Generate Dockerfiles"}
+                {isGeneratingDeployment ? "Generating..." : "Generate Deployment Artifacts"}
               </Button>
 
-              {dockerfileError && (
+              {deploymentError && (
                 <div className="mt-3 text-xs text-red-400">
-                  {dockerfileError}
+                  {deploymentError}
                 </div>
               )}
 
@@ -529,28 +506,6 @@ export function Sidebar({
                   >
                     Clear Dockerfile Links
                   </Button>
-                </div>
-              )}
-            </div>
-
-            {/* YAML */}
-            <div className="p-4 border rounded-lg border-border">
-              <h3 className="text-sm font-medium mb-2">Generate YAML</h3>
-              <p className="text-xs text-muted-foreground mb-3">
-                Generates YAML via the agent service (uses generated Dockerfiles as input).
-              </p>
-
-              <Button
-                className="w-full"
-                onClick={handleGenerateYaml}
-                disabled={isGeneratingYaml || isGeneratingDockerfiles}
-              >
-                {isGeneratingYaml ? "Generating..." : "Generate YAML"}
-              </Button>
-
-              {yamlError && (
-                <div className="mt-3 text-xs text-red-400">
-                  {yamlError}
                 </div>
               )}
 

@@ -34,7 +34,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-const SIMPLE_CHAT_SESSION_KEY = "simple-chat-session-id";
+const CHAT_SESSION_KEY = "chat-session-id";
 
 const Index = () => {
   const [selectedNode, setSelectedNode] = useState<any>(null);
@@ -56,12 +56,12 @@ const Index = () => {
 
   // Backend session id
   const [chatSessionId, setChatSessionId] = useState<string>(() => {
-    return localStorage.getItem(SIMPLE_CHAT_SESSION_KEY) || "";
+    return localStorage.getItem(CHAT_SESSION_KEY) || "";
   });
 
   useEffect(() => {
     if (chatSessionId) {
-      localStorage.setItem(SIMPLE_CHAT_SESSION_KEY, chatSessionId);
+      localStorage.setItem(CHAT_SESSION_KEY, chatSessionId);
     }
   }, [chatSessionId]);
 
@@ -207,7 +207,7 @@ const Index = () => {
 
       if (!res.ok) {
         const errText = await res.text();
-        throw new Error(`simple_chat failed (${res.status}): ${errText}`);
+        throw new Error(`Chat failed (${res.status}): ${errText}`);
       }
 
       const data = await res.json();
@@ -243,12 +243,12 @@ const Index = () => {
           body: JSON.stringify({ session_id: chatSessionId }),
         });
       } catch (e) {
-        console.warn("Failed to reset backend simple_chat session:", e);
+        console.warn("Failed to reset backend chat session:", e);
       }
     }
 
     setChatSessionId("");
-    localStorage.removeItem(SIMPLE_CHAT_SESSION_KEY);
+    localStorage.removeItem(CHAT_SESSION_KEY);
   };
 
   const handleSaveWorkflow = () => {
