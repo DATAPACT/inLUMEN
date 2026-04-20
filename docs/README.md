@@ -81,12 +81,18 @@ Step 4: Wait for the stack to finish starting. The root compose file now:
 - mounts the frontend and connection source folders for development
 - auto-restarts the Python API bundle when files under `connection/` change
 - pulls the default Ollama model automatically on first run
+- is set up to behave consistently on macOS and Windows through Docker Desktop
 
 Step 5: Optional: if you want GPT-based models, create a root `.env` file and set your API key there:
 
 ```
 OPENAI_API_KEY=sk-xxxx-(...)-xxxx
 ```
+
+For the best macOS/Windows experience:
+- use Docker Desktop with `docker compose`
+- keep the repository on a local filesystem, not a network drive
+- keep Git line endings as checked in; the repo now enforces LF for container-executed files
 
 Note: building the containers may take around 5 minutes, please wait until Neo4J is fully started.  
 

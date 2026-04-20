@@ -15,9 +15,8 @@ RUN pip3 install -r requirements.txt
 # Copy all files to the working directory in the container
 COPY . ./
 
-# Convert line endings for run.sh and all .py files to Unix format
-RUN sed -i 's/\r$//' run_inlumen.sh && \
-    find . -name "*.py" -exec sed -i 's/\r$//' {} +
+# Convert line endings for shell scripts and Python files to Unix format
+RUN find . \( -name "*.sh" -o -name "*.py" \) -exec sed -i 's/\r$//' {} +
 
 # Install Python dependencies from requirements.txt
 # RUN pip3 install -r requirements.txt
@@ -27,7 +26,7 @@ EXPOSE 5000
 EXPOSE 5001
 EXPOSE 5002
 
-# Give execute permission to run.sh
+# Give execute permission to shell scripts
 RUN chmod +x run_inlumen.sh
 
-CMD ["bash", "run_inlumen.sh"]
+CMD ["python", "service_runner.py"]

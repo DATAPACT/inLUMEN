@@ -46,7 +46,7 @@ def stop_process(process):
 def start_process():
     print("[dev_runner.py] Starting inLUMEN API bundle...", flush=True)
     return subprocess.Popen(
-        ["bash", "run_inlumen.sh"],
+        ["python", "service_runner.py"],
         cwd=WATCH_ROOT,
     )
 

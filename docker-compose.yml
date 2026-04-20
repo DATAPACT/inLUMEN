@@ -63,8 +63,6 @@ services:
     restart: unless-stopped
     ports:
       - "11434:11434"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     tty: true
     volumes:
       - ./ollama-volume:/root/.ollama
@@ -122,7 +120,10 @@ services:
       KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-}
       KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-}
       KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:-}
-    command: python dev_runner.py
+      WATCH_INTERVAL_SECONDS: ${WATCH_INTERVAL_SECONDS:-1.0}
+    command:
+      - python
+      - dev_runner.py
     networks:
       - datapact_network
 
