@@ -75,46 +75,31 @@ Step 3: Run the following command to build the docker containers:
 docker compose up --build
 ```
 
-Step 4: Open localhost:9099, log in, and generate an access/secret key called minio-datapact.
+Step 4: Wait for the stack to finish starting. The root compose file now:
+- starts Neo4J, MinIO, frontend, Ollama, and the Python connection APIs together
+- builds the `connection` image automatically
+- mounts the frontend and connection source folders for development
+- auto-restarts the Python API bundle when files under `connection/` change
+- pulls the default Ollama model automatically on first run
 
-Step 5: In a separate terminal/shell, navigate to the inLUMEN/connection directory.
-
-Create a openaiapi.ini file in this directory and add your OpenAI API key inside this file, if you wish to use GPT models. The content of this .ini file must look like:
-
-```
-[openai]
-OPENAI_API_KEY = sk-xxxx-(...)-xxxx
-```
-
-Then, run the commands found in inLUMEN/connection/command.txt, in the given order:
-
-First:
-```
-docker build -t inlumenapi -f Dockerfile .
-```
-
-Then:
-```
-docker run -p 5000:5000 -p 5001:5001 -p 5002:5002 -v ${PWD}/downloads:/usr/inlumen/downloads --network=datapact_network -it inlumenapi
-```
-
-Step 6: Install the base Ollama model into your Llama service by accessing *datapact-llm* in Docker Desktop and executing (in Exec) the following line:
+Step 5: Optional: if you want GPT-based models, create a root `.env` file and set your API key there:
 
 ```
-ollama run llama3.1:8b
+OPENAI_API_KEY=sk-xxxx-(...)-xxxx
 ```
 
 Note: building the containers may take around 5 minutes, please wait until Neo4J is fully started.  
 
-Note: Once the installation is complete, frontend will be offered as a service at localhost:8080 and backend services (databases) will be offered at localhost:7474 (Neo4J), localhost:9099 (MinIO).
+Note: Once the installation is complete, frontend will be offered as a service at localhost:8080 and backend services will be offered at localhost:5000 (MinIO API), localhost:5001 (Neo4J API), localhost:5002 (LLM/agent API), localhost:7474 (Neo4J), localhost:9000 (MinIO S3 API), localhost:9099 (MinIO console), and localhost:11434 (Ollama).
 
-Note: To log into the database services, use the *database_name* as username and *password* as password. For security reasons, make sure to change these later in the docker-compose.yml file. 
+Note: To log into MinIO, use the configured root credentials from `docker-compose.yml` or `.env`. For security reasons, change these values before using the stack outside local development.
 
 ## **How To Use**
 
 To open the editor, go to localhost:8080. This will open the dashboard. 
 
-Backend services (databases) currently offered at localhost:7474 (Neo4J), localhost:9099 (MinIO). To log into the database services, use the *database_name* as username and *password* as password. *For security reasons, make sure to change these later in the docker-compose.yml file.*
+Backend services are currently offered at localhost:7474 (Neo4J), localhost:9000 (MinIO S3 API), localhost:9099 (MinIO console), and localhost:11434 (Ollama). Neo4J uses the credentials defined by `NEO4J_AUTH` and MinIO uses `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` from `docker-compose.yml` or `.env`.
+The compose setup now also exposes the internal APIs at localhost:5000, localhost:5001, and localhost:5002 for the frontend and local debugging.
 
 LLM-agents are (by default) powered by Llama models, but can also integrate with OpenAI models given an API key. Configure your setup in the dialog window. 
 
@@ -129,4 +114,3 @@ n/a
 ## **Additional Links**
 
 n/a
-

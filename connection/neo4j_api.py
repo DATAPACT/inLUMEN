@@ -6,6 +6,7 @@ import configparser
 import json
 import os
 
+CORS_ALLOWED_ORIGIN = os.getenv("CORS_ALLOWED_ORIGIN", "http://localhost:8080")
 
 config_neo4j = configparser.ConfigParser()
 config_neo4j.read('neo4j_config.ini')
@@ -17,9 +18,15 @@ app = Flask(__name__)
 
 driver = GraphDatabase.driver(config_neo4j.get('neo4j','uri'), auth=(config_neo4j.get('neo4j','username'), config_neo4j.get('neo4j','password')))
 
+
+def _label_exists(session, label_name: str) -> bool:
+    result = session.run("CALL db.labels() YIELD label RETURN collect(label) AS labels").single()
+    labels = result["labels"] if result and result["labels"] else []
+    return label_name in labels
+
 # Define a function to set the CORS headers
 def add_cors_headers(response):
-    response.headers['Access-Control-Allow-Origin'] = 'http://localhost:8080'  # allowed origin
+    response.headers['Access-Control-Allow-Origin'] = CORS_ALLOWED_ORIGIN
     response.headers['Access-Control-Allow-Methods'] = 'OPTIONS, GET, POST, DELETE'  # Adjust as needed
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
     return response
@@ -431,6 +438,12 @@ def neo4j_get_overview_properties():
     """
     try:
         with driver.session() as session:
+            if not _label_exists(session, "PIPELINE"):
+                return jsonify({
+                    "version": None,
+                    "created_at": None,
+                    "updated_at": None
+                }), 200
             result = session.run(query)
             record = result.single()
             if record is None:
@@ -459,6 +472,8 @@ def neo4j_get_pipeline_updated_at():
     """
     try:
         with driver.session() as session:
+            if not _label_exists(session, "PIPELINE"):
+                return jsonify({"updated_at": None}), 200
             record = session.run(query).single()
             updated_at = record["updated_at"] if record else None
             return jsonify({"updated_at": updated_at}), 200
@@ -532,6 +547,13 @@ def neo4j_get_graph():
 
     try:
         with driver.session() as session:
+            if not _label_exists(session, "PIPELINE"):
+                return jsonify({
+                    "updated_at": None,
+                    "nodes": [],
+                    "edges": [],
+                    "viewport": {"x": 0, "y": 0, "zoom": 1}
+                }), 200
             record = session.run(query).single()
             if not record:
                 return jsonify({

@@ -1,3 +1,4 @@
-docker build -t inlumenapi -f Dockerfile .
+Legacy manual connection startup is no longer required.
 
-docker run -p 5000:5000 -p 5001:5001 -p 5002:5002 -v ${PWD}/downloads:/usr/inlumen/downloads --network=datapact_network -it inlumenapi
+Start the full stack from the repository root:
+docker compose up --build

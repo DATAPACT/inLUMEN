@@ -1,9 +1,26 @@
 #!/bin/bash
+set -euo pipefail
 
-# Run each Python file in the background
+pids=()
+
+cleanup() {
+  for pid in "${pids[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  done
+  wait || true
+}
+
+trap cleanup EXIT INT TERM
+
 python -u minio_api.py &
-python -u neo4j_api.py &
-python -u analytics_api.py 
+pids+=("$!")
 
-# Wait for all background processes to finish
-wait
+python -u neo4j_api.py &
+pids+=("$!")
+
+python -u analytics_api.py &
+pids+=("$!")
+
+wait -n "${pids[@]}"
