@@ -2,21 +2,20 @@ from flask import Flask, request, jsonify
 from neo4j import GraphDatabase
 from auth_middleware import require_auth
 import uuid
-import configparser
 import json
 import os
+from runtime_config import default_frontend_origin, get_neo4j_settings, get_service_port
 
-CORS_ALLOWED_ORIGIN = os.getenv("CORS_ALLOWED_ORIGIN", "http://localhost:8080")
-
-config_neo4j = configparser.ConfigParser()
-config_neo4j.read('neo4j_config.ini')
+CORS_ALLOWED_ORIGIN = os.getenv("CORS_ALLOWED_ORIGIN", "").strip() or default_frontend_origin()
+NEO4J_API_PORT = get_service_port("NEO4J_API_PORT", 5001)
+NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD = get_neo4j_settings()
 
 # Global graph data
 graph_data = []
 
 app = Flask(__name__)
 
-driver = GraphDatabase.driver(config_neo4j.get('neo4j','uri'), auth=(config_neo4j.get('neo4j','username'), config_neo4j.get('neo4j','password')))
+driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
 
 
 def _label_exists(session, label_name: str) -> bool:
@@ -727,4 +726,4 @@ def neo4j_update_description():
 
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=5001)
+    app.run(host="0.0.0.0", port=NEO4J_API_PORT)

@@ -3,8 +3,10 @@ from minio_access import remove_bucket, remove_object, download_last_object, get
 from auth_middleware import require_auth
 import os
 import datetime
+from runtime_config import default_frontend_origin, get_service_port
 
-CORS_ALLOWED_ORIGIN = os.getenv("CORS_ALLOWED_ORIGIN", "http://localhost:8080")
+CORS_ALLOWED_ORIGIN = os.getenv("CORS_ALLOWED_ORIGIN", "").strip() or default_frontend_origin()
+MINIO_API_PORT = get_service_port("MINIO_API_PORT", 5003)
 
 app = Flask(__name__)
 
@@ -150,4 +152,4 @@ def minio_get_object():
     return jsonify({'object': object_response})
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=5003)
+    app.run(host="0.0.0.0", port=MINIO_API_PORT)

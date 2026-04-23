@@ -1,6 +1,7 @@
 /**
  * Master switch for Keycloak authentication.
- * Controlled via VITE_AUTH_ENABLED in .env — same file as backend AUTH_ENABLED.
+ * Controlled via AUTH_ENABLED in the root .env; Docker Compose exposes the same
+ * value to Vite as VITE_AUTH_ENABLED.
  *
  * true  — frontend listens for postMessage tokens and injects Authorization headers;
  *         backend validates JWT on every request (requires AUTH_ENABLED=true env var too).

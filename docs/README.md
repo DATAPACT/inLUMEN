@@ -70,12 +70,23 @@ Step 1: Clone this repository on your computer.
 
 Step 2: Navigate to the cloned project directory.
 
-Step 3: Run the following command to build the docker containers:
+Step 3: Optional but recommended: copy `.env.example` to `.env` and adjust only the values you need.
+
+The Docker setup derives CORS, frontend API URLs, Neo4J URI, and MinIO endpoint from the Compose service names, ports, and credential values, so you do not need separate `CORS_ALLOWED_ORIGIN`, `NEO4J_URI`, `MINIO_ENDPOINT`, `NEO4J_API_BASE_URL`, or `VITE_*_API_URL` entries for normal use.
+
+Common values you may change include:
+- `OPENAI_API_KEY` when using GPT-based models
+- `FRONTEND_PORT`, `MINIO_API_PORT`, `NEO4J_API_PORT`, `LLM_API_PORT`
+- `NEO4J_HTTP_PORT`, `NEO4J_BOLT_PORT`, `MINIO_S3_PORT`, `MINIO_CONSOLE_PORT`, `OLLAMA_PORT`
+- `NEO4J_AUTH`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`
+- `AUTH_ENABLED` plus the Keycloak values when enabling authentication
+
+Step 4: Run the following command to build the docker containers:
 ```
 docker compose up --build
 ```
 
-Step 4: Wait for the stack to finish starting. The root compose file now:
+Step 5: Wait for the stack to finish starting. The root compose file now:
 - starts Neo4J, MinIO, frontend, Ollama, and the Python connection APIs together
 - builds the `connection` image automatically
 - mounts the frontend and connection source folders for development
@@ -83,7 +94,7 @@ Step 4: Wait for the stack to finish starting. The root compose file now:
 - pulls the default Ollama model automatically on first run
 - is set up to behave consistently on macOS and Windows through Docker Desktop
 
-Step 5: Optional: if you want GPT-based models, create a root `.env` file and set your API key there:
+Step 6: Optional: if you want GPT-based models, set your API key in the root `.env` file:
 
 ```
 OPENAI_API_KEY=sk-xxxx-(...)-xxxx
@@ -96,16 +107,16 @@ For the best macOS/Windows experience:
 
 Note: building the containers may take around 5 minutes, please wait until Neo4J is fully started.  
 
-Note: Once the installation is complete, frontend will be offered as a service at localhost:8080 and backend services will be offered at localhost:5000 (MinIO API), localhost:5001 (Neo4J API), localhost:5002 (LLM/agent API), localhost:7474 (Neo4J), localhost:9000 (MinIO S3 API), localhost:9099 (MinIO console), and localhost:11434 (Ollama).
+Note: Once the installation is complete, the default local endpoints are localhost:8080 (frontend), localhost:5003 (MinIO API), localhost:5001 (Neo4J API), localhost:5002 (LLM/agent API), localhost:7474 (Neo4J HTTP), localhost:7687 (Neo4J Bolt), localhost:9000 (MinIO S3 API), localhost:9099 (MinIO console), and localhost:11434 (Ollama). These defaults can all be changed through `.env`.
 
-Note: To log into MinIO, use the configured root credentials from `docker-compose.yml` or `.env`. For security reasons, change these values before using the stack outside local development.
+Note: To log into MinIO, use the configured root credentials from `.env`. For security reasons, change these values before using the stack outside local development.
 
 ## **How To Use**
 
-To open the editor, go to localhost:8080. This will open the dashboard. 
+To open the editor, go to `http://localhost:8080` by default, or the custom value you configured in `FRONTEND_PORT`. This will open the dashboard.
 
-Backend services are currently offered at localhost:7474 (Neo4J), localhost:9000 (MinIO S3 API), localhost:9099 (MinIO console), and localhost:11434 (Ollama). Neo4J uses the credentials defined by `NEO4J_AUTH` and MinIO uses `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` from `docker-compose.yml` or `.env`.
-The compose setup now also exposes the internal APIs at localhost:5000, localhost:5001, and localhost:5002 for the frontend and local debugging.
+Backend services are currently offered at their configured localhost ports for Neo4J, MinIO, and Ollama. Neo4J uses `NEO4J_AUTH`, and MinIO uses `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` from `.env`.
+The compose setup also exposes the internal APIs at the configured `MINIO_API_PORT`, `NEO4J_API_PORT`, and `LLM_API_PORT` values for the frontend and local debugging.
 
 LLM-agents are (by default) powered by Llama models, but can also integrate with OpenAI models given an API key. Configure your setup in the dialog window. 
 
