@@ -10,6 +10,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (window.self === window.top) return;
 
     const handleMessage = (event: MessageEvent) => {
+      if (event.source !== window.parent) return;
       if (TOOLBOX_ORIGIN !== '*' && event.origin !== TOOLBOX_ORIGIN) return;
       const data = event.data;
       if (data?.type === 'SSO_TOKEN' && typeof data.token === 'string') {
@@ -19,7 +20,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     window.addEventListener('message', handleMessage);
 
-    // Notify parent that the iframe is ready — triggers SSOTokenBridge to push the token
+    // Notify parent that the iframe is ready. This triggers toolbox-ui's SSOTokenBridge.
     window.parent.postMessage({ type: 'IFRAME_READY' }, TOOLBOX_ORIGIN === '*' ? '*' : TOOLBOX_ORIGIN);
 
     return () => window.removeEventListener('message', handleMessage);

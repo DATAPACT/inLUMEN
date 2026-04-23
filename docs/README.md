@@ -81,6 +81,8 @@ Common values you may change include:
 - `NEO4J_AUTH`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`
 - `AUTH_ENABLED` plus the Keycloak values when enabling authentication
 
+For Keycloak SSO, keep the original integration contract: set `AUTH_ENABLED=true` and configure `KEYCLOAK_JWKS_URL`, `KEYCLOAK_ISSUER`, and `KEYCLOAK_AUDIENCE` in the root `.env`. The frontend infers the toolbox parent origin when embedded, so `VITE_TOOLBOX_ORIGIN` is not normally needed; it remains supported in `frontend/.env` only as a fallback for deployments that hide iframe referrers. Standalone frontend setups can also keep using `VITE_AUTH_ENABLED` and `VITE_*_API_URL` in `frontend/.env`; Docker Compose derives those values from the root `.env` unless explicitly overridden.
+
 Step 4: Run the following command to build the docker containers:
 ```
 docker compose up --build

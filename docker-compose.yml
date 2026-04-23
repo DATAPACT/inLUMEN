@@ -155,7 +155,7 @@ services:
       VITE_MINIO_API_PORT: ${MINIO_API_PORT:-5003}
       VITE_NEO4J_API_PORT: ${NEO4J_API_PORT:-5001}
       VITE_LLM_API_PORT: ${LLM_API_PORT:-5002}
-      VITE_AUTH_ENABLED: ${AUTH_ENABLED:-false}
+      VITE_AUTH_ENABLED: ${VITE_AUTH_ENABLED:-${AUTH_ENABLED:-false}}
     command: npm run dev -- --host 0.0.0.0
     networks:
       - datapact_network
