@@ -1,11 +1,13 @@
 import React, { useState, useCallback, useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
 import { apiFetch } from '@/utils/apiFetch';
 import { MINIO_API_URL, NEO4J_API_URL, LLM_API_URL } from '@/config/api';
+import { ChatbotConfig, buildLLMRequestConfig } from '@/services/chatbotService';
 import ReactFlow, {
   Node,
   Edge,
   Controls,
   MiniMap,
+  ReactFlowInstance,
   ReactFlowProvider,
   NodeChange,
   EdgeChange,
@@ -28,10 +30,11 @@ interface FlowCanvasProps {
   onRemoveNode?: (nodeId: string) => void;
   onRemoveEdge?: (edgeId: string) => void;
   isLightMode?: boolean;
+  activeChatbotConfig?: ChatbotConfig;
 }
 
 export interface FlowCanvasRef {
-  updateNode: (id: string, data: any) => void;
+  updateNode: (id: string, data: Record<string, unknown>) => void;
 }
 
 let nodeId = 1;
@@ -187,7 +190,14 @@ const clearNeo4jAndMinIO = async () => {
   }
 };
 
-export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSelect, onNodesChange, onRemoveNode, onRemoveEdge, isLightMode }, ref) => {
+export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
+  onNodeSelect,
+  onNodesChange,
+  onRemoveNode,
+  onRemoveEdge,
+  isLightMode,
+  activeChatbotConfig,
+}, ref) => {
   const [nodes, setNodes] = useState<Node[]>(() => {
     const savedNodes = localStorage.getItem('ai-flow-nodes');
     return savedNodes ? JSON.parse(savedNodes) : [];
@@ -200,33 +210,59 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
   const [dockerfileDownloads, setDockerfileDownloads] = useState<{ name: string; url: string }[]>([]);
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
-  const [reactFlowInstance, setReactFlowInstance] = useState<any>(null);
+  const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
   const lastSeenUpdatedAtRef = useRef<string | null>(null);
   const currentGraphRef = useRef<{ nodes: Node[]; edges: Edge[] } | null>(null);
   const refreshCooldownUntilRef = useRef<number>(0);
+  const syncBackoffUntilRef = useRef<number>(0);
+  const syncFailureLoggedRef = useRef(false);
 
   const markLocalWrite = useCallback((ms = 800) => {
     refreshCooldownUntilRef.current = Date.now() + ms;
   }, []);
 
-  const normalizeGraph = useCallback((data: any) => {
-    const incomingNodes: Node[] = Array.isArray(data?.nodes) ? data.nodes : [];
-    const incomingEdges: any[] = Array.isArray(data?.edges) ? data.edges : [];
+  const scheduleSyncRetry = useCallback((label: string, error: unknown) => {
+    if (!syncFailureLoggedRef.current) {
+      console.warn(`[FlowCanvas.tsx] ${label}:`, error);
+      syncFailureLoggedRef.current = true;
+    }
+    syncBackoffUntilRef.current = Date.now() + 15000;
+  }, []);
 
-    const nodesNorm: Node[] = incomingNodes.map((n: any) => ({
-      ...n,
-      id: String(n.id),
-    }));
+  const markSyncHealthy = useCallback(() => {
+    syncFailureLoggedRef.current = false;
+    syncBackoffUntilRef.current = 0;
+  }, []);
 
-    const edgesNorm: Edge[] = incomingEdges.map((e: any) => ({
-      ...e,
-      id: e?.id ? String(e.id) : `e-${String(e.source)}-${String(e.target)}`,
-      source: String(e.source),
-      target: String(e.target),
-    }));
+  const normalizeGraph = useCallback((data: unknown) => {
+    const parsedGraph = (data && typeof data === "object" ? data : {}) as {
+      nodes?: unknown[];
+      edges?: unknown[];
+      updated_at?: string | null;
+    };
+    const incomingNodes = Array.isArray(parsedGraph.nodes) ? parsedGraph.nodes : [];
+    const incomingEdges = Array.isArray(parsedGraph.edges) ? parsedGraph.edges : [];
+
+    const nodesNorm: Node[] = incomingNodes.map((nodeEntry) => {
+      const node = nodeEntry as Node;
+      return {
+        ...node,
+        id: String(node.id),
+      };
+    });
+
+    const edgesNorm: Edge[] = incomingEdges.map((edgeEntry) => {
+      const edge = edgeEntry as Edge;
+      return {
+        ...edge,
+        id: edge?.id ? String(edge.id) : `e-${String(edge.source)}-${String(edge.target)}`,
+        source: String(edge.source),
+        target: String(edge.target),
+      };
+    });
 
     return {
-      updated_at: data?.updated_at ?? null,
+      updated_at: parsedGraph.updated_at ?? null,
       nodes: nodesNorm,
       edges: edgesNorm,
     };
@@ -260,15 +296,22 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
     const initialLoad = async () => {
       try {
         await fetchGraphAndApply();
+        markSyncHealthy();
       } catch (e) {
-        console.warn("[FlowCanvas.tsx] Initial neo4j_get_graph failed:", e);
+        scheduleSyncRetry("Initial neo4j_get_graph failed", e);
       }
     };
     const tick = async () => {
       try {
-        if (Date.now() < refreshCooldownUntilRef.current) return;
+        if (
+          Date.now() < refreshCooldownUntilRef.current ||
+          Date.now() < syncBackoffUntilRef.current
+        ) {
+          return;
+        }
         const updatedAt = await fetchPipelineUpdatedAt();
         if (cancelled) return;
+        markSyncHealthy();
         if (lastSeenUpdatedAtRef.current === null) {
           if (updatedAt) {
             await fetchGraphAndApply();
@@ -279,7 +322,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
           await fetchGraphAndApply();
         }
       } catch (e) {
-        console.warn("[FlowCanvas.tsx] Neo4j poll tick failed:", e);
+        scheduleSyncRetry("Neo4j poll tick failed", e);
       }
     };
     // Load once at mount, then poll
@@ -290,10 +333,10 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [fetchPipelineUpdatedAt, fetchGraphAndApply]);
+  }, [fetchPipelineUpdatedAt, fetchGraphAndApply, markSyncHealthy, scheduleSyncRetry]);
 
   // Expose updateNode 
-  const updateNode = useCallback((id: string, data: any) => {
+  const updateNode = useCallback((id: string, data: Record<string, unknown>) => {
     setNodes((nds) =>
       nds.map((node) => {
         if (node.id === id) {
@@ -532,6 +575,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
           },
           body: JSON.stringify({
             files,
+            llm_config: activeChatbotConfig ? buildLLMRequestConfig(activeChatbotConfig) : undefined,
           }),
         }
       );
@@ -555,6 +599,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
           },
           body: JSON.stringify({
             dockerfiles_json,
+            llm_config: activeChatbotConfig ? buildLLMRequestConfig(activeChatbotConfig) : undefined,
           }),
         }
       );
@@ -595,15 +640,15 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({ onNodeSe
       const file = e.target.files?.[0];
       if (!file) return;
       const text = await file.text();
-      const flowData = JSON.parse(text);
-      if (!flowData.nodes || !flowData.edges) {
+      const flowData = JSON.parse(text) as { nodes?: Node[]; edges?: Edge[] };
+      if (!Array.isArray(flowData.nodes) || !Array.isArray(flowData.edges)) {
         toast.error('Invalid flow file', {
           description: 'The selected file does not contain a valid flow',
         });
         return;
       }
-      const importedNodes: Node[] = flowData.nodes;
-      const importedEdges: any[] = flowData.edges;
+      const importedNodes = flowData.nodes;
+      const importedEdges = flowData.edges;
       await clearNeo4jAndMinIO();
       markLocalWrite(1200); // avoid immediate poll-refresh
 
@@ -749,8 +794,24 @@ interface WrappedFlowCanvasProps extends FlowCanvasProps {
   flowCanvasRef?: React.RefObject<FlowCanvasRef>;
 }
 
-export const WrappedFlowCanvas = ({ onNodeSelect, onNodesChange, isLightMode, flowCanvasRef }: WrappedFlowCanvasProps) => (
+export const WrappedFlowCanvas = ({
+  onNodeSelect,
+  onNodesChange,
+  onRemoveNode,
+  onRemoveEdge,
+  isLightMode,
+  activeChatbotConfig,
+  flowCanvasRef,
+}: WrappedFlowCanvasProps) => (
   <ReactFlowProvider>
-    <FlowCanvas ref={flowCanvasRef} onNodeSelect={onNodeSelect} onNodesChange={onNodesChange} isLightMode={isLightMode} />
+    <FlowCanvas
+      ref={flowCanvasRef}
+      onNodeSelect={onNodeSelect}
+      onNodesChange={onNodesChange}
+      onRemoveNode={onRemoveNode}
+      onRemoveEdge={onRemoveEdge}
+      isLightMode={isLightMode}
+      activeChatbotConfig={activeChatbotConfig}
+    />
   </ReactFlowProvider>
 );

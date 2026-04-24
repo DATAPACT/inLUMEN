@@ -1,11 +1,9 @@
 from flask import Flask, request, jsonify, Response, make_response
 from auth_middleware import require_auth
-from openai import OpenAI
 from autogen_ext.code_executors.local import LocalCommandLineCodeExecutor
 from autogen_ext.code_executors.docker import DockerCommandLineCodeExecutor
 from autogen_agentchat.tools import AgentTool, TeamTool
 from autogen_ext.models.openai import OpenAIChatCompletionClient
-from autogen_ext.models.ollama import OllamaChatCompletionClient
 from autogen_agentchat.conditions import TextMessageTermination, SourceMatchTermination, MaxMessageTermination, TextMentionTermination, FunctionalTermination
 from autogen_agentchat.agents import AssistantAgent, CodeExecutorAgent, UserProxyAgent
 from autogen_core.model_context import BufferedChatCompletionContext, ChatCompletionContext, TokenLimitedChatCompletionContext
@@ -22,8 +20,8 @@ from autogen_agentchat.tools import AgentTool, TeamTool
 from autogen_agentchat.teams import RoundRobinGroupChat, SelectorGroupChat, Swarm
 from autogen_core.memory import ListMemory, MemoryContent, MemoryMimeType, Memory
 from pathlib import Path
+from dataclasses import dataclass
 import tempfile
-import configparser
 import io
 import sys
 import os
@@ -63,66 +61,248 @@ def run_async(coro):
     return global_loop.run_until_complete(coro)
 
 #_________________Model Configuration_________________
-# OpenAI version - use env first, then optional ini file.
-config = configparser.ConfigParser(allow_no_value=True)
-config.read("openaiapi.ini")
+# OpenAI-compatible LLM providers. The app no longer starts or depends on a
+# local Ollama daemon; cloud and on-prem endpoints are selected by base URL.
+LLM_PROVIDER_PRESETS = {
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+    },
+    "ollama_cloud": {
+        "base_url": "https://ollama.com/v1",
+    },
+    "custom": {
+        "base_url": "",
+    },
+    # Kept for backward compatibility with existing OPENAI_* deployments.
+    "openai": {
+        "base_url": "https://api.openai.com/v1",
+    },
+}
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://llm:11434")
-DEFAULT_CHAT_MODEL = os.getenv("DEFAULT_CHAT_MODEL", "llama3.1")
+DEFAULT_LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openrouter").strip() or "openrouter"
+DEFAULT_CHAT_MODEL = (
+    os.getenv("LLM_MODEL", "").strip()
+    or "gpt-oss-120b"
+)
+DEFAULT_LLM_BASE_URL = os.getenv("LLM_BASE_URL", "").strip()
+DEFAULT_LLM_MODEL_FAMILY = "unknown"
 NEO4J_API_PORT = get_service_port("NEO4J_API_PORT", 5001)
 LLM_API_PORT = get_service_port("LLM_API_PORT", 5002)
 NEO4J_API_BASE_URL = os.getenv("NEO4J_API_BASE_URL", "").strip() or f"http://127.0.0.1:{NEO4J_API_PORT}"
 CORS_ALLOWED_ORIGIN = os.getenv("CORS_ALLOWED_ORIGIN", "").strip() or default_frontend_origin()
 
-openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
-if not openai_api_key and config.has_section("openai"):
-    openai_api_key = config.get("openai", "OPENAI_API_KEY", fallback="").strip()
+OPENROUTER_MODEL_ALIASES = {
+    "gpt-4o": "openai/gpt-4o",
+    "gpt-4o-mini": "openai/gpt-4o-mini",
+    "gpt-oss-120b": "openai/gpt-oss-120b",
+    "gpt-oss:120b": "openai/gpt-oss-120b",
+    "gpt-oss-20b": "openai/gpt-oss-20b",
+    "gpt-oss:20b": "openai/gpt-oss-20b",
+}
 
-openai_model_client = None
-openai_model_client_no_parallel_calls = None
-if openai_api_key:
-    openai_model_client = OpenAIChatCompletionClient(
-        model=OPENAI_MODEL,
-        api_key=openai_api_key,
-    )
-    # Must disable parallel tool calls to avoid concurrency issues in AgentTool/TeamTool
-    openai_model_client_no_parallel_calls = OpenAIChatCompletionClient(
-        model=OPENAI_MODEL,
-        api_key=openai_api_key,
-        parallel_tool_calls=False,
-    )
-
-ollama_model_client = OllamaChatCompletionClient(model=OLLAMA_MODEL, host=OLLAMA_HOST)
-
-
-def _is_openai_model(model: str | None) -> bool:
-    return bool(model) and model.lower().startswith("gpt-")
-
-
-def _resolve_ollama_model(model: str | None) -> str:
-    if not model:
-        return OLLAMA_MODEL
-    normalized = model.strip()
-    if normalized == "llama3.1":
-        return OLLAMA_MODEL
+def _normalize_provider(provider: str | None) -> str:
+    normalized = (provider or DEFAULT_LLM_PROVIDER).strip().lower().replace("-", "_")
+    aliases = {
+        "open_router": "openrouter",
+        "ollama": "ollama_cloud",
+        "ollama_cloud": "ollama_cloud",
+        "on_premise": "custom",
+        "on_prem": "custom",
+        "self_hosted": "custom",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in LLM_PROVIDER_PRESETS:
+        return "custom"
     return normalized
 
 
-def _select_model_client(model: str | None) -> ChatCompletionClient:
-    if _is_openai_model(model):
-        if openai_model_client is None:
-            print(
-                f"[analytics_api.py] OpenAI model '{model}' requested but OPENAI_API_KEY is not configured. Falling back to Ollama."
-            )
-        else:
-            return OpenAIChatCompletionClient(model=model, api_key=openai_api_key)
-    return OllamaChatCompletionClient(model=_resolve_ollama_model(model), host=OLLAMA_HOST)
+def _api_key_from_env() -> str:
+    return os.getenv("LLM_API_KEY", "").strip()
 
 
-# All agents get following config. Change LLM config to experiment:
-current_model_client = openai_model_client or ollama_model_client
+@dataclass(frozen=True)
+class LLMConfig:
+    provider: str
+    model: str
+    base_url: str
+    api_key: str
+    model_family: str = "unknown"
+    max_tokens: Optional[int] = None
+    openrouter_provider_only: tuple[str, ...] = ()
+    supports_vision: bool = False
+    supports_function_calling: bool = True
+    supports_json_output: bool = True
+    supports_structured_output: bool = True
+
+
+def _bool_config(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _positive_int_config(value: Any, default: Optional[int]) -> Optional[int]:
+    if value is None or value == "":
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _string_tuple_config(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item).strip().lower() for item in value if str(item).strip())
+    return tuple(item.strip().lower() for item in str(value).split(",") if item.strip())
+
+
+def _raw_config_value(raw: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in raw and raw.get(key) is not None:
+            return raw.get(key)
+    return None
+
+
+def _resolve_llm_config(raw_config: Optional[Mapping[str, Any]] = None) -> LLMConfig:
+    raw = raw_config or {}
+    provider = _normalize_provider(
+        raw.get("provider")
+        or raw.get("llm_provider")
+        or raw.get("providerName")
+    )
+    preset = LLM_PROVIDER_PRESETS[provider]
+    model = (
+        str(raw.get("model") or "").strip()
+        or DEFAULT_CHAT_MODEL
+    )
+    if provider == "openrouter" and model.lower() in {"llama3.1", "llama3.1:8b"}:
+        model = DEFAULT_CHAT_MODEL
+    if provider == "openrouter":
+        model = OPENROUTER_MODEL_ALIASES.get(model.lower(), model)
+    base_url = (
+        str(raw.get("base_url") or raw.get("baseUrl") or "").strip()
+        or DEFAULT_LLM_BASE_URL
+        or preset["base_url"]
+    )
+    api_key = (
+        str(raw.get("api_key") or raw.get("apiKey") or "").strip()
+        or _api_key_from_env()
+    )
+    model_family = (
+        str(raw.get("model_family") or raw.get("modelFamily") or "").strip()
+        or DEFAULT_LLM_MODEL_FAMILY
+    )
+    max_tokens = _positive_int_config(
+        _raw_config_value(raw, "max_tokens", "maxTokens"),
+        None,
+    )
+    openrouter_provider_only = _string_tuple_config(
+        _raw_config_value(
+            raw,
+            "openrouter_provider_only",
+            "openRouterProviderOnly",
+            "openrouterProviderOnly",
+            "openrouter_provider",
+            "openRouterProvider",
+        )
+    )
+
+    if not model:
+        raise ValueError("LLM model is required.")
+    if not base_url:
+        raise ValueError("LLM base URL is required for OpenAI-compatible endpoints.")
+    if not api_key:
+        raise ValueError(
+            f"LLM API key is required for provider '{provider}'. "
+            "Provide it in the configuration or set LLM_API_KEY."
+        )
+
+    return LLMConfig(
+        provider=provider,
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+        model_family=model_family,
+        max_tokens=max_tokens,
+        openrouter_provider_only=openrouter_provider_only,
+        supports_vision=_bool_config(_raw_config_value(raw, "supports_vision", "supportsVision"), False),
+        supports_function_calling=_bool_config(
+            _raw_config_value(raw, "supports_function_calling", "supportsFunctionCalling"),
+            True,
+        ),
+        supports_json_output=_bool_config(_raw_config_value(raw, "supports_json_output", "supportsJsonOutput"), True),
+        supports_structured_output=_bool_config(
+            _raw_config_value(raw, "supports_structured_output", "supportsStructuredOutput"),
+            True,
+        ),
+    )
+
+
+def _llm_config_from_payload(payload: Mapping[str, Any]) -> LLMConfig:
+    raw_config = payload.get("llm_config")
+    if isinstance(raw_config, Mapping):
+        return _resolve_llm_config(raw_config)
+    return _resolve_llm_config(payload)
+
+
+def _model_info(llm_config: LLMConfig) -> dict:
+    return {
+        "vision": llm_config.supports_vision,
+        "function_calling": llm_config.supports_function_calling,
+        "json_output": llm_config.supports_json_output,
+        "family": llm_config.model_family,
+        "structured_output": llm_config.supports_structured_output,
+    }
+
+
+def _select_model_client(
+    llm_config: Optional[LLMConfig] = None,
+    *,
+    parallel_tool_calls: Optional[bool] = None,
+) -> ChatCompletionClient:
+    resolved_config = llm_config or _resolve_llm_config()
+    kwargs: dict[str, Any] = {
+        "model": resolved_config.model,
+        "api_key": resolved_config.api_key,
+        "base_url": resolved_config.base_url,
+        "model_info": _model_info(resolved_config),
+    }
+    if resolved_config.max_tokens is not None:
+        kwargs["max_tokens"] = resolved_config.max_tokens
+    if parallel_tool_calls is not None:
+        kwargs["parallel_tool_calls"] = parallel_tool_calls
+    if resolved_config.provider == "openrouter":
+        default_headers = {
+            "HTTP-Referer": "http://localhost",
+            "X-Title": "inLUMEN",
+        }
+        kwargs["default_headers"] = default_headers
+        if resolved_config.openrouter_provider_only:
+            kwargs["extra_body"] = {
+                "provider": {
+                    "only": list(resolved_config.openrouter_provider_only),
+                },
+            }
+    return OpenAIChatCompletionClient(**kwargs)
+
+
+def _log_llm_selection(prefix: str, llm_config: LLMConfig) -> None:
+    openrouter_route = (
+        f", openrouter_provider_only={','.join(llm_config.openrouter_provider_only)}"
+        if llm_config.openrouter_provider_only
+        else ""
+    )
+    print(
+        f"[analytics_api.py] {prefix}: provider={llm_config.provider}, "
+        f"model={llm_config.model}, base_url={llm_config.base_url}"
+        f"{f', max_tokens={llm_config.max_tokens}' if llm_config.max_tokens is not None else ''}"
+        f"{openrouter_route}"
+    )
 
 #_________________MinIO Access_________________
 MINIO_CLIENT: Optional[Minio] = None
@@ -245,10 +425,10 @@ class ForcedAssistantAgent(AssistantAgent):
             )
             yield model_result
 
-def build_pipeline_editing_team(model: str) -> RoundRobinGroupChat:
-    print("[analytics_api.py] Building pipeline editing team with model " + model + " configuration.")
+def build_pipeline_editing_team(llm_config: LLMConfig) -> RoundRobinGroupChat:
+    _log_llm_selection("Building pipeline editing team", llm_config)
     # Configure the model client used behind the agents according to selection:
-    model_client = _select_model_client(model)
+    model_client = _select_model_client(llm_config)
     # Database Schema (METAMODEL) - TODO: hidden for now
     DB_SCHEMA = """
         Nodes:
@@ -564,7 +744,7 @@ def build_pipeline_editing_team(model: str) -> RoundRobinGroupChat:
     user_proxy = UserProxyAgent("user_proxy")
     pipeline_editor = AssistantAgent(
         name = "pipeline_editor",
-        model_client = current_model_client,
+        model_client = model_client,
         tools = [create_pipeline, create_step, delete_step, overview], 
         description = f"An agent that designs AI/data pipelines given a user request.",
         system_message = f""" You design AI/data pipelines using your registered tools. Call one or multiple tools to create or modify a pipeline as requested by the user.
@@ -581,7 +761,7 @@ def build_pipeline_editing_team(model: str) -> RoundRobinGroupChat:
     # TODO: Add observer
     #pipeline_observer = AssistantAgent(
     #    name = "pipeline_observer",
-    #    model_client = current_model_client,
+    #    model_client = model_client,
     #    tools = [overview], 
     #    description = f"An agent that reports changes or modifications recorded in a graph database.",
     #    system_message = f"""Each time you are called, you call the [overview] tool to get an overview of the current graph content. Return "NO" if there are no changes from the previous version. Return "YES" if you see any differences from the previous version. """,  
@@ -749,8 +929,9 @@ def _generate_argo_yaml_tool(params: Optional[dict] = None) -> str:
     return workflow_text
 
 
-def build_argo_yaml_team() -> RoundRobinGroupChat:
+def build_argo_yaml_team(llm_config: Optional[LLMConfig] = None) -> RoundRobinGroupChat:
     """Construct an AutoGen team that fetches pipeline info, downloads code, and emits Argo YAML."""
+    model_client = _select_model_client(llm_config)
     pipeline_tool = FunctionTool(
         _pipeline_design_tool,
         name="fetch_pipeline_design",
@@ -771,7 +952,7 @@ def build_argo_yaml_team() -> RoundRobinGroupChat:
 
     pipeline_agent = AssistantAgent(
         name="pipeline_inspector",
-        model_client=current_model_client,
+        model_client=model_client,
         tools=[pipeline_tool],
         system_message="""You are the pipeline inspector. Call [fetch_pipeline_design] to grab the pipeline graph,
         including all steps, their flow IDs, labels, types, and linked buckets/files. Replay that information in
@@ -782,7 +963,7 @@ def build_argo_yaml_team() -> RoundRobinGroupChat:
 
     file_agent = AssistantAgent(
         name="code_reader",
-        model_client=current_model_client,
+        model_client=model_client,
         tools=[minio_tool],
         system_message="""You are the code reader. Examine the conversation to identify every step (flow_id)
         and its linked bucket/file names. Call [fetch_code_file_contents] once with all step/bucket/file pairs so we
@@ -793,7 +974,7 @@ def build_argo_yaml_team() -> RoundRobinGroupChat:
 
     yaml_agent = AssistantAgent(
         name="argo_composer",
-        model_client=current_model_client,
+        model_client=model_client,
         tools=[yaml_tool],
         system_message="""You are the Argo Workflow composer. Use the pipeline graph message, the code reader
         message, and the Dockerfile metadata message to craft a single Argo Workflow YAML that sequences every step in flow order.
@@ -829,10 +1010,15 @@ class ListDockerfilesResponse(BaseModel):
         content: str
     dockerfiles: list[DockerfileItem]
 
-async def _generate_dockerfiles_with_agent(filenames: list[str], ids: list[str]) -> ListDockerfilesResponse:
+async def _generate_dockerfiles_with_agent(
+    filenames: list[str],
+    ids: list[str],
+    llm_config: Optional[LLMConfig] = None,
+) -> ListDockerfilesResponse:
+    model_client = _select_model_client(llm_config)
     dockerfile_generator = AssistantAgent(
         name="dockerfile_generator",
-        model_client=current_model_client,
+        model_client=model_client,
         description="An agent that generates Dockerfiles.",
         system_message=f""" You will be given a list of files and another containing their corresponding IDs (files with same ID means they belong to the same folder). Generate a Dockerfile file per folder. Name them Dockerfile.<insert folder ID and no extension>. Follow the rules:
         1) Start with a base image. 2) Copy files into the container. 3) Install dependencies from requirements file (if present). 4) Make .sh files executable. 5) Set the startup command.
@@ -870,8 +1056,14 @@ def agentic_generate_dockerfiles():
     print("[analytics_api.py] Buckets received:", buckets)
     print("[analytics_api.py] Corresponding IDs to filenames that were received:", ids)
     try:
-        parsed: ListDockerfilesResponse = run_async(_generate_dockerfiles_with_agent(filenames, ids))
+        llm_config = _llm_config_from_payload(data)
+        _log_llm_selection("Generating Dockerfiles", llm_config)
+        parsed: ListDockerfilesResponse = run_async(
+            _generate_dockerfiles_with_agent(filenames, ids, llm_config)
+        )
         return jsonify(parsed.model_dump()), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         print("[analytics_api.py] Error generating dockerfiles:", e)
         return jsonify({"error": str(e)}), 500
@@ -883,7 +1075,7 @@ def agentic_generate_yaml():
     if request.method == 'OPTIONS':
         return make_response("", 200)
     data = request.get_json() or {}
-    dockerfile_json = data.get("dockerfile_json")
+    dockerfile_json = data.get("dockerfile_json") or data.get("dockerfiles_json")
     print("[analytics_api.py] Dockerfile received:", dockerfile_json)
     task = data.get(
         "task",
@@ -899,8 +1091,9 @@ def agentic_generate_yaml():
         task_message += "\n\nDockerfile metadata: " + dockerfile_dump
 
     async def run_team():
-        # Build & Run team
-        team = build_argo_yaml_team()
+        llm_config = _llm_config_from_payload(data)
+        _log_llm_selection("Generating Argo YAML", llm_config)
+        team = build_argo_yaml_team(llm_config)
         result = await team.run(task=task_message)
         print("[analytics_api.py] build_argo_yaml_team run result messages:")
         for idx, msg in enumerate(result.messages or []):
@@ -920,6 +1113,8 @@ def agentic_generate_yaml():
         resp = make_response(yaml_text, 200)
         resp.headers["Content-Type"] = "application/x-yaml; charset=utf-8"
         return resp
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         print("[analytics_api.py] Error generating YAML:", e)
         return jsonify({"error": str(e)}), 500
@@ -935,10 +1130,13 @@ def agentic_pipeline_editor():
     if not user_message:
         return jsonify({"error": "Missing user_message"}), 400
     session_id = payload.get("session_id") or str(uuid.uuid4())
-    model = payload.get("model") or DEFAULT_CHAT_MODEL
-    print("[analytics_api.py] User message sent to pipeline editor; Model used for responses: " + model)
+    try:
+        llm_config = _llm_config_from_payload(payload)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    _log_llm_selection("User message sent to pipeline editor", llm_config)
     async def run_turn():
-        team = build_pipeline_editing_team(model=model)
+        team = build_pipeline_editing_team(llm_config=llm_config)
         team_state = load_state_from_disk(session_id)
         if team_state:
             await team.load_state(team_state)

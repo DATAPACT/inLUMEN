@@ -1,11 +1,11 @@
-import React, { useEffect } from 'react';
+import React, { useEffect } from "react";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogDescription,
-  DialogFooter
+  DialogFooter,
 } from "@/components/ui/dialog";
 import {
   Form,
@@ -13,8 +13,15 @@ import {
   FormField,
   FormItem,
   FormLabel,
-  FormMessage
+  FormMessage,
 } from "@/components/ui/form";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -22,16 +29,25 @@ import { useForm } from "react-hook-form";
 import * as z from "zod";
 import {
   ChatbotConfig,
+  LLMProvider,
+  LLM_PROVIDER_DETAILS,
   createChatbotConfig,
-  updateChatbotConfig
+  getDefaultChatbotConfig,
+  updateChatbotConfig,
 } from "@/services/chatbotService";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { toast } from "sonner";
 
-// ---- Schema ----
+const providerValues = ["openrouter", "ollama_cloud", "custom"] as const;
+
 const formSchema = z.object({
   name: z.string().min(1, "Configuration name is required"),
-  model: z.enum(["gpt-4o", "llama3.1"]),
+  provider: z.enum(providerValues),
+  model: z.string().min(1, "Model name is required"),
+  baseUrl: z
+    .string()
+    .min(1, "Base URL is required")
+    .refine((value) => /^https?:\/\/.+/i.test(value), "Use an http(s) OpenAI-compatible base URL"),
+  apiKey: z.string().optional(),
 });
 
 interface ChatbotConfigFormProps {
@@ -45,45 +61,60 @@ export function ChatbotConfigForm({
   isOpen,
   onClose,
   initialConfig,
-  onConfigSaved
+  onConfigSaved,
 }: ChatbotConfigFormProps) {
+  const defaultConfig = React.useMemo(() => getDefaultChatbotConfig(), []);
 
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
     defaultValues: {
       name: initialConfig?.name || "New Configuration",
-      model: (initialConfig?.model === "gpt-4o" || initialConfig?.model === "llama3.1")
-        ? initialConfig.model
-        : "llama3.1",
+      provider: initialConfig?.provider || defaultConfig.provider,
+      model: initialConfig?.model || defaultConfig.model,
+      baseUrl: initialConfig?.baseUrl || defaultConfig.baseUrl,
+      apiKey: initialConfig?.apiKey || "",
     },
   });
 
+  const selectedProvider = form.watch("provider");
+
   useEffect(() => {
-    if (initialConfig) {
-      form.reset({
-        name: initialConfig.name,
-        model: (initialConfig.model === "gpt-4o" || initialConfig.model === "llama3.1")
-          ? initialConfig.model
-          : "llama3.1",
-      });
-    } else {
-      form.reset({
-        name: "New Configuration",
-        model: "llama3.1",
-      });
+    const nextConfig = initialConfig || {
+      ...defaultConfig,
+      name: "New Configuration",
+    };
+    form.reset({
+      name: nextConfig.name,
+      provider: nextConfig.provider,
+      model: nextConfig.model,
+      baseUrl: nextConfig.baseUrl,
+      apiKey: nextConfig.apiKey || "",
+    });
+  }, [initialConfig, form, defaultConfig]);
+
+  const applyProviderDefaults = (provider: LLMProvider) => {
+    const details = LLM_PROVIDER_DETAILS[provider];
+    const currentModel = form.getValues("model");
+    const defaultModels = Object.values(LLM_PROVIDER_DETAILS).map((item) => item.defaultModel);
+
+    if (details.baseUrl) {
+      form.setValue("baseUrl", details.baseUrl, { shouldValidate: true });
     }
-  }, [initialConfig, form]);
+    if (!currentModel || defaultModels.includes(currentModel)) {
+      form.setValue("model", details.defaultModel, { shouldValidate: true });
+    }
+  };
 
   const onSubmit = async (values: z.infer<typeof formSchema>) => {
     try {
       const configData: ChatbotConfig = {
+        id: initialConfig?.id,
         name: values.name,
+        provider: values.provider,
         model: values.model,
+        baseUrl: values.baseUrl,
+        apiKey: values.apiKey?.trim() || "",
       };
-
-      if (initialConfig?.id) {
-        configData.id = initialConfig.id;
-      }
 
       const savedConfig = initialConfig?.id
         ? await updateChatbotConfig(configData)
@@ -103,19 +134,18 @@ export function ChatbotConfigForm({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-[500px]">
+      <DialogContent className="sm:max-w-[540px]">
         <DialogHeader>
           <DialogTitle>
-            {initialConfig ? "Edit Configuration" : "New Configuration"}
+            {initialConfig ? "Edit LLM Configuration" : "New LLM Configuration"}
           </DialogTitle>
           <DialogDescription>
-            Configure the AI backend for your pipeline assistant
+            Configure an OpenAI-compatible endpoint. API keys are kept in this browser only.
           </DialogDescription>
         </DialogHeader>
 
         <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
-
+          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-5">
             <FormField
               control={form.control}
               name="name"
@@ -123,7 +153,55 @@ export function ChatbotConfigForm({
                 <FormItem>
                   <FormLabel>Configuration Name</FormLabel>
                   <FormControl>
-                    <Input placeholder="My Chatbot Config" {...field} />
+                    <Input placeholder="OpenRouter GPT-OSS" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="provider"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Provider</FormLabel>
+                  <Select
+                    onValueChange={(value: LLMProvider) => {
+                      field.onChange(value);
+                      applyProviderDefaults(value);
+                    }}
+                    value={field.value}
+                  >
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select an LLM provider" />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {providerValues.map((provider) => (
+                        <SelectItem key={provider} value={provider}>
+                          {LLM_PROVIDER_DETAILS[provider].label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {LLM_PROVIDER_DETAILS[selectedProvider].description}
+                  </p>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="baseUrl"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>OpenAI-Compatible Base URL</FormLabel>
+                  <FormControl>
+                    <Input placeholder="https://example.com/v1" {...field} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -135,32 +213,27 @@ export function ChatbotConfigForm({
               name="model"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>AI Model</FormLabel>
+                  <FormLabel>Model</FormLabel>
                   <FormControl>
-                    <RadioGroup
-                      onValueChange={field.onChange}
-                      value={field.value}
-                      className="flex flex-col space-y-1"
-                    >
-                      <FormItem className="flex items-center space-x-3">
-                        <FormControl>
-                          <RadioGroupItem value="llama3.1" />
-                        </FormControl>
-                        <FormLabel className="font-normal">
-                          Llama 3.1 (Local)
-                        </FormLabel>
-                      </FormItem>
-
-                      <FormItem className="flex items-center space-x-3">
-                        <FormControl>
-                          <RadioGroupItem value="gpt-4o" />
-                        </FormControl>
-                        <FormLabel className="font-normal">
-                          GPT-4o (Backend Key)
-                        </FormLabel>
-                      </FormItem>
-                    </RadioGroup>
+                    <Input placeholder="gpt-oss-120b" {...field} />
                   </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="apiKey"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>API Key</FormLabel>
+                  <FormControl>
+                    <Input type="password" placeholder="Provider API key" autoComplete="off" {...field} />
+                  </FormControl>
+                  <p className="text-xs text-muted-foreground">
+                    Optional. Leave empty to use the backend `LLM_API_KEY` instead.
+                  </p>
                   <FormMessage />
                 </FormItem>
               )}
@@ -169,7 +242,6 @@ export function ChatbotConfigForm({
             <DialogFooter>
               <Button type="submit">Save Configuration</Button>
             </DialogFooter>
-
           </form>
         </Form>
       </DialogContent>
