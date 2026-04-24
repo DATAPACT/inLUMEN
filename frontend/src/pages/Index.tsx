@@ -7,7 +7,6 @@ import { Toolbar } from '@/components/Toolbar';
 import { WrappedFlowCanvas, FlowCanvasRef } from '@/components/FlowCanvas';
 import { toast } from 'sonner';
 import {
-  Save,
   Send,
   PlusCircle,
   ChevronDown,
@@ -18,7 +17,6 @@ import {
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Node } from 'reactflow';
 import {
@@ -373,18 +371,16 @@ const Index = () => {
 
   // label for main configuration button
   const activeConfig = selectedConfig || defaultConfig;
-  const configButtonLabel =
+  const compactConfigLabel =
     activeConfig.name === formatProviderLabel(activeConfig.provider)
-      ? formatConfigDescription(activeConfig)
-      : `${activeConfig.name} · ${formatConfigDescription(activeConfig)}`;
+      ? `${formatProviderLabel(activeConfig.provider)} / ${activeConfig.model}`
+      : `${activeConfig.name}`;
   const conversationStatus = isProcessing
     ? "Thinking through your graph..."
     : conversation.length > 0
       ? `${conversation.length} message${conversation.length === 1 ? "" : "s"} in session`
       : "Ready to design";
-  const keyStatusText = activeConfig.apiKey
-    ? "Browser-stored provider key attached"
-    : "No browser key stored. Backend env key will be used if available.";
+  const hasConversation = conversation.length > 0 || isProcessing;
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden animate-fade-in bg-[#1A1A1D]">
@@ -409,7 +405,7 @@ const Index = () => {
 
         {showFlowLayout ? (
           <ResizablePanelGroup direction="horizontal" className="flex-1">
-            <ResizablePanel defaultSize={58} minSize={36}>
+            <ResizablePanel defaultSize={60} minSize={38}>
               <div className={`h-full ${isLightMode ? 'bg-gray-50' : 'bg-canvas-DEFAULT'}`}>
                 <WrappedFlowCanvas
                   onNodeSelect={onNodeSelect}
@@ -425,9 +421,9 @@ const Index = () => {
 
             <ResizableHandle withHandle />
 
-            <ResizablePanel defaultSize={42} minSize={28}>
+            <ResizablePanel defaultSize={40} minSize={26}>
               <ResizablePanelGroup direction="horizontal">
-                <ResizablePanel defaultSize={56} minSize={28}>
+                <ResizablePanel defaultSize={64} minSize={30}>
                   <PropertiesPanel
                     selectedNode={selectedNode}
                     onNodeUpdate={onNodeUpdate}
@@ -437,65 +433,35 @@ const Index = () => {
 
                 <ResizableHandle withHandle />
 
-                <ResizablePanel defaultSize={44} minSize={24} maxSize={62}>
-                  <div className="relative flex h-full flex-col overflow-hidden border-l border-white/10 bg-[radial-gradient(circle_at_top,#173329_0%,#0b1118_42%,#070b10_100%)] text-slate-100">
-                    <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(110,231,183,0.14),transparent_28%),radial-gradient(circle_at_bottom_left,rgba(56,189,248,0.12),transparent_30%)]" />
-
-                    <div className="relative border-b border-white/10 px-4 py-4">
-                      <div className="rounded-[28px] border border-emerald-400/20 bg-slate-950/60 p-4 shadow-[0_24px_60px_rgba(2,6,23,0.45)] backdrop-blur-xl">
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div className="space-y-2">
-                            <div className="flex items-center gap-2">
-                              <span className="h-2.5 w-2.5 rounded-full bg-emerald-300 shadow-[0_0_18px_rgba(110,231,183,0.9)]" />
-                              <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-emerald-100/80">
-                                AI-assisted Pipeline Design Chat
-                              </p>
-                            </div>
-                            <div>
-                              <h3 className="text-xl font-semibold tracking-tight text-white">
-                                Shape the pipeline in natural language
-                              </h3>
-                              <p className="mt-1 max-w-xl text-sm leading-6 text-slate-300">
-                                Describe the workflow, data movement, or deployment target and the copilot will help translate it into nodes and runnable artifacts.
-                              </p>
-                            </div>
+                <ResizablePanel defaultSize={36} minSize={18} maxSize={44}>
+                  <div className="flex h-full flex-col overflow-hidden border-l border-white/10 bg-[linear-gradient(180deg,#081018_0%,#0b1118_100%)] text-slate-100">
+                    <div className="border-b border-white/10 px-3 py-3">
+                      <div className="flex items-start gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="h-2 w-2 rounded-full bg-emerald-300 shadow-[0_0_14px_rgba(110,231,183,0.85)]" />
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-emerald-100/80">
+                              Pipeline Chat
+                            </p>
                           </div>
-
-                          <Badge
-                            variant="outline"
-                            className="border-emerald-400/25 bg-emerald-500/10 px-3 py-1 text-[11px] uppercase tracking-[0.22em] text-emerald-100"
-                          >
+                          <p className="mt-1 text-sm font-medium text-white">
                             {conversationStatus}
-                          </Badge>
+                          </p>
+                          <p className="mt-1 truncate text-xs text-slate-400">
+                            Using {formatProviderLabel(activeConfig.provider)} / {activeConfig.model}
+                          </p>
                         </div>
 
-                        <div className="mt-4 flex flex-wrap gap-2">
-                          <Badge className="border-0 bg-white/10 px-3 py-1.5 text-[11px] font-medium text-slate-100 hover:bg-white/10">
-                            {formatProviderLabel(activeConfig.provider)}
-                          </Badge>
-                          <Badge className="border-0 bg-sky-500/15 px-3 py-1.5 text-[11px] font-medium text-sky-100 hover:bg-sky-500/15">
-                            {activeConfig.model}
-                          </Badge>
-                          <Badge
-                            variant="outline"
-                            className="border-white/10 bg-slate-900/60 px-3 py-1.5 text-[11px] text-slate-300"
-                          >
-                            {keyStatusText}
-                          </Badge>
-                        </div>
-                      </div>
-
-                      <div className="mt-3 flex flex-wrap items-center gap-2">
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <Button
                               variant="outline"
                               size="sm"
-                              className="max-w-full gap-2 rounded-2xl border-emerald-400/20 bg-slate-950/70 text-slate-100 hover:bg-slate-900 hover:text-white"
+                              className="h-9 max-w-full gap-2 rounded-xl border-white/10 bg-slate-900/80 px-3 text-slate-100 hover:bg-slate-900 hover:text-white"
                             >
                               <Settings className="h-4 w-4 text-emerald-200" />
-                              <span className="max-w-[220px] truncate text-left text-xs font-medium">
-                                {configButtonLabel}
+                              <span className="max-w-[140px] truncate text-left text-xs font-medium">
+                                {compactConfigLabel}
                               </span>
                               <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-60" />
                             </Button>
@@ -575,51 +541,36 @@ const Index = () => {
                             </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
+                      </div>
 
+                      <div className="mt-3 flex items-center gap-2">
                         <Button
                           variant="outline"
                           size="sm"
                           onClick={handleClearConversation}
-                          className="rounded-2xl border-white/10 bg-slate-950/50 text-xs text-slate-200 hover:bg-slate-900 hover:text-white"
+                          className="h-8 rounded-xl border-white/10 bg-slate-900/60 px-3 text-xs text-slate-200 hover:bg-slate-900 hover:text-white"
                         >
-                          Clear Chat
+                          Clear
                         </Button>
-
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={handleSaveWorkflow}
-                          className="rounded-2xl border-white/10 bg-slate-950/50 text-xs text-slate-200 hover:bg-slate-900 hover:text-white"
-                        >
-                          <Save className="h-3.5 w-3.5" />
-                          Save
-                        </Button>
+                        <p className="truncate text-[11px] text-slate-500">
+                          Enter sends. Shift+Enter adds a new line.
+                        </p>
                       </div>
                     </div>
 
-                    <div className="relative flex min-h-0 flex-1 px-4 pb-4">
-                      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[28px] border border-white/10 bg-slate-950/55 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_20px_50px_rgba(2,6,23,0.35)] backdrop-blur-xl">
-                        <div className="border-b border-white/10 px-4 py-3">
-                          <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">
-                            Conversation
-                          </p>
-                          <p className="mt-1 text-sm text-slate-300">
-                            Keep refining the graph. The assistant can help with structure, deployment, and execution details.
-                          </p>
-                        </div>
-
-                        <ScrollArea className="min-h-0 flex-1">
-                          {conversation.length > 0 || isProcessing ? (
-                            <div className="space-y-5 px-4 py-4">
+                    <div className="flex min-h-0 flex-1 flex-col">
+                      <ScrollArea className="min-h-0 flex-1">
+                        {hasConversation ? (
+                          <div className="space-y-4 px-3 py-3">
                               {conversation.map((msg, index) => (
                                 <div
                                   key={index}
                                   className={cn("flex", msg.role === 'user' ? "justify-end" : "justify-start")}
                                 >
-                                  <div className="max-w-[90%] space-y-2">
+                                  <div className="max-w-[92%] space-y-1.5">
                                     <div
                                       className={cn(
-                                        "flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.22em]",
+                                        "flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em]",
                                         msg.role === 'user' ? "justify-end text-emerald-100/80" : "text-slate-400"
                                       )}
                                     >
@@ -633,7 +584,7 @@ const Index = () => {
                                     </div>
                                     <div
                                       className={cn(
-                                        "rounded-[24px] border px-4 py-3 text-sm leading-6 shadow-lg",
+                                        "rounded-[18px] border px-3 py-2.5 text-sm leading-6 shadow-lg",
                                         msg.role === 'user'
                                           ? "border-emerald-400/25 bg-[linear-gradient(135deg,rgba(16,185,129,0.28),rgba(14,116,144,0.3))] text-white shadow-emerald-950/30"
                                           : "border-white/10 bg-slate-900/80 text-slate-100 shadow-slate-950/40"
@@ -649,12 +600,12 @@ const Index = () => {
 
                               {isProcessing && (
                                 <div className="flex justify-start">
-                                  <div className="max-w-[88%] space-y-2">
-                                    <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
+                                  <div className="max-w-[90%] space-y-1.5">
+                                    <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                                       <span className="h-2 w-2 rounded-full bg-sky-300" />
                                       Pipeline Copilot
                                     </div>
-                                    <div className="rounded-[24px] border border-white/10 bg-slate-900/80 px-4 py-3 text-sm text-slate-300 shadow-lg shadow-slate-950/40">
+                                    <div className="rounded-[18px] border border-white/10 bg-slate-900/80 px-3 py-2.5 text-sm text-slate-300 shadow-lg shadow-slate-950/40">
                                       <div className="flex items-center gap-3">
                                         <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-600 border-t-emerald-300" />
                                         Working through the next pipeline revision...
@@ -665,43 +616,40 @@ const Index = () => {
                               )}
 
                               <div ref={conversationEndRef} />
-                            </div>
-                          ) : (
-                            <div className="flex h-full flex-col items-center justify-center px-6 py-8 text-center">
-                              <div className="rounded-full border border-emerald-400/20 bg-emerald-500/10 px-4 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-emerald-100">
-                                Start With A Prompt
-                              </div>
-                              <h4 className="mt-4 text-xl font-semibold text-white">
-                                Describe the pipeline outcome you want
-                              </h4>
-                              <p className="mt-2 max-w-md text-sm leading-6 text-slate-400">
-                                Ask for an ingestion path, training workflow, deployment package, or a full end-to-end AI system. The chat will stay aligned with the active provider configuration.
-                              </p>
+                          </div>
+                        ) : (
+                          <div className="flex h-full flex-col justify-center px-3 py-4">
+                            <p className="text-sm font-medium text-white">
+                              Describe the pipeline you want to build.
+                            </p>
+                            <p className="mt-1 text-xs leading-5 text-slate-400">
+                              Use the chat to add steps, refine the graph, or ask for deployment artifacts.
+                            </p>
 
-                              <div className="mt-6 grid w-full gap-2">
-                                {CHAT_PROMPT_SUGGESTIONS.map((prompt) => (
-                                  <button
-                                    key={prompt}
-                                    type="button"
-                                    onClick={() => handleSuggestionClick(prompt)}
-                                    className="rounded-2xl border border-white/10 bg-slate-900/70 px-4 py-3 text-left text-sm leading-6 text-slate-200 transition-colors hover:border-emerald-400/30 hover:bg-slate-900"
-                                  >
-                                    {prompt}
-                                  </button>
-                                ))}
-                              </div>
+                            <div className="mt-4 space-y-2">
+                              {CHAT_PROMPT_SUGGESTIONS.slice(0, 2).map((prompt) => (
+                                <button
+                                  key={prompt}
+                                  type="button"
+                                  onClick={() => handleSuggestionClick(prompt)}
+                                  className="w-full rounded-xl border border-white/10 bg-slate-900/70 px-3 py-2.5 text-left text-xs leading-5 text-slate-200 transition-colors hover:border-emerald-400/25 hover:bg-slate-900"
+                                >
+                                  {prompt}
+                                </button>
+                              ))}
                             </div>
-                          )}
-                        </ScrollArea>
+                          </div>
+                        )}
+                      </ScrollArea>
 
-                        <div className="border-t border-white/10 p-4">
-                          <div className="rounded-[24px] border border-white/10 bg-slate-950/70 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+                      <div className="border-t border-white/10 p-3">
+                        <div className="rounded-[20px] border border-white/10 bg-slate-950/70 p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
                             <Textarea
-                              className="min-h-[92px] resize-none border-0 bg-transparent px-1 text-sm leading-6 text-slate-100 shadow-none placeholder:text-slate-500 focus-visible:ring-0"
-                              placeholder="Describe the pipeline you want to build, refine the current graph, or ask for deployment artifacts..."
+                              className="min-h-[72px] resize-none border-0 bg-transparent px-1 text-sm leading-6 text-slate-100 shadow-none placeholder:text-slate-500 focus-visible:ring-0"
+                              placeholder="Describe the pipeline..."
                               value={userInput}
                               onChange={(e) => setUserInput(e.target.value)}
-                              rows={4}
+                              rows={3}
                               onKeyDown={(e) => {
                                 if (e.key === 'Enter' && !e.shiftKey) {
                                   e.preventDefault();
@@ -710,15 +658,11 @@ const Index = () => {
                               }}
                             />
 
-                            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-white/10 pt-3">
-                              <p className="text-xs text-slate-500">
-                                Press Enter to send. Use Shift+Enter for a new line.
-                              </p>
-
+                            <div className="mt-2 flex items-center justify-end border-t border-white/10 pt-2">
                               <Button
                                 onClick={handleSendMessage}
                                 disabled={isProcessing || !userInput.trim()}
-                                className="h-auto rounded-2xl bg-[linear-gradient(135deg,#34d399,#0f766e)] px-4 py-3 font-semibold text-slate-950 shadow-[0_18px_40px_rgba(16,185,129,0.3)] hover:opacity-95"
+                                className="h-9 rounded-xl bg-[linear-gradient(135deg,#34d399,#0f766e)] px-3.5 font-semibold text-slate-950 shadow-[0_18px_40px_rgba(16,185,129,0.3)] hover:opacity-95"
                               >
                                 {isProcessing ? (
                                   <>
@@ -728,12 +672,11 @@ const Index = () => {
                                 ) : (
                                   <>
                                     <Send className="h-4 w-4" />
-                                    Send Prompt
+                                    Send
                                   </>
                                 )}
                               </Button>
                             </div>
-                          </div>
                         </div>
                       </div>
                     </div>
