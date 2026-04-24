@@ -58,39 +58,6 @@ services:
         aliases:
           - datapact-minio-db
 
-  llm:
-    image: ollama/ollama:latest
-    container_name: datapact_llm
-    hostname: datapact-llm
-    restart: unless-stopped
-    ports:
-      - "${OLLAMA_PORT:-11434}:11434"
-    tty: true
-    volumes:
-      - ./ollama-volume:/root/.ollama
-    networks:
-      datapact_network:
-        aliases:
-          - datapact-llm
-
-  llm-init:
-    image: ollama/ollama:latest
-    container_name: datapact_llm_init
-    depends_on:
-      llm:
-        condition: service_started
-    environment:
-      OLLAMA_HOST: http://llm:11434
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
-    entrypoint:
-      - /bin/sh
-      - -c
-    command:
-      - until ollama list >/dev/null 2>&1; do sleep 2; done; ollama pull "$${OLLAMA_MODEL}"
-    restart: "no"
-    networks:
-      - datapact_network
-
   connection:
     build:
       context: ./connection
@@ -102,8 +69,6 @@ services:
         condition: service_healthy
       minio:
         condition: service_started
-      llm-init:
-        condition: service_completed_successfully
     working_dir: /usr/inlumen
     ports:
       - "${MINIO_API_PORT:-5003}:${MINIO_API_PORT:-5003}"
@@ -117,10 +82,10 @@ services:
       MINIO_API_PORT: ${MINIO_API_PORT:-5003}
       NEO4J_API_PORT: ${NEO4J_API_PORT:-5001}
       LLM_API_PORT: ${LLM_API_PORT:-5002}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OLLAMA_HOST: http://llm:11434
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
-      DEFAULT_CHAT_MODEL: ${DEFAULT_CHAT_MODEL:-llama3.1}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openrouter}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://openrouter.ai/api/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gpt-oss-120b}
       NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/password}
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio-datapact}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio-datapact}

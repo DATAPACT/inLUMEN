@@ -1,11 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { apiFetch } from '@/utils/apiFetch';
 import { NEO4J_API_URL, LLM_API_URL } from '@/config/api';
+import { ChatbotConfig, buildLLMRequestConfig, formatProviderLabel } from '@/services/chatbotService';
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Input } from "@/components/ui/input";
 import {
   Brain,
   MessageCircle,
@@ -46,6 +46,7 @@ interface SidebarProps {
   onBlankPipeline?: () => void;
   onSavePipeline?: () => void;
   pipelineOverview?: PipelineOverview;
+  activeChatbotConfig?: ChatbotConfig;
 }
 
 interface NodeTypeItem {
@@ -141,19 +142,13 @@ export function Sidebar({
   setGithubToken,
   onBlankPipeline,
   onSavePipeline,
-  pipelineOverview
+  pipelineOverview,
+  activeChatbotConfig
 }: SidebarProps) {
-  const [showKey, setShowKey] = useState(false);
-
   // --- overview state (fetched when Overview tab is opened)
   const [overviewData, setOverviewData] = useState<Partial<PipelineOverview> | null>(null);
   const [overviewError, setOverviewError] = useState<string>("");
   const [isLoadingOverview, setIsLoadingOverview] = useState(false);
-
-  // --- OpenAI API key
-  const [openaiKey, setOpenaiKey] = useState<string>(() => {
-    return localStorage.getItem("openai_api_key") || "";
-  });
 
   // --- Dockerfiles state
   const [isGeneratingDeployment, setIsGeneratingDeployment] = useState(false);
@@ -169,11 +164,6 @@ export function Sidebar({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const handleOpenaiKeyChange = (val: string) => {
-    setOpenaiKey(val);
-    localStorage.setItem("openai_api_key", val);
-  };
 
   const clearDockerfileDownloads = () => {
     setDockerfileDownloads((prev) => {
@@ -204,7 +194,7 @@ export function Sidebar({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         files,
-        // openai_api_key: openaiKey, // enable when backend supports it
+        llm_config: activeChatbotConfig ? buildLLMRequestConfig(activeChatbotConfig) : undefined,
       }),
     });
 
@@ -284,7 +274,7 @@ export function Sidebar({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           dockerfile_json,
-          // openai_api_key: openaiKey, // enable when backend supports it
+          llm_config: activeChatbotConfig ? buildLLMRequestConfig(activeChatbotConfig) : undefined,
         }),
       });
 
@@ -432,32 +422,28 @@ export function Sidebar({
 
         {activeTab === "simulate" && (
           <div className="py-4 space-y-4">
-            {/* OpenAI key */}
+            {/* Active LLM endpoint */}
             <div className="p-4 border rounded-lg border-border">
               <h3 className="text-sm font-medium mb-2 flex items-center gap-2">
                 <Key className="w-4 h-4" />
-                OpenAI API Key
+                Active LLM Endpoint
               </h3>
               <p className="text-xs text-muted-foreground mb-3">
-                Used by the LLM agents. Stored in your browser localStorage.
+                Deployment agents use the same OpenAI-compatible configuration selected in chat.
               </p>
-
-              <div className="flex items-center gap-2">
-                <Input
-                  type={showKey ? "text" : "password"}
-                  value={openaiKey}
-                  onChange={(e) => handleOpenaiKeyChange(e.target.value)}
-                  placeholder="sk-..."
-                  className="flex-1"
-                />
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={() => setShowKey(!showKey)}
-                  title={showKey ? "Hide key" : "Show key"}
-                >
-                  <Key className="w-4 h-4" />
-                </Button>
+              <div className="rounded-md bg-muted/40 p-3 text-xs text-muted-foreground space-y-1">
+                <div>
+                  <span className="font-medium text-foreground">Provider:</span>{" "}
+                  {activeChatbotConfig ? formatProviderLabel(activeChatbotConfig.provider) : "Backend default"}
+                </div>
+                <div>
+                  <span className="font-medium text-foreground">Model:</span>{" "}
+                  {activeChatbotConfig?.model || "Configured on backend"}
+                </div>
+                <div className="truncate">
+                  <span className="font-medium text-foreground">Base URL:</span>{" "}
+                  {activeChatbotConfig?.baseUrl || "Configured on backend"}
+                </div>
               </div>
             </div>
 

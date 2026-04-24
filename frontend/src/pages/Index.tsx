@@ -7,7 +7,6 @@ import { Toolbar } from '@/components/Toolbar';
 import { WrappedFlowCanvas, FlowCanvasRef } from '@/components/FlowCanvas';
 import { toast } from 'sonner';
 import {
-  Save,
   Send,
   PlusCircle,
   ChevronDown,
@@ -18,11 +17,15 @@ import {
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import { Node } from 'reactflow';
 import {
   ChatbotConfig,
+  buildLLMRequestConfig,
   fetchChatbotConfigs,
-  deleteChatbotConfig
+  deleteChatbotConfig,
+  formatProviderLabel,
+  getDefaultChatbotConfig
 } from '@/services/chatbotService';
 import { ChatbotConfigForm } from '@/components/ChatbotConfigForm';
 import {
@@ -33,26 +36,48 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { cn } from '@/lib/utils';
 
 const CHAT_SESSION_KEY = "chat-session-id";
+const CHAT_PROMPT_SUGGESTIONS = [
+  "Design a remote patient monitoring pipeline with ingestion, preprocessing, model training, and alerting.",
+  "Create a document retrieval pipeline that ingests PDFs, chunks content, stores embeddings, and answers questions.",
+  "Build a fraud detection workflow with batch feature engineering, real-time scoring, and monitoring.",
+];
+
+type FlowNodeData = {
+  label?: string;
+  description?: string;
+  type?: string;
+  files?: unknown[];
+  [key: string]: unknown;
+};
+
+type FlowNode = Node<FlowNodeData>;
+
+type DragNodeType = {
+  type: string;
+  data: FlowNodeData;
+};
 
 const Index = () => {
-  const [selectedNode, setSelectedNode] = useState<any>(null);
+  const [selectedNode, setSelectedNode] = useState<FlowNode | null>(null);
   const [activeTab, setActiveTab] = useState('lab'); // 'lab', 'overview', or 'simulate'
   const [userInput, setUserInput] = useState('');
-  const [aiResponse, setAiResponse] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [githubToken, setGithubToken] = useState('');
-  const [flowNodes, setFlowNodes] = useState<Node[]>([]);
+  const [flowNodes, setFlowNodes] = useState<FlowNode[]>([]);
   const [conversation, setConversation] = useState<{ role: 'user' | 'assistant', content: string }[]>([]);
   const [isLightMode, setIsLightMode] = useState(false);
   const flowCanvasRef = useRef<FlowCanvasRef>(null);
+  const conversationEndRef = useRef<HTMLDivElement | null>(null);
   const [pipelineLastUpdate, setPipelineLastUpdate] = useState<string>('Never');
   const [pipelineCreatedAt, setPipelineCreatedAt] = useState<string>('Never');
   const [configs, setConfigs] = useState<ChatbotConfig[]>([]);
   const [selectedConfig, setSelectedConfig] = useState<ChatbotConfig | null>(null);
   const [isConfigFormOpen, setIsConfigFormOpen] = useState(false);
   const [configToEdit, setConfigToEdit] = useState<ChatbotConfig | undefined>(undefined);
+  const defaultConfig = React.useMemo(() => getDefaultChatbotConfig(), []);
 
   // Backend session id
   const [chatSessionId, setChatSessionId] = useState<string>(() => {
@@ -65,20 +90,31 @@ const Index = () => {
     }
   }, [chatSessionId]);
 
-  // Helper to display model labels
-  const formatModelLabel = (model?: string) => {
-    if (!model) return "Llama 3.1";
-    const m = model.toLowerCase();
-    if (m === "llama3.1") return "Llama 3.1";
-    if (m === "gpt-4o") return "GPT-4o";
-    return model;
-  };
+  const formatConfigDescription = (config: ChatbotConfig) =>
+    `${formatProviderLabel(config.provider)} / ${config.model}`;
 
-  // Local fallback config so UI shows default model even before configs exist
-  const defaultConfig: ChatbotConfig = {
-    name: "Configuration",
-    model: "llama3.1",
-  };
+  const pickPreferredConfig = useCallback(
+    (configsList: ChatbotConfig[]) =>
+      configsList.find((config) => config.provider === "openrouter") || configsList[0] || defaultConfig,
+    [defaultConfig]
+  );
+
+  const loadConfigurations = useCallback(async () => {
+    try {
+      const configsList = await fetchChatbotConfigs();
+      setConfigs(configsList);
+      setSelectedConfig((currentSelection) => {
+        if (currentSelection?.id) {
+          return configsList.find((config) => config.id === currentSelection.id) || currentSelection;
+        }
+        return pickPreferredConfig(configsList);
+      });
+    } catch (error) {
+      console.error("Error loading configurations:", error);
+      setConfigs([]);
+      setSelectedConfig((currentSelection) => currentSelection || defaultConfig);
+    }
+  }, [defaultConfig, pickPreferredConfig]);
 
   // Compute pipeline overview from flowNodes
   const pipelineOverview = React.useMemo(() => {
@@ -115,28 +151,7 @@ const Index = () => {
     }
 
     loadConfigurations();
-  }, []);
-
-  const loadConfigurations = async () => {
-    try {
-      const configsList = await fetchChatbotConfigs();
-      setConfigs(configsList);
-
-      if (!selectedConfig) {
-        if (configsList.length > 0) {
-          const llamaPreferred =
-            configsList.find(c => (c.model || "").toLowerCase() === "llama3.1") || configsList[0];
-          setSelectedConfig(llamaPreferred);
-        } else {
-          setSelectedConfig(defaultConfig);
-        }
-      }
-    } catch (error) {
-      console.error("Error loading configurations:", error);
-      toast.error("Failed to load configurations");
-      if (!selectedConfig) setSelectedConfig(defaultConfig);
-    }
-  };
+  }, [loadConfigurations]);
 
   useEffect(() => {
     if (githubToken) {
@@ -144,11 +159,18 @@ const Index = () => {
     }
   }, [githubToken]);
 
-  const onNodeSelect = useCallback((node: any) => {
+  useEffect(() => {
+    conversationEndRef.current?.scrollIntoView({
+      behavior: conversation.length > 1 || isProcessing ? "smooth" : "auto",
+      block: "end",
+    });
+  }, [conversation, isProcessing]);
+
+  const onNodeSelect = useCallback((node: FlowNode | null) => {
     setSelectedNode(node);
   }, []);
 
-  const onNodeUpdate = useCallback((id: string, data: any) => {
+  const onNodeUpdate = useCallback((id: string, data: FlowNodeData) => {
     setFlowNodes(prev => prev.map(node =>
       node.id === id ? { ...node, data: { ...node.data, ...data } } : node
     ));
@@ -159,7 +181,7 @@ const Index = () => {
     setFlowNodes(nodes);
   }, []);
 
-  const onDragStart = (event: React.DragEvent, nodeType: any) => {
+  const onDragStart = (event: React.DragEvent, nodeType: DragNodeType) => {
     event.dataTransfer.setData('application/reactflow', JSON.stringify(nodeType));
     event.dataTransfer.effectAllowed = 'move';
   };
@@ -201,7 +223,8 @@ const Index = () => {
         body: JSON.stringify({
           session_id: chatSessionId || null,
           user_message: userInput,
-          model: activeCfg.model || "llama3.1",
+          model: activeCfg.model,
+          llm_config: buildLLMRequestConfig(activeCfg),
         }),
       });
 
@@ -218,11 +241,12 @@ const Index = () => {
 
       const responseText = data.assistant_message ?? "";
       setConversation(prev => [...prev, { role: 'assistant', content: responseText }]);
-      setAiResponse(responseText);
       setUserInput('');
     } catch (error) {
       console.error("Error processing request:", error);
-      toast.error("An error occurred while processing your request");
+      toast.error("An error occurred while processing your request", {
+        description: error instanceof Error ? error.message : "Unknown error occurred",
+      });
     } finally {
       setIsProcessing(false);
     }
@@ -230,7 +254,6 @@ const Index = () => {
 
   const handleClearConversation = async () => {
     setConversation([]);
-    setAiResponse('');
     toast.success("Conversation cleared", {
       description: "Your conversation history has been reset",
     });
@@ -277,13 +300,7 @@ const Index = () => {
           setConfigs(updatedConfigs);
 
           if (selectedConfig?.id === id) {
-            if (updatedConfigs.length > 0) {
-              const llamaPreferred =
-                updatedConfigs.find(c => (c.model || "").toLowerCase() === "llama3.1") || updatedConfigs[0];
-              setSelectedConfig(llamaPreferred);
-            } else {
-              setSelectedConfig(defaultConfig);
-            }
+            setSelectedConfig(pickPreferredConfig(updatedConfigs));
           }
 
           toast.success("Configuration deleted successfully");
@@ -304,8 +321,12 @@ const Index = () => {
   const handleSelectConfig = (config: ChatbotConfig) => {
     setSelectedConfig(config);
     toast.info(`Activated: ${config.name}`, {
-      description: `Using ${formatModelLabel(config.model)}`
+      description: `Using ${formatConfigDescription(config)}`
     });
+  };
+
+  const handleSuggestionClick = (prompt: string) => {
+    setUserInput(prompt);
   };
 
   const handleBlankPipeline = () => {
@@ -350,7 +371,16 @@ const Index = () => {
 
   // label for main configuration button
   const activeConfig = selectedConfig || defaultConfig;
-  const configButtonLabel = `${activeConfig.name} (${formatModelLabel(activeConfig.model)})`;
+  const compactConfigLabel =
+    activeConfig.name === formatProviderLabel(activeConfig.provider)
+      ? `${formatProviderLabel(activeConfig.provider)} / ${activeConfig.model}`
+      : `${activeConfig.name}`;
+  const conversationStatus = isProcessing
+    ? "Thinking through your graph..."
+    : conversation.length > 0
+      ? `${conversation.length} message${conversation.length === 1 ? "" : "s"} in session`
+      : "Ready to design";
+  const hasConversation = conversation.length > 0 || isProcessing;
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden animate-fade-in bg-[#1A1A1D]">
@@ -370,11 +400,12 @@ const Index = () => {
           onBlankPipeline={handleBlankPipeline}
           onSavePipeline={handleSavePipeline}
           pipelineOverview={pipelineOverview}
+          activeChatbotConfig={activeConfig}
         />
 
         {showFlowLayout ? (
           <ResizablePanelGroup direction="horizontal" className="flex-1">
-            <ResizablePanel defaultSize={60} minSize={40}>
+            <ResizablePanel defaultSize={60} minSize={38}>
               <div className={`h-full ${isLightMode ? 'bg-gray-50' : 'bg-canvas-DEFAULT'}`}>
                 <WrappedFlowCanvas
                   onNodeSelect={onNodeSelect}
@@ -382,6 +413,7 @@ const Index = () => {
                   onRemoveNode={handleRemoveNode}
                   onRemoveEdge={handleRemoveEdge}
                   isLightMode={isLightMode}
+                  activeChatbotConfig={activeConfig}
                   flowCanvasRef={flowCanvasRef}
                 />
               </div>
@@ -389,9 +421,9 @@ const Index = () => {
 
             <ResizableHandle withHandle />
 
-            <ResizablePanel defaultSize={40} minSize={30}>
+            <ResizablePanel defaultSize={40} minSize={26}>
               <ResizablePanelGroup direction="horizontal">
-                <ResizablePanel defaultSize={60} minSize={30}>
+                <ResizablePanel defaultSize={64} minSize={30}>
                   <PropertiesPanel
                     selectedNode={selectedNode}
                     onNodeUpdate={onNodeUpdate}
@@ -401,68 +433,107 @@ const Index = () => {
 
                 <ResizableHandle withHandle />
 
-                <ResizablePanel defaultSize={40} minSize={20} maxSize={60}>
-                  <div className="h-full bg-white border-l border-border flex flex-col">
-                    <div className="p-4 border-b border-border flex items-center justify-between gap-2">
-                      <h3 className="text-sm font-medium text-gray-900">
-                        AI-assisted Pipeline Design Chat
-                      </h3>
+                <ResizablePanel defaultSize={36} minSize={18} maxSize={44}>
+                  <div className="flex h-full flex-col overflow-hidden border-l border-white/10 bg-[linear-gradient(180deg,#081018_0%,#0b1118_100%)] text-slate-100">
+                    <div className="border-b border-white/10 px-3 py-3">
+                      <div className="flex items-start gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="h-2 w-2 rounded-full bg-emerald-300 shadow-[0_0_14px_rgba(110,231,183,0.85)]" />
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-emerald-100/80">
+                              Pipeline Chat
+                            </p>
+                          </div>
+                          <p className="mt-1 text-sm font-medium text-white">
+                            {conversationStatus}
+                          </p>
+                          <p className="mt-1 truncate text-xs text-slate-400">
+                            Using {formatProviderLabel(activeConfig.provider)} / {activeConfig.model}
+                          </p>
+                        </div>
 
-                      <div className="flex items-center gap-2">
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
-                            <Button variant="outline" className="gap-1" size="sm">
-                              <Settings className="w-4 h-4" />
-                              <span className="hidden md:inline-flex">
-                                {configButtonLabel}
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-9 max-w-full gap-2 rounded-xl border-white/10 bg-slate-900/80 px-3 text-slate-100 hover:bg-slate-900 hover:text-white"
+                            >
+                              <Settings className="h-4 w-4 text-emerald-200" />
+                              <span className="max-w-[140px] truncate text-left text-xs font-medium">
+                                {compactConfigLabel}
                               </span>
-                              <ChevronDown className="w-3 h-3 opacity-50" />
+                              <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-60" />
                             </Button>
                           </DropdownMenuTrigger>
 
-                          <DropdownMenuContent align="end" className="w-56">
-                            <DropdownMenuLabel>Chatbot Configurations</DropdownMenuLabel>
-                            <DropdownMenuSeparator />
+                          <DropdownMenuContent
+                            align="end"
+                            className="w-[320px] rounded-2xl border-white/10 bg-slate-950/95 p-2 text-slate-100 shadow-[0_24px_60px_rgba(2,6,23,0.55)] backdrop-blur-xl"
+                          >
+                            <DropdownMenuLabel className="px-3 pt-2 text-xs uppercase tracking-[0.22em] text-slate-400">
+                              Chatbot Configurations
+                            </DropdownMenuLabel>
+                            <DropdownMenuSeparator className="bg-white/10" />
 
-                            {configs.map((config) => (
+                            {configs.length > 0 ? (
+                              configs.map((config) => (
+                                <DropdownMenuItem
+                                  key={config.id}
+                                  className="flex cursor-pointer items-start justify-between gap-2 rounded-xl px-3 py-3 focus:bg-emerald-500/10 focus:text-white data-[highlighted]:bg-emerald-500/10"
+                                  onClick={() => handleSelectConfig(config)}
+                                >
+                                  <div className="min-w-0 flex-1">
+                                    <div className="truncate text-sm font-medium text-slate-100">
+                                      {config.name}
+                                    </div>
+                                    <div
+                                      className={cn(
+                                        "truncate text-xs text-slate-400",
+                                        selectedConfig?.id === config.id && "text-emerald-200"
+                                      )}
+                                    >
+                                      {formatConfigDescription(config)}
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-1">
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-7 w-7 rounded-full text-slate-300 hover:bg-white/10 hover:text-white"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleEditConfig(config);
+                                      }}
+                                    >
+                                      <Edit className="h-3.5 w-3.5" />
+                                    </Button>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-7 w-7 rounded-full text-rose-300 hover:bg-rose-500/10 hover:text-rose-200"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (config.id) handleDeleteConfig(config.id);
+                                      }}
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                    </Button>
+                                  </div>
+                                </DropdownMenuItem>
+                              ))
+                            ) : (
                               <DropdownMenuItem
-                                key={config.id}
-                                className="flex justify-between cursor-pointer"
-                                onClick={() => handleSelectConfig(config)}
+                                disabled
+                                className="rounded-xl px-3 py-3 text-xs text-slate-400 opacity-100"
                               >
-                                <span className={selectedConfig?.id === config.id ? "font-bold" : ""}>
-                                  {config.name} ({formatModelLabel(config.model)})
-                                </span>
-                                <div className="flex items-center gap-1">
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="h-6 w-6"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handleEditConfig(config);
-                                    }}
-                                  >
-                                    <Edit className="h-3 w-3" />
-                                  </Button>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="h-6 w-6 text-destructive"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      if (config.id) handleDeleteConfig(config.id);
-                                    }}
-                                  >
-                                    <Trash2 className="h-3 h-3" />
-                                  </Button>
-                                </div>
+                                No saved browser configurations yet.
                               </DropdownMenuItem>
-                            ))}
+                            )}
 
-                            <DropdownMenuSeparator />
+                            <DropdownMenuSeparator className="bg-white/10" />
                             <DropdownMenuItem
-                              className="flex items-center gap-2 cursor-pointer"
+                              className="flex cursor-pointer items-center gap-2 rounded-xl px-3 py-3 text-emerald-100 focus:bg-emerald-500/10 focus:text-white data-[highlighted]:bg-emerald-500/10"
                               onClick={handleCreateConfig}
                             >
                               <PlusCircle className="h-4 w-4" />
@@ -470,78 +541,143 @@ const Index = () => {
                             </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
+                      </div>
 
+                      <div className="mt-3 flex items-center gap-2">
                         <Button
                           variant="outline"
                           size="sm"
                           onClick={handleClearConversation}
-                          className="text-xs"
+                          className="h-8 rounded-xl border-white/10 bg-slate-900/60 px-3 text-xs text-slate-200 hover:bg-slate-900 hover:text-white"
                         >
-                          Clear Chat
+                          Clear
                         </Button>
-
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={handleSaveWorkflow}
-                          className="text-xs flex items-center gap-1"
-                        >
-                          <Save className="w-3 h-3" />
-                          Save
-                        </Button>
+                        <p className="truncate text-[11px] text-slate-500">
+                          Enter sends. Shift+Enter adds a new line.
+                        </p>
                       </div>
                     </div>
 
-                    <div className="flex-1 overflow-y-auto p-4">
-                      {conversation.length > 0 ? (
-                        <div className="space-y-3">
-                          {conversation.map((msg, index) => (
-                            <div
-                              key={index}
-                              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                            >
-                              <div
-                                className={`max-w-[80%] p-3 rounded-lg ${msg.role === 'user'
-                                  ? 'bg-blue-600 text-white'
-                                  : 'bg-gray-100 text-gray-900'
-                                  }`}
-                              >
-                                <div className="text-sm whitespace-pre-wrap">
-                                  {msg.content}
+                    <div className="flex min-h-0 flex-1 flex-col">
+                      <ScrollArea className="min-h-0 flex-1">
+                        {hasConversation ? (
+                          <div className="space-y-4 px-3 py-3">
+                              {conversation.map((msg, index) => (
+                                <div
+                                  key={index}
+                                  className={cn("flex", msg.role === 'user' ? "justify-end" : "justify-start")}
+                                >
+                                  <div className="max-w-[92%] space-y-1.5">
+                                    <div
+                                      className={cn(
+                                        "flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em]",
+                                        msg.role === 'user' ? "justify-end text-emerald-100/80" : "text-slate-400"
+                                      )}
+                                    >
+                                      <span
+                                        className={cn(
+                                          "h-2 w-2 rounded-full",
+                                          msg.role === 'user' ? "bg-emerald-300" : "bg-sky-300"
+                                        )}
+                                      />
+                                      {msg.role === 'user' ? "You" : "Pipeline Copilot"}
+                                    </div>
+                                    <div
+                                      className={cn(
+                                        "rounded-[18px] border px-3 py-2.5 text-sm leading-6 shadow-lg",
+                                        msg.role === 'user'
+                                          ? "border-emerald-400/25 bg-[linear-gradient(135deg,rgba(16,185,129,0.28),rgba(14,116,144,0.3))] text-white shadow-emerald-950/30"
+                                          : "border-white/10 bg-slate-900/80 text-slate-100 shadow-slate-950/40"
+                                      )}
+                                    >
+                                      <div className="whitespace-pre-wrap break-words">
+                                        {msg.content}
+                                      </div>
+                                    </div>
+                                  </div>
                                 </div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="h-full flex items-center justify-center">
-                          <p className="text-gray-400 text-sm">Describe your pipeline</p>
-                        </div>
-                      )}
-                    </div>
+                              ))}
 
-                    <div className="p-4 border-t border-border">
-                      <div className="flex gap-2">
-                        <Textarea
-                          className="flex-1 text-gray-900 border-gray-300 bg-white"
-                          placeholder="Describe your pipeline"
-                          value={userInput}
-                          onChange={(e) => setUserInput(e.target.value)}
-                          rows={1}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' && !e.shiftKey) {
-                              e.preventDefault();
-                              handleSendMessage();
-                            }
-                          }}
-                        />
-                        <Button
-                          onClick={handleSendMessage}
-                          disabled={isProcessing || !userInput.trim()}
-                          className="bg-blue-600 hover:bg-blue-700 text-white"
-                        >
-                          <Send className="h-4 w-4" />
-                        </Button>
+                              {isProcessing && (
+                                <div className="flex justify-start">
+                                  <div className="max-w-[90%] space-y-1.5">
+                                    <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                                      <span className="h-2 w-2 rounded-full bg-sky-300" />
+                                      Pipeline Copilot
+                                    </div>
+                                    <div className="rounded-[18px] border border-white/10 bg-slate-900/80 px-3 py-2.5 text-sm text-slate-300 shadow-lg shadow-slate-950/40">
+                                      <div className="flex items-center gap-3">
+                                        <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-600 border-t-emerald-300" />
+                                        Working through the next pipeline revision...
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+
+                              <div ref={conversationEndRef} />
+                          </div>
+                        ) : (
+                          <div className="flex h-full flex-col justify-center px-3 py-4">
+                            <p className="text-sm font-medium text-white">
+                              Describe the pipeline you want to build.
+                            </p>
+                            <p className="mt-1 text-xs leading-5 text-slate-400">
+                              Use the chat to add steps, refine the graph, or ask for deployment artifacts.
+                            </p>
+
+                            <div className="mt-4 space-y-2">
+                              {CHAT_PROMPT_SUGGESTIONS.slice(0, 2).map((prompt) => (
+                                <button
+                                  key={prompt}
+                                  type="button"
+                                  onClick={() => handleSuggestionClick(prompt)}
+                                  className="w-full rounded-xl border border-white/10 bg-slate-900/70 px-3 py-2.5 text-left text-xs leading-5 text-slate-200 transition-colors hover:border-emerald-400/25 hover:bg-slate-900"
+                                >
+                                  {prompt}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </ScrollArea>
+
+                      <div className="border-t border-white/10 p-3">
+                        <div className="rounded-[20px] border border-white/10 bg-slate-950/70 p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+                            <Textarea
+                              className="min-h-[72px] resize-none border-0 bg-transparent px-1 text-sm leading-6 text-slate-100 shadow-none placeholder:text-slate-500 focus-visible:ring-0"
+                              placeholder="Describe the pipeline..."
+                              value={userInput}
+                              onChange={(e) => setUserInput(e.target.value)}
+                              rows={3}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' && !e.shiftKey) {
+                                  e.preventDefault();
+                                  handleSendMessage();
+                                }
+                              }}
+                            />
+
+                            <div className="mt-2 flex items-center justify-end border-t border-white/10 pt-2">
+                              <Button
+                                onClick={handleSendMessage}
+                                disabled={isProcessing || !userInput.trim()}
+                                className="h-9 rounded-xl bg-[linear-gradient(135deg,#34d399,#0f766e)] px-3.5 font-semibold text-slate-950 shadow-[0_18px_40px_rgba(16,185,129,0.3)] hover:opacity-95"
+                              >
+                                {isProcessing ? (
+                                  <>
+                                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-950/30 border-t-slate-950" />
+                                    Thinking
+                                  </>
+                                ) : (
+                                  <>
+                                    <Send className="h-4 w-4" />
+                                    Send
+                                  </>
+                                )}
+                              </Button>
+                            </div>
+                        </div>
                       </div>
                     </div>
                   </div>
