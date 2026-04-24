@@ -45,6 +45,7 @@ import nest_asyncio
 from neo4j import GraphDatabase
 from minio import Minio
 from minio.error import S3Error
+from runtime_config import default_frontend_origin, get_minio_settings, get_service_port
 
 # _________________Create a single global event loop for all requests____________
 global_loop = asyncio.new_event_loop()
@@ -70,8 +71,10 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://llm:11434")
 DEFAULT_CHAT_MODEL = os.getenv("DEFAULT_CHAT_MODEL", "llama3.1")
-NEO4J_API_BASE_URL = os.getenv("NEO4J_API_BASE_URL", "http://127.0.0.1:5001")
-CORS_ALLOWED_ORIGIN = os.getenv("CORS_ALLOWED_ORIGIN", "http://localhost:8080")
+NEO4J_API_PORT = get_service_port("NEO4J_API_PORT", 5001)
+LLM_API_PORT = get_service_port("LLM_API_PORT", 5002)
+NEO4J_API_BASE_URL = os.getenv("NEO4J_API_BASE_URL", "").strip() or f"http://127.0.0.1:{NEO4J_API_PORT}"
+CORS_ALLOWED_ORIGIN = os.getenv("CORS_ALLOWED_ORIGIN", "").strip() or default_frontend_origin()
 
 openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
 if not openai_api_key and config.has_section("openai"):
@@ -128,13 +131,12 @@ def _get_minio_client() -> Minio:
     global MINIO_CLIENT
     if MINIO_CLIENT is not None:
         return MINIO_CLIENT
-    config_minio = configparser.ConfigParser()
-    config_minio.read("minio_config.ini")
+    endpoint, access_key, secret_key, secure = get_minio_settings()
     MINIO_CLIENT = Minio(
-        config_minio.get("minio", "endpoint"),
-        access_key=config_minio.get("minio", "access_key"),
-        secret_key=config_minio.get("minio", "secret_key"),
-        secure=config_minio.getboolean("minio", "secure"),
+        endpoint,
+        access_key=access_key,
+        secret_key=secret_key,
+        secure=secure,
     )
     return MINIO_CLIENT
 
@@ -268,7 +270,7 @@ def build_pipeline_editing_team(model: str) -> RoundRobinGroupChat:
             - has_files: string ("yes"|"no") - default: "no"
             - endpoint: string
             - database: string - default : "minio"
-            - param_json: string - default "\{\}"
+            - param_json: string - default "{}"
         (:FILE) represents a single file associated with a step. Properties:
             - uid: string (generated via randomUUID)
             - filename: string
@@ -972,4 +974,4 @@ def agentic_pipeline_editor_reset():
     return jsonify({"ok": True}), 200
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=5002)
+    app.run(host="0.0.0.0", port=LLM_API_PORT)

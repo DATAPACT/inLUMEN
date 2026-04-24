@@ -1,25 +1,24 @@
 from minio import Minio
 from minio.error import S3Error
-import configparser
 import time
 from datetime import timedelta
 import os
 from urllib.parse import urlparse, urlunparse
+from runtime_config import get_minio_settings
 
 
 client = None
 
 def main():
     global client
-    # Create a configparser object and read it
-    config = configparser.ConfigParser(allow_no_value = True)
-    # Update with right user (use case/ DYNABIC component)
-    config.read('minio_config.ini')
+    endpoint, access_key, secret_key, secure = get_minio_settings()
     # Initialize client:
-    client = Minio(config.get('minio', 'endpoint'),
-        access_key=config.get('minio', 'access_key'),
-        secret_key=config.get('minio', 'secret_key'),
-        secure = config.getboolean('minio', 'secure'))
+    client = Minio(
+        endpoint,
+        access_key=access_key,
+        secret_key=secret_key,
+        secure=secure,
+    )
 
 
 ### Bucket Operations ###
