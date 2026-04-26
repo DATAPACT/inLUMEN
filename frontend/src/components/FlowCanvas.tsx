@@ -744,19 +744,19 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           className="bg-card/70 border border-border rounded-md"
         />
 
-        <Panel position="top-center" className="mt-2">
-          <div className="bg-card/90 backdrop-blur-sm border border-border rounded-lg py-1.5 px-3 text-xs flex items-center gap-2">
+        <Panel position="top-center" className="mt-2 max-w-[calc(100vw-2rem)]">
+          <div className="bg-card/90 backdrop-blur-sm border border-border rounded-lg py-1.5 px-3 text-xs flex flex-wrap items-center justify-center gap-2">
             <Button size="sm" variant="outline" onClick={saveFlow} className="flex items-center gap-1 h-7">
               <Save className="h-3.5 w-3.5" />
               Save
             </Button>
             <Button size="sm" variant="outline" onClick={exportFlow} className="flex items-center gap-1 h-7">
               <Download className="h-3.5 w-3.5" />
-              Export to JSON
+              JSON
             </Button>
             <Button size="sm" variant="outline" onClick={exportFlowYAML} className="flex items-center gap-1 h-7">
               <Download className="h-3.5 w-3.5" />
-              Export to YAML
+              YAML
             </Button>
             <Button
               size="sm"
