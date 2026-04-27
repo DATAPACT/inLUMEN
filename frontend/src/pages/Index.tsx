@@ -280,19 +280,22 @@ const Index = () => {
   const activeConfig = selectedConfig || defaultConfig;
 
   const handleSendMessage = async () => {
-    if (!userInput.trim()) {
+    const messageText = userInput;
+
+    if (!messageText.trim()) {
       toast.error("Please enter a message", {
         description: "Your input is empty",
       });
       return;
     }
 
+    setUserInput('');
     setIsProcessing(true);
     toast("Processing your input", {
       description: "AI is thinking...",
     });
 
-    const newUserMessage = { role: 'user' as const, content: userInput };
+    const newUserMessage = { role: 'user' as const, content: messageText };
     const updatedConversation = [...conversation, newUserMessage];
     setConversation(updatedConversation);
 
@@ -304,7 +307,7 @@ const Index = () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           session_id: chatSessionId || null,
-          user_message: userInput,
+          user_message: messageText,
           model: activeCfg.model,
           llm_config: buildLLMRequestConfig(activeCfg),
         }),
@@ -323,7 +326,6 @@ const Index = () => {
 
       const responseText = data.assistant_message ?? "";
       setConversation(prev => [...prev, { role: 'assistant', content: responseText }]);
-      setUserInput('');
     } catch (error) {
       console.error("Error processing request:", error);
       toast.error("An error occurred while processing your request", {
