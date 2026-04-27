@@ -305,18 +305,18 @@ export function Sidebar({
   return (
     <div className={cn("w-64 border-r border-border bg-card flex flex-col", className)}>
       <Tabs value={activeTab} onValueChange={onTabChange} className="w-full">
-        <TabsList className="grid grid-cols-3 w-full rounded-none border-b border-border">
-          <TabsTrigger value="lab" className="flex items-center gap-1.5 text-xs">
-            <Beaker className="w-4 h-4" />
+        <TabsList className="grid h-12 w-full grid-cols-3 rounded-none border-b border-border p-1">
+          <TabsTrigger value="lab" className="min-w-0 gap-1 px-1.5 text-xs">
+            <Beaker className="h-3.5 w-3.5 shrink-0" />
             Lab
           </TabsTrigger>
-          <TabsTrigger value="overview" className="flex items-center gap-1.5 text-xs">
-            <BarChart3 className="w-4 h-4" />
-            Overview
+          <TabsTrigger value="overview" className="min-w-0 gap-1 px-1.5 text-xs">
+            <BarChart3 className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">Overview</span>
           </TabsTrigger>
-          <TabsTrigger value="simulate" className="flex items-center gap-1.5 text-xs">
-            <PlayCircle className="w-4 h-4" />
-            Simulate
+          <TabsTrigger value="simulate" className="min-w-0 gap-1 px-1.5 text-xs">
+            <PlayCircle className="h-3.5 w-3.5 shrink-0" />
+            Run
           </TabsTrigger>
         </TabsList>
       </Tabs>
@@ -455,7 +455,7 @@ export function Sidebar({
               </p>
 
               <Button
-                className="w-full"
+                className="h-auto min-h-10 w-full whitespace-normal px-3 py-2 text-center leading-snug"
                 onClick={handleGenerateDeploymentArtifacts}
                 disabled={isGeneratingDeployment}
               >

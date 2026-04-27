@@ -266,13 +266,6 @@ const Index = () => {
     event.dataTransfer.effectAllowed = 'move';
   };
 
-  const handleRunFlow = () => {
-    toast.success("Running AI Flow", {
-      description: "Executing your custom thinking model",
-    });
-    setActiveTab('simulate');
-  };
-
   const handleTabChange = (value: string) => {
     setActiveTab(value);
   };
@@ -559,7 +552,6 @@ const Index = () => {
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden animate-fade-in bg-background text-foreground transition-colors">
       <Toolbar
-        onRunFlow={handleRunFlow}
         isLightMode={isLightMode}
         onToggleLightMode={() => setIsLightMode(!isLightMode)}
         isLibraryOpen={isLibraryOpen}

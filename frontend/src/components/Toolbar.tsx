@@ -1,7 +1,6 @@
 import React from 'react';
 import { Button } from "@/components/ui/button";
 import {
-  PlayCircle,
   HelpCircle,
   Settings,
   Sun,
@@ -16,7 +15,6 @@ import inlumenLogo from "@/assets/inlumen-logo.svg";
 
 interface ToolbarProps {
   className?: string;
-  onRunFlow: () => void;
   isLightMode: boolean;
   onToggleLightMode: () => void;
   isLibraryOpen: boolean;
@@ -31,7 +29,6 @@ interface ToolbarProps {
 
 export function Toolbar({
   className,
-  onRunFlow,
   isLightMode,
   onToggleLightMode,
   isLibraryOpen,
@@ -105,11 +102,6 @@ export function Toolbar({
       </div>
       
       <div className="flex-1" />
-
-      <Button variant="outline" size="sm" className="hidden h-8 text-xs md:inline-flex" onClick={onRunFlow}>
-        <PlayCircle className="h-3.5 w-3.5" />
-        Run
-      </Button>
 
       <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={onOpenHelp}>
         <HelpCircle className="h-3.5 w-3.5 mr-1" />
