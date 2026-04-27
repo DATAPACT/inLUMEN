@@ -66,7 +66,7 @@ export const CustomNode: React.FC<NodeProps> = ({ data, selected }) => {
   return (
     <div 
       className={cn(
-        "node-custom px-3 py-2 rounded-lg border min-w-[160px] max-w-[240px] animate-fade-in",
+        "node-custom px-3 py-2 rounded-lg border min-w-[160px] max-w-[240px] animate-fade-in text-slate-100",
         selected ? "border-accent/80 shadow-[0_0_0_1px_hsl(var(--accent))]" : "border-border",
         data.active ? "animate-pulse border-purple-500" : "",
         data.type === 'system' ? "bg-purple-950/40" : 
@@ -100,11 +100,11 @@ export const CustomNode: React.FC<NodeProps> = ({ data, selected }) => {
         <div className="text-sm font-medium">{data.label}</div>
         
         {data.description && (
-          <div className="text-xs text-muted-foreground">{data.description}</div>
+          <div className="text-xs text-slate-300">{data.description}</div>
         )}
 
         {data.content && (
-          <div className="text-xs bg-background/30 p-2 rounded border border-border mt-1 max-h-20 overflow-y-auto">
+          <div className="text-xs bg-slate-950/30 p-2 rounded border border-white/10 mt-1 max-h-20 overflow-y-auto">
             <p className="line-clamp-3">{data.content}</p>
           </div>
         )}

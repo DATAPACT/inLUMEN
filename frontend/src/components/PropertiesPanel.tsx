@@ -17,6 +17,7 @@ interface PropertiesPanelProps {
   selectedNode: any;
   onNodeUpdate: (id: string, data: any) => void;
   onRemoveNode?: (nodeId: string) => void;
+  className?: string;
 }
 
 type StepType =
@@ -92,7 +93,7 @@ function pickNeo4jUpdatableProps(nodeId: string, nodeData: any, nodeType: StepTy
   return props;
 }
 
-export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: PropertiesPanelProps) {
+export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, className }: PropertiesPanelProps) {
   const nodeType: StepType = normalizeType(selectedNode?.data?.type ?? selectedNode?.type);
 
   const [label, setLabel] = useState('');
@@ -591,7 +592,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode }: Pr
   };
 
   return (
-    <div className="w-80 border-l border-border bg-card flex flex-col h-full">
+    <div className={cn("w-full border-l border-border bg-card text-card-foreground flex flex-col h-full", className)}>
       <div className="p-4 border-b border-border">
         <div className="flex items-center justify-between">
           <div>

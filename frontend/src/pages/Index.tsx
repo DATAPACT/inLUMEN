@@ -13,11 +13,28 @@ import {
   Edit,
   Trash2,
   Settings,
+  Save,
+  Download,
+  PanelLeft,
+  SlidersHorizontal,
+  MessageSquare,
+  RotateCcw,
+  Sun,
+  Moon,
+  Keyboard,
+  HelpCircle,
 } from 'lucide-react';
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Node } from 'reactflow';
 import {
   ChatbotConfig,
@@ -39,11 +56,57 @@ import {
 import { cn } from '@/lib/utils';
 
 const CHAT_SESSION_KEY = "chat-session-id";
+const CHAT_TRANSCRIPT_KEY = "inlumen-chat-transcript";
+const PANEL_STATE_KEY = "inlumen-panel-preferences";
+const THEME_KEY = "inlumen-theme";
 const CHAT_PROMPT_SUGGESTIONS = [
   "Design a remote patient monitoring pipeline with ingestion, preprocessing, model training, and alerting.",
   "Create a document retrieval pipeline that ingests PDFs, chunks content, stores embeddings, and answers questions.",
   "Build a fraud detection workflow with batch feature engineering, real-time scoring, and monitoring.",
 ];
+
+type RightPanel = 'inspector' | 'chat' | null;
+
+type PanelPreferences = {
+  libraryOpen: boolean;
+  rightPanel: RightPanel;
+};
+
+const DEFAULT_PANEL_PREFERENCES: PanelPreferences = {
+  libraryOpen: false,
+  rightPanel: null,
+};
+
+const readPanelPreferences = (): PanelPreferences => {
+  try {
+    const saved = localStorage.getItem(PANEL_STATE_KEY);
+    if (!saved) return DEFAULT_PANEL_PREFERENCES;
+    const parsed = JSON.parse(saved) as Partial<PanelPreferences>;
+    const rightPanel =
+      parsed.rightPanel === 'inspector' || parsed.rightPanel === 'chat'
+        ? parsed.rightPanel
+        : null;
+    return {
+      libraryOpen: typeof parsed.libraryOpen === 'boolean'
+        ? parsed.libraryOpen
+        : DEFAULT_PANEL_PREFERENCES.libraryOpen,
+      rightPanel,
+    };
+  } catch {
+    return DEFAULT_PANEL_PREFERENCES;
+  }
+};
+
+const readSavedTheme = () => {
+  try {
+    return localStorage.getItem(THEME_KEY) === "light";
+  } catch {
+    return false;
+  }
+};
+
+const createDownloadTimestamp = () =>
+  new Date().toISOString().replace(/[:.]/g, "-");
 
 type FlowNodeData = {
   label?: string;
@@ -68,7 +131,10 @@ const Index = () => {
   const [githubToken, setGithubToken] = useState('');
   const [flowNodes, setFlowNodes] = useState<FlowNode[]>([]);
   const [conversation, setConversation] = useState<{ role: 'user' | 'assistant', content: string }[]>([]);
-  const [isLightMode, setIsLightMode] = useState(false);
+  const [isLightMode, setIsLightMode] = useState(readSavedTheme);
+  const [panelPreferences, setPanelPreferences] = useState<PanelPreferences>(readPanelPreferences);
+  const [isHelpOpen, setIsHelpOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const flowCanvasRef = useRef<FlowCanvasRef>(null);
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
   const [pipelineLastUpdate, setPipelineLastUpdate] = useState<string>('Never');
@@ -78,6 +144,8 @@ const Index = () => {
   const [isConfigFormOpen, setIsConfigFormOpen] = useState(false);
   const [configToEdit, setConfigToEdit] = useState<ChatbotConfig | undefined>(undefined);
   const defaultConfig = React.useMemo(() => getDefaultChatbotConfig(), []);
+  const isLibraryOpen = panelPreferences.libraryOpen;
+  const rightPanel = panelPreferences.rightPanel;
 
   // Backend session id
   const [chatSessionId, setChatSessionId] = useState<string>(() => {
@@ -89,6 +157,15 @@ const Index = () => {
       localStorage.setItem(CHAT_SESSION_KEY, chatSessionId);
     }
   }, [chatSessionId]);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("light", isLightMode);
+    localStorage.setItem(THEME_KEY, isLightMode ? "light" : "dark");
+  }, [isLightMode]);
+
+  useEffect(() => {
+    localStorage.setItem(PANEL_STATE_KEY, JSON.stringify(panelPreferences));
+  }, [panelPreferences]);
 
   const formatConfigDescription = (config: ChatbotConfig) =>
     `${formatProviderLabel(config.provider)} / ${config.model}`;
@@ -168,6 +245,9 @@ const Index = () => {
 
   const onNodeSelect = useCallback((node: FlowNode | null) => {
     setSelectedNode(node);
+    if (node) {
+      setPanelPreferences((current) => ({ ...current, rightPanel: 'inspector' }));
+    }
   }, []);
 
   const onNodeUpdate = useCallback((id: string, data: FlowNodeData) => {
@@ -186,31 +266,29 @@ const Index = () => {
     event.dataTransfer.effectAllowed = 'move';
   };
 
-  const handleRunFlow = () => {
-    toast.success("Running AI Flow", {
-      description: "Executing your custom thinking model",
-    });
-    setActiveTab('simulate');
-  };
-
   const handleTabChange = (value: string) => {
     setActiveTab(value);
   };
 
+  const activeConfig = selectedConfig || defaultConfig;
+
   const handleSendMessage = async () => {
-    if (!userInput.trim()) {
+    const messageText = userInput;
+
+    if (!messageText.trim()) {
       toast.error("Please enter a message", {
         description: "Your input is empty",
       });
       return;
     }
 
+    setUserInput('');
     setIsProcessing(true);
     toast("Processing your input", {
       description: "AI is thinking...",
     });
 
-    const newUserMessage = { role: 'user' as const, content: userInput };
+    const newUserMessage = { role: 'user' as const, content: messageText };
     const updatedConversation = [...conversation, newUserMessage];
     setConversation(updatedConversation);
 
@@ -222,7 +300,7 @@ const Index = () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           session_id: chatSessionId || null,
-          user_message: userInput,
+          user_message: messageText,
           model: activeCfg.model,
           llm_config: buildLLMRequestConfig(activeCfg),
         }),
@@ -241,7 +319,6 @@ const Index = () => {
 
       const responseText = data.assistant_message ?? "";
       setConversation(prev => [...prev, { role: 'assistant', content: responseText }]);
-      setUserInput('');
     } catch (error) {
       console.error("Error processing request:", error);
       toast.error("An error occurred while processing your request", {
@@ -272,6 +349,97 @@ const Index = () => {
 
     setChatSessionId("");
     localStorage.removeItem(CHAT_SESSION_KEY);
+  };
+
+  const handleToggleLibrary = () => {
+    setPanelPreferences((current) => ({
+      ...current,
+      libraryOpen: !current.libraryOpen,
+    }));
+  };
+
+  const handleToggleRightPanel = (panel: Exclude<RightPanel, null>) => {
+    setPanelPreferences((current) => ({
+      ...current,
+      rightPanel: current.rightPanel === panel ? null : panel,
+    }));
+  };
+
+  const handleResetPanelLayout = () => {
+    setPanelPreferences(DEFAULT_PANEL_PREFERENCES);
+    toast.success("Layout reset", {
+      description: "The canvas is focused and panels are back to their default state.",
+    });
+  };
+
+  const buildConversationMarkdown = () => {
+    const lines = [
+      "# inLUMEN chat export",
+      "",
+      `Exported: ${new Date().toLocaleString()}`,
+      `Model: ${formatConfigDescription(activeConfig)}`,
+      "",
+      ...conversation.flatMap((message) => [
+        `## ${message.role === "user" ? "You" : "Pipeline Copilot"}`,
+        "",
+        message.content,
+        "",
+      ]),
+    ];
+
+    if (isProcessing) {
+      lines.push("## Pipeline Copilot", "", "_Response in progress at export time._", "");
+    }
+
+    return lines.join("\n");
+  };
+
+  const handleSaveConversation = () => {
+    if (conversation.length === 0) {
+      toast.error("Nothing to save", {
+        description: "Start a chat before saving the transcript.",
+      });
+      return;
+    }
+
+    localStorage.setItem(
+      CHAT_TRANSCRIPT_KEY,
+      JSON.stringify({
+        savedAt: new Date().toISOString(),
+        sessionId: chatSessionId || null,
+        model: formatConfigDescription(activeConfig),
+        conversation,
+      })
+    );
+
+    toast.success("Chat saved", {
+      description: "Transcript saved locally in this browser.",
+    });
+  };
+
+  const handleExportConversation = () => {
+    if (conversation.length === 0) {
+      toast.error("Nothing to export", {
+        description: "Start a chat before exporting the transcript.",
+      });
+      return;
+    }
+
+    const blob = new Blob([buildConversationMarkdown()], {
+      type: "text/markdown;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `inlumen-chat-${createDownloadTimestamp()}.md`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+
+    toast.success("Chat exported", {
+      description: "Transcript downloaded as Markdown.",
+    });
   };
 
   const handleSaveWorkflow = () => {
@@ -370,7 +538,6 @@ const Index = () => {
   const showFlowLayout = activeTab === 'lab' || activeTab === 'overview' || activeTab === 'simulate';
 
   // label for main configuration button
-  const activeConfig = selectedConfig || defaultConfig;
   const compactConfigLabel =
     activeConfig.name === formatProviderLabel(activeConfig.provider)
       ? `${formatProviderLabel(activeConfig.provider)} / ${activeConfig.model}`
@@ -383,30 +550,40 @@ const Index = () => {
   const hasConversation = conversation.length > 0 || isProcessing;
 
   return (
-    <div className="h-screen w-screen flex flex-col overflow-hidden animate-fade-in bg-[#1A1A1D]">
+    <div className="h-screen w-screen flex flex-col overflow-hidden animate-fade-in bg-background text-foreground transition-colors">
       <Toolbar
-        onRunFlow={handleRunFlow}
         isLightMode={isLightMode}
         onToggleLightMode={() => setIsLightMode(!isLightMode)}
+        isLibraryOpen={isLibraryOpen}
+        isInspectorOpen={rightPanel === 'inspector'}
+        isChatOpen={rightPanel === 'chat'}
+        onToggleLibrary={handleToggleLibrary}
+        onToggleInspector={() => handleToggleRightPanel('inspector')}
+        onToggleChat={() => handleToggleRightPanel('chat')}
+        onOpenHelp={() => setIsHelpOpen(true)}
+        onOpenSettings={() => setIsSettingsOpen(true)}
       />
 
-      <div className="flex-1 flex overflow-hidden">
-        <Sidebar
-          onDragStart={onDragStart}
-          activeTab={activeTab}
-          onTabChange={handleTabChange}
-          githubToken={githubToken}
-          setGithubToken={setGithubToken}
-          onBlankPipeline={handleBlankPipeline}
-          onSavePipeline={handleSavePipeline}
-          pipelineOverview={pipelineOverview}
-          activeChatbotConfig={activeConfig}
-        />
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {isLibraryOpen && (
+          <Sidebar
+            className="w-[17rem] shrink-0 bg-card/95"
+            onDragStart={onDragStart}
+            activeTab={activeTab}
+            onTabChange={handleTabChange}
+            githubToken={githubToken}
+            setGithubToken={setGithubToken}
+            onBlankPipeline={handleBlankPipeline}
+            onSavePipeline={handleSavePipeline}
+            pipelineOverview={pipelineOverview}
+            activeChatbotConfig={activeConfig}
+          />
+        )}
 
         {showFlowLayout ? (
-          <ResizablePanelGroup direction="horizontal" className="flex-1">
-            <ResizablePanel defaultSize={60} minSize={38}>
-              <div className={`h-full ${isLightMode ? 'bg-gray-50' : 'bg-canvas-DEFAULT'}`}>
+          <ResizablePanelGroup direction="horizontal" className="min-w-0 flex-1">
+            <ResizablePanel defaultSize={rightPanel ? 72 : 100} minSize={45}>
+              <div className="h-full bg-background">
                 <WrappedFlowCanvas
                   onNodeSelect={onNodeSelect}
                   onNodesChange={onNodesChange}
@@ -419,149 +596,166 @@ const Index = () => {
               </div>
             </ResizablePanel>
 
-            <ResizableHandle withHandle />
-
-            <ResizablePanel defaultSize={40} minSize={26}>
-              <ResizablePanelGroup direction="horizontal">
-                <ResizablePanel defaultSize={64} minSize={30}>
-                  <PropertiesPanel
-                    selectedNode={selectedNode}
-                    onNodeUpdate={onNodeUpdate}
-                    onRemoveNode={handleRemoveNode}
-                  />
-                </ResizablePanel>
-
+            {rightPanel && (
+              <>
                 <ResizableHandle withHandle />
-
-                <ResizablePanel defaultSize={36} minSize={18} maxSize={44}>
-                  <div className="flex h-full flex-col overflow-hidden border-l border-white/10 bg-[linear-gradient(180deg,#081018_0%,#0b1118_100%)] text-slate-100">
-                    <div className="border-b border-white/10 px-3 py-3">
-                      <div className="flex items-start gap-2">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            <span className="h-2 w-2 rounded-full bg-emerald-300 shadow-[0_0_14px_rgba(110,231,183,0.85)]" />
-                            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-emerald-100/80">
-                              Pipeline Chat
+                <ResizablePanel defaultSize={28} minSize={24} maxSize={42} className="min-w-[320px]">
+                  {rightPanel === 'inspector' ? (
+                    <PropertiesPanel
+                      className="bg-card/95"
+                      selectedNode={selectedNode}
+                      onNodeUpdate={onNodeUpdate}
+                      onRemoveNode={handleRemoveNode}
+                    />
+                  ) : (
+                    <div className="flex h-full flex-col overflow-hidden border-l border-border bg-card/95 text-card-foreground">
+                      <div className="border-b border-border px-3 py-3">
+                        <div className="flex items-start gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_14px_rgba(52,211,153,0.65)]" />
+                              <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-emerald-500">
+                                Pipeline Chat
+                              </p>
+                            </div>
+                            <p className="mt-1 text-sm font-medium text-foreground">
+                              {conversationStatus}
+                            </p>
+                            <p className="mt-1 truncate text-xs text-muted-foreground">
+                              Using {formatProviderLabel(activeConfig.provider)} / {activeConfig.model}
                             </p>
                           </div>
-                          <p className="mt-1 text-sm font-medium text-white">
-                            {conversationStatus}
-                          </p>
-                          <p className="mt-1 truncate text-xs text-slate-400">
-                            Using {formatProviderLabel(activeConfig.provider)} / {activeConfig.model}
-                          </p>
+
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-9 max-w-full gap-2 rounded-xl bg-background/80 px-3 text-foreground hover:bg-muted"
+                              >
+                                <Settings className="h-4 w-4 text-emerald-500" />
+                                <span className="max-w-[140px] truncate text-left text-xs font-medium">
+                                  {compactConfigLabel}
+                                </span>
+                                <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-60" />
+                              </Button>
+                            </DropdownMenuTrigger>
+
+                            <DropdownMenuContent
+                              align="end"
+                              className="w-[320px] rounded-2xl border-border bg-popover p-2 text-popover-foreground shadow-[0_24px_60px_rgba(2,6,23,0.22)] backdrop-blur-xl"
+                            >
+                              <DropdownMenuLabel className="px-3 pt-2 text-xs uppercase tracking-[0.22em] text-muted-foreground">
+                                Chatbot Configurations
+                              </DropdownMenuLabel>
+                              <DropdownMenuSeparator />
+
+                              {configs.length > 0 ? (
+                                configs.map((config) => (
+                                  <DropdownMenuItem
+                                    key={config.id}
+                                    className="flex cursor-pointer items-start justify-between gap-2 rounded-xl px-3 py-3 focus:bg-emerald-500/10 data-[highlighted]:bg-emerald-500/10"
+                                    onClick={() => handleSelectConfig(config)}
+                                  >
+                                    <div className="min-w-0 flex-1">
+                                      <div className="truncate text-sm font-medium">
+                                        {config.name}
+                                      </div>
+                                      <div
+                                        className={cn(
+                                          "truncate text-xs text-muted-foreground",
+                                          selectedConfig?.id === config.id && "text-emerald-500"
+                                        )}
+                                      >
+                                        {formatConfigDescription(config)}
+                                      </div>
+                                    </div>
+                                    <div className="flex items-center gap-1">
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-7 w-7 rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleEditConfig(config);
+                                        }}
+                                      >
+                                        <Edit className="h-3.5 w-3.5" />
+                                      </Button>
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-7 w-7 rounded-full text-rose-500 hover:bg-rose-500/10"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          if (config.id) handleDeleteConfig(config.id);
+                                        }}
+                                      >
+                                        <Trash2 className="h-3.5 w-3.5" />
+                                      </Button>
+                                    </div>
+                                  </DropdownMenuItem>
+                                ))
+                              ) : (
+                                <DropdownMenuItem
+                                  disabled
+                                  className="rounded-xl px-3 py-3 text-xs text-muted-foreground opacity-100"
+                                >
+                                  No saved browser configurations yet.
+                                </DropdownMenuItem>
+                              )}
+
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem
+                                className="flex cursor-pointer items-center gap-2 rounded-xl px-3 py-3 text-emerald-600 focus:bg-emerald-500/10 data-[highlighted]:bg-emerald-500/10"
+                                onClick={handleCreateConfig}
+                              >
+                                <PlusCircle className="h-4 w-4" />
+                                <span>New Configuration</span>
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
                         </div>
 
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="h-9 max-w-full gap-2 rounded-xl border-white/10 bg-slate-900/80 px-3 text-slate-100 hover:bg-slate-900 hover:text-white"
-                            >
-                              <Settings className="h-4 w-4 text-emerald-200" />
-                              <span className="max-w-[140px] truncate text-left text-xs font-medium">
-                                {compactConfigLabel}
-                              </span>
-                              <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-60" />
-                            </Button>
-                          </DropdownMenuTrigger>
-
-                          <DropdownMenuContent
-                            align="end"
-                            className="w-[320px] rounded-2xl border-white/10 bg-slate-950/95 p-2 text-slate-100 shadow-[0_24px_60px_rgba(2,6,23,0.55)] backdrop-blur-xl"
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={handleSaveConversation}
+                            disabled={conversation.length === 0}
+                            className="h-8 rounded-xl px-3 text-xs"
                           >
-                            <DropdownMenuLabel className="px-3 pt-2 text-xs uppercase tracking-[0.22em] text-slate-400">
-                              Chatbot Configurations
-                            </DropdownMenuLabel>
-                            <DropdownMenuSeparator className="bg-white/10" />
-
-                            {configs.length > 0 ? (
-                              configs.map((config) => (
-                                <DropdownMenuItem
-                                  key={config.id}
-                                  className="flex cursor-pointer items-start justify-between gap-2 rounded-xl px-3 py-3 focus:bg-emerald-500/10 focus:text-white data-[highlighted]:bg-emerald-500/10"
-                                  onClick={() => handleSelectConfig(config)}
-                                >
-                                  <div className="min-w-0 flex-1">
-                                    <div className="truncate text-sm font-medium text-slate-100">
-                                      {config.name}
-                                    </div>
-                                    <div
-                                      className={cn(
-                                        "truncate text-xs text-slate-400",
-                                        selectedConfig?.id === config.id && "text-emerald-200"
-                                      )}
-                                    >
-                                      {formatConfigDescription(config)}
-                                    </div>
-                                  </div>
-                                  <div className="flex items-center gap-1">
-                                    <Button
-                                      variant="ghost"
-                                      size="icon"
-                                      className="h-7 w-7 rounded-full text-slate-300 hover:bg-white/10 hover:text-white"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleEditConfig(config);
-                                      }}
-                                    >
-                                      <Edit className="h-3.5 w-3.5" />
-                                    </Button>
-                                    <Button
-                                      variant="ghost"
-                                      size="icon"
-                                      className="h-7 w-7 rounded-full text-rose-300 hover:bg-rose-500/10 hover:text-rose-200"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        if (config.id) handleDeleteConfig(config.id);
-                                      }}
-                                    >
-                                      <Trash2 className="h-3.5 w-3.5" />
-                                    </Button>
-                                  </div>
-                                </DropdownMenuItem>
-                              ))
-                            ) : (
-                              <DropdownMenuItem
-                                disabled
-                                className="rounded-xl px-3 py-3 text-xs text-slate-400 opacity-100"
-                              >
-                                No saved browser configurations yet.
-                              </DropdownMenuItem>
-                            )}
-
-                            <DropdownMenuSeparator className="bg-white/10" />
-                            <DropdownMenuItem
-                              className="flex cursor-pointer items-center gap-2 rounded-xl px-3 py-3 text-emerald-100 focus:bg-emerald-500/10 focus:text-white data-[highlighted]:bg-emerald-500/10"
-                              onClick={handleCreateConfig}
-                            >
-                              <PlusCircle className="h-4 w-4" />
-                              <span>New Configuration</span>
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
+                            <Save className="h-3.5 w-3.5" />
+                            Save
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={handleExportConversation}
+                            disabled={conversation.length === 0}
+                            className="h-8 rounded-xl px-3 text-xs"
+                          >
+                            <Download className="h-3.5 w-3.5" />
+                            Export
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={handleClearConversation}
+                            className="h-8 rounded-xl px-3 text-xs text-muted-foreground"
+                          >
+                            Clear
+                          </Button>
+                          <p className="min-w-[160px] flex-1 truncate text-[11px] text-muted-foreground">
+                            Enter sends. Shift+Enter adds a new line.
+                          </p>
+                        </div>
                       </div>
 
-                      <div className="mt-3 flex items-center gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={handleClearConversation}
-                          className="h-8 rounded-xl border-white/10 bg-slate-900/60 px-3 text-xs text-slate-200 hover:bg-slate-900 hover:text-white"
-                        >
-                          Clear
-                        </Button>
-                        <p className="truncate text-[11px] text-slate-500">
-                          Enter sends. Shift+Enter adds a new line.
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="flex min-h-0 flex-1 flex-col">
-                      <ScrollArea className="min-h-0 flex-1">
-                        {hasConversation ? (
-                          <div className="space-y-4 px-3 py-3">
+                      <div className="flex min-h-0 flex-1 flex-col">
+                        <ScrollArea className="min-h-0 flex-1">
+                          {hasConversation ? (
+                            <div className="space-y-4 px-3 py-3">
                               {conversation.map((msg, index) => (
                                 <div
                                   key={index}
@@ -571,23 +765,23 @@ const Index = () => {
                                     <div
                                       className={cn(
                                         "flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em]",
-                                        msg.role === 'user' ? "justify-end text-emerald-100/80" : "text-slate-400"
+                                        msg.role === 'user' ? "justify-end text-emerald-500" : "text-muted-foreground"
                                       )}
                                     >
                                       <span
                                         className={cn(
                                           "h-2 w-2 rounded-full",
-                                          msg.role === 'user' ? "bg-emerald-300" : "bg-sky-300"
+                                          msg.role === 'user' ? "bg-emerald-400" : "bg-sky-400"
                                         )}
                                       />
                                       {msg.role === 'user' ? "You" : "Pipeline Copilot"}
                                     </div>
                                     <div
                                       className={cn(
-                                        "rounded-[18px] border px-3 py-2.5 text-sm leading-6 shadow-lg",
+                                        "rounded-[18px] border px-3 py-2.5 text-sm leading-6 shadow-sm",
                                         msg.role === 'user'
-                                          ? "border-emerald-400/25 bg-[linear-gradient(135deg,rgba(16,185,129,0.28),rgba(14,116,144,0.3))] text-white shadow-emerald-950/30"
-                                          : "border-white/10 bg-slate-900/80 text-slate-100 shadow-slate-950/40"
+                                          ? "border-emerald-400/25 bg-[linear-gradient(135deg,rgba(16,185,129,0.88),rgba(14,116,144,0.86))] text-white"
+                                          : "border-border bg-muted/55 text-foreground"
                                       )}
                                     >
                                       <div className="whitespace-pre-wrap break-words">
@@ -601,13 +795,13 @@ const Index = () => {
                               {isProcessing && (
                                 <div className="flex justify-start">
                                   <div className="max-w-[90%] space-y-1.5">
-                                    <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-                                      <span className="h-2 w-2 rounded-full bg-sky-300" />
+                                    <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                                      <span className="h-2 w-2 rounded-full bg-sky-400" />
                                       Pipeline Copilot
                                     </div>
-                                    <div className="rounded-[18px] border border-white/10 bg-slate-900/80 px-3 py-2.5 text-sm text-slate-300 shadow-lg shadow-slate-950/40">
+                                    <div className="rounded-[18px] border border-border bg-muted/55 px-3 py-2.5 text-sm text-muted-foreground shadow-sm">
                                       <div className="flex items-center gap-3">
-                                        <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-600 border-t-emerald-300" />
+                                        <span className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-emerald-400" />
                                         Working through the next pipeline revision...
                                       </div>
                                     </div>
@@ -616,36 +810,36 @@ const Index = () => {
                               )}
 
                               <div ref={conversationEndRef} />
-                          </div>
-                        ) : (
-                          <div className="flex h-full flex-col justify-center px-3 py-4">
-                            <p className="text-sm font-medium text-white">
-                              Describe the pipeline you want to build.
-                            </p>
-                            <p className="mt-1 text-xs leading-5 text-slate-400">
-                              Use the chat to add steps, refine the graph, or ask for deployment artifacts.
-                            </p>
-
-                            <div className="mt-4 space-y-2">
-                              {CHAT_PROMPT_SUGGESTIONS.slice(0, 2).map((prompt) => (
-                                <button
-                                  key={prompt}
-                                  type="button"
-                                  onClick={() => handleSuggestionClick(prompt)}
-                                  className="w-full rounded-xl border border-white/10 bg-slate-900/70 px-3 py-2.5 text-left text-xs leading-5 text-slate-200 transition-colors hover:border-emerald-400/25 hover:bg-slate-900"
-                                >
-                                  {prompt}
-                                </button>
-                              ))}
                             </div>
-                          </div>
-                        )}
-                      </ScrollArea>
+                          ) : (
+                            <div className="flex h-full flex-col justify-center px-3 py-4">
+                              <p className="text-sm font-medium text-foreground">
+                                Describe the pipeline you want to build.
+                              </p>
+                              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                                Use the chat to add steps, refine the graph, or ask for deployment artifacts.
+                              </p>
 
-                      <div className="border-t border-white/10 p-3">
-                        <div className="rounded-[20px] border border-white/10 bg-slate-950/70 p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+                              <div className="mt-4 space-y-2">
+                                {CHAT_PROMPT_SUGGESTIONS.slice(0, 2).map((prompt) => (
+                                  <button
+                                    key={prompt}
+                                    type="button"
+                                    onClick={() => handleSuggestionClick(prompt)}
+                                    className="w-full rounded-xl border border-border bg-background/70 px-3 py-2.5 text-left text-xs leading-5 text-foreground transition-colors hover:border-emerald-400/35 hover:bg-muted"
+                                  >
+                                    {prompt}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </ScrollArea>
+
+                        <div className="border-t border-border p-3">
+                          <div className="rounded-[20px] border border-border bg-background/85 p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
                             <Textarea
-                              className="min-h-[72px] resize-none border-0 bg-transparent px-1 text-sm leading-6 text-slate-100 shadow-none placeholder:text-slate-500 focus-visible:ring-0"
+                              className="min-h-[72px] resize-none border-0 bg-transparent px-1 text-sm leading-6 text-foreground shadow-none placeholder:text-muted-foreground focus-visible:ring-0"
                               placeholder="Describe the pipeline..."
                               value={userInput}
                               onChange={(e) => setUserInput(e.target.value)}
@@ -658,11 +852,11 @@ const Index = () => {
                               }}
                             />
 
-                            <div className="mt-2 flex items-center justify-end border-t border-white/10 pt-2">
+                            <div className="mt-2 flex items-center justify-end border-t border-border pt-2">
                               <Button
                                 onClick={handleSendMessage}
                                 disabled={isProcessing || !userInput.trim()}
-                                className="h-9 rounded-xl bg-[linear-gradient(135deg,#34d399,#0f766e)] px-3.5 font-semibold text-slate-950 shadow-[0_18px_40px_rgba(16,185,129,0.3)] hover:opacity-95"
+                                className="h-9 rounded-xl bg-[linear-gradient(135deg,#34d399,#0f766e)] px-3.5 font-semibold text-slate-950 shadow-[0_18px_40px_rgba(16,185,129,0.22)] hover:opacity-95"
                               >
                                 {isProcessing ? (
                                   <>
@@ -677,13 +871,14 @@ const Index = () => {
                                 )}
                               </Button>
                             </div>
+                          </div>
                         </div>
                       </div>
                     </div>
-                  </div>
+                  )}
                 </ResizablePanel>
-              </ResizablePanelGroup>
-            </ResizablePanel>
+              </>
+            )}
           </ResizablePanelGroup>
         ) : (
           <div className="flex-1 flex items-center justify-center text-muted-foreground">
@@ -691,6 +886,129 @@ const Index = () => {
           </div>
         )}
       </div>
+
+      <Dialog open={isHelpOpen} onOpenChange={setIsHelpOpen}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <HelpCircle className="h-5 w-5 text-emerald-500" />
+              inLUMEN Help
+            </DialogTitle>
+            <DialogDescription>
+              A compact guide for working efficiently on laptop-sized screens.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-3 text-sm">
+            <div className="rounded-xl border border-border bg-muted/35 p-3">
+              <div className="mb-1 flex items-center gap-2 font-medium">
+                <PanelLeft className="h-4 w-4 text-emerald-500" />
+                Panels
+              </div>
+              Use the header toggles to show only what you need: Library for dragging nodes, Inspector for editing selected nodes, and Chat for pipeline assistance.
+            </div>
+            <div className="rounded-xl border border-border bg-muted/35 p-3">
+              <div className="mb-1 flex items-center gap-2 font-medium">
+                <Keyboard className="h-4 w-4 text-emerald-500" />
+                Chat shortcuts
+              </div>
+              Press Enter to send a message. Press Shift+Enter to add a new line. Save stores the transcript locally; Export downloads it as Markdown.
+            </div>
+            <div className="rounded-xl border border-border bg-muted/35 p-3">
+              <div className="mb-1 flex items-center gap-2 font-medium">
+                <SlidersHorizontal className="h-4 w-4 text-emerald-500" />
+                Canvas workflow
+              </div>
+              Select a node to open the Inspector automatically. Use the canvas Save, Export, Import, and Clear controls for pipeline files.
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Settings className="h-5 w-5 text-emerald-500" />
+              Workspace Settings
+            </DialogTitle>
+            <DialogDescription>
+              Control the workspace layout and appearance without leaving the canvas.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="rounded-xl border border-border bg-muted/30 p-3">
+              <div className="mb-3 text-sm font-medium">Appearance</div>
+              <Button
+                variant="outline"
+                className="w-full justify-start"
+                onClick={() => setIsLightMode((current) => !current)}
+              >
+                {isLightMode ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
+                {isLightMode ? "Switch to dark mode" : "Switch to light mode"}
+              </Button>
+            </div>
+
+            <div className="rounded-xl border border-border bg-muted/30 p-3">
+              <div className="mb-3 text-sm font-medium">Panel visibility</div>
+              <div className="grid grid-cols-3 gap-2">
+                <Button
+                  variant={isLibraryOpen ? "default" : "outline"}
+                  size="sm"
+                  onClick={handleToggleLibrary}
+                >
+                  <PanelLeft className="h-4 w-4" />
+                  Library
+                </Button>
+                <Button
+                  variant={rightPanel === 'inspector' ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => handleToggleRightPanel('inspector')}
+                >
+                  <SlidersHorizontal className="h-4 w-4" />
+                  Inspector
+                </Button>
+                <Button
+                  variant={rightPanel === 'chat' ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => handleToggleRightPanel('chat')}
+                >
+                  <MessageSquare className="h-4 w-4" />
+                  Chat
+                </Button>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="mt-3 w-full justify-start text-muted-foreground"
+                onClick={handleResetPanelLayout}
+              >
+                <RotateCcw className="h-4 w-4" />
+                Reset to focused canvas layout
+              </Button>
+            </div>
+
+            <div className="rounded-xl border border-border bg-muted/30 p-3">
+              <div className="mb-2 text-sm font-medium">Chat model</div>
+              <p className="mb-3 text-xs text-muted-foreground">
+                Current model: {formatConfigDescription(activeConfig)}
+              </p>
+              <Button
+                variant="outline"
+                className="w-full justify-start"
+                onClick={() => {
+                  setPanelPreferences((current) => ({ ...current, rightPanel: 'chat' }));
+                  setIsSettingsOpen(false);
+                }}
+              >
+                <MessageSquare className="h-4 w-4" />
+                Open chat configuration
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <ChatbotConfigForm
         isOpen={isConfigFormOpen}

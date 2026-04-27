@@ -38,6 +38,36 @@
     --radius: 0.5rem;
   }
 
+  .light {
+    --background: 210 30% 97%;
+    --foreground: 222 28% 13%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 28% 13%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 28% 13%;
+
+    --primary: 158 64% 35%;
+    --primary-foreground: 160 45% 98%;
+
+    --secondary: 210 22% 93%;
+    --secondary-foreground: 222 28% 13%;
+
+    --muted: 210 22% 93%;
+    --muted-foreground: 218 12% 42%;
+
+    --accent: 158 58% 38%;
+    --accent-foreground: 160 45% 98%;
+
+    --destructive: 0 72% 50%;
+    --destructive-foreground: 210 20% 98%;
+
+    --border: 214 24% 87%;
+    --input: 214 24% 87%;
+    --ring: 158 58% 38%;
+  }
+
   * {
     @apply border-border;
   }
@@ -93,5 +123,18 @@
       linear-gradient(theme('colors.canvas.grid') 1px, transparent 1px),
       linear-gradient(90deg, theme('colors.canvas.grid') 1px, transparent 1px);
     background-size: 20px 20px;
+  }
+
+  .light .flow-canvas {
+    background-color: #f8faf9;
+    background-image:
+      linear-gradient(rgba(15, 118, 110, 0.1) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(15, 118, 110, 0.1) 1px, transparent 1px);
+  }
+
+  .light .react-flow__controls-button {
+    background: hsl(var(--card));
+    color: hsl(var(--foreground));
+    border-color: hsl(var(--border));
   }
 }
