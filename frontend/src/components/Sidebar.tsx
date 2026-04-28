@@ -38,7 +38,7 @@ interface PipelineOverview {
 
 interface SidebarProps {
   className?: string;
-  onDragStart: (event: React.DragEvent, nodeType: any) => void;
+  onDragStart: (event: React.DragEvent, nodeType: DragNodeType) => void;
   activeTab: string;
   onTabChange: (value: string) => void;
   githubToken: string;
@@ -56,6 +56,37 @@ interface NodeTypeItem {
   icon: React.ReactNode;
   color: string;
 }
+
+type DragNodeType = {
+  type: string;
+  data: {
+    label: string;
+    description: string;
+    type: string;
+  };
+};
+
+type Neo4jFileRef = {
+  filename?: string;
+  bucket?: string;
+  [key: string]: unknown;
+};
+
+type DockerfileGenerationResponse = {
+  dockerfiles?: Array<{
+    dockerfile_filename?: string;
+    content?: string;
+  }>;
+};
+
+type PipelineOverviewResponse = {
+  version?: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+const errorToMessage = (error: unknown, fallback: string) =>
+  error instanceof Error ? error.message : fallback;
 
 const nodeTypes: NodeTypeItem[] = [
   {
@@ -179,7 +210,7 @@ export function Sidebar({
     });
   };
 
-  const fetchNeo4jFiles = async () => {
+  const fetchNeo4jFiles = async (): Promise<Neo4jFileRef[]> => {
     const filesRes = await apiFetch(`${NEO4J_API_URL}/neo4j_get_all_files`, { method: "GET" });
     if (!filesRes.ok) {
       const errText = await filesRes.text().catch(() => "");
@@ -188,7 +219,7 @@ export function Sidebar({
     return await filesRes.json(); // expected: [{filename,bucket}, ...]
   };
 
-  const generateDockerfiles = async (files: any) => {
+  const generateDockerfiles = async (files: Neo4jFileRef[]): Promise<DockerfileGenerationResponse> => {
     const genRes = await apiFetch(`${LLM_API_URL}/agentic_generate_dockerfiles`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -207,7 +238,7 @@ export function Sidebar({
   };
 
   // fetch overview properties when opening Overview tab
-  const fetchPipelineOverview = async () => {
+  const fetchPipelineOverview = async (): Promise<PipelineOverviewResponse> => {
     const res = await apiFetch(`${NEO4J_API_URL}/neo4j_get_overview_properties`, { method: "GET" });
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
@@ -230,10 +261,10 @@ export function Sidebar({
           createdAt: data?.created_at ?? "",
           lastUpdate: data?.updated_at ?? "",
         });
-      } catch (e: any) {
+      } catch (e: unknown) {
         if (isCancelled) return;
         console.error("[Sidebar.tsx] Overview fetch error:", e);
-        setOverviewError(e?.message || "Failed to fetch overview.");
+        setOverviewError(errorToMessage(e, "Failed to fetch overview."));
       } finally {
         if (!isCancelled) setIsLoadingOverview(false);
       }
@@ -259,7 +290,7 @@ export function Sidebar({
       }
 
       const links: DockerfileDownload[] = dockerfiles.map(
-        (df: { dockerfile_filename: string; content: string }, idx: number) => {
+        (df, idx: number) => {
           const name = df?.dockerfile_filename || `Dockerfile_${idx + 1}`;
           const blob = new Blob([df?.content ?? ""], { type: "text/plain;charset=utf-8" });
           const url = URL.createObjectURL(blob);
@@ -288,9 +319,9 @@ export function Sidebar({
       const url = URL.createObjectURL(blob);
 
       setYamlDownload({ name: `ai-pipeline-${Date.now()}.yaml`, url });
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error("[Sidebar.tsx] Generate deployment artifacts error:", e);
-      setDeploymentError(e?.message || "Failed to generate deployment artifacts.");
+      setDeploymentError(errorToMessage(e, "Failed to generate deployment artifacts."));
     } finally {
       setIsGeneratingDeployment(false);
     }

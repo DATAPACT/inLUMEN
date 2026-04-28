@@ -1,96 +1,52 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { apiFetch } from '@/utils/apiFetch';
-import { MINIO_API_URL, NEO4J_API_URL } from '@/config/api';
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { PlusCircle, Upload, X, Eye } from 'lucide-react';
+import { FilePreviewDialog, PreviewType } from '@/components/properties/FilePreviewDialog';
+import { getTypeColor, getTypeIcon } from '@/components/properties/nodeAppearance';
 import {
-  Brain, MessageCircle, FileText, Zap, Database, Settings, Clipboard, PlusCircle,
-  Upload, X, Eye, Edit, Save
-} from 'lucide-react';
+  normalizeType,
+  pickNeo4jUpdatableProps,
+  StepType,
+  STORAGE_DATABASE_OPTIONS,
+  StorageDatabaseOption,
+  normalizeStorageDatabaseOption,
+  typeHasContent,
+  typeHasEndpoint,
+  typeHasFiles,
+  isTextPreviewFile,
+} from '@/features/nodes/nodeSchema';
+import {
+  removeNodeFile,
+  updateNodePropertiesInNeo4j,
+  uploadNodeFile,
+} from '@/features/nodes/nodePersistence';
+import { Node } from 'reactflow';
+
+type NodeParamMap = Record<string, string>;
+
+type PropertyNodeData = {
+  label?: string;
+  description?: string;
+  type?: StepType | string;
+  content?: string;
+  files?: File[];
+  has_files?: string;
+  param?: NodeParamMap;
+  endpoint?: string;
+  database?: StorageDatabaseOption | string;
+  [key: string]: unknown;
+};
 
 interface PropertiesPanelProps {
-  selectedNode: any;
-  onNodeUpdate: (id: string, data: any) => void;
+  selectedNode: Node<PropertyNodeData> | null;
+  onNodeUpdate: (id: string, data: PropertyNodeData) => void;
   onRemoveNode?: (nodeId: string) => void;
   className?: string;
-}
-
-type StepType =
-  | "action"
-  | "input"
-  | "output"
-  | "config"
-  | "storage"
-  | "api"
-  | "custom";
-
-const STORAGE_DATABASE_OPTIONS = ["MinIO", "SQLite", "ChromaDB"] as const;
-
-const normalizeType = (t: any): StepType => {
-  const s = String(t ?? "").toLowerCase().trim();
-  if (
-    s === "action" ||
-    s === "input" ||
-    s === "output" ||
-    s === "config" ||
-    s === "storage" ||
-    s === "api" ||
-    s === "custom"
-  ) return s;
-  return "action";
-};
-
-// Files supported where backend sets has_files: input/output/action/custom
-const typeHasFiles = (t: StepType) => t === "input" || t === "output" || t === "action" || t === "custom";
-
-// Content supported only for input/output
-const typeHasContent = (t: StepType) => t === "input" || t === "output";
-
-// Endpoint supported only for storage/api
-const typeHasEndpoint = (t: StepType) => t === "storage" || t === "api";
-
-const toDbValue = (uiValue: string) => {
-  // "MinIO" -> "minio", "SQLite" -> "sqlite", "ChromaDB" -> "chromadb"
-  return String(uiValue ?? "").toLowerCase().trim();
-};
-
-function pickNeo4jUpdatableProps(nodeId: string, nodeData: any, nodeType: StepType) {
-  // Only send what your backend expects / allows
-  const props: Record<string, any> = {
-    flow_id: nodeId,
-    label: nodeData.label ?? "",
-    type: nodeType,
-    description: nodeData.description ?? ""
-  };
-
-  if (typeHasContent(nodeType)) {
-    props.content = nodeData.content ?? "";
-  }
-
-  if (typeHasFiles(nodeType)) {
-    props.has_files = nodeData.has_files ?? "no"; // derived already in pushNodeUpdate
-    // We do NOT send actual files to Neo4j (File objects aren’t JSON-serializable)
-  }
-
-  if (nodeType === "config") {
-    // Send param (object) and let backend convert to param_json
-    props.param = nodeData.param ?? {};
-  }
-
-  if (typeHasEndpoint(nodeType)) {
-    props.endpoint = nodeData.endpoint ?? "";
-  }
-
-  if (nodeType === "storage") {
-    props.database = toDbValue(nodeData.database ?? "MinIO");
-  }
-
-  return props;
 }
 
 export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, className }: PropertiesPanelProps) {
@@ -107,52 +63,31 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // config param state (config only)
-  const [param, setParam] = useState<Record<string, string>>({});
-  const [draftKeys, setDraftKeys] = useState<Record<string, string>>({});
+  const [param, setParam] = useState<NodeParamMap>({});
+  const [draftKeys, setDraftKeys] = useState<NodeParamMap>({});
 
   // endpoint state (storage/api only)
   const [endpoint, setEndpoint] = useState('');
 
   // storage database dropdown
-  const [databaseName, setDatabaseName] = useState<(typeof STORAGE_DATABASE_OPTIONS)[number]>("MinIO");
+  const [databaseName, setDatabaseName] = useState<StorageDatabaseOption>("MinIO");
 
   // preview/edit file dialog state
   const [previewFile, setPreviewFile] = useState<File | null>(null);
   const [previewContent, setPreviewContent] = useState('');
-  const [previewType, setPreviewType] = useState<'text' | 'image' | 'binary'>('text');
+  const [previewType, setPreviewType] = useState<PreviewType>('text');
   const [isEditing, setIsEditing] = useState(false);
   const [editedContent, setEditedContent] = useState('');
   const [previewFileIndex, setPreviewFileIndex] = useState<number>(-1);
 
-  // --- Neo4j update function ---
-  const updatePropertyToNeo4J = useCallback(async (nodeId: string, properties: Record<string, any>) => {
-    try {
-      const response = await apiFetch(`${NEO4J_API_URL}/neo4j_update_node`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // Shape assumption: { flow_id, properties }
-        body: JSON.stringify({
-          flow_id: nodeId,
-          properties
-        })
-      });
-
-      if (!response.ok) throw new Error('Failed to update node in Neo4j');
-      const result = await response.json();
-      console.log("[PropertiesPanel.tsx] Neo4j update_node:", result);
-    } catch (err) {
-      console.error("[PropertiesPanel.tsx] Neo4j update node error:", err);
-    }
-  }, []);
-
   // Debounce Neo4j updates to avoid POST per keystroke
   const neo4jDebounceRef = useRef<number | null>(null);
-  const debouncedUpdatePropertyToNeo4J = useCallback((nodeId: string, properties: Record<string, any>) => {
+  const debouncedUpdatePropertyToNeo4J = useCallback((nodeId: string, properties: Record<string, unknown>) => {
     if (neo4jDebounceRef.current) window.clearTimeout(neo4jDebounceRef.current);
     neo4jDebounceRef.current = window.setTimeout(() => {
-      updatePropertyToNeo4J(nodeId, properties);
+      updateNodePropertiesInNeo4j(nodeId, properties);
     }, 300);
-  }, [updatePropertyToNeo4J]);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -160,106 +95,11 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
     };
   }, []);
 
-  // --- File upload function (MinIO + Neo4J) ---
-  const uploadFileToMinio = useCallback(async (nodeId: string, file: File) => {
-    try {
-      const form = new FormData();
-      form.append("file", file);
-      form.append("bucket_id", nodeId);
-      const res = await apiFetch(`${MINIO_API_URL}/minio_upload_file`, {
-        method: "POST",
-        body: form,
-      });
-      if (!res.ok) {
-        const txt = await res.text().catch(() => "");
-        throw new Error(`MinIO upload failed (${res.status}): ${txt}`);
-      }
-      const json = await res.json().catch(() => null);
-      console.log("[PropertiesPanel.tsx] MinIO upload ok:", {
-        nodeId,
-        fileName: file.name,
-        response: json,
-      });
-
-      // After MinIO upload: create FILE node + relationship in Neo4j
-      const neoRes = await apiFetch(`${NEO4J_API_URL}/neo4j_add_file`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          properties: {
-            flow_id: nodeId,       
-            filename: file.name,
-          },
-        }),
-      });
-
-      if (!neoRes.ok) {
-        const txt = await neoRes.text().catch(() => "");
-        throw new Error(`Neo4j add file failed (${neoRes.status}): ${txt}`);
-      }
-      const neoJson = await neoRes.json().catch(() => null);
-      console.log("[PropertiesPanel.tsx] Neo4j add_file ok:", neoJson);
-      // Return both if you want to use them in the UI
-      return { minio: json, neo4j: neoJson };
-    } catch (err) {
-      console.error("[PropertiesPanel.tsx] MinIO upload error:", err);
-      throw err;
-    }
-  }, []);
-
-
-   // --- File remove function (MinIO + Neo4J) ---
-  const removeFileInMinio = useCallback(async (nodeId: string, file: File) => {
-    try {
-      //  Remove from MinIO 
-      const form = new FormData();
-      form.append("filename", file.name);
-      form.append("bucket_id", nodeId);
-      const res = await apiFetch(`${MINIO_API_URL}/minio_remove_file`, {
-        method: "DELETE",
-        body: form,
-      });
-      if (!res.ok) {
-        const txt = await res.text().catch(() => "");
-        throw new Error(`MinIO removal failed (${res.status}): ${txt}`);
-      }
-      const json = await res.json().catch(() => null);
-      console.log("[PropertiesPanel.tsx] MinIO removal ok:", {
-        nodeId,
-        fileName: file.name,
-        response: json,
-      });
-
-      // Remove one FILE node in Neo4j (latest added)
-      const neoRes = await apiFetch(`${NEO4J_API_URL}/neo4j_delete_file`, {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          properties: {
-            flow_id: nodeId,      
-            filename: file.name,
-          },
-        }),
-      });
-      if (!neoRes.ok) {
-        const txt = await neoRes.text().catch(() => "");
-        throw new Error(`Neo4j delete file failed (${neoRes.status}): ${txt}`);
-      }
-      const neoJson = await neoRes.json().catch(() => null);
-      console.log("[PropertiesPanel.tsx] Neo4j delete_file ok:", neoJson);
-      return { minio: json, neo4j: neoJson };
-    } catch (err) {
-      console.error("[PropertiesPanel.tsx] MinIO removal error:", err);
-      throw err;
-    }
-  }, []);
-
-
   // Enforce type-specific rules before persisting into node.data
-  const pushNodeUpdate = (patch: Record<string, any>) => {
+  const pushNodeUpdate = (patch: Partial<PropertyNodeData>) => {
     if (!selectedNode) return;
 
-    const next = { ...selectedNode.data, ...patch, type: nodeType };
+    const next: PropertyNodeData = { ...selectedNode.data, ...patch, type: nodeType };
 
     // Content only for input/output
     if (!typeHasContent(nodeType)) {
@@ -273,7 +113,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
       delete next.files;
       delete next.has_files;
     } else {
-      const filesArr: File[] = next.files ?? [];
+      const filesArr: File[] = Array.isArray(next.files) ? next.files : [];
       next.files = filesArr;
       next.has_files = filesArr.length > 0 ? "yes" : "no"; // internal
     }
@@ -320,12 +160,12 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
       setContent(typeHasContent(nodeType) ? (selectedNode.data.content || '') : '');
 
       // files only for input/output/action/custom
-      setFiles(typeHasFiles(nodeType) ? (selectedNode.data.files || []) : []);
+      setFiles(typeHasFiles(nodeType) && Array.isArray(selectedNode.data.files) ? selectedNode.data.files : []);
 
       // param only for config
       if (nodeType === "config") {
         const p = selectedNode.data.param;
-        setParam((p && typeof p === "object" && !Array.isArray(p)) ? p : {});
+        setParam((p && typeof p === "object" && !Array.isArray(p)) ? p as NodeParamMap : {});
       } else {
         setParam({});
       }
@@ -335,8 +175,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
 
       // database only for storage
       if (nodeType === "storage") {
-        const db = selectedNode.data.database || "MinIO";
-        setDatabaseName((STORAGE_DATABASE_OPTIONS.includes(db) ? db : "MinIO") as any);
+        setDatabaseName(normalizeStorageDatabaseOption(selectedNode.data.database));
       } else {
         setDatabaseName("MinIO");
       }
@@ -357,7 +196,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
     setIsEditing(false);
     setEditedContent('');
     setPreviewFileIndex(-1);
-  }, [selectedNode]); // nodeType derived from selectedNode, ok to depend on selectedNode only
+  }, [selectedNode, nodeType]);
 
   const handleLabelChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setLabel(e.target.value);
@@ -379,7 +218,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
     pushNodeUpdate({ endpoint: e.target.value });
   };
 
-  const handleDatabaseChange = (val: (typeof STORAGE_DATABASE_OPTIONS)[number]) => {
+  const handleDatabaseChange = (val: StorageDatabaseOption) => {
     setDatabaseName(val);
     pushNodeUpdate({ database: val });
   };
@@ -412,7 +251,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
     pushNodeUpdate({ files: updatedFiles });
     const nodeId = selectedNode.id;
     const results = await Promise.allSettled(
-      changedFiles.map((f) => uploadFileToMinio(nodeId, f))
+      changedFiles.map((f) => uploadNodeFile(nodeId, f))
     );
     const failed = results.filter((r) => r.status === "rejected");
     if (failed.length > 0) {
@@ -431,7 +270,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
     setFiles(updatedFiles);
     pushNodeUpdate({ files: updatedFiles });
     try {
-      await removeFileInMinio(selectedNode.id, fileToRemove);
+      await removeNodeFile(selectedNode.id, fileToRemove);
     } catch (err) {
       console.warn("[PropertiesPanel.tsx] Removed locally, but MinIO removal failed:", err);
     }
@@ -446,25 +285,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
       setPreviewType('image');
       setPreviewContent(URL.createObjectURL(file));
       setEditedContent('');
-    } else if (
-      file.type.startsWith('text/') ||
-      file.name.endsWith('.json') ||
-      file.name.endsWith('.xml') ||
-      file.name.endsWith('.yaml') ||
-      file.name.endsWith('.yml') ||
-      file.name.endsWith('.md') ||
-      file.name.endsWith('.js') ||
-      file.name.endsWith('.ts') ||
-      file.name.endsWith('.tsx') ||
-      file.name.endsWith('.jsx') ||
-      file.name.endsWith('.css') ||
-      file.name.endsWith('.html') ||
-      file.name.endsWith('.py') ||
-      file.name.endsWith('.java') ||
-      file.name.endsWith('.cpp') ||
-      file.name.endsWith('.c') ||
-      file.name.endsWith('.h')
-    ) {
+    } else if (isTextPreviewFile(file)) {
       setPreviewType('text');
       try {
         const c = await file.text();
@@ -502,7 +323,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
 
     // 2) Upload updated file to MinIO
     try {
-      await uploadFileToMinio(selectedNode.id, newFile);
+      await uploadNodeFile(selectedNode.id, newFile);
     } catch {
       // keep UI changes even if MinIO upload fails
       console.warn("[PropertiesPanel.tsx] File saved locally, but MinIO upload failed.");
@@ -559,36 +380,6 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
       delete copy[key];
       return copy;
     });
-  };
-
-  const getTypeIcon = (type: string) => {
-    switch (type) {
-      case 'system': return <Brain className="w-4 h-4" />;
-      case 'input': return <FileText className="w-4 h-4" />;
-      case 'output': return <MessageCircle className="w-4 h-4" />;
-      case 'action': return <Zap className="w-4 h-4" />;
-      case 'storage': return <Database className="w-4 h-4" />;
-      case 'api': return <Database className="w-4 h-4" />;
-      case 'config': return <Settings className="w-4 h-4" />;
-      case 'clipboard': return <Clipboard className="w-4 h-4" />;
-      case 'custom': return <PlusCircle className="w-4 h-4" />;
-      default: return null;
-    }
-  };
-
-  const getTypeColor = (type: string) => {
-    switch (type) {
-      case 'system': return 'bg-purple-500/20 text-purple-300 border-purple-500/30';
-      case 'input': return 'bg-blue-500/20 text-blue-300 border-blue-500/30';
-      case 'output': return 'bg-green-500/20 text-green-300 border-green-500/30';
-      case 'action': return 'bg-amber-500/20 text-amber-300 border-amber-500/30';
-      case 'api': return 'bg-rose-500/20 text-rose-300 border-rose-500/30';
-      case 'storage': return 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
-      case 'config': return 'bg-sky-500/20 text-sky-300 border-sky-500/30';
-      case 'clipboard': return 'bg-teal-500/20 text-teal-300 border-teal-500/30';
-      case 'custom': return 'bg-violet-500/20 text-violet-300 border-violet-500/30';
-      default: return 'bg-gray-500/20 text-gray-300 border-gray-500/30';
-    }
   };
 
   return (
@@ -746,7 +537,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
                   <select
                     className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
                     value={databaseName}
-                    onChange={(e) => handleDatabaseChange(e.target.value as any)}
+                    onChange={(e) => handleDatabaseChange(normalizeStorageDatabaseOption(e.target.value))}
                   >
                     {STORAGE_DATABASE_OPTIONS.map((opt) => (
                       <option key={opt} value={opt}>{opt}</option>
@@ -837,78 +628,21 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
         </div>
       )}
 
-      {/* File Preview Dialog */}
-      <Dialog open={!!previewFile} onOpenChange={() => setPreviewFile(null)}>
-        <DialogContent className="max-w-4xl max-h-[80vh] overflow-hidden">
-          <DialogHeader>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <DialogTitle>{previewFile?.name}</DialogTitle>
-                <Badge variant="outline" className="text-xs">
-                  {previewType === 'image' ? 'Image' : previewType === 'text' ? 'Text' : 'Binary'}
-                </Badge>
-              </div>
-              <div className="flex items-center gap-2">
-                {previewType === 'text' && !isEditing && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setIsEditing(true)}
-                  >
-                    <Edit className="w-4 h-4 mr-1" />
-                    Edit
-                  </Button>
-                )}
-                {isEditing && (
-                  <>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => {
-                        setIsEditing(false);
-                        setEditedContent(previewContent);
-                      }}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      variant="default"
-                      size="sm"
-                      onClick={saveFileChanges}
-                    >
-                      <Save className="w-4 h-4 mr-1" />
-                      Save Changes
-                    </Button>
-                  </>
-                )}
-              </div>
-            </div>
-          </DialogHeader>
-
-          <div className="flex-1 overflow-auto">
-            {previewType === 'image' ? (
-              <div className="flex justify-center p-4">
-                <img
-                  src={previewContent}
-                  alt={previewFile?.name}
-                  className="max-w-full max-h-[60vh] object-contain rounded-lg border"
-                />
-              </div>
-            ) : isEditing && previewType === 'text' ? (
-              <Textarea
-                value={editedContent}
-                onChange={(e) => setEditedContent(e.target.value)}
-                className="min-h-[400px] font-mono text-sm resize-none"
-                placeholder="Edit your file content here..."
-              />
-            ) : (
-              <pre className="whitespace-pre-wrap text-sm font-mono bg-muted/50 p-4 rounded">
-                {previewContent}
-              </pre>
-            )}
-          </div>
-        </DialogContent>
-      </Dialog>
+      <FilePreviewDialog
+        file={previewFile}
+        previewContent={previewContent}
+        previewType={previewType}
+        isEditing={isEditing}
+        editedContent={editedContent}
+        onClose={() => setPreviewFile(null)}
+        onStartEditing={() => setIsEditing(true)}
+        onCancelEditing={() => {
+          setIsEditing(false);
+          setEditedContent(previewContent);
+        }}
+        onEditedContentChange={setEditedContent}
+        onSaveChanges={saveFileChanges}
+      />
     </div>
   );
 }
