@@ -5,6 +5,7 @@ import uuid
 import json
 import os
 from runtime_config import default_frontend_origin, get_neo4j_settings, get_service_port
+from step_types import normalize_step_type
 
 CORS_ALLOWED_ORIGIN = os.getenv("CORS_ALLOWED_ORIGIN", "").strip() or default_frontend_origin()
 NEO4J_API_PORT = get_service_port("NEO4J_API_PORT", 5001)
@@ -42,9 +43,9 @@ def neo4j_add_node():
     print("[neo4j_api.py] Received query to add STEP node in Neo4j.")
     data = request.json or {}
     properties = data.get("properties", {}) or {}
-    step_type = str(properties.get("type") or "").lower().strip()
+    step_type = normalize_step_type(properties.get("type"))
     # Set default properties:
-    properties.setdefault("type", step_type)
+    properties["type"] = step_type
     properties.setdefault("label", properties.get("label", ""))
     properties.setdefault("description", properties.get("description", ""))
     properties.setdefault("flow_id", properties.get("flow_id"))
@@ -212,7 +213,7 @@ def neo4j_update_node():
     properties = data.get("properties", {}) 
     flow_id = data.get("flow_id") or properties.get("flow_id")
     properties["flow_id"] = flow_id  # Cannot change
-    step_type = str(properties.get("type", "")).lower().strip()
+    step_type = normalize_step_type(properties.get("type"))
     properties["type"] = step_type  # Cannot change
     # Changes in label/description
     properties["label"] = properties.get("label", "")
@@ -589,7 +590,7 @@ def neo4j_get_graph():
                 except Exception:
                     y = 0.0
 
-                step_kind = str(props.get("type") or "custom")
+                step_kind = normalize_step_type(props.get("type"), default="custom")
 
                 files_for_step = row.get("files") or []
                 # filenames list (simple)

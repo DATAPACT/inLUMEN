@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from graph_client import run_neo4j_query
 from llm_config import LLMConfig, log_llm_selection, select_model_client
+from step_types import normalize_step_type
 
 
 class ForcedAssistantAgent(AssistantAgent):
@@ -236,8 +237,8 @@ def build_pipeline_editing_team(
         try:
             query_type = "create_step"
             data = json.loads(params)
-            step_type = str(data.get("type", "")).replace("'", "\\'").strip()
-            step_type_lower = step_type.lower()
+            step_type = normalize_step_type(data.get("type"))
+            step_type_lower = step_type
             label = str(data.get("label", "")).replace("'", "\\'")
             description = str(data.get("description", "")).replace("'", "\\'")
             props_lines = [
@@ -359,6 +360,8 @@ def build_pipeline_editing_team(
                         - [create_step]: calling this tool will create a new step in a pipeline (will always place it last).
                         - [delete_step]: calling this tool will delete a step in a pipeline.
                         Tool calls MUST use a single string argument named params. The value of params MUST be a JSON-encoded string matching the "params JSON" schema in the docstring.
+                        The create_step type MUST be one of: input, action, output, config, storage, api, custom.
+                        Use the label/description fields for domain-specific names such as ingestion, preprocessing, model training, or alerting.
                         """,
         max_tool_iterations=10,
         reflect_on_tool_use=True,

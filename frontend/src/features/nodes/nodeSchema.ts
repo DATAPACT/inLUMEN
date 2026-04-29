@@ -19,7 +19,7 @@ export const normalizeStorageDatabaseOption = (value: unknown): StorageDatabaseO
 };
 
 export const normalizeType = (type: unknown): StepType => {
-  const normalized = String(type ?? "").toLowerCase().trim();
+  const normalized = String(type ?? "").toLowerCase().trim().replace(/\s+/g, "_");
   if (
     normalized === "action" ||
     normalized === "input" ||
@@ -32,6 +32,57 @@ export const normalizeType = (type: unknown): StepType => {
     return normalized;
   }
 
+  const aliases: Record<string, StepType> = {
+    data_ingestion: "input",
+    "data-source": "input",
+    data_source: "input",
+    ingest: "input",
+    ingestion: "input",
+    source: "input",
+    sensor: "input",
+    sensors: "input",
+    collect: "input",
+    collection: "input",
+    preprocess: "action",
+    preprocessing: "action",
+    processing: "action",
+    transform: "action",
+    transformation: "action",
+    feature_engineering: "action",
+    "feature-engineering": "action",
+    training: "action",
+    model_training: "action",
+    "model-training": "action",
+    evaluation: "action",
+    model_evaluation: "action",
+    "model-evaluation": "action",
+    inference: "action",
+    scoring: "action",
+    alert: "output",
+    alerting: "output",
+    notification: "output",
+    notify: "output",
+    report: "output",
+    reporting: "output",
+    dashboard: "output",
+    result: "output",
+    results: "output",
+    database: "storage",
+    db: "storage",
+    clipboard: "storage",
+    endpoint: "api",
+    api_call: "api",
+    "api-call": "api",
+    model_config: "config",
+    "model-config": "config",
+    configuration: "config",
+  };
+  if (aliases[normalized]) return aliases[normalized];
+  if (normalized.includes("ingest") || normalized.includes("input") || normalized.includes("source")) return "input";
+  if (normalized.includes("alert") || normalized.includes("output") || normalized.includes("report")) return "output";
+  if (normalized.includes("storage") || normalized.includes("database") || normalized.includes("clipboard")) return "storage";
+  if (normalized.includes("api") || normalized.includes("endpoint")) return "api";
+  if (normalized.includes("config")) return "config";
   return "action";
 };
 

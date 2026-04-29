@@ -1,4 +1,5 @@
 import { Edge, Node } from 'reactflow';
+import { normalizeType } from '@/features/nodes/nodeSchema';
 
 export type NormalizedGraph = {
   updated_at: string | null;
@@ -20,6 +21,10 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
     return {
       ...node,
       id: String(node.id),
+      data: {
+        ...node.data,
+        type: normalizeType(node.data?.type),
+      },
     };
   });
 
