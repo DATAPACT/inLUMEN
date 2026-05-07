@@ -93,9 +93,9 @@ def build_pipeline_editing_team(
             - uid: string (generated via randomUUID)
             - flow_id: string (unique int: number of step generated: 1,2 ... N)
             - type: string ("input"|"config"|"output"|"action"|"storage"|"api")
-            - label: string 
+            - label: string
             - description: string
-            - content: string 
+            - content: string
             - has_files: string ("yes"|"no") - default: "no"
             - endpoint: string
             - database: string - default : "minio"
@@ -267,7 +267,7 @@ def build_pipeline_editing_team(
             props_str = ",\n            ".join(props_lines)
             query = f"""
             MATCH (p:PIPELINE {{status:'design'}})
-            SET p.updated_at = datetime() 
+            SET p.updated_at = datetime()
             WITH p
             OPTIONAL MATCH (sAll:STEP)
             WHERE sAll.flow_id IS NOT NULL AND toString(sAll.flow_id) =~ '^[0-9]+$'
@@ -355,8 +355,8 @@ def build_pipeline_editing_team(
         description="An agent that designs AI/data pipelines given a user request.",
         system_message=""" You design AI/data pipelines using your registered tools. Call one or multiple tools to create or modify a pipeline as requested by the user.
                           A PIPELINE is composed of one or several STEPs. Use overview to check if there are any pipelines. If the user request is unclear or incomplete, ask for more details.
-                        - [overview]: calling this tool will give you an overview of the current pipeline content, if any. 
-                        - [create_pipeline]: calling this tool will create a pipeline. 
+                        - [overview]: calling this tool will give you an overview of the current pipeline content, if any.
+                        - [create_pipeline]: calling this tool will create a pipeline.
                         - [create_step]: calling this tool will create a new step in a pipeline (will always place it last).
                         - [delete_step]: calling this tool will delete a step in a pipeline.
                         Tool calls MUST use a single string argument named params. The value of params MUST be a JSON-encoded string matching the "params JSON" schema in the docstring.

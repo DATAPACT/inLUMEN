@@ -33,7 +33,7 @@ async def generate_dockerfiles_with_agent(
         description="An agent that generates Dockerfiles.",
         system_message=""" You will be given a list of files and another containing their corresponding IDs (files with same ID means they belong to the same folder). Generate a Dockerfile file per folder. Name them Dockerfile.<insert folder ID and no extension>. Follow the rules:
         1) Start with a base image. 2) Copy files into the container. 3) Install dependencies from requirements file (if present). 4) Make .sh files executable. 5) Set the startup command.
-        See example below: 
+        See example below:
         FROM ubuntu:latest
         ENV DEBIAN_FRONTEND=noninteractive
         RUN apt-get update && apt-get install -y \
