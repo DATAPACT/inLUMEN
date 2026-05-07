@@ -13,6 +13,7 @@ import {
   Database,
   PlusCircle 
 } from 'lucide-react';
+import { normalizeType } from '@/features/nodes/nodeSchema';
 
 interface NodeProps {
   data: {
@@ -60,8 +61,9 @@ const getTypeColor = (type: string) => {
 };
 
 export const CustomNode: React.FC<NodeProps> = ({ data, selected }) => {
-  const icon = icons[data.type as keyof typeof icons] || <PanelLeft className="w-4 h-4" />;
-  const typeColor = getTypeColor(data.type);
+  const visualType = data.type === 'system' ? 'system' : normalizeType(data.type);
+  const icon = icons[visualType as keyof typeof icons] || <PanelLeft className="w-4 h-4" />;
+  const typeColor = getTypeColor(visualType);
   
   return (
     <div 
@@ -69,14 +71,14 @@ export const CustomNode: React.FC<NodeProps> = ({ data, selected }) => {
         "node-custom px-3 py-2 rounded-lg border min-w-[160px] max-w-[240px] animate-fade-in text-slate-100",
         selected ? "border-accent/80 shadow-[0_0_0_1px_hsl(var(--accent))]" : "border-border",
         data.active ? "animate-pulse border-purple-500" : "",
-        data.type === 'system' ? "bg-purple-950/40" : 
-        data.type === 'input' ? "bg-blue-950/40" :
-        data.type === 'output' ? "bg-green-950/40" :
-        data.type === 'action' ? "bg-amber-950/40" :
-        data.type === 'api' ? "bg-rose-950/40" :
-        data.type === 'config' ? "bg-sky-950/40" :
-        data.type === 'custom' ? "bg-gray-950/40" :
-        data.type === 'storage' ? "bg-teal-950/40" : "bg-gray-950/40"
+        visualType === 'system' ? "bg-purple-950/40" :
+        visualType === 'input' ? "bg-blue-950/40" :
+        visualType === 'output' ? "bg-green-950/40" :
+        visualType === 'action' ? "bg-amber-950/40" :
+        visualType === 'api' ? "bg-rose-950/40" :
+        visualType === 'config' ? "bg-sky-950/40" :
+        visualType === 'custom' ? "bg-gray-950/40" :
+        visualType === 'storage' ? "bg-teal-950/40" : "bg-gray-950/40"
       )}
     >
       {/* Input handle on the top */}
@@ -93,7 +95,7 @@ export const CustomNode: React.FC<NodeProps> = ({ data, selected }) => {
             className={cn("text-xs font-normal flex items-center gap-1", typeColor)}
           >
             {icon}
-            {data.type}
+            {visualType}
           </Badge>
         </div>
         
