@@ -621,7 +621,13 @@ def neo4j_get_graph():
                 if "database" in props:
                     data["database"] = props.get("database")
                 if "param_json" in props:
-                    data["param_json"] = props.get("param_json")
+                    param_json = props.get("param_json")
+                    data["param_json"] = param_json
+                    try:
+                        parsed_param = json.loads(param_json) if isinstance(param_json, str) else {}
+                    except Exception:
+                        parsed_param = {}
+                    data["param"] = parsed_param if isinstance(parsed_param, dict) else {}
 
                 nodes.append({
                     "id": node_id,

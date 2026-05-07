@@ -1,5 +1,6 @@
 import { apiFetch } from '@/utils/apiFetch';
 import { MINIO_API_URL, NEO4J_API_URL } from '@/config/api';
+import { getNodeFileName, NodeFileReference } from '@/features/nodes/nodeSchema';
 
 export const updateNodePropertiesInNeo4j = async (
   nodeId: string,
@@ -67,10 +68,15 @@ export const uploadNodeFile = async (nodeId: string, file: File) => {
   }
 };
 
-export const removeNodeFile = async (nodeId: string, file: File) => {
+export const removeNodeFile = async (nodeId: string, file: NodeFileReference) => {
+  const fileName = getNodeFileName(file);
+  if (!fileName) {
+    throw new Error("Cannot remove a file without a filename.");
+  }
+
   try {
     const form = new FormData();
-    form.append("filename", file.name);
+    form.append("filename", fileName);
     form.append("bucket_id", nodeId);
     const res = await apiFetch(`${MINIO_API_URL}/minio_remove_file`, {
       method: "DELETE",
@@ -83,7 +89,7 @@ export const removeNodeFile = async (nodeId: string, file: File) => {
     const json = await res.json().catch(() => null);
     console.log("[nodePersistence.ts] MinIO removal ok:", {
       nodeId,
-      fileName: file.name,
+      fileName,
       response: json,
     });
 
@@ -93,7 +99,7 @@ export const removeNodeFile = async (nodeId: string, file: File) => {
       body: JSON.stringify({
         properties: {
           flow_id: nodeId,
-          filename: file.name,
+          filename: fileName,
         },
       }),
     });

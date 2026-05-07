@@ -11,11 +11,35 @@ export const STORAGE_DATABASE_OPTIONS = ["MinIO", "SQLite", "ChromaDB"] as const
 
 export type StorageDatabaseOption = (typeof STORAGE_DATABASE_OPTIONS)[number];
 
+export type NodeFileMetadata = {
+  filename?: string;
+  name?: string;
+  bucket?: string;
+  added_at?: string;
+  [key: string]: unknown;
+};
+
+export type NodeFileReference = File | string | NodeFileMetadata;
+
+export const isBrowserFile = (file: NodeFileReference): file is File =>
+  typeof File !== "undefined" && file instanceof File;
+
+export const getNodeFileName = (file: NodeFileReference) => {
+  if (typeof file === "string") return file;
+  if (isBrowserFile(file)) return file.name;
+  if (file && typeof file === "object") {
+    const name = file.filename ?? file.name;
+    return typeof name === "string" ? name : "";
+  }
+  return "";
+};
+
 export const normalizeStorageDatabaseOption = (value: unknown): StorageDatabaseOption => {
-  const candidate = String(value ?? "");
-  return STORAGE_DATABASE_OPTIONS.includes(candidate as StorageDatabaseOption)
-    ? (candidate as StorageDatabaseOption)
-    : "MinIO";
+  const candidate = String(value ?? "").trim().toLowerCase();
+  return (
+    STORAGE_DATABASE_OPTIONS.find((option) => option.toLowerCase() === candidate) ??
+    "MinIO"
+  );
 };
 
 export const normalizeType = (type: unknown): StepType => {

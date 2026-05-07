@@ -7,7 +7,8 @@ import { Edit, Save } from 'lucide-react';
 export type PreviewType = 'text' | 'image' | 'binary';
 
 type FilePreviewDialogProps = {
-  file: File | null;
+  open: boolean;
+  fileName: string;
   previewContent: string;
   previewType: PreviewType;
   isEditing: boolean;
@@ -20,7 +21,8 @@ type FilePreviewDialogProps = {
 };
 
 export const FilePreviewDialog = ({
-  file,
+  open,
+  fileName,
   previewContent,
   previewType,
   isEditing,
@@ -31,12 +33,14 @@ export const FilePreviewDialog = ({
   onEditedContentChange,
   onSaveChanges,
 }: FilePreviewDialogProps) => (
-  <Dialog open={!!file} onOpenChange={onClose}>
+  <Dialog open={open} onOpenChange={(nextOpen) => {
+    if (!nextOpen) onClose();
+  }}>
     <DialogContent className="max-w-4xl max-h-[80vh] overflow-hidden">
       <DialogHeader>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <DialogTitle>{file?.name}</DialogTitle>
+            <DialogTitle>{fileName}</DialogTitle>
             <Badge variant="outline" className="text-xs">
               {previewType === 'image' ? 'Image' : previewType === 'text' ? 'Text' : 'Binary'}
             </Badge>
@@ -80,7 +84,7 @@ export const FilePreviewDialog = ({
           <div className="flex justify-center p-4">
             <img
               src={previewContent}
-              alt={file?.name}
+              alt={fileName}
               className="max-w-full max-h-[60vh] object-contain rounded-lg border"
             />
           </div>

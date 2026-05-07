@@ -2,7 +2,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { apiFetch } from '@/utils/apiFetch';
 import { LLM_API_URL } from '@/config/api';
 import { Sidebar } from '@/components/Sidebar';
-import { PropertiesPanel } from '@/components/PropertiesPanel';
+import { PropertiesPanel, PropertyNodeData } from '@/components/PropertiesPanel';
 import { Toolbar } from '@/components/Toolbar';
 import { WrappedFlowCanvas, FlowCanvasRef } from '@/components/FlowCanvas';
 import { ChatPanel } from '@/components/chat/ChatPanel';
@@ -92,13 +92,7 @@ const readSavedTheme = () => {
 const createDownloadTimestamp = () =>
   new Date().toISOString().replace(/[:.]/g, "-");
 
-type FlowNodeData = {
-  label?: string;
-  description?: string;
-  type?: string;
-  files?: unknown[];
-  [key: string]: unknown;
-};
+type FlowNodeData = PropertyNodeData;
 
 type FlowNode = Node<FlowNodeData>;
 

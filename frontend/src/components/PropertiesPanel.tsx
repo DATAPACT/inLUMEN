@@ -15,10 +15,13 @@ import {
   STORAGE_DATABASE_OPTIONS,
   StorageDatabaseOption,
   normalizeStorageDatabaseOption,
+  getNodeFileName,
+  isBrowserFile,
   typeHasContent,
   typeHasEndpoint,
   typeHasFiles,
   isTextPreviewFile,
+  NodeFileReference,
 } from '@/features/nodes/nodeSchema';
 import {
   removeNodeFile,
@@ -29,17 +32,24 @@ import { Node } from 'reactflow';
 
 type NodeParamMap = Record<string, string>;
 
-type PropertyNodeData = {
+export type PropertyNodeData = {
   label?: string;
   description?: string;
   type?: StepType | string;
   content?: string;
-  files?: File[];
+  files?: NodeFileReference[];
   has_files?: string;
   param?: NodeParamMap;
   endpoint?: string;
   database?: StorageDatabaseOption | string;
   [key: string]: unknown;
+};
+
+const normalizeFileReferences = (value: unknown): NodeFileReference[] => {
+  if (!Array.isArray(value)) return [];
+  return value.filter((file): file is NodeFileReference => {
+    return getNodeFileName(file as NodeFileReference).length > 0;
+  });
 };
 
 interface PropertiesPanelProps {
@@ -59,7 +69,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
   const [content, setContent] = useState('');
 
   // file state (input/output/action/custom)
-  const [files, setFiles] = useState<File[]>([]);
+  const [files, setFiles] = useState<NodeFileReference[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // config param state (config only)
@@ -74,6 +84,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
 
   // preview/edit file dialog state
   const [previewFile, setPreviewFile] = useState<File | null>(null);
+  const [previewFileName, setPreviewFileName] = useState('');
   const [previewContent, setPreviewContent] = useState('');
   const [previewType, setPreviewType] = useState<PreviewType>('text');
   const [isEditing, setIsEditing] = useState(false);
@@ -113,7 +124,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
       delete next.files;
       delete next.has_files;
     } else {
-      const filesArr: File[] = Array.isArray(next.files) ? next.files : [];
+      const filesArr = normalizeFileReferences(next.files);
       next.files = filesArr;
       next.has_files = filesArr.length > 0 ? "yes" : "no"; // internal
     }
@@ -160,7 +171,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
       setContent(typeHasContent(nodeType) ? (selectedNode.data.content || '') : '');
 
       // files only for input/output/action/custom
-      setFiles(typeHasFiles(nodeType) && Array.isArray(selectedNode.data.files) ? selectedNode.data.files : []);
+      setFiles(typeHasFiles(nodeType) ? normalizeFileReferences(selectedNode.data.files) : []);
 
       // param only for config
       if (nodeType === "config") {
@@ -191,6 +202,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
 
     // reset preview dialog
     setPreviewFile(null);
+    setPreviewFileName('');
     setPreviewContent('');
     setPreviewType('text');
     setIsEditing(false);
@@ -232,7 +244,10 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
     const existing = files;
     // Map filename -> index in existing array
     const nameToIndex = new Map<string, number>();
-    existing.forEach((f, idx) => nameToIndex.set(f.name, idx));
+    existing.forEach((f, idx) => {
+      const fileName = getNodeFileName(f);
+      if (fileName) nameToIndex.set(fileName, idx);
+    });
     const updatedFiles = [...existing];
     const changedFiles: File[] = [];
     for (const f of picked) {
@@ -276,10 +291,23 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
     }
   };
 
-  const viewFile = async (file: File, index: number) => {
-    setPreviewFile(file);
+  const viewFile = async (file: NodeFileReference, index: number) => {
+    const fileName = getNodeFileName(file);
+    setPreviewFileName(fileName);
     setPreviewFileIndex(index);
     setIsEditing(false);
+
+    if (!isBrowserFile(file)) {
+      setPreviewFile(null);
+      setPreviewType('binary');
+      setPreviewContent(
+        `Stored file: ${fileName}\nPreview is available for files selected in this browser session.`
+      );
+      setEditedContent('');
+      return;
+    }
+
+    setPreviewFile(file);
 
     if (file.type.startsWith('image/')) {
       setPreviewType('image');
@@ -589,7 +617,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
                     <div className="mt-3 space-y-2">
                       {files.map((file, index) => (
                         <div key={index} className="flex items-center justify-between bg-muted/50 p-2 rounded">
-                          <span className="text-xs truncate flex-1">{file.name}</span>
+                          <span className="text-xs truncate flex-1">{getNodeFileName(file)}</span>
                           <div className="flex items-center gap-1">
                             <Button
                               type="button"
@@ -629,12 +657,16 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
       )}
 
       <FilePreviewDialog
-        file={previewFile}
+        open={Boolean(previewFileName)}
+        fileName={previewFileName}
         previewContent={previewContent}
         previewType={previewType}
         isEditing={isEditing}
         editedContent={editedContent}
-        onClose={() => setPreviewFile(null)}
+        onClose={() => {
+          setPreviewFile(null);
+          setPreviewFileName('');
+        }}
         onStartEditing={() => setIsEditing(true)}
         onCancelEditing={() => {
           setIsEditing(false);

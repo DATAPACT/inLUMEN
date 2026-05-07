@@ -251,7 +251,7 @@ def build_pipeline_editing_team(
                 props_lines.append("content: ''")
                 props_lines.append("has_files: 'no'")
             elif step_type_lower == "config":
-                props_lines.append("param_json: {}")
+                props_lines.append("param_json: '{}'")
             elif step_type_lower == "action":
                 props_lines.append("has_files: 'no'")
             elif step_type_lower == "storage":

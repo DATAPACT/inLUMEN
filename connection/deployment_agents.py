@@ -99,24 +99,65 @@ def _generate_argo_yaml_tool(params: Optional[dict] = None) -> str:
     """Produce the final Argo Workflow YAML from pipeline, code, and dockerfile metadata."""
     payload = params or {}
     pipeline = payload.get("pipeline_graph") or {}
-    file_contents = payload.get("file_contents") or []
-    dockerfiles = payload.get("dockerfiles") or []
+    file_contents_raw = payload.get("file_contents") or []
+    dockerfiles_raw = payload.get("dockerfiles") or []
+    file_contents = (
+        file_contents_raw.get("files", [])
+        if isinstance(file_contents_raw, dict)
+        else file_contents_raw
+    )
+    dockerfiles = (
+        dockerfiles_raw.get("dockerfiles", [])
+        if isinstance(dockerfiles_raw, dict)
+        else dockerfiles_raw
+    )
+
+    def _steps_from_pipeline_graph(graph: dict) -> List[dict]:
+        if graph.get("step_rows"):
+            steps = []
+            for row in graph.get("step_rows", []) or []:
+                step = row.get("step") or {}
+                flow_id = str(step.get("flow_id") or "").strip()
+                if not flow_id:
+                    continue
+                steps.append(
+                    {
+                        "flow_id": flow_id,
+                        "label": step.get("label", ""),
+                        "description": step.get("description", ""),
+                        "type": step.get("type", "custom"),
+                        "files": row.get("files") or [],
+                    }
+                )
+            return steps
+
+        steps = []
+        for node in graph.get("nodes", []) or []:
+            data = node.get("data") or {}
+            flow_id = str(data.get("flow_id") or node.get("id") or "").strip()
+            if not flow_id:
+                continue
+            files = data.get("file_buckets") or []
+            if not files:
+                files = [
+                    {"filename": filename, "bucket": f"files-step-id-{flow_id}"}
+                    for filename in data.get("files", []) or []
+                    if isinstance(filename, str)
+                ]
+            steps.append(
+                {
+                    "flow_id": flow_id,
+                    "label": data.get("label", ""),
+                    "description": data.get("description", ""),
+                    "type": data.get("type", "custom"),
+                    "files": files,
+                }
+            )
+        return steps
 
     steps = []
-    for row in pipeline.get("step_rows", []) or []:
-        step = row.get("step") or {}
-        flow_id = str(step.get("flow_id") or "").strip()
-        if not flow_id:
-            continue
-        steps.append(
-            {
-                "flow_id": flow_id,
-                "label": step.get("label", ""),
-                "description": step.get("description", ""),
-                "type": step.get("type", "custom"),
-                "files": row.get("files") or [],
-            }
-        )
+    if isinstance(pipeline, dict):
+        steps = _steps_from_pipeline_graph(pipeline)
 
     def _to_int(flow_id: str) -> int:
         try:
@@ -133,16 +174,27 @@ def _generate_argo_yaml_tool(params: Optional[dict] = None) -> str:
 
     dockerfile_lookup: Dict[str, List[dict]] = {}
     for entry in dockerfiles:
-        flow_id = str(entry.get("flow_id") or "").strip()
+        name = str(
+            entry.get("flow_id")
+            or entry.get("step_id")
+            or entry.get("dockerfile_filename")
+            or entry.get("name")
+            or ""
+        )
+        flow_match = re.search(r"(\d+)", name)
+        flow_id = str(entry.get("flow_id") or entry.get("step_id") or "").strip()
+        if not flow_id and flow_match:
+            flow_id = flow_match.group(1)
         if flow_id:
             dockerfile_lookup.setdefault(flow_id, []).append(entry)
 
     def _image_name(entry: dict, flow_id: str) -> str:
-        name = str(entry.get("name") or "").strip()
+        name = str(entry.get("name") or entry.get("dockerfile_filename") or "").strip()
         if not name:
             return f"inlumen/step-{flow_id}:latest"
-        base = Path(name).stem if "." in name else name
+        base = name.replace(".", "-") if name.lower().startswith("dockerfile.") else Path(name).stem
         base = re.sub(r"[^a-zA-Z0-9._-]", "-", base)
+        base = base.lower()
         if not base:
             base = f"step-{flow_id}"
         return f"inlumen/{base}:latest"
