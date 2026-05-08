@@ -32,10 +32,12 @@ import {
   clearNeo4jAndMinIO,
 } from '@/features/flow/flowPersistence';
 import {
+  createAgentGraphSnapshot,
   downloadJsonFile,
   downloadTextFile,
   getNextNumericNodeId,
   normalizeGraph,
+  type AgentGraphSnapshot,
   type NormalizedGraph,
 } from '@/features/flow/flowGraph';
 
@@ -51,6 +53,7 @@ interface FlowCanvasProps {
 export interface FlowCanvasRef {
   updateNode: (id: string, data: Record<string, unknown>) => void;
   syncFromBackend: (graphData?: unknown) => Promise<NormalizedGraph>;
+  getCurrentGraph: () => AgentGraphSnapshot;
 }
 
 let nodeId = 1;
@@ -134,6 +137,14 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     }
   }, [applyGraph, fetchGraphAndApply, markSyncHealthy, scheduleSyncRetry]);
 
+  const getCurrentGraph = useCallback(() => {
+    return createAgentGraphSnapshot(normalizeGraph({
+      updated_at: lastSeenUpdatedAtRef.current,
+      nodes,
+      edges,
+    }));
+  }, [edges, nodes]);
+
   useEffect(() => {
     let cancelled = false;
     const initialLoad = async () => {
@@ -200,7 +211,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   useImperativeHandle(ref, () => ({
     updateNode,
     syncFromBackend,
-  }), [syncFromBackend, updateNode]);
+    getCurrentGraph,
+  }), [getCurrentGraph, syncFromBackend, updateNode]);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const triggerImport = () => fileInputRef.current?.click();

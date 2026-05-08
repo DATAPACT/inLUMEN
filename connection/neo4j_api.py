@@ -517,6 +517,177 @@ def neo4j_update_node_position():
         return jsonify({"ok": True}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/neo4j_sync_graph', methods=['POST', 'OPTIONS'])
+@require_auth
+def neo4j_sync_graph():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    payload = request.get_json(force=True) or {}
+    graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+    raw_nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    raw_edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+
+    nodes = []
+    seen_node_ids = set()
+    for raw_node in raw_nodes:
+        if not isinstance(raw_node, dict):
+            continue
+        data = raw_node.get("data") if isinstance(raw_node.get("data"), dict) else raw_node
+        flow_id = str(raw_node.get("id") or data.get("id") or "").strip()
+        if not flow_id or flow_id in seen_node_ids:
+            continue
+        seen_node_ids.add(flow_id)
+
+        position = raw_node.get("position") if isinstance(raw_node.get("position"), dict) else {}
+        try:
+            x = float(position.get("x", data.get("x", 0)) or 0)
+        except Exception:
+            x = 0.0
+        try:
+            y = float(position.get("y", data.get("y", 0)) or 0)
+        except Exception:
+            y = 0.0
+
+        step_type = normalize_step_type(data.get("type"), default="custom")
+        props = {
+            "flow_id": flow_id,
+            "type": step_type,
+            "label": str(data.get("label") or ""),
+            "description": str(data.get("description") or ""),
+            "x": x,
+            "y": y,
+        }
+        if step_type in ("input", "output"):
+            props["content"] = str(data.get("content") or "")
+            props["has_files"] = "yes" if data.get("files") else str(data.get("has_files") or "no").lower().strip()
+        elif step_type in ("action", "custom"):
+            props["has_files"] = "yes" if data.get("files") else str(data.get("has_files") or "no").lower().strip()
+        elif step_type == "config":
+            param_obj = data.get("param") if isinstance(data.get("param"), dict) else {}
+            props["param_json"] = json.dumps(param_obj)
+        elif step_type == "storage":
+            props["endpoint"] = str(data.get("endpoint") or "")
+            db = str(data.get("database") or "minio").lower().strip()
+            props["database"] = db if db in ("minio", "sqlite", "chromadb") else "minio"
+        elif step_type == "api":
+            props["endpoint"] = str(data.get("endpoint") or "")
+        nodes.append(props)
+
+    visible_ids = {node["flow_id"] for node in nodes}
+    edges = []
+    seen_edges = set()
+    for raw_edge in raw_edges:
+        if not isinstance(raw_edge, dict):
+            continue
+        source = str(raw_edge.get("source") or "").strip()
+        target = str(raw_edge.get("target") or "").strip()
+        edge_key = (source, target)
+        if (
+            not source
+            or not target
+            or source == target
+            or source not in visible_ids
+            or target not in visible_ids
+            or edge_key in seen_edges
+        ):
+            continue
+        seen_edges.add(edge_key)
+        edges.append({"source": source, "target": target})
+
+    try:
+        with driver.session() as session:
+            if not nodes:
+                record = session.run("""
+                MATCH (s:STEP)
+                WHERE s.flow_id IS NOT NULL
+                RETURN collect(toString(s.flow_id)) AS deleted_step_flow_ids
+                """).single()
+                deleted_ids = record["deleted_step_flow_ids"] if record and record["deleted_step_flow_ids"] else []
+                session.run("MATCH (n) DETACH DELETE n")
+                return jsonify({
+                    "ok": True,
+                    "node_count": 0,
+                    "edge_count": 0,
+                    "deleted_step_flow_ids": deleted_ids,
+                }), 200
+
+            pipeline_record = session.run("""
+            OPTIONAL MATCH (candidate:PIPELINE {status:'design'})
+            OPTIONAL MATCH (candidate)-[:HAS_STEP]->(candidateStep:STEP)
+            WITH candidate, count(candidateStep) AS step_count
+            ORDER BY step_count DESC, candidate.updated_at DESC
+            WITH collect(candidate)[0] AS candidate
+            CALL {
+              WITH candidate
+              WITH candidate WHERE candidate IS NULL
+              CREATE (p:PIPELINE {
+                  uid: randomUUID(),
+                  name: '',
+                  label: '',
+                  description: '',
+                  version: '1.1',
+                  created_at: datetime(),
+                  updated_at: datetime(),
+                  status: 'design'
+              })
+              RETURN p
+
+              UNION
+
+              WITH candidate
+              WITH candidate WHERE candidate IS NOT NULL
+              SET candidate.updated_at = datetime()
+              RETURN candidate AS p
+            }
+            RETURN p.uid AS pipeline_uid
+            """).single()
+            pipeline_uid = pipeline_record["pipeline_uid"]
+
+            session.run("""
+            MATCH (s:STEP)
+            WHERE s.flow_id IS NOT NULL AND NOT toString(s.flow_id) IN $visible_ids
+            DETACH DELETE s
+            """, visible_ids=list(visible_ids))
+
+            for props in nodes:
+                session.run("""
+                MATCH (p:PIPELINE {uid: $pipeline_uid})
+                MERGE (s:STEP {flow_id: $flow_id})
+                ON CREATE SET s.uid = randomUUID()
+                SET s += $props
+                MERGE (p)-[:HAS_STEP]->(s)
+                SET p.updated_at = datetime()
+                RETURN s.flow_id AS flow_id
+                """, pipeline_uid=pipeline_uid, flow_id=props["flow_id"], props=props)
+
+            session.run("""
+            MATCH (:STEP)-[r:FLOWS_TO]->(:STEP)
+            DELETE r
+            """)
+
+            for edge in edges:
+                session.run("""
+                MATCH (source:STEP {flow_id: $source})
+                MATCH (target:STEP {flow_id: $target})
+                MERGE (source)-[:FLOWS_TO]->(target)
+                """, source=edge["source"], target=edge["target"])
+
+            session.run("""
+            MATCH (p:PIPELINE {uid: $pipeline_uid})
+            SET p.updated_at = datetime()
+            """, pipeline_uid=pipeline_uid)
+
+        return jsonify({
+            "ok": True,
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+        }), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error syncing visible graph:", e)
+        return jsonify({"error": str(e)}), 500
     
 @app.route('/neo4j_get_graph', methods=['GET'])
 @require_auth
