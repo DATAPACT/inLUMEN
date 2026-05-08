@@ -87,14 +87,18 @@ def neo4j_add_node():
     # Construct the Cypher query
     query = """
     WITH $props AS props
-    OPTIONAL MATCH (s:STEP)
-    WITH props, count(s) AS stepCount
-
-    CALL (stepCount) {
-      WITH stepCount
-      WHERE stepCount = 0
+    OPTIONAL MATCH (candidate:PIPELINE {status:'design'})
+    OPTIONAL MATCH (candidate)-[:HAS_STEP]->(candidateStep:STEP)
+    WITH props, candidate, count(candidateStep) AS step_count
+    ORDER BY step_count DESC, candidate.updated_at DESC
+    WITH props, collect(candidate)[0] AS candidate
+    CALL {
+      WITH props, candidate
+      WITH props, candidate
+      WHERE candidate IS NULL
       CREATE (p:PIPELINE {
           uid:        randomUUID(),
+          name:       '',
           label:       '',
           description: '',
           version:    '1.1',
@@ -106,19 +110,11 @@ def neo4j_add_node():
 
       UNION
 
-      WITH stepCount
-      WHERE stepCount <> 0
-      MERGE (p:PIPELINE {status: 'design'})
-      ON CREATE SET
-          p.uid = randomUUID(),
-          p.label = '',
-          p.description = '',
-          p.version = '1.1',
-          p.created_at = datetime(),
-          p.updated_at = datetime()
-      ON MATCH SET
-          p.updated_at = datetime()
-      RETURN p
+      WITH props, candidate
+      WITH props, candidate
+      WHERE candidate IS NOT NULL
+      SET candidate.updated_at = datetime()
+      RETURN candidate AS p
     }
 
     WITH props, p
@@ -466,8 +462,11 @@ def neo4j_get_overview_properties():
 def neo4j_get_pipeline_updated_at():
     print("[neo4j_api.py] Received request to get PIPELINE.updated_at")
     query = """
-    MATCH (p:PIPELINE)
-    RETURN toString(p.updated_at) AS updated_at
+    MATCH (candidate:PIPELINE {status:'design'})
+    OPTIONAL MATCH (candidate)-[:HAS_STEP]->(candidateStep:STEP)
+    WITH candidate, count(candidateStep) AS step_count
+    ORDER BY step_count DESC, candidate.updated_at DESC
+    RETURN toString(candidate.updated_at) AS updated_at
     LIMIT 1
     """
     try:
@@ -508,7 +507,7 @@ def neo4j_update_node_position():
     SET s.x = $x,
         s.y = $y
     WITH s
-    MATCH (p:PIPELINE)
+    MATCH (p:PIPELINE)-[:HAS_STEP]->(s)
     SET p.updated_at = datetime()
     RETURN s.flow_id AS flow_id
     """
@@ -524,17 +523,39 @@ def neo4j_update_node_position():
 def neo4j_get_graph():
     print("[neo4j_api.py] Received request to get graph (ReactFlow export-like).")
     query = """
-    MATCH (p:PIPELINE {status:'design'})
+    MATCH (candidate:PIPELINE {status:'design'})
+    OPTIONAL MATCH (candidate)-[:HAS_STEP]->(candidateStep:STEP)
+    WITH candidate, count(candidateStep) AS step_count
+    ORDER BY step_count DESC, candidate.updated_at DESC
+    WITH collect({pipeline: candidate, step_count: step_count}) AS ranked,
+         count(candidate) AS design_pipeline_count
+    WITH ranked[0].pipeline AS p,
+         ranked[0].step_count AS pipeline_step_count,
+         design_pipeline_count
     OPTIONAL MATCH (p)-[:HAS_STEP]->(s:STEP)
     OPTIONAL MATCH (s)-[:FLOWS_TO]->(t:STEP)
     OPTIONAL MATCH (s)-[:HAS_FILE]->(f:FILE)
     WITH
       p,
+      design_pipeline_count,
+      pipeline_step_count,
       s,
       t,
       collect(DISTINCT f { .filename, .bucket, added_at: toString(f.added_at) }) AS files_for_step
     RETURN
       toString(p.updated_at) AS updated_at,
+      p {
+        .uid,
+        .name,
+        .label,
+        .description,
+        .version,
+        .status,
+        created_at: toString(p.created_at),
+        updated_at: toString(p.updated_at)
+      } AS pipeline,
+      design_pipeline_count,
+      pipeline_step_count,
       collect(DISTINCT {
         step: s,
         files: files_for_step
@@ -564,6 +585,10 @@ def neo4j_get_graph():
                 }), 200
 
             updated_at = record["updated_at"]
+            pipeline = record["pipeline"] or {}
+            if isinstance(pipeline, dict):
+                pipeline["design_pipeline_count"] = record["design_pipeline_count"]
+                pipeline["step_count"] = record["pipeline_step_count"]
             step_rows = record["step_rows"] or []
             flows = record["flows"] or []
 
@@ -654,6 +679,7 @@ def neo4j_get_graph():
 
             return jsonify({
                 "updated_at": updated_at,
+                "pipeline": pipeline,
                 "nodes": nodes,
                 "edges": edges,
                 "viewport": {"x": 0, "y": 0, "zoom": 1}

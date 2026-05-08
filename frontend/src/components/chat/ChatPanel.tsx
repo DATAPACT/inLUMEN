@@ -1,5 +1,6 @@
 import React from 'react';
 import {
+  AlertTriangle,
   ChevronDown,
   Download,
   Edit,
@@ -21,7 +22,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ChatbotConfig, formatProviderLabel } from '@/services/chatbotService';
-import { ChatMessage } from '@/features/chat/chatTypes';
+import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
 import { cn } from '@/lib/utils';
 
 type ChatPanelProps = {
@@ -30,6 +31,7 @@ type ChatPanelProps = {
   selectedConfig: ChatbotConfig | null;
   conversation: ChatMessage[];
   conversationEndRef: React.RefObject<HTMLDivElement>;
+  canvasSyncStatus: CanvasSyncStatus;
   isProcessing: boolean;
   userInput: string;
   promptSuggestions: string[];
@@ -52,6 +54,7 @@ export const ChatPanel = ({
   selectedConfig,
   conversation,
   conversationEndRef,
+  canvasSyncStatus,
   isProcessing,
   userInput,
   promptSuggestions,
@@ -77,6 +80,12 @@ export const ChatPanel = ({
       ? `${conversation.length} message${conversation.length === 1 ? "" : "s"} in session`
       : "Ready to design";
   const hasConversation = conversation.length > 0 || isProcessing;
+  const showSyncStatus =
+    canvasSyncStatus.state === 'warning' || canvasSyncStatus.state === 'error';
+  const syncStatusClass =
+    canvasSyncStatus.state === 'error'
+      ? 'border-rose-500/25 bg-rose-500/10 text-rose-600'
+      : 'border-amber-500/25 bg-amber-500/10 text-amber-600';
 
   return (
     <div className="flex h-full flex-col overflow-hidden border-l border-border bg-card/95 text-card-foreground">
@@ -95,6 +104,20 @@ export const ChatPanel = ({
             <p className="mt-1 truncate text-xs text-muted-foreground">
               Using {formatProviderLabel(activeConfig.provider)} / {activeConfig.model}
             </p>
+            {showSyncStatus && (
+              <div
+                role="alert"
+                className={cn(
+                  "mt-2 flex items-start gap-2 rounded-md border px-2 py-1.5 text-[11px] leading-4",
+                  syncStatusClass,
+                )}
+              >
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0 flex-1 break-words">
+                  {canvasSyncStatus.message}
+                </span>
+              </div>
+            )}
           </div>
 
           <DropdownMenu>

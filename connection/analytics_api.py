@@ -10,6 +10,7 @@ from async_runtime import run_async
 from auth_middleware import require_auth
 from chat_state import clear_state_from_disk, load_state_from_disk, save_state_to_disk
 from deployment_agents import generate_dockerfiles_with_agent, build_argo_yaml_team
+from graph_client import fetch_pipeline_graph
 from llm_config import llm_config_from_payload, log_llm_selection
 from pipeline_editor_team import build_pipeline_editing_team
 from runtime_config import default_frontend_origin, get_service_port
@@ -64,6 +65,150 @@ def _assistant_message_from_result(result) -> str:
     if result.messages:
         return getattr(result.messages[-1], "content", "")
     return ""
+
+
+GRAPH_MUTATION_RE = re.compile(
+    r"\b(add|build|change|clear|connect|create|delete|design|draw|generate|"
+    r"improve|insert|link|make|modify|move|optimize|refine|remove|replace|update)\b",
+    re.IGNORECASE,
+)
+
+
+def _message_expects_graph_change(user_message: str) -> bool:
+    return bool(GRAPH_MUTATION_RE.search(user_message or ""))
+
+
+def _graph_counts(graph: dict | None) -> tuple[int, int]:
+    if not isinstance(graph, dict):
+        return 0, 0
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+    return len(nodes), len(edges)
+
+
+def _graph_signature(graph: dict | None) -> str:
+    if not isinstance(graph, dict):
+        return json.dumps({"nodes": [], "edges": []}, sort_keys=True)
+
+    nodes = []
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        data = node.get("data") if isinstance(node.get("data"), dict) else {}
+        position = node.get("position") if isinstance(node.get("position"), dict) else {}
+        nodes.append({
+            "id": str(node.get("id", "")),
+            "type": data.get("type", ""),
+            "label": data.get("label", ""),
+            "description": data.get("description", ""),
+            "content": data.get("content", ""),
+            "endpoint": data.get("endpoint", ""),
+            "database": data.get("database", ""),
+            "x": round(float(position.get("x", 0) or 0), 2),
+            "y": round(float(position.get("y", 0) or 0), 2),
+        })
+
+    edges = []
+    for edge in graph.get("edges") or []:
+        if not isinstance(edge, dict):
+            continue
+        edges.append({
+            "source": str(edge.get("source", "")),
+            "target": str(edge.get("target", "")),
+        })
+
+    nodes.sort(key=lambda node: node["id"])
+    edges.sort(key=lambda edge: (edge["source"], edge["target"]))
+    return json.dumps({"nodes": nodes, "edges": edges}, sort_keys=True)
+
+
+async def _safe_fetch_pipeline_graph() -> tuple[dict | None, str | None]:
+    try:
+        return await fetch_pipeline_graph(NEO4J_API_BASE_URL), None
+    except Exception as exc:
+        print("[analytics_api.py] Failed to fetch pipeline graph for sync guardrail:", exc)
+        return None, str(exc)
+
+
+def _build_graph_sync_guardrail(
+    before_graph: dict | None,
+    after_graph: dict | None,
+    user_message: str,
+    fetch_error: str | None = None,
+    repaired: bool = False,
+) -> dict:
+    before_nodes, before_edges = _graph_counts(before_graph)
+    after_nodes, after_edges = _graph_counts(after_graph)
+    expected_graph_change = _message_expects_graph_change(user_message)
+    graph_changed = _graph_signature(before_graph) != _graph_signature(after_graph)
+    updated_at = after_graph.get("updated_at") if isinstance(after_graph, dict) else None
+
+    if fetch_error:
+        return {
+            "status": "degraded",
+            "guardrail_passed": False,
+            "expected_graph_change": expected_graph_change,
+            "graph_changed": graph_changed,
+            "node_count": after_nodes,
+            "edge_count": after_edges,
+            "updated_at": updated_at,
+            "message": f"Agent replied, but graph sync verification failed: {fetch_error}",
+            "repaired": repaired,
+        }
+
+    if expected_graph_change and not graph_changed:
+        return {
+            "status": "warning",
+            "guardrail_passed": False,
+            "expected_graph_change": True,
+            "graph_changed": False,
+            "node_count": after_nodes,
+            "edge_count": after_edges,
+            "updated_at": updated_at,
+            "message": (
+                "The request looked like it should change the canvas, but no visible graph "
+                "change was persisted."
+            ),
+            "repaired": repaired,
+        }
+
+    if graph_changed:
+        return {
+            "status": "synced",
+            "guardrail_passed": True,
+            "expected_graph_change": expected_graph_change,
+            "graph_changed": True,
+            "node_count": after_nodes,
+            "edge_count": after_edges,
+            "updated_at": updated_at,
+            "message": (
+                f"Canvas graph synced: {before_nodes}->{after_nodes} nodes, "
+                f"{before_edges}->{after_edges} edges."
+            ),
+            "repaired": repaired,
+        }
+
+    return {
+        "status": "unchanged",
+        "guardrail_passed": True,
+        "expected_graph_change": expected_graph_change,
+        "graph_changed": False,
+        "node_count": after_nodes,
+        "edge_count": after_edges,
+        "updated_at": updated_at,
+        "message": f"Canvas graph checked: {after_nodes} nodes and {after_edges} edges.",
+        "repaired": repaired,
+    }
+
+
+def _guardrail_repair_task(user_message: str) -> str:
+    return (
+        "Guardrail repair: the previous turn did not persist a visible pipeline graph "
+        "change, but the user request appears to require one. Use the pipeline tools now "
+        "to create, update, delete, or connect STEP nodes in Neo4j as needed. "
+        "If no design pipeline exists, create one first. Original user request:\n"
+        f"{user_message}"
+    )
 
 
 @app.route("/agentic_generate_dockerfiles", methods=["POST", "OPTIONS"])
@@ -160,6 +305,7 @@ def agentic_pipeline_editor():
     log_llm_selection("User message sent to pipeline editor", llm_config)
 
     async def run_turn():
+        before_graph, before_graph_error = await _safe_fetch_pipeline_graph()
         team = build_pipeline_editing_team(
             llm_config=llm_config,
             neo4j_api_base_url=NEO4J_API_BASE_URL,
@@ -168,13 +314,47 @@ def agentic_pipeline_editor():
         if team_state:
             await team.load_state(team_state)
         result = await team.run(task=user_message)
+        assistant_message = _assistant_message_from_result(result)
+        after_graph, after_graph_error = await _safe_fetch_pipeline_graph()
+        sync = _build_graph_sync_guardrail(
+            before_graph,
+            after_graph,
+            user_message,
+            before_graph_error or after_graph_error,
+        )
+
+        if (
+            sync["expected_graph_change"]
+            and not sync["guardrail_passed"]
+            and not before_graph_error
+            and not after_graph_error
+        ):
+            repair_result = await team.run(task=_guardrail_repair_task(user_message))
+            repair_message = _assistant_message_from_result(repair_result)
+            if repair_message:
+                assistant_message = repair_message
+            repaired_graph, repaired_graph_error = await _safe_fetch_pipeline_graph()
+            after_graph = repaired_graph
+            sync = _build_graph_sync_guardrail(
+                before_graph,
+                after_graph,
+                user_message,
+                before_graph_error or repaired_graph_error,
+                repaired=True,
+            )
+
         new_state = await team.save_state()
         save_state_to_disk(session_id, new_state)
-        return _assistant_message_from_result(result)
+        return assistant_message, after_graph, sync
 
     try:
-        assistant_message = asyncio.run(run_turn())
-        return jsonify({"session_id": session_id, "assistant_message": assistant_message}), 200
+        assistant_message, graph, sync = asyncio.run(run_turn())
+        return jsonify({
+            "session_id": session_id,
+            "assistant_message": assistant_message,
+            "graph": graph,
+            "sync": sync,
+        }), 200
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 

@@ -6,7 +6,7 @@ import { PropertiesPanel, PropertyNodeData } from '@/components/PropertiesPanel'
 import { Toolbar } from '@/components/Toolbar';
 import { WrappedFlowCanvas, FlowCanvasRef } from '@/components/FlowCanvas';
 import { ChatPanel } from '@/components/chat/ChatPanel';
-import { ChatMessage } from '@/features/chat/chatTypes';
+import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
 import { toast } from 'sonner';
 import {
   Settings,
@@ -101,6 +101,22 @@ type DragNodeType = {
   data: FlowNodeData;
 };
 
+type ChatApiResponse = {
+  session_id?: string;
+  assistant_message?: string;
+  graph?: unknown;
+  sync?: {
+    status?: string;
+    guardrail_passed?: boolean;
+    expected_graph_change?: boolean;
+    graph_changed?: boolean;
+    message?: string;
+    node_count?: number;
+    edge_count?: number;
+    updated_at?: string | null;
+  };
+};
+
 const Index = () => {
   const [selectedNode, setSelectedNode] = useState<FlowNode | null>(null);
   const [activeTab, setActiveTab] = useState('lab'); // 'lab', 'overview', or 'simulate'
@@ -109,6 +125,10 @@ const Index = () => {
   const [githubToken, setGithubToken] = useState('');
   const [flowNodes, setFlowNodes] = useState<FlowNode[]>([]);
   const [conversation, setConversation] = useState<ChatMessage[]>([]);
+  const [canvasSyncStatus, setCanvasSyncStatus] = useState<CanvasSyncStatus>({
+    state: 'idle',
+    message: 'Canvas is ready',
+  });
   const [isLightMode, setIsLightMode] = useState(readSavedTheme);
   const [panelPreferences, setPanelPreferences] = useState<PanelPreferences>(readPanelPreferences);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
@@ -289,7 +309,7 @@ const Index = () => {
         throw new Error(`Chat failed (${res.status}): ${errText}`);
       }
 
-      const data = await res.json();
+      const data = await res.json() as ChatApiResponse;
 
       if (data.session_id && data.session_id !== chatSessionId) {
         setChatSessionId(data.session_id);
@@ -297,8 +317,46 @@ const Index = () => {
 
       const responseText = data.assistant_message ?? "";
       setConversation(prev => [...prev, { role: 'assistant', content: responseText }]);
+
+      setCanvasSyncStatus({
+        state: 'syncing',
+        message: 'Applying agent graph changes to the canvas...',
+      });
+
+      if (!flowCanvasRef.current) {
+        setCanvasSyncStatus({
+          state: 'warning',
+          message: 'Chat completed, but the canvas was not mounted for graph sync.',
+        });
+        return;
+      }
+
+      const syncedGraph = await flowCanvasRef.current.syncFromBackend(data.graph);
+      const sync = data.sync;
+      const nodeCount = sync?.node_count ?? syncedGraph.nodes.length;
+      const edgeCount = sync?.edge_count ?? syncedGraph.edges.length;
+      const updatedAt = sync?.updated_at ?? syncedGraph.updated_at;
+      const guardrailPassed = sync?.guardrail_passed !== false;
+      const syncMessage = sync?.message
+        || `Canvas sync needs attention: ${nodeCount} node${nodeCount === 1 ? '' : 's'} and ${edgeCount} edge${edgeCount === 1 ? '' : 's'}.`;
+
+      setCanvasSyncStatus({
+        state: guardrailPassed ? 'idle' : 'warning',
+        message: guardrailPassed ? '' : syncMessage,
+        updatedAt,
+      });
+
+      if (!guardrailPassed) {
+        toast.warning("Canvas sync guardrail", {
+          description: syncMessage,
+        });
+      }
     } catch (error) {
       console.error("Error processing request:", error);
+      setCanvasSyncStatus({
+        state: 'error',
+        message: error instanceof Error ? error.message : 'Chat or canvas sync failed.',
+      });
       toast.error("An error occurred while processing your request", {
         description: error instanceof Error ? error.message : "Unknown error occurred",
       });
@@ -327,6 +385,10 @@ const Index = () => {
 
     setChatSessionId("");
     localStorage.removeItem(CHAT_SESSION_KEY);
+    setCanvasSyncStatus({
+      state: 'idle',
+      message: 'Canvas is ready',
+    });
   };
 
   const handleToggleLibrary = () => {
@@ -580,6 +642,7 @@ const Index = () => {
                       selectedConfig={selectedConfig}
                       conversation={conversation}
                       conversationEndRef={conversationEndRef}
+                      canvasSyncStatus={canvasSyncStatus}
                       isProcessing={isProcessing}
                       userInput={userInput}
                       promptSuggestions={CHAT_PROMPT_SUGGESTIONS}

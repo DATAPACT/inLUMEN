@@ -16,26 +16,47 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
   const incomingNodes = Array.isArray(parsedGraph.nodes) ? parsedGraph.nodes : [];
   const incomingEdges = Array.isArray(parsedGraph.edges) ? parsedGraph.edges : [];
 
-  const nodes: Node[] = incomingNodes.map((nodeEntry) => {
-    const node = nodeEntry as Node;
-    return {
+  const nodes: Node[] = incomingNodes.flatMap((nodeEntry) => {
+    const node = (nodeEntry && typeof nodeEntry === "object" ? nodeEntry : {}) as Node;
+    if (node.id == null || String(node.id).trim() === "") return [];
+    const position = node.position || { x: 0, y: 0 };
+    return [{
       ...node,
       id: String(node.id),
+      position: {
+        x: Number.isFinite(Number(position.x)) ? Number(position.x) : 0,
+        y: Number.isFinite(Number(position.y)) ? Number(position.y) : 0,
+      },
       data: {
         ...node.data,
+        label: node.data?.label || "",
+        description: node.data?.description || "",
         type: normalizeType(node.data?.type),
       },
-    };
+    }];
   });
 
-  const edges: Edge[] = incomingEdges.map((edgeEntry) => {
-    const edge = edgeEntry as Edge;
-    return {
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const seenEdgeKeys = new Set<string>();
+  const edges: Edge[] = [];
+
+  incomingEdges.forEach((edgeEntry) => {
+    const edge = (edgeEntry && typeof edgeEntry === "object" ? edgeEntry : {}) as Edge;
+    const source = String(edge.source || "");
+    const target = String(edge.target || "");
+    const edgeKey = `${source}->${target}`;
+
+    if (!source || !target || source === target) return;
+    if (!nodeIds.has(source) || !nodeIds.has(target)) return;
+    if (seenEdgeKeys.has(edgeKey)) return;
+    seenEdgeKeys.add(edgeKey);
+
+    edges.push({
       ...edge,
       id: edge?.id ? String(edge.id) : `e-${String(edge.source)}-${String(edge.target)}`,
-      source: String(edge.source),
-      target: String(edge.target),
-    };
+      source,
+      target,
+    });
   });
 
   return {
