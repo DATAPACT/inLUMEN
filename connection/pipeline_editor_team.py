@@ -208,21 +208,46 @@ def build_pipeline_editing_team(
             description = data.get("description", "").replace("'", "\\'")
             version = str(data.get("version", "1.0")).replace("'", "\\'")
             query = f"""
-            CREATE (p:PIPELINE {{
-            uid:        randomUUID(),
-            name:       '{name}',
-            description:'{description}',
-            version:    '{version}',
-            created_at: datetime(),
-            updated_at: datetime(),
-            status:     'design'
-            }})
+            OPTIONAL MATCH (candidate:PIPELINE {{status:'design'}})
+            OPTIONAL MATCH (candidate)-[:HAS_STEP]->(candidateStep:STEP)
+            WITH candidate, count(candidateStep) AS step_count
+            ORDER BY step_count DESC, candidate.updated_at DESC
+            WITH collect(candidate)[0] AS existing, count(candidate) AS design_pipeline_count
+            CALL {{
+              WITH existing
+              WITH existing WHERE existing IS NULL
+              CREATE (p:PIPELINE {{
+                uid:        randomUUID(),
+                name:       '{name}',
+                label:      '{name}',
+                description:'{description}',
+                version:    '{version}',
+                created_at: datetime(),
+                updated_at: datetime(),
+                status:     'design'
+              }})
+              RETURN p, true AS created
+
+              UNION
+
+              WITH existing
+              WITH existing WHERE existing IS NOT NULL
+              SET existing.name = CASE WHEN '{name}' <> '' THEN '{name}' ELSE coalesce(existing.name, existing.label, '') END,
+                  existing.label = CASE WHEN '{name}' <> '' THEN '{name}' ELSE coalesce(existing.label, existing.name, '') END,
+                  existing.description = CASE WHEN '{description}' <> '' THEN '{description}' ELSE coalesce(existing.description, '') END,
+                  existing.version = CASE WHEN '{version}' <> '' THEN '{version}' ELSE coalesce(existing.version, '1.0') END,
+                  existing.updated_at = datetime()
+              RETURN existing AS p, false AS created
+            }}
             RETURN {{
             uid: p.uid,
             name: p.name,
+            label: p.label,
             description: p.description,
             version: p.version,
             status: p.status,
+            created: created,
+            design_pipeline_count: design_pipeline_count,
             created_at: toString(p.created_at),
             updated_at: toString(p.updated_at)
             }} AS pipeline;
@@ -266,7 +291,32 @@ def build_pipeline_editing_team(
                 props_lines.append("has_files: 'no'")
             props_str = ",\n            ".join(props_lines)
             query = f"""
-            MATCH (p:PIPELINE {{status:'design'}})
+            OPTIONAL MATCH (candidate:PIPELINE {{status:'design'}})
+            OPTIONAL MATCH (candidate)-[:HAS_STEP]->(candidateStep:STEP)
+            WITH candidate, count(candidateStep) AS step_count
+            ORDER BY step_count DESC, candidate.updated_at DESC
+            WITH collect(candidate)[0] AS candidate
+            CALL {{
+              WITH candidate
+              WITH candidate WHERE candidate IS NULL
+              CREATE (p:PIPELINE {{
+                uid:        randomUUID(),
+                name:       '',
+                label:      '',
+                description:'',
+                version:    '1.0',
+                created_at: datetime(),
+                updated_at: datetime(),
+                status:     'design'
+              }})
+              RETURN p
+
+              UNION
+
+              WITH candidate
+              WITH candidate WHERE candidate IS NOT NULL
+              RETURN candidate AS p
+            }}
             SET p.updated_at = datetime()
             WITH p
             OPTIONAL MATCH (sAll:STEP)

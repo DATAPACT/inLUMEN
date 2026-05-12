@@ -32,10 +32,13 @@ import {
   clearNeo4jAndMinIO,
 } from '@/features/flow/flowPersistence';
 import {
+  createAgentGraphSnapshot,
   downloadJsonFile,
   downloadTextFile,
   getNextNumericNodeId,
   normalizeGraph,
+  type AgentGraphSnapshot,
+  type NormalizedGraph,
 } from '@/features/flow/flowGraph';
 
 interface FlowCanvasProps {
@@ -49,6 +52,8 @@ interface FlowCanvasProps {
 
 export interface FlowCanvasRef {
   updateNode: (id: string, data: Record<string, unknown>) => void;
+  syncFromBackend: (graphData?: unknown) => Promise<NormalizedGraph>;
+  getCurrentGraph: () => AgentGraphSnapshot;
 }
 
 let nodeId = 1;
@@ -77,6 +82,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const refreshCooldownUntilRef = useRef<number>(0);
   const syncBackoffUntilRef = useRef<number>(0);
   const syncFailureLoggedRef = useRef(false);
+  const selectedNodeIdRef = useRef<string | null>(null);
 
   const markLocalWrite = useCallback((ms = 800) => {
     refreshCooldownUntilRef.current = Date.now() + ms;
@@ -95,14 +101,49 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     syncBackoffUntilRef.current = 0;
   }, []);
 
-  const fetchGraphAndApply = useCallback(async () => {
-    const data = await fetchPipelineGraph();
+  const applyGraph = useCallback((data: unknown) => {
     const g = normalizeGraph(data);
     setNodes(g.nodes);
     setEdges(g.edges);
     lastSeenUpdatedAtRef.current = g.updated_at;
     nodeId = getNextNumericNodeId(g.nodes, nodeId);
-  }, []);
+
+    const selectedNodeId = selectedNodeIdRef.current;
+    if (selectedNodeId) {
+      const refreshedSelection = g.nodes.find((node) => node.id === selectedNodeId) || null;
+      selectedNodeIdRef.current = refreshedSelection?.id ?? null;
+      setSelectedNode(refreshedSelection);
+      onNodeSelect(refreshedSelection);
+    }
+
+    return g;
+  }, [onNodeSelect]);
+
+  const fetchGraphAndApply = useCallback(async () => {
+    const data = await fetchPipelineGraph();
+    return applyGraph(data);
+  }, [applyGraph]);
+
+  const syncFromBackend = useCallback(async (graphData?: unknown) => {
+    try {
+      const graph = graphData == null
+        ? await fetchGraphAndApply()
+        : applyGraph(graphData);
+      markSyncHealthy();
+      return graph;
+    } catch (error) {
+      scheduleSyncRetry("Explicit graph sync failed", error);
+      throw error;
+    }
+  }, [applyGraph, fetchGraphAndApply, markSyncHealthy, scheduleSyncRetry]);
+
+  const getCurrentGraph = useCallback(() => {
+    return createAgentGraphSnapshot(normalizeGraph({
+      updated_at: lastSeenUpdatedAtRef.current,
+      nodes,
+      edges,
+    }));
+  }, [edges, nodes]);
 
   useEffect(() => {
     let cancelled = false;
@@ -169,7 +210,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   }, []);
   useImperativeHandle(ref, () => ({
     updateNode,
-  }), [updateNode]);
+    syncFromBackend,
+    getCurrentGraph,
+  }), [getCurrentGraph, syncFromBackend, updateNode]);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const triggerImport = () => fileInputRef.current?.click();
@@ -200,6 +243,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       if (selectedNode) {
         const updatedSelectedNode = newNodes.find(n => n.id === selectedNode.id);
         if (updatedSelectedNode) {
+          selectedNodeIdRef.current = updatedSelectedNode.id;
           setSelectedNode(updatedSelectedNode);
           onNodeSelect(updatedSelectedNode);
         }
@@ -274,11 +318,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   );
 
   const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
+    selectedNodeIdRef.current = node.id;
     setSelectedNode(node);
     onNodeSelect(node);
   }, [onNodeSelect]);
 
   const onPaneClick = useCallback(() => {
+    selectedNodeIdRef.current = null;
     setSelectedNode(null);
     onNodeSelect(null);
   }, [onNodeSelect]);
@@ -411,6 +457,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const clearCanvas = async () => {
     setNodes([]);
     setEdges([]);
+    selectedNodeIdRef.current = null;
+    setSelectedNode(null);
+    onNodeSelect(null);
     localStorage.removeItem('ai-flow');
     localStorage.removeItem('ai-flow-nodes');
     localStorage.removeItem('ai-flow-edges');

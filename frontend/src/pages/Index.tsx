@@ -6,7 +6,7 @@ import { PropertiesPanel, PropertyNodeData } from '@/components/PropertiesPanel'
 import { Toolbar } from '@/components/Toolbar';
 import { WrappedFlowCanvas, FlowCanvasRef } from '@/components/FlowCanvas';
 import { ChatPanel } from '@/components/chat/ChatPanel';
-import { ChatMessage } from '@/features/chat/chatTypes';
+import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
 import { toast } from 'sonner';
 import {
   Settings,
@@ -41,6 +41,7 @@ import { ChatbotConfigForm } from '@/components/ChatbotConfigForm';
 
 const CHAT_SESSION_KEY = "chat-session-id";
 const CHAT_TRANSCRIPT_KEY = "inlumen-chat-transcript";
+const CHAT_HISTORY_KEY = "inlumen-chat-history";
 const PANEL_STATE_KEY = "inlumen-panel-preferences";
 const THEME_KEY = "inlumen-theme";
 const CHAT_PROMPT_SUGGESTIONS = [
@@ -92,6 +93,35 @@ const readSavedTheme = () => {
 const createDownloadTimestamp = () =>
   new Date().toISOString().replace(/[:.]/g, "-");
 
+const normalizeSavedConversation = (value: unknown): ChatMessage[] => {
+  const messages = Array.isArray(value)
+    ? value
+    : value && typeof value === "object" && Array.isArray((value as { conversation?: unknown }).conversation)
+      ? (value as { conversation: unknown[] }).conversation
+      : [];
+
+  return messages.flatMap((message) => {
+    if (!message || typeof message !== "object") return [];
+    const entry = message as Partial<ChatMessage>;
+    if (entry.role !== "user" && entry.role !== "assistant") return [];
+    if (typeof entry.content !== "string") return [];
+    return [{ role: entry.role, content: entry.content }];
+  });
+};
+
+const readSavedConversation = (): ChatMessage[] => {
+  try {
+    const savedHistory = localStorage.getItem(CHAT_HISTORY_KEY);
+    if (savedHistory) return normalizeSavedConversation(JSON.parse(savedHistory));
+
+    const savedTranscript = localStorage.getItem(CHAT_TRANSCRIPT_KEY);
+    if (savedTranscript) return normalizeSavedConversation(JSON.parse(savedTranscript));
+  } catch {
+    return [];
+  }
+  return [];
+};
+
 type FlowNodeData = PropertyNodeData;
 
 type FlowNode = Node<FlowNodeData>;
@@ -101,6 +131,22 @@ type DragNodeType = {
   data: FlowNodeData;
 };
 
+type ChatApiResponse = {
+  session_id?: string;
+  assistant_message?: string;
+  graph?: unknown;
+  sync?: {
+    status?: string;
+    guardrail_passed?: boolean;
+    expected_graph_change?: boolean;
+    graph_changed?: boolean;
+    message?: string;
+    node_count?: number;
+    edge_count?: number;
+    updated_at?: string | null;
+  };
+};
+
 const Index = () => {
   const [selectedNode, setSelectedNode] = useState<FlowNode | null>(null);
   const [activeTab, setActiveTab] = useState('lab'); // 'lab', 'overview', or 'simulate'
@@ -108,7 +154,11 @@ const Index = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [githubToken, setGithubToken] = useState('');
   const [flowNodes, setFlowNodes] = useState<FlowNode[]>([]);
-  const [conversation, setConversation] = useState<ChatMessage[]>([]);
+  const [conversation, setConversation] = useState<ChatMessage[]>(readSavedConversation);
+  const [canvasSyncStatus, setCanvasSyncStatus] = useState<CanvasSyncStatus>({
+    state: 'idle',
+    message: 'Canvas is ready',
+  });
   const [isLightMode, setIsLightMode] = useState(readSavedTheme);
   const [panelPreferences, setPanelPreferences] = useState<PanelPreferences>(readPanelPreferences);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
@@ -144,6 +194,18 @@ const Index = () => {
   useEffect(() => {
     localStorage.setItem(PANEL_STATE_KEY, JSON.stringify(panelPreferences));
   }, [panelPreferences]);
+
+  useEffect(() => {
+    if (conversation.length === 0) return;
+    localStorage.setItem(
+      CHAT_HISTORY_KEY,
+      JSON.stringify({
+        savedAt: new Date().toISOString(),
+        sessionId: chatSessionId || null,
+        conversation,
+      })
+    );
+  }, [chatSessionId, conversation]);
 
   const formatConfigDescription = (config: ChatbotConfig) =>
     `${formatProviderLabel(config.provider)} / ${config.model}`;
@@ -272,6 +334,7 @@ const Index = () => {
 
     try {
       const activeCfg = selectedConfig || defaultConfig;
+      const canvasGraph = flowCanvasRef.current?.getCurrentGraph() ?? null;
 
       const res = await apiFetch(`${LLM_API_URL}/simple_chat`, {
         method: "POST",
@@ -279,6 +342,7 @@ const Index = () => {
         body: JSON.stringify({
           session_id: chatSessionId || null,
           user_message: messageText,
+          canvas_graph: canvasGraph,
           model: activeCfg.model,
           llm_config: buildLLMRequestConfig(activeCfg),
         }),
@@ -289,7 +353,7 @@ const Index = () => {
         throw new Error(`Chat failed (${res.status}): ${errText}`);
       }
 
-      const data = await res.json();
+      const data = await res.json() as ChatApiResponse;
 
       if (data.session_id && data.session_id !== chatSessionId) {
         setChatSessionId(data.session_id);
@@ -297,8 +361,46 @@ const Index = () => {
 
       const responseText = data.assistant_message ?? "";
       setConversation(prev => [...prev, { role: 'assistant', content: responseText }]);
+
+      setCanvasSyncStatus({
+        state: 'syncing',
+        message: 'Applying agent graph changes to the canvas...',
+      });
+
+      if (!flowCanvasRef.current) {
+        setCanvasSyncStatus({
+          state: 'warning',
+          message: 'Chat completed, but the canvas was not mounted for graph sync.',
+        });
+        return;
+      }
+
+      const syncedGraph = await flowCanvasRef.current.syncFromBackend(data.graph);
+      const sync = data.sync;
+      const nodeCount = sync?.node_count ?? syncedGraph.nodes.length;
+      const edgeCount = sync?.edge_count ?? syncedGraph.edges.length;
+      const updatedAt = sync?.updated_at ?? syncedGraph.updated_at;
+      const guardrailPassed = sync?.guardrail_passed !== false;
+      const syncMessage = sync?.message
+        || `Canvas sync needs attention: ${nodeCount} node${nodeCount === 1 ? '' : 's'} and ${edgeCount} edge${edgeCount === 1 ? '' : 's'}.`;
+
+      setCanvasSyncStatus({
+        state: guardrailPassed ? 'idle' : 'warning',
+        message: guardrailPassed ? '' : syncMessage,
+        updatedAt,
+      });
+
+      if (!guardrailPassed) {
+        toast.warning("Canvas sync guardrail", {
+          description: syncMessage,
+        });
+      }
     } catch (error) {
       console.error("Error processing request:", error);
+      setCanvasSyncStatus({
+        state: 'error',
+        message: error instanceof Error ? error.message : 'Chat or canvas sync failed.',
+      });
       toast.error("An error occurred while processing your request", {
         description: error instanceof Error ? error.message : "Unknown error occurred",
       });
@@ -327,6 +429,12 @@ const Index = () => {
 
     setChatSessionId("");
     localStorage.removeItem(CHAT_SESSION_KEY);
+    localStorage.removeItem(CHAT_HISTORY_KEY);
+    localStorage.removeItem(CHAT_TRANSCRIPT_KEY);
+    setCanvasSyncStatus({
+      state: 'idle',
+      message: 'Canvas is ready',
+    });
   };
 
   const handleToggleLibrary = () => {
@@ -477,7 +585,6 @@ const Index = () => {
 
   const handleBlankPipeline = () => {
     setFlowNodes([]);
-    setConversation([]);
     setSelectedNode(null);
     localStorage.removeItem('ai-flow-nodes');
     localStorage.removeItem('ai-flow-edges');
@@ -580,6 +687,7 @@ const Index = () => {
                       selectedConfig={selectedConfig}
                       conversation={conversation}
                       conversationEndRef={conversationEndRef}
+                      canvasSyncStatus={canvasSyncStatus}
                       isProcessing={isProcessing}
                       userInput={userInput}
                       promptSuggestions={CHAT_PROMPT_SUGGESTIONS}
