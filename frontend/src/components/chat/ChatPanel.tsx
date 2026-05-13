@@ -1,34 +1,19 @@
 import React from 'react';
 import {
   AlertTriangle,
-  ChevronDown,
   Download,
-  Edit,
-  PlusCircle,
   Save,
   Send,
-  Settings,
-  Trash2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Textarea } from '@/components/ui/textarea';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { ChatbotConfig, formatProviderLabel } from '@/services/chatbotService';
 import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
 import { cn } from '@/lib/utils';
 
 type ChatPanelProps = {
   activeConfig: ChatbotConfig;
-  configs: ChatbotConfig[];
-  selectedConfig: ChatbotConfig | null;
   conversation: ChatMessage[];
   conversationEndRef: React.RefObject<HTMLDivElement>;
   canvasSyncStatus: CanvasSyncStatus;
@@ -41,17 +26,11 @@ type ChatPanelProps = {
   onClearConversation: () => void;
   onSaveConversation: () => void;
   onExportConversation: () => void;
-  onSelectConfig: (config: ChatbotConfig) => void;
-  onCreateConfig: () => void;
-  onEditConfig: (config: ChatbotConfig) => void;
-  onDeleteConfig: (id: string) => void;
   onSuggestionClick: (prompt: string) => void;
 };
 
 export const ChatPanel = ({
   activeConfig,
-  configs,
-  selectedConfig,
   conversation,
   conversationEndRef,
   canvasSyncStatus,
@@ -64,16 +43,8 @@ export const ChatPanel = ({
   onClearConversation,
   onSaveConversation,
   onExportConversation,
-  onSelectConfig,
-  onCreateConfig,
-  onEditConfig,
-  onDeleteConfig,
   onSuggestionClick,
 }: ChatPanelProps) => {
-  const compactConfigLabel =
-    activeConfig.name === formatProviderLabel(activeConfig.provider)
-      ? `${formatProviderLabel(activeConfig.provider)} / ${activeConfig.model}`
-      : `${activeConfig.name}`;
   const conversationStatus = isProcessing
     ? "Thinking through your graph..."
     : conversation.length > 0
@@ -120,95 +91,6 @@ export const ChatPanel = ({
             )}
           </div>
 
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-9 max-w-full gap-2 rounded-xl bg-background/80 px-3 text-foreground hover:bg-muted"
-              >
-                <Settings className="h-4 w-4 text-emerald-500" />
-                <span className="max-w-[140px] truncate text-left text-xs font-medium">
-                  {compactConfigLabel}
-                </span>
-                <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-60" />
-              </Button>
-            </DropdownMenuTrigger>
-
-            <DropdownMenuContent
-              align="end"
-              className="w-[320px] rounded-2xl border-border bg-popover p-2 text-popover-foreground shadow-[0_24px_60px_rgba(2,6,23,0.22)] backdrop-blur-xl"
-            >
-              <DropdownMenuLabel className="px-3 pt-2 text-xs uppercase tracking-[0.22em] text-muted-foreground">
-                Chatbot Configurations
-              </DropdownMenuLabel>
-              <DropdownMenuSeparator />
-
-              {configs.length > 0 ? (
-                configs.map((config) => (
-                  <DropdownMenuItem
-                    key={config.id}
-                    className="flex cursor-pointer items-start justify-between gap-2 rounded-xl px-3 py-3 focus:bg-emerald-500/10 data-[highlighted]:bg-emerald-500/10"
-                    onClick={() => onSelectConfig(config)}
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-medium">
-                        {config.name}
-                      </div>
-                      <div
-                        className={cn(
-                          "truncate text-xs text-muted-foreground",
-                          selectedConfig?.id === config.id && "text-emerald-500",
-                        )}
-                      >
-                        {formatConfigDescription(config)}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-7 w-7 rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onEditConfig(config);
-                        }}
-                      >
-                        <Edit className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-7 w-7 rounded-full text-rose-500 hover:bg-rose-500/10"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (config.id) onDeleteConfig(config.id);
-                        }}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                  </DropdownMenuItem>
-                ))
-              ) : (
-                <DropdownMenuItem
-                  disabled
-                  className="rounded-xl px-3 py-3 text-xs text-muted-foreground opacity-100"
-                >
-                  No saved browser configurations yet.
-                </DropdownMenuItem>
-              )}
-
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                className="flex cursor-pointer items-center gap-2 rounded-xl px-3 py-3 text-emerald-600 focus:bg-emerald-500/10 data-[highlighted]:bg-emerald-500/10"
-                onClick={onCreateConfig}
-              >
-                <PlusCircle className="h-4 w-4" />
-                <span>New Configuration</span>
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
         </div>
 
         <div className="mt-3 flex flex-wrap items-center gap-2">

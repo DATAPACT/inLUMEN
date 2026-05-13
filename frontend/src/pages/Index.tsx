@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { apiFetch } from '@/utils/apiFetch';
 import { LLM_API_URL } from '@/config/api';
+import { cn } from '@/lib/utils';
 import { Sidebar } from '@/components/Sidebar';
 import { PropertiesPanel, PropertyNodeData } from '@/components/PropertiesPanel';
 import { Toolbar } from '@/components/Toolbar';
@@ -18,6 +19,11 @@ import {
   Moon,
   Keyboard,
   HelpCircle,
+  Key,
+  ChevronDown,
+  Edit,
+  PlusCircle,
+  Trash2,
 } from 'lucide-react';
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
 import { Button } from '@/components/ui/button';
@@ -28,6 +34,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Node } from 'reactflow';
 import {
   ChatbotConfig,
@@ -683,8 +697,6 @@ const Index = () => {
                   ) : (
                     <ChatPanel
                       activeConfig={activeConfig}
-                      configs={configs}
-                      selectedConfig={selectedConfig}
                       conversation={conversation}
                       conversationEndRef={conversationEndRef}
                       canvasSyncStatus={canvasSyncStatus}
@@ -697,10 +709,6 @@ const Index = () => {
                       onClearConversation={handleClearConversation}
                       onSaveConversation={handleSaveConversation}
                       onExportConversation={handleExportConversation}
-                      onSelectConfig={handleSelectConfig}
-                      onCreateConfig={handleCreateConfig}
-                      onEditConfig={handleEditConfig}
-                      onDeleteConfig={handleDeleteConfig}
                       onSuggestionClick={handleSuggestionClick}
                     />
                   )}
@@ -818,21 +826,111 @@ const Index = () => {
             </div>
 
             <div className="rounded-xl border border-border bg-muted/30 p-3">
-              <div className="mb-2 text-sm font-medium">Chat model</div>
+              <div className="mb-2 flex items-center gap-2 text-sm font-medium">
+                <Key className="h-4 w-4 text-emerald-500" />
+                LLM configuration
+              </div>
               <p className="mb-3 text-xs text-muted-foreground">
-                Current model: {formatConfigDescription(activeConfig)}
+                Used by Pipeline Chat and Generate Deployment Artifacts.
               </p>
-              <Button
-                variant="outline"
-                className="w-full justify-start"
-                onClick={() => {
-                  setPanelPreferences((current) => ({ ...current, rightPanel: 'chat' }));
-                  setIsSettingsOpen(false);
-                }}
-              >
-                <MessageSquare className="h-4 w-4" />
-                Open chat configuration
-              </Button>
+              <div className="mb-3 rounded-md bg-background/70 p-3 text-xs text-muted-foreground space-y-1">
+                <div>
+                  <span className="font-medium text-foreground">Provider:</span>{" "}
+                  {formatProviderLabel(activeConfig.provider)}
+                </div>
+                <div>
+                  <span className="font-medium text-foreground">Model:</span>{" "}
+                  {activeConfig.model}
+                </div>
+                <div className="truncate">
+                  <span className="font-medium text-foreground">Base URL:</span>{" "}
+                  {activeConfig.baseUrl}
+                </div>
+              </div>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" className="w-full justify-between">
+                    <span className="min-w-0 truncate text-left">
+                      {formatConfigDescription(activeConfig)}
+                    </span>
+                    <ChevronDown className="h-4 w-4 shrink-0 opacity-60" />
+                  </Button>
+                </DropdownMenuTrigger>
+
+                <DropdownMenuContent
+                  align="start"
+                  className="w-[var(--radix-dropdown-menu-trigger-width)] min-w-[320px] rounded-xl border-border bg-popover p-2 text-popover-foreground"
+                >
+                  <DropdownMenuLabel className="px-3 pt-2 text-xs uppercase tracking-[0.22em] text-muted-foreground">
+                    Saved LLM Configurations
+                  </DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+
+                  {configs.length > 0 ? (
+                    configs.map((config) => (
+                      <DropdownMenuItem
+                        key={config.id}
+                        className="flex cursor-pointer items-start justify-between gap-2 rounded-lg px-3 py-3 focus:bg-emerald-500/10 data-[highlighted]:bg-emerald-500/10"
+                        onClick={() => handleSelectConfig(config)}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm font-medium">
+                            {config.name}
+                          </div>
+                          <div
+                            className={cn(
+                              "truncate text-xs text-muted-foreground",
+                              selectedConfig?.id === config.id && "text-emerald-500",
+                            )}
+                          >
+                            {formatConfigDescription(config)}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleEditConfig(config);
+                            }}
+                          >
+                            <Edit className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 rounded-full text-rose-500 hover:bg-rose-500/10"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (config.id) handleDeleteConfig(config.id);
+                            }}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
+                      </DropdownMenuItem>
+                    ))
+                  ) : (
+                    <DropdownMenuItem
+                      disabled
+                      className="rounded-lg px-3 py-3 text-xs text-muted-foreground opacity-100"
+                    >
+                      No saved LLM configurations yet.
+                    </DropdownMenuItem>
+                  )}
+
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-3 text-emerald-600 focus:bg-emerald-500/10 data-[highlighted]:bg-emerald-500/10"
+                    onClick={handleCreateConfig}
+                  >
+                    <PlusCircle className="h-4 w-4" />
+                    <span>New Configuration</span>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           </div>
         </DialogContent>
