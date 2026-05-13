@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { apiFetch } from '@/utils/apiFetch';
 import { NEO4J_API_URL, LLM_API_URL } from '@/config/api';
-import { ChatbotConfig, buildLLMRequestConfig, formatProviderLabel } from '@/services/chatbotService';
+import { ChatbotConfig, buildLLMRequestConfig } from '@/services/chatbotService';
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
@@ -19,7 +19,6 @@ import {
   LayoutGrid,
   Beaker,
   PlayCircle,
-  Key,
   PlusCircle,
   BarChart3,
   Calendar,
@@ -453,31 +452,6 @@ export function Sidebar({
 
         {activeTab === "simulate" && (
           <div className="py-4 space-y-4">
-            {/* Active LLM endpoint */}
-            <div className="p-4 border rounded-lg border-border">
-              <h3 className="text-sm font-medium mb-2 flex items-center gap-2">
-                <Key className="w-4 h-4" />
-                Active LLM Endpoint
-              </h3>
-              <p className="text-xs text-muted-foreground mb-3">
-                Deployment agents use the same OpenAI-compatible configuration selected in chat.
-              </p>
-              <div className="rounded-md bg-muted/40 p-3 text-xs text-muted-foreground space-y-1">
-                <div>
-                  <span className="font-medium text-foreground">Provider:</span>{" "}
-                  {activeChatbotConfig ? formatProviderLabel(activeChatbotConfig.provider) : "Backend default"}
-                </div>
-                <div>
-                  <span className="font-medium text-foreground">Model:</span>{" "}
-                  {activeChatbotConfig?.model || "Configured on backend"}
-                </div>
-                <div className="truncate">
-                  <span className="font-medium text-foreground">Base URL:</span>{" "}
-                  {activeChatbotConfig?.baseUrl || "Configured on backend"}
-                </div>
-              </div>
-            </div>
-
             {/* Deployment artifacts */}
             <div className="p-4 border rounded-lg border-border">
               <h3 className="text-sm font-medium mb-2">Generate Deployment Artifacts</h3>
