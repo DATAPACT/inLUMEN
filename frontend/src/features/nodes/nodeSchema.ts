@@ -34,6 +34,14 @@ export const getNodeFileName = (file: NodeFileReference) => {
   return "";
 };
 
+export const getNodeFileBucket = (file: NodeFileReference, nodeId: string) => {
+  if (file && typeof file === "object" && !isBrowserFile(file)) {
+    const bucket = file.bucket;
+    if (typeof bucket === "string" && bucket.trim()) return bucket.trim();
+  }
+  return `files-step-id-${nodeId}`.toLowerCase();
+};
+
 export const normalizeStorageDatabaseOption = (value: unknown): StorageDatabaseOption => {
   const candidate = String(value ?? "").trim().toLowerCase();
   return (
@@ -157,21 +165,41 @@ export const pickNeo4jUpdatableProps = (
   return props;
 };
 
+const TEXT_PREVIEW_EXTENSIONS = [
+  '.txt',
+  '.csv',
+  '.tsv',
+  '.json',
+  '.xml',
+  '.yaml',
+  '.yml',
+  '.md',
+  '.js',
+  '.ts',
+  '.tsx',
+  '.jsx',
+  '.css',
+  '.html',
+  '.py',
+  '.java',
+  '.cpp',
+  '.c',
+  '.h',
+  '.sh',
+  '.sql',
+  '.dockerfile',
+  '.env',
+];
+
+export const isTextPreviewName = (name: string) => {
+  const normalized = name.toLowerCase();
+  return TEXT_PREVIEW_EXTENSIONS.some((extension) => normalized.endsWith(extension)) ||
+    normalized === 'dockerfile' ||
+    normalized.startsWith('dockerfile.');
+};
+
+export const isImagePreviewName = (name: string) =>
+  /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(name);
+
 export const isTextPreviewFile = (file: File) =>
-  file.type.startsWith('text/') ||
-  file.name.endsWith('.json') ||
-  file.name.endsWith('.xml') ||
-  file.name.endsWith('.yaml') ||
-  file.name.endsWith('.yml') ||
-  file.name.endsWith('.md') ||
-  file.name.endsWith('.js') ||
-  file.name.endsWith('.ts') ||
-  file.name.endsWith('.tsx') ||
-  file.name.endsWith('.jsx') ||
-  file.name.endsWith('.css') ||
-  file.name.endsWith('.html') ||
-  file.name.endsWith('.py') ||
-  file.name.endsWith('.java') ||
-  file.name.endsWith('.cpp') ||
-  file.name.endsWith('.c') ||
-  file.name.endsWith('.h');
+  file.type.startsWith('text/') || isTextPreviewName(file.name);
