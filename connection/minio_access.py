@@ -112,14 +112,21 @@ def get_object(bucket_name, object_name, prefix = None, version_id=None):
     if prefix is not None:
         object_name = prefix + object_name
     # TODO: Provide the correct SSE-C key if encrypted object
-    try:
-        response = client.get_object(bucket_name, object_name, version_id = version_id)
-    finally:
-        response.close()
-        response.release_conn()
+    response = client.get_object(bucket_name, object_name, version_id = version_id)
     # TODO: handle the HTTPResponse (fetch data, response status)
     # Tested
     return response
+
+def read_object_bytes(bucket_name, object_name, prefix = None, version_id=None):
+    '''
+        Read object data from given bucket into bytes.
+    '''
+    response = get_object(bucket_name, object_name, prefix=prefix, version_id=version_id)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()
 
 def download_object(bucket_name, object_name, file_path, prefix = None, version_id=None):
     '''

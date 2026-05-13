@@ -20,11 +20,15 @@ import {
   typeHasContent,
   typeHasEndpoint,
   typeHasFiles,
+  isImagePreviewName,
+  isTextPreviewName,
   isTextPreviewFile,
   NodeFileReference,
 } from '@/features/nodes/nodeSchema';
 import {
+  readNodeFile,
   removeNodeFile,
+  updateNodeTextFile,
   updateNodePropertiesInNeo4j,
   uploadNodeFile,
 } from '@/features/nodes/nodePersistence';
@@ -87,6 +91,8 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
   const [previewFileName, setPreviewFileName] = useState('');
   const [previewContent, setPreviewContent] = useState('');
   const [previewType, setPreviewType] = useState<PreviewType>('text');
+  const [isPreviewLoading, setIsPreviewLoading] = useState(false);
+  const [canEditPreview, setCanEditPreview] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editedContent, setEditedContent] = useState('');
   const [previewFileIndex, setPreviewFileIndex] = useState<number>(-1);
@@ -205,6 +211,8 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
     setPreviewFileName('');
     setPreviewContent('');
     setPreviewType('text');
+    setIsPreviewLoading(false);
+    setCanEditPreview(false);
     setIsEditing(false);
     setEditedContent('');
     setPreviewFileIndex(-1);
@@ -292,58 +300,87 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
   };
 
   const viewFile = async (file: NodeFileReference, index: number) => {
+    if (!selectedNode) return;
     const fileName = getNodeFileName(file);
     setPreviewFileName(fileName);
     setPreviewFileIndex(index);
     setIsEditing(false);
+    setCanEditPreview(false);
+    setIsPreviewLoading(false);
 
-    if (!isBrowserFile(file)) {
-      setPreviewFile(null);
-      setPreviewType('binary');
-      setPreviewContent(
-        `Stored file: ${fileName}\nPreview is available for files selected in this browser session.`
-      );
-      setEditedContent('');
+    if (isBrowserFile(file)) {
+      setPreviewFile(file);
+      setCanEditPreview(isTextPreviewFile(file));
+      if (file.type.startsWith('image/')) {
+        setPreviewType('image');
+        setPreviewContent(URL.createObjectURL(file));
+        setEditedContent('');
+      } else if (isTextPreviewFile(file)) {
+        setPreviewType('text');
+        try {
+          const c = await file.text();
+          setPreviewContent(c);
+          setEditedContent(c);
+        } catch {
+          setPreviewContent('Error reading file content');
+          setEditedContent('');
+        }
+      } else {
+        setPreviewType('binary');
+        setPreviewContent(`Preview is not available for ${fileName}.`);
+        setEditedContent('');
+      }
       return;
     }
 
-    setPreviewFile(file);
-
-    if (file.type.startsWith('image/')) {
-      setPreviewType('image');
-      setPreviewContent(URL.createObjectURL(file));
-      setEditedContent('');
-    } else if (isTextPreviewFile(file)) {
-      setPreviewType('text');
-      try {
-        const c = await file.text();
-        setPreviewContent(c);
-        setEditedContent(c);
-      } catch {
-        setPreviewContent('Error reading file content');
+    setPreviewFile(null);
+    setIsPreviewLoading(true);
+    setPreviewContent('');
+    try {
+      const response = await readNodeFile(selectedNode.id, file);
+      if (isImagePreviewName(fileName)) {
+        const blob = await response.blob();
+        setPreviewType('image');
+        setPreviewContent(URL.createObjectURL(blob));
+        setEditedContent('');
+      } else if (isTextPreviewName(fileName)) {
+        const text = await response.text();
+        setPreviewType('text');
+        setPreviewContent(text);
+        setEditedContent(text);
+        setCanEditPreview(true);
+      } else {
+        setPreviewType('binary');
+        setPreviewContent(`Preview is not available for ${fileName}.`);
         setEditedContent('');
       }
-    } else {
+    } catch (err) {
+      console.warn("[PropertiesPanel.tsx] Failed to load file preview:", err);
       setPreviewType('binary');
-      const info = `Binary file: ${file.name}\nSize: ${(file.size / 1024).toFixed(2)} KB\nType: ${file.type || 'Unknown'}`;
-      setPreviewContent(info);
+      setPreviewContent(`Preview is not available for ${fileName}.`);
       setEditedContent('');
+    } finally {
+      setIsPreviewLoading(false);
     }
   };
 
   // Save edited text file and re-upload to MinIO
   const saveFileChanges = async () => {
     if (!selectedNode) return;
-    if (previewFileIndex === -1 || !previewFile || previewType !== 'text') return;
+    if (previewFileIndex === -1 || previewType !== 'text') return;
 
-    const blob = new Blob([editedContent], { type: previewFile.type });
-    const newFile = new File([blob], previewFile.name, {
-      type: previewFile.type,
-      lastModified: Date.now()
+    const currentFile = files[previewFileIndex];
+    if (!currentFile) return;
+    const currentFileName = getNodeFileName(currentFile);
+    if (!currentFileName) return;
+    const fileType = previewFile?.type || "text/plain";
+    const newFile = new File([new Blob([editedContent], { type: fileType })], currentFileName, {
+      type: fileType,
+      lastModified: Date.now(),
     });
 
     const updatedFiles = [...files];
-    updatedFiles[previewFileIndex] = newFile;
+    updatedFiles[previewFileIndex] = isBrowserFile(currentFile) ? newFile : currentFile;
 
     // 1) Update UI/state + Neo4j
     setFiles(updatedFiles);
@@ -351,14 +388,17 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
 
     // 2) Upload updated file to MinIO
     try {
-      await uploadNodeFile(selectedNode.id, newFile);
-    } catch {
-      // keep UI changes even if MinIO upload fails
-      console.warn("[PropertiesPanel.tsx] File saved locally, but MinIO upload failed.");
+      if (isBrowserFile(currentFile)) {
+        await uploadNodeFile(selectedNode.id, newFile);
+        setPreviewFile(newFile);
+      } else {
+        await updateNodeTextFile(selectedNode.id, currentFile, editedContent);
+      }
+    } catch (err) {
+      console.warn("[PropertiesPanel.tsx] File saved locally, but MinIO update failed:", err);
     }
 
     setPreviewContent(editedContent);
-    setPreviewFile(newFile);
     setIsEditing(false);
   };
 
@@ -661,11 +701,15 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
         fileName={previewFileName}
         previewContent={previewContent}
         previewType={previewType}
+        isLoading={isPreviewLoading}
+        canEdit={canEditPreview || previewType === 'text'}
         isEditing={isEditing}
         editedContent={editedContent}
         onClose={() => {
           setPreviewFile(null);
           setPreviewFileName('');
+          setCanEditPreview(false);
+          setIsPreviewLoading(false);
         }}
         onStartEditing={() => setIsEditing(true)}
         onCancelEditing={() => {

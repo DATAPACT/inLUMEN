@@ -12,6 +12,8 @@ type FilePreviewDialogProps = {
   previewContent: string;
   previewType: PreviewType;
   isEditing: boolean;
+  isLoading?: boolean;
+  canEdit?: boolean;
   editedContent: string;
   onClose: () => void;
   onStartEditing: () => void;
@@ -26,6 +28,8 @@ export const FilePreviewDialog = ({
   previewContent,
   previewType,
   isEditing,
+  isLoading = false,
+  canEdit = false,
   editedContent,
   onClose,
   onStartEditing,
@@ -46,7 +50,7 @@ export const FilePreviewDialog = ({
             </Badge>
           </div>
           <div className="flex items-center gap-2">
-            {previewType === 'text' && !isEditing && (
+            {previewType === 'text' && canEdit && !isEditing && !isLoading && (
               <Button
                 variant="outline"
                 size="sm"
@@ -80,7 +84,11 @@ export const FilePreviewDialog = ({
       </DialogHeader>
 
       <div className="flex-1 overflow-auto">
-        {previewType === 'image' ? (
+        {isLoading ? (
+          <div className="rounded-md bg-muted/50 p-4 text-sm text-muted-foreground">
+            Loading preview...
+          </div>
+        ) : previewType === 'image' ? (
           <div className="flex justify-center p-4">
             <img
               src={previewContent}
@@ -95,10 +103,14 @@ export const FilePreviewDialog = ({
             className="min-h-[400px] font-mono text-sm resize-none"
             placeholder="Edit your file content here..."
           />
-        ) : (
+        ) : previewType === 'text' ? (
           <pre className="whitespace-pre-wrap text-sm font-mono bg-muted/50 p-4 rounded">
             {previewContent}
           </pre>
+        ) : (
+          <div className="rounded-md bg-muted/50 p-4 text-sm text-muted-foreground">
+            {previewContent || 'Preview is not available for this file format.'}
+          </div>
         )}
       </div>
     </DialogContent>

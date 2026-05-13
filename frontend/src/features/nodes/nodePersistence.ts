@@ -1,6 +1,10 @@
 import { apiFetch } from '@/utils/apiFetch';
 import { MINIO_API_URL, NEO4J_API_URL } from '@/config/api';
-import { getNodeFileName, NodeFileReference } from '@/features/nodes/nodeSchema';
+import {
+  getNodeFileBucket,
+  getNodeFileName,
+  NodeFileReference,
+} from '@/features/nodes/nodeSchema';
 
 export const updateNodePropertiesInNeo4j = async (
   nodeId: string,
@@ -114,4 +118,54 @@ export const removeNodeFile = async (nodeId: string, file: NodeFileReference) =>
     console.error("[nodePersistence.ts] MinIO removal error:", err);
     throw err;
   }
+};
+
+export const readNodeFile = async (nodeId: string, file: NodeFileReference) => {
+  const fileName = getNodeFileName(file);
+  if (!fileName) {
+    throw new Error("Cannot read a file without a filename.");
+  }
+
+  const bucket = getNodeFileBucket(file, nodeId);
+  const bucketId = bucket.replace(/^files-step-id-/i, "");
+  const params = new URLSearchParams({
+    bucket_id: bucketId,
+    filename: fileName,
+  });
+  const res = await apiFetch(`${MINIO_API_URL}/minio_read_file?${params.toString()}`, {
+    method: "GET",
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`MinIO read failed (${res.status}): ${txt}`);
+  }
+  return res;
+};
+
+export const updateNodeTextFile = async (
+  nodeId: string,
+  file: NodeFileReference,
+  content: string,
+) => {
+  const fileName = getNodeFileName(file);
+  if (!fileName) {
+    throw new Error("Cannot update a file without a filename.");
+  }
+
+  const bucket = getNodeFileBucket(file, nodeId);
+  const bucketId = bucket.replace(/^files-step-id-/i, "");
+  const res = await apiFetch(`${MINIO_API_URL}/minio_update_text_file`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      bucket_id: bucketId,
+      filename: fileName,
+      content,
+    }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`MinIO text update failed (${res.status}): ${txt}`);
+  }
+  return res.json().catch(() => null);
 };
