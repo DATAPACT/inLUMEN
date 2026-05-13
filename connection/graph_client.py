@@ -4,13 +4,28 @@ import json
 import requests
 
 
-async def fetch_pipeline_graph(neo4j_api_base_url: str) -> dict:
+def _auth_headers(authorization: str | None = None) -> dict:
+    headers = {}
+    if authorization:
+        headers["Authorization"] = authorization
+    return headers
+
+
+async def fetch_pipeline_graph(
+    neo4j_api_base_url: str,
+    authorization: str | None = None,
+) -> dict:
     """Fetch the current pipeline nodes, files and flows from Neo4j."""
     api_url = f"{neo4j_api_base_url}/neo4j_get_graph"
     try:
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
-            None, lambda: requests.get(api_url, timeout=60)
+            None,
+            lambda: requests.get(
+                api_url,
+                timeout=60,
+                headers=_auth_headers(authorization),
+            ),
         )
         response.raise_for_status()
         return response.json()
