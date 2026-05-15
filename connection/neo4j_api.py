@@ -527,10 +527,15 @@ def _upsert_main_pipeline_version(
         v.node_count = $node_count,
         v.edge_count = $edge_count,
         v.file_count = $file_count,
+        v.description = coalesce(v.description, ''),
         v.graph_json = $graph_json,
         v.file_snapshots_json = $file_snapshots_json,
         v.updated_at = datetime()
     MERGE (p)-[:HAS_VERSION]->(v)
+    SET p.version = $main_name,
+        p.description = v.description,
+        p.active_version_uid = $main_uid,
+        p.updated_at = datetime()
     RETURN
       v.uid AS uid,
       v.name AS name,
@@ -540,6 +545,7 @@ def _upsert_main_pipeline_version(
       v.node_count AS node_count,
       v.edge_count AS edge_count,
       v.file_count AS file_count,
+      v.description AS description,
       toString(v.created_at) AS created_at,
       toString(v.updated_at) AS updated_at,
       toString(p.updated_at) AS pipeline_updated_at
@@ -1038,9 +1044,22 @@ def neo4j_get_all_files():
 def neo4j_get_overview_properties():
     print("[neo4j_api.py] Received request to get pipeline overview properties.")
     query = """
-    MATCH (p:PIPELINE)
+    MATCH (candidate:PIPELINE {status:'design'})
+    OPTIONAL MATCH (candidate)-[:HAS_STEP]->(candidateStep:STEP)
+    WITH candidate, count(candidateStep) AS step_count
+    ORDER BY step_count DESC, candidate.updated_at DESC
+    WITH collect(candidate)[0] AS p
+    OPTIONAL MATCH (p)-[:HAS_VERSION]->(activeVersion:PIPELINE_VERSION {uid: coalesce(p.active_version_uid, 'main')})
     RETURN 
-      p.version AS version, 
+      CASE
+        WHEN coalesce(p.active_version_uid, 'main') = 'main' THEN 'Main'
+        ELSE coalesce(activeVersion.name, p.version, 'Main')
+      END AS version,
+      CASE
+        WHEN coalesce(p.active_version_uid, 'main') = 'main' THEN coalesce(activeVersion.description, '')
+        ELSE coalesce(activeVersion.description, '')
+      END AS description,
+      coalesce(p.active_version_uid, 'main') AS active_version_uid,
       toString(p.updated_at) AS updated_at, 
       toString(p.created_at) AS created_at
     """
@@ -1049,6 +1068,8 @@ def neo4j_get_overview_properties():
             if not _label_exists(session, "PIPELINE"):
                 return jsonify({
                     "version": None,
+                    "description": None,
+                    "active_version_uid": None,
                     "created_at": None,
                     "updated_at": None
                 }), 200
@@ -1057,16 +1078,83 @@ def neo4j_get_overview_properties():
             if record is None:
                 return jsonify({
                     "version": None,
+                    "description": None,
+                    "active_version_uid": None,
                     "created_at": None,
                     "updated_at": None
                 }), 200
             return jsonify({
                 "version": record["version"],
+                "description": record["description"],
+                "active_version_uid": record["active_version_uid"],
                 "created_at": record["created_at"],
                 "updated_at": record["updated_at"]
             }), 200
     except Exception as e:
         print("[neo4j_api.py] Error executing Neo4j query:", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/neo4j_update_pipeline_overview', methods=['POST', 'OPTIONS'])
+@require_auth
+def neo4j_update_pipeline_overview():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    payload = request.get_json(force=True) or {}
+    version_name = str(payload.get("version") or payload.get("version_name") or "").strip()
+    description = str(payload.get("description") or "")
+    version_uid = str(payload.get("active_version_uid") or payload.get("version_uid") or "").strip()
+
+    try:
+        with driver.session() as session:
+            pipeline_uid = _ensure_design_pipeline(session)
+            active_record = session.run("""
+            MATCH (p:PIPELINE {uid: $pipeline_uid})
+            RETURN coalesce(p.active_version_uid, 'main') AS active_version_uid,
+                   coalesce(p.version, 'Main') AS pipeline_version
+            """, pipeline_uid=pipeline_uid).single()
+            active_version_uid = version_uid or (active_record["active_version_uid"] if active_record else MAIN_VERSION_UID)
+            fallback_name = active_record["pipeline_version"] if active_record else MAIN_VERSION_NAME
+            version_name = MAIN_VERSION_NAME if active_version_uid == MAIN_VERSION_UID else (version_name or fallback_name or MAIN_VERSION_NAME)
+
+            record = session.run("""
+            MATCH (p:PIPELINE {uid: $pipeline_uid})
+            SET p.version = $version_name,
+                p.description = CASE
+                  WHEN $active_version_uid = $main_uid THEN $description
+                  ELSE p.description
+                END,
+                p.active_version_uid = $active_version_uid,
+                p.updated_at = datetime()
+            MERGE (v:PIPELINE_VERSION {uid: $active_version_uid})
+            ON CREATE SET v.created_at = datetime(),
+                          v.version_index = CASE WHEN $active_version_uid = $main_uid THEN 0 ELSE null END,
+                          v.is_main = CASE WHEN $active_version_uid = $main_uid THEN true ELSE false END
+            SET v.name = $version_name,
+                v.version = $version_name,
+                v.description = $description,
+                v.updated_at = datetime()
+            MERGE (p)-[:HAS_VERSION]->(v)
+            RETURN
+              coalesce(v.name, p.version, 'Main') AS version,
+              coalesce(v.description, '') AS description,
+              v.uid AS active_version_uid,
+              toString(p.created_at) AS created_at,
+              toString(p.updated_at) AS updated_at
+            """, pipeline_uid=pipeline_uid,
+                 version_name=version_name,
+                 description=description,
+                 active_version_uid=active_version_uid,
+                 main_uid=MAIN_VERSION_UID).single()
+
+            return jsonify(record.data() if record else {
+                "version": version_name,
+                "description": description,
+                "active_version_uid": active_version_uid,
+            }), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error updating pipeline overview:", e)
         return jsonify({"error": str(e)}), 500
     
 @app.route('/neo4j_get_pipeline_updated_at', methods=['GET'])
@@ -1101,8 +1189,9 @@ def neo4j_list_pipeline_versions():
     MATCH (p:PIPELINE {status:'design'})-[:HAS_VERSION]->(v:PIPELINE_VERSION)
     RETURN
       v.uid AS uid,
-      v.name AS name,
-      v.version AS version,
+      CASE WHEN coalesce(v.is_main, false) OR v.uid = $main_uid THEN 'Main' ELSE v.name END AS name,
+      CASE WHEN coalesce(v.is_main, false) OR v.uid = $main_uid THEN 'Main' ELSE v.version END AS version,
+      v.description AS description,
       v.version_index AS version_index,
       coalesce(v.is_main, false) AS is_main,
       v.node_count AS node_count,
@@ -1117,7 +1206,7 @@ def neo4j_list_pipeline_versions():
         with driver.session() as session:
             if not _label_exists(session, "PIPELINE_VERSION"):
                 return jsonify({"versions": []}), 200
-            result = session.run(query)
+            result = session.run(query, main_uid=MAIN_VERSION_UID)
             versions = []
             for record in result:
                 version = record.data()
@@ -1521,14 +1610,28 @@ def neo4j_sync_graph():
 
     payload = request.get_json(force=True) or {}
     graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+    active_version_uid = str(payload.get("active_version_uid") or payload.get("version_uid") or MAIN_VERSION_UID).strip() or MAIN_VERSION_UID
+    version_name = str(payload.get("version_name") or payload.get("active_version_name") or "").strip()
 
     try:
         with driver.session() as session:
+            pipeline_uid = _ensure_design_pipeline(session)
+            if active_version_uid == MAIN_VERSION_UID:
+                version_name = MAIN_VERSION_NAME
+            elif not version_name:
+                record = session.run("""
+                MATCH (:PIPELINE {uid: $pipeline_uid})-[:HAS_VERSION]->(v:PIPELINE_VERSION {uid: $version_uid})
+                RETURN v.name AS name
+                """, pipeline_uid=pipeline_uid, version_uid=active_version_uid).single()
+                if not record:
+                    return jsonify({"error": f"Pipeline version not found: {active_version_uid}"}), 404
+                version_name = record["name"] or MAIN_VERSION_NAME
+
             result = _sync_graph_to_session(
                 session,
                 graph,
-                version_name=MAIN_VERSION_NAME,
-                active_version_uid=MAIN_VERSION_UID,
+                version_name=version_name,
+                active_version_uid=active_version_uid,
             )
         return jsonify(result), 200
     except Exception as e:

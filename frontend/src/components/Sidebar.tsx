@@ -5,7 +5,13 @@ import { ChatbotConfig, buildLLMRequestConfig } from '@/services/chatbotService'
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  MAIN_PIPELINE_VERSION_UID,
+  updatePipelineOverviewMetadata,
+} from '@/features/flow/flowPersistence';
 import {
   Brain,
   MessageCircle,
@@ -29,11 +35,19 @@ import {
 
 interface PipelineOverview {
   version: string;
+  description: string;
   lastUpdate: string;
   createdAt: string; 
   stepCount: number;
   fileCount: number;
 }
+
+type PipelineOverviewUpdate = {
+  version?: string;
+  description?: string;
+  activeVersionUid?: string;
+  updatedAt?: string | null;
+};
 
 interface SidebarProps {
   className?: string;
@@ -45,6 +59,8 @@ interface SidebarProps {
   onBlankPipeline?: () => void;
   onSavePipeline?: () => void;
   pipelineOverview?: PipelineOverview;
+  activeVersionUid?: string;
+  onOverviewUpdated?: (overview: PipelineOverviewUpdate) => void;
   activeChatbotConfig?: ChatbotConfig;
 }
 
@@ -80,6 +96,8 @@ type DockerfileGenerationResponse = {
 
 type PipelineOverviewResponse = {
   version?: string;
+  description?: string;
+  active_version_uid?: string;
   created_at?: string;
   updated_at?: string;
 };
@@ -173,12 +191,18 @@ export function Sidebar({
   onBlankPipeline,
   onSavePipeline,
   pipelineOverview,
+  activeVersionUid,
+  onOverviewUpdated,
   activeChatbotConfig
 }: SidebarProps) {
   // --- overview state (fetched when Overview tab is opened)
   const [overviewData, setOverviewData] = useState<Partial<PipelineOverview> | null>(null);
   const [overviewError, setOverviewError] = useState<string>("");
   const [isLoadingOverview, setIsLoadingOverview] = useState(false);
+  const [overviewVersionDraft, setOverviewVersionDraft] = useState("");
+  const [overviewDescriptionDraft, setOverviewDescriptionDraft] = useState("");
+  const [isSavingOverview, setIsSavingOverview] = useState(false);
+  const [overviewSaveError, setOverviewSaveError] = useState("");
 
   // --- Dockerfiles state
   const [isGeneratingDeployment, setIsGeneratingDeployment] = useState(false);
@@ -243,7 +267,7 @@ export function Sidebar({
       const errText = await res.text().catch(() => "");
       throw new Error(`Failed to fetch overview: ${res.status} ${res.statusText} ${errText}`);
     }
-    return await res.json(); // expected: { version, created_at, updated_at }
+    return await res.json(); // expected: { version, description, active_version_uid, created_at, updated_at }
   };
 
   useEffect(() => {
@@ -257,8 +281,15 @@ export function Sidebar({
         if (isCancelled) return;
         setOverviewData({
           version: data?.version ?? "",
+          description: data?.description ?? "",
           createdAt: data?.created_at ?? "",
           lastUpdate: data?.updated_at ?? "",
+        });
+        onOverviewUpdated?.({
+          version: data?.version ?? "",
+          description: data?.description ?? "",
+          activeVersionUid: data?.active_version_uid,
+          updatedAt: data?.updated_at ?? null,
         });
       } catch (e: unknown) {
         if (isCancelled) return;
@@ -271,7 +302,7 @@ export function Sidebar({
     return () => {
       isCancelled = true;
     };
-  }, [activeTab]);
+  }, [activeTab, activeVersionUid, onOverviewUpdated]);
 
   const handleGenerateDeploymentArtifacts = async () => {
     try {
@@ -331,6 +362,57 @@ export function Sidebar({
     ...pipelineOverview,
     ...overviewData,
   } as PipelineOverview;
+  const isMainVersion = activeVersionUid === MAIN_PIPELINE_VERSION_UID;
+
+  useEffect(() => {
+    setOverviewVersionDraft(overview?.version ?? "");
+    setOverviewDescriptionDraft(overview?.description ?? "");
+  }, [overview?.description, overview?.version]);
+
+  const handleOverviewMetadataSave = async () => {
+    const nextVersion = isMainVersion
+      ? "Main"
+      : overviewVersionDraft.trim() || overview?.version || "Main";
+    const nextDescription = overviewDescriptionDraft.trim();
+    const currentVersion = overview?.version || "";
+    const currentDescription = overview?.description || "";
+
+    if (nextVersion === currentVersion && nextDescription === currentDescription) return;
+
+    try {
+      setOverviewSaveError("");
+      setIsSavingOverview(true);
+      const saved = await updatePipelineOverviewMetadata({
+        version: nextVersion,
+        description: nextDescription,
+        activeVersionUid,
+      });
+      const savedVersion = saved.version ?? nextVersion;
+      const savedDescription = saved.description ?? nextDescription;
+      setOverviewVersionDraft(savedVersion);
+      setOverviewDescriptionDraft(savedDescription);
+      setOverviewData((current) => ({
+        ...current,
+        version: savedVersion,
+        description: savedDescription,
+        lastUpdate: saved.updated_at ?? current?.lastUpdate ?? "",
+        createdAt: saved.created_at ?? current?.createdAt ?? "",
+      }));
+      onOverviewUpdated?.({
+        version: savedVersion,
+        description: savedDescription,
+        activeVersionUid: saved.active_version_uid,
+        updatedAt: saved.updated_at ?? null,
+      });
+    } catch (e: unknown) {
+      console.error("[Sidebar.tsx] Overview save error:", e);
+      setOverviewSaveError(errorToMessage(e, "Failed to save overview."));
+      setOverviewVersionDraft(currentVersion);
+      setOverviewDescriptionDraft(currentDescription);
+    } finally {
+      setIsSavingOverview(false);
+    }
+  };
 
   return (
     <div className={cn("w-64 border-r border-border bg-card flex flex-col", className)}>
@@ -404,6 +486,12 @@ export function Sidebar({
               {overviewError && (
                 <div className="text-xs text-red-400 mb-2">{overviewError}</div>
               )}
+              {overviewSaveError && (
+                <div className="text-xs text-red-400 mb-2">{overviewSaveError}</div>
+              )}
+              {isSavingOverview && (
+                <div className="text-xs text-muted-foreground mb-2">Saving overview...</div>
+              )}
 
               <div className="space-y-3">
                 <div className="p-3 rounded-lg border border-border bg-muted/30">
@@ -411,7 +499,36 @@ export function Sidebar({
                     <Hash className="w-3.5 h-3.5" />
                     <span className="text-xs font-medium">Pipeline Version</span>
                   </div>
-                  <p className="text-sm font-semibold">{overview?.version || '0.0.0'}</p>
+                  <Input
+                    aria-label="Pipeline version"
+                    value={overviewVersionDraft}
+                    disabled={isSavingOverview || isMainVersion}
+                    onChange={(event) => setOverviewVersionDraft(event.target.value)}
+                    onBlur={() => { void handleOverviewMetadataSave(); }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.currentTarget.blur();
+                      }
+                    }}
+                    placeholder="Main"
+                    className="h-8 px-2 text-sm font-semibold"
+                  />
+                </div>
+
+                <div className="p-3 rounded-lg border border-border bg-muted/30">
+                  <div className="flex items-center gap-2 text-muted-foreground mb-1">
+                    <FileText className="w-3.5 h-3.5" />
+                    <span className="text-xs font-medium">Pipeline Description</span>
+                  </div>
+                  <Textarea
+                    aria-label="Pipeline description"
+                    value={overviewDescriptionDraft}
+                    disabled={isSavingOverview}
+                    onChange={(event) => setOverviewDescriptionDraft(event.target.value)}
+                    onBlur={() => { void handleOverviewMetadataSave(); }}
+                    placeholder="None"
+                    className="min-h-[76px] resize-none px-2 py-2 text-sm font-medium"
+                  />
                 </div>
 
                 <div className="p-3 rounded-lg border border-border bg-muted/30">

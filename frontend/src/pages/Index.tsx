@@ -198,7 +198,10 @@ const Index = () => {
   const [isSettingMainVersion, setIsSettingMainVersion] = useState(false);
   const [activeVersionUid, setActiveVersionUid] = useState(MAIN_PIPELINE_VERSION_UID);
   const [activeVersionName, setActiveVersionName] = useState('Main');
+  const [activePipelineDescription, setActivePipelineDescription] = useState('');
   const activeVersionSaveTimeoutRef = useRef<number | null>(null);
+  const activeVersionUidRef = useRef(MAIN_PIPELINE_VERSION_UID);
+  const activeVersionNameRef = useRef('Main');
   const defaultConfig = React.useMemo(() => getDefaultChatbotConfig(), []);
   const isLibraryOpen = panelPreferences.libraryOpen;
   const rightPanel = panelPreferences.rightPanel;
@@ -269,13 +272,14 @@ const Index = () => {
     }, 0);
 
     return {
-      version: '1.0.0',
+      version: activeVersionName,
+      description: activePipelineDescription,
       lastUpdate: pipelineLastUpdate,
       createdAt: pipelineCreatedAt,
       stepCount: flowNodes.length,
       fileCount
     };
-  }, [flowNodes, pipelineLastUpdate, pipelineCreatedAt]);
+  }, [activePipelineDescription, activeVersionName, flowNodes, pipelineLastUpdate, pipelineCreatedAt]);
 
   useEffect(() => {
     const savedToken = localStorage.getItem('github_token');
@@ -311,28 +315,44 @@ const Index = () => {
     });
   }, [conversation, isProcessing]);
 
-  const updateActiveVersion = useCallback((uid: string, name?: string) => {
-    setActiveVersionUid(uid);
-    if (name !== undefined) {
-      setActiveVersionName(name);
-    } else if (uid === MAIN_PIPELINE_VERSION_UID) {
-      setActiveVersionName('Main');
-    }
+  const updateActiveVersionName = useCallback((name: string) => {
+    activeVersionNameRef.current = name;
+    setActiveVersionName(name);
   }, []);
+
+  const updateActiveVersion = useCallback((uid: string, name?: string) => {
+    const nextName = uid === MAIN_PIPELINE_VERSION_UID
+      ? 'Main'
+      : name !== undefined
+        ? name
+        : activeVersionNameRef.current;
+    activeVersionUidRef.current = uid;
+    activeVersionNameRef.current = nextName;
+    setActiveVersionUid(uid);
+    updateActiveVersionName(nextName);
+  }, [updateActiveVersionName]);
+
+  const handleActiveVersionNameChange = useCallback((name: string) => {
+    updateActiveVersionName(
+      activeVersionUidRef.current === MAIN_PIPELINE_VERSION_UID
+        ? 'Main'
+        : name,
+    );
+  }, [updateActiveVersionName]);
 
   const flushActiveVersionSnapshot = useCallback(async () => {
     if (!flowCanvasRef.current) return null;
     const version = await savePipelineActiveVersion(
       flowCanvasRef.current.getCurrentVersionGraph(),
-      activeVersionUid,
-      activeVersionName,
+      activeVersionUidRef.current,
+      activeVersionNameRef.current,
     );
     setVersionsRefreshKey((key) => key + 1);
     if (version.pipeline_updated_at) {
       setPipelineLastUpdate(new Date(version.pipeline_updated_at).toLocaleString());
     }
     return version;
-  }, [activeVersionName, activeVersionUid]);
+  }, []);
 
   const scheduleActiveVersionSnapshot = useCallback(() => {
     if (activeVersionSaveTimeoutRef.current) {
@@ -413,6 +433,8 @@ const Index = () => {
           session_id: chatSessionId || null,
           user_message: messageText,
           canvas_graph: canvasGraph,
+          active_version_uid: activeVersionUidRef.current,
+          active_version_name: activeVersionNameRef.current,
           model: activeCfg.model,
           llm_config: buildLLMRequestConfig(activeCfg),
         }),
@@ -696,6 +718,33 @@ const Index = () => {
     }
   };
 
+  const handleOverviewUpdated = useCallback((overview: {
+    version?: string;
+    description?: string;
+    activeVersionUid?: string;
+    updatedAt?: string | null;
+  }) => {
+    const nextVersionName = overview.version?.trim();
+    if (nextVersionName && nextVersionName !== activeVersionName) {
+      updateActiveVersionName(
+        (overview.activeVersionUid ?? activeVersionUidRef.current) === MAIN_PIPELINE_VERSION_UID
+          ? 'Main'
+          : nextVersionName,
+      );
+      setVersionsRefreshKey((key) => key + 1);
+    }
+    if (overview.description !== undefined) {
+      setActivePipelineDescription(overview.description);
+    }
+    if (overview.activeVersionUid) {
+      activeVersionUidRef.current = overview.activeVersionUid;
+      setActiveVersionUid(overview.activeVersionUid);
+    }
+    if (overview.updatedAt) {
+      setPipelineLastUpdate(new Date(overview.updatedAt).toLocaleString());
+    }
+  }, [activeVersionName, updateActiveVersionName]);
+
   const handleRestoreVersion = async (version: PipelineVersionSummary) => {
     if (!flowCanvasRef.current) {
       toast.error("Canvas is not ready for restore");
@@ -813,6 +862,8 @@ const Index = () => {
             onBlankPipeline={handleBlankPipeline}
             onSavePipeline={handleSavePipeline}
             pipelineOverview={pipelineOverview}
+            activeVersionUid={activeVersionUid}
+            onOverviewUpdated={handleOverviewUpdated}
             activeChatbotConfig={activeConfig}
           />
         )}
@@ -831,7 +882,7 @@ const Index = () => {
                   onVersionSaved={handleVersionSaved}
                   onCanvasEdited={scheduleActiveVersionSnapshot}
                   onActiveVersionChange={updateActiveVersion}
-                  onActiveVersionNameChange={setActiveVersionName}
+                  onActiveVersionNameChange={handleActiveVersionNameChange}
                   flowCanvasRef={flowCanvasRef}
                 />
               </div>

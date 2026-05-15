@@ -17,6 +17,7 @@ export type PipelineVersionSummary = {
   uid: string;
   name: string;
   version?: string;
+  description?: string | null;
   version_index?: number;
   is_main?: boolean;
   node_count?: number;
@@ -35,6 +36,14 @@ export type PipelineVersionRestore = {
 
 export type PipelineVersionSetMainResult = PipelineVersionRestore & {
   source_version?: PipelineVersionSummary;
+};
+
+export type PipelineOverviewMetadata = {
+  version?: string;
+  description?: string;
+  active_version_uid?: string;
+  created_at?: string | null;
+  updated_at?: string | null;
 };
 
 export const addNodeToNeo4j = async (node: Node) => {
@@ -264,6 +273,29 @@ export const savePipelineActiveVersion = async (
     throw new Error("Active version response did not include a version id.");
   }
   return data.version;
+};
+
+export const updatePipelineOverviewMetadata = async (
+  metadata: {
+    version: string;
+    description: string;
+    activeVersionUid?: string;
+  },
+): Promise<PipelineOverviewMetadata> => {
+  const res = await apiFetch(`${NEO4J_API_URL}/neo4j_update_pipeline_overview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      version: metadata.version,
+      description: metadata.description,
+      active_version_uid: metadata.activeVersionUid,
+    }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Failed to update pipeline overview (${res.status}): ${txt}`);
+  }
+  return res.json().catch(() => ({}));
 };
 
 export const restorePipelineVersion = async (

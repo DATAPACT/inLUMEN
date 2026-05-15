@@ -20,16 +20,26 @@ async def fetch_pipeline_graph(neo4j_api_base_url: str) -> dict:
         ) from exc
 
 
-async def sync_backend_to_canvas_graph(neo4j_api_base_url: str, graph: dict) -> dict:
+async def sync_backend_to_canvas_graph(
+    neo4j_api_base_url: str,
+    graph: dict,
+    active_version_uid: str | None = None,
+    active_version_name: str | None = None,
+) -> dict:
     """Make Neo4j match the visible canvas graph before an agent turn."""
     api_url = f"{neo4j_api_base_url}/neo4j_sync_graph"
+    payload = {"graph": graph}
+    if active_version_uid:
+        payload["active_version_uid"] = active_version_uid
+    if active_version_name:
+        payload["version_name"] = active_version_name
     try:
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
             None,
             lambda: requests.post(
                 api_url,
-                data=json.dumps({"graph": graph}),
+                data=json.dumps(payload),
                 headers={"Content-Type": "application/json"},
                 timeout=60,
             ),
@@ -39,6 +49,38 @@ async def sync_backend_to_canvas_graph(neo4j_api_base_url: str, graph: dict) -> 
     except Exception as exc:
         raise RuntimeError(
             f"Failed to sync visible canvas graph to Neo4j ({api_url}): {exc}"
+        ) from exc
+
+
+async def save_active_pipeline_version(
+    neo4j_api_base_url: str,
+    graph: dict,
+    active_version_uid: str,
+    active_version_name: str,
+) -> dict:
+    """Persist the current live graph into the requested active pipeline version."""
+    api_url = f"{neo4j_api_base_url}/neo4j_save_pipeline_active_version"
+    payload = {
+        "graph": graph,
+        "uid": active_version_uid,
+        "name": active_version_name,
+    }
+    try:
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: requests.post(
+                api_url,
+                data=json.dumps(payload),
+                headers={"Content-Type": "application/json"},
+                timeout=60,
+            ),
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to save active pipeline version ({api_url}): {exc}"
         ) from exc
 
 
