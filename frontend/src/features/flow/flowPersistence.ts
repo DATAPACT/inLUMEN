@@ -3,6 +3,29 @@ import { apiFetch } from '@/utils/apiFetch';
 import { MINIO_API_URL, NEO4J_API_URL, LLM_API_URL } from '@/config/api';
 import { ChatbotConfig, buildLLMRequestConfig } from '@/services/chatbotService';
 
+export type PipelineVersionSummary = {
+  uid: string;
+  name: string;
+  version?: string;
+  version_index?: number;
+  node_count?: number;
+  edge_count?: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+  pipeline_updated_at?: string | null;
+};
+
+export type PipelineVersionRestore = {
+  version: PipelineVersionSummary;
+  graph: {
+    updated_at?: string | null;
+    nodes?: Node[];
+    edges?: Edge[];
+    viewport?: unknown;
+    [key: string]: unknown;
+  };
+};
+
 export const addNodeToNeo4j = async (node: Node) => {
   try {
     const response = await apiFetch(`${NEO4J_API_URL}/neo4j_add_node`, {
@@ -160,6 +183,70 @@ export const fetchPipelineGraph = async () => {
   const res = await apiFetch(`${NEO4J_API_URL}/neo4j_get_graph`, { method: "GET" });
   if (!res.ok) throw new Error("Failed to fetch neo4j_get_graph");
   return res.json();
+};
+
+export const fetchPipelineVersions = async (): Promise<PipelineVersionSummary[]> => {
+  const res = await apiFetch(`${NEO4J_API_URL}/neo4j_list_pipeline_versions`, { method: "GET" });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Failed to fetch pipeline versions (${res.status}): ${txt}`);
+  }
+  const data = await res.json().catch(() => ({}));
+  return Array.isArray(data?.versions) ? data.versions : [];
+};
+
+export const savePipelineVersion = async (
+  name: string,
+  graph: PipelineVersionRestore["graph"],
+): Promise<PipelineVersionSummary> => {
+  const res = await apiFetch(`${NEO4J_API_URL}/neo4j_save_pipeline_version`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, graph }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Failed to save pipeline version (${res.status}): ${txt}`);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!data?.version?.uid) {
+    throw new Error("Saved version response did not include a version id.");
+  }
+  return data.version;
+};
+
+export const restorePipelineVersion = async (
+  versionUid: string,
+): Promise<PipelineVersionRestore> => {
+  const res = await apiFetch(`${NEO4J_API_URL}/neo4j_restore_pipeline_version`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uid: versionUid }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Failed to restore pipeline version (${res.status}): ${txt}`);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!data?.version?.uid || !data?.graph) {
+    throw new Error("Restore response did not include a version graph.");
+  }
+  return data as PipelineVersionRestore;
+};
+
+export const deletePipelineVersion = async (
+  versionUid: string,
+): Promise<{ deleted_uid?: string; remaining_count?: number; pipeline_updated_at?: string | null }> => {
+  const res = await apiFetch(`${NEO4J_API_URL}/neo4j_delete_pipeline_version`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uid: versionUid }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Failed to delete pipeline version (${res.status}): ${txt}`);
+  }
+  return res.json().catch(() => ({}));
 };
 
 export const rebuildBackendFromFlow = async (nodes: Node[], edges: Edge[]) => {

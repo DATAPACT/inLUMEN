@@ -7,7 +7,12 @@ import { PropertiesPanel, PropertyNodeData } from '@/components/PropertiesPanel'
 import { Toolbar } from '@/components/Toolbar';
 import { WrappedFlowCanvas, FlowCanvasRef } from '@/components/FlowCanvas';
 import { ChatPanel } from '@/components/chat/ChatPanel';
+import { VersionsPanel } from '@/components/versions/VersionsPanel';
 import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
+import {
+  restorePipelineVersion,
+  type PipelineVersionSummary,
+} from '@/features/flow/flowPersistence';
 import { toast } from 'sonner';
 import {
   Settings,
@@ -64,7 +69,7 @@ const CHAT_PROMPT_SUGGESTIONS = [
   "Build a fraud detection workflow with batch feature engineering, real-time scoring, and monitoring.",
 ];
 
-type RightPanel = 'inspector' | 'chat' | null;
+type RightPanel = 'inspector' | 'chat' | 'versions' | null;
 
 type PanelPreferences = {
   libraryOpen: boolean;
@@ -82,7 +87,7 @@ const readPanelPreferences = (): PanelPreferences => {
     if (!saved) return DEFAULT_PANEL_PREFERENCES;
     const parsed = JSON.parse(saved) as Partial<PanelPreferences>;
     const rightPanel =
-      parsed.rightPanel === 'inspector' || parsed.rightPanel === 'chat'
+      parsed.rightPanel === 'inspector' || parsed.rightPanel === 'chat' || parsed.rightPanel === 'versions'
         ? parsed.rightPanel
         : null;
     return {
@@ -185,6 +190,8 @@ const Index = () => {
   const [selectedConfig, setSelectedConfig] = useState<ChatbotConfig | null>(null);
   const [isConfigFormOpen, setIsConfigFormOpen] = useState(false);
   const [configToEdit, setConfigToEdit] = useState<ChatbotConfig | undefined>(undefined);
+  const [versionsRefreshKey, setVersionsRefreshKey] = useState(0);
+  const [isRestoringVersion, setIsRestoringVersion] = useState(false);
   const defaultConfig = React.useMemo(() => getDefaultChatbotConfig(), []);
   const isLibraryOpen = panelPreferences.libraryOpen;
   const rightPanel = panelPreferences.rightPanel;
@@ -622,6 +629,47 @@ const Index = () => {
     });
   };
 
+  const handleVersionSaved = (version: PipelineVersionSummary) => {
+    setVersionsRefreshKey((key) => key + 1);
+    if (version.pipeline_updated_at) {
+      setPipelineLastUpdate(new Date(version.pipeline_updated_at).toLocaleString());
+    }
+  };
+
+  const handleRestoreVersion = async (version: PipelineVersionSummary) => {
+    if (!flowCanvasRef.current) {
+      toast.error("Canvas is not ready for restore");
+      return;
+    }
+
+    try {
+      setIsRestoringVersion(true);
+      const restored = await restorePipelineVersion(version.uid);
+      const syncedGraph = await flowCanvasRef.current.syncFromBackend(restored.graph);
+      setVersionsRefreshKey((key) => key + 1);
+
+      const updatedAt = restored.version.pipeline_updated_at ?? syncedGraph.updated_at ?? null;
+      if (updatedAt) {
+        setPipelineLastUpdate(new Date(updatedAt).toLocaleString());
+      }
+      setCanvasSyncStatus({
+        state: 'idle',
+        message: '',
+        updatedAt,
+      });
+      toast.success("Version restored", {
+        description: restored.version.name,
+      });
+    } catch (error) {
+      console.error("Error restoring version:", error);
+      toast.error("Failed to restore version", {
+        description: error instanceof Error ? error.message : "Unknown error occurred",
+      });
+    } finally {
+      setIsRestoringVersion(false);
+    }
+  };
+
   const handleRemoveNode = (nodeId: string) => {
     setFlowNodes(prev => prev.filter(node => node.id !== nodeId));
     if (selectedNode?.id === nodeId) {
@@ -644,9 +692,11 @@ const Index = () => {
         isLibraryOpen={isLibraryOpen}
         isInspectorOpen={rightPanel === 'inspector'}
         isChatOpen={rightPanel === 'chat'}
+        isVersionsOpen={rightPanel === 'versions'}
         onToggleLibrary={handleToggleLibrary}
         onToggleInspector={() => handleToggleRightPanel('inspector')}
         onToggleChat={() => handleToggleRightPanel('chat')}
+        onToggleVersions={() => handleToggleRightPanel('versions')}
         onOpenHelp={() => setIsHelpOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
       />
@@ -678,6 +728,7 @@ const Index = () => {
                   onRemoveEdge={handleRemoveEdge}
                   isLightMode={isLightMode}
                   activeChatbotConfig={activeConfig}
+                  onVersionSaved={handleVersionSaved}
                   flowCanvasRef={flowCanvasRef}
                 />
               </div>
@@ -694,7 +745,7 @@ const Index = () => {
                       onNodeUpdate={onNodeUpdate}
                       onRemoveNode={handleRemoveNode}
                     />
-                  ) : (
+                  ) : rightPanel === 'chat' ? (
                     <ChatPanel
                       activeConfig={activeConfig}
                       conversation={conversation}
@@ -710,6 +761,13 @@ const Index = () => {
                       onSaveConversation={handleSaveConversation}
                       onExportConversation={handleExportConversation}
                       onSuggestionClick={handleSuggestionClick}
+                    />
+                  ) : (
+                    <VersionsPanel
+                      className="bg-card/95"
+                      refreshKey={versionsRefreshKey}
+                      isRestoring={isRestoringVersion}
+                      onRestoreVersion={(version) => { void handleRestoreVersion(version); }}
                     />
                   )}
                 </ResizablePanel>
@@ -741,7 +799,7 @@ const Index = () => {
                 <PanelLeft className="h-4 w-4 text-emerald-500" />
                 Panels
               </div>
-              Use the header toggles to show only what you need: Library for dragging nodes, Inspector for editing selected nodes, and Chat for pipeline assistance.
+              Use the header toggles to show only what you need: Library, Inspector, Chat, and Versions.
             </div>
             <div className="rounded-xl border border-border bg-muted/35 p-3">
               <div className="mb-1 flex items-center gap-2 font-medium">
@@ -755,7 +813,7 @@ const Index = () => {
                 <SlidersHorizontal className="h-4 w-4 text-emerald-500" />
                 Canvas workflow
               </div>
-              Select a node to open the Inspector automatically. Use the canvas Save, Export, Import, and Clear controls for pipeline files.
+              Select a node to open the Inspector automatically. Use canvas Save to create a named version.
             </div>
           </div>
         </DialogContent>
@@ -788,7 +846,7 @@ const Index = () => {
 
             <div className="rounded-xl border border-border bg-muted/30 p-3">
               <div className="mb-3 text-sm font-medium">Panel visibility</div>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-4 gap-2">
                 <Button
                   variant={isLibraryOpen ? "default" : "outline"}
                   size="sm"
@@ -812,6 +870,14 @@ const Index = () => {
                 >
                   <MessageSquare className="h-4 w-4" />
                   Chat
+                </Button>
+                <Button
+                  variant={rightPanel === 'versions' ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => handleToggleRightPanel('versions')}
+                >
+                  <RotateCcw className="h-4 w-4" />
+                  Versions
                 </Button>
               </div>
               <Button

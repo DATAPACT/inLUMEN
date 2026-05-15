@@ -7,7 +7,8 @@ import {
   Moon,
   PanelLeft,
   SlidersHorizontal,
-  MessageSquare
+  MessageSquare,
+  History
 } from 'lucide-react';
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
@@ -20,9 +21,11 @@ interface ToolbarProps {
   isLibraryOpen: boolean;
   isInspectorOpen: boolean;
   isChatOpen: boolean;
+  isVersionsOpen: boolean;
   onToggleLibrary: () => void;
   onToggleInspector: () => void;
   onToggleChat: () => void;
+  onToggleVersions: () => void;
   onOpenHelp: () => void;
   onOpenSettings: () => void;
 }
@@ -34,9 +37,11 @@ export function Toolbar({
   isLibraryOpen,
   isInspectorOpen,
   isChatOpen,
+  isVersionsOpen,
   onToggleLibrary,
   onToggleInspector,
   onToggleChat,
+  onToggleVersions,
   onOpenHelp,
   onOpenSettings
 }: ToolbarProps) {
@@ -98,6 +103,17 @@ export function Toolbar({
         >
           <MessageSquare className="h-3.5 w-3.5" />
           <span className="hidden lg:inline">Chat</span>
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className={panelButtonClass(isVersionsOpen)}
+          aria-pressed={isVersionsOpen}
+          onClick={onToggleVersions}
+          title="Toggle saved versions"
+        >
+          <History className="h-3.5 w-3.5" />
+          <span className="hidden lg:inline">Versions</span>
         </Button>
       </div>
       
