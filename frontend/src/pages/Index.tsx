@@ -10,7 +10,10 @@ import { ChatPanel } from '@/components/chat/ChatPanel';
 import { VersionsPanel } from '@/components/versions/VersionsPanel';
 import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
 import {
+  MAIN_PIPELINE_VERSION_UID,
   restorePipelineVersion,
+  savePipelineActiveVersion,
+  setPipelineVersionAsMain,
   type PipelineVersionSummary,
 } from '@/features/flow/flowPersistence';
 import { toast } from 'sonner';
@@ -192,6 +195,10 @@ const Index = () => {
   const [configToEdit, setConfigToEdit] = useState<ChatbotConfig | undefined>(undefined);
   const [versionsRefreshKey, setVersionsRefreshKey] = useState(0);
   const [isRestoringVersion, setIsRestoringVersion] = useState(false);
+  const [isSettingMainVersion, setIsSettingMainVersion] = useState(false);
+  const [activeVersionUid, setActiveVersionUid] = useState(MAIN_PIPELINE_VERSION_UID);
+  const [activeVersionName, setActiveVersionName] = useState('Main');
+  const activeVersionSaveTimeoutRef = useRef<number | null>(null);
   const defaultConfig = React.useMemo(() => getDefaultChatbotConfig(), []);
   const isLibraryOpen = panelPreferences.libraryOpen;
   const rightPanel = panelPreferences.rightPanel;
@@ -304,9 +311,51 @@ const Index = () => {
     });
   }, [conversation, isProcessing]);
 
-  const onNodeSelect = useCallback((node: FlowNode | null) => {
+  const updateActiveVersion = useCallback((uid: string, name?: string) => {
+    setActiveVersionUid(uid);
+    if (name !== undefined) {
+      setActiveVersionName(name);
+    } else if (uid === MAIN_PIPELINE_VERSION_UID) {
+      setActiveVersionName('Main');
+    }
+  }, []);
+
+  const flushActiveVersionSnapshot = useCallback(async () => {
+    if (!flowCanvasRef.current) return null;
+    const version = await savePipelineActiveVersion(
+      flowCanvasRef.current.getCurrentVersionGraph(),
+      activeVersionUid,
+      activeVersionName,
+    );
+    setVersionsRefreshKey((key) => key + 1);
+    if (version.pipeline_updated_at) {
+      setPipelineLastUpdate(new Date(version.pipeline_updated_at).toLocaleString());
+    }
+    return version;
+  }, [activeVersionName, activeVersionUid]);
+
+  const scheduleActiveVersionSnapshot = useCallback(() => {
+    if (activeVersionSaveTimeoutRef.current) {
+      window.clearTimeout(activeVersionSaveTimeoutRef.current);
+    }
+    activeVersionSaveTimeoutRef.current = window.setTimeout(() => {
+      void flushActiveVersionSnapshot().catch((error) => {
+        console.warn("Failed to save active pipeline version:", error);
+      });
+    }, 600);
+  }, [flushActiveVersionSnapshot]);
+
+  useEffect(() => {
+    return () => {
+      if (activeVersionSaveTimeoutRef.current) {
+        window.clearTimeout(activeVersionSaveTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const onNodeSelect = useCallback((node: FlowNode | null, options?: { openInspector?: boolean }) => {
     setSelectedNode(node);
-    if (node) {
+    if (node && options?.openInspector !== false) {
       setPanelPreferences((current) => ({ ...current, rightPanel: 'inspector' }));
     }
   }, []);
@@ -397,6 +446,7 @@ const Index = () => {
       }
 
       const syncedGraph = await flowCanvasRef.current.syncFromBackend(data.graph);
+      scheduleActiveVersionSnapshot();
       const sync = data.sync;
       const nodeCount = sync?.node_count ?? syncedGraph.nodes.length;
       const edgeCount = sync?.edge_count ?? syncedGraph.edges.length;
@@ -470,6 +520,15 @@ const Index = () => {
       ...current,
       rightPanel: current.rightPanel === panel ? null : panel,
     }));
+  };
+
+  const handleToggleVersionsPanel = async () => {
+    if (rightPanel !== 'versions') {
+      await flushActiveVersionSnapshot().catch((error) => {
+        console.warn("Failed to refresh active pipeline version:", error);
+      });
+    }
+    handleToggleRightPanel('versions');
   };
 
   const handleResetPanelLayout = () => {
@@ -605,6 +664,7 @@ const Index = () => {
   };
 
   const handleBlankPipeline = () => {
+    updateActiveVersion(MAIN_PIPELINE_VERSION_UID, 'Main');
     setFlowNodes([]);
     setSelectedNode(null);
     localStorage.removeItem('ai-flow-nodes');
@@ -644,8 +704,10 @@ const Index = () => {
 
     try {
       setIsRestoringVersion(true);
+      await flushActiveVersionSnapshot();
       const restored = await restorePipelineVersion(version.uid);
       const syncedGraph = await flowCanvasRef.current.syncFromBackend(restored.graph);
+      updateActiveVersion(restored.version.uid, restored.version.name);
       setVersionsRefreshKey((key) => key + 1);
 
       const updatedAt = restored.version.pipeline_updated_at ?? syncedGraph.updated_at ?? null;
@@ -667,6 +729,43 @@ const Index = () => {
       });
     } finally {
       setIsRestoringVersion(false);
+    }
+  };
+
+  const handleSetMainVersion = async (version: PipelineVersionSummary) => {
+    if (!flowCanvasRef.current) {
+      toast.error("Canvas is not ready");
+      return;
+    }
+    if (version.is_main || version.uid === MAIN_PIPELINE_VERSION_UID) return;
+
+    try {
+      setIsSettingMainVersion(true);
+      await flushActiveVersionSnapshot();
+      const result = await setPipelineVersionAsMain(version.uid);
+      const syncedGraph = await flowCanvasRef.current.syncFromBackend(result.graph);
+      updateActiveVersion(MAIN_PIPELINE_VERSION_UID, 'Main');
+      setVersionsRefreshKey((key) => key + 1);
+
+      const updatedAt = result.version.pipeline_updated_at ?? syncedGraph.updated_at ?? null;
+      if (updatedAt) {
+        setPipelineLastUpdate(new Date(updatedAt).toLocaleString());
+      }
+      setCanvasSyncStatus({
+        state: 'idle',
+        message: '',
+        updatedAt,
+      });
+      toast.success("Main updated", {
+        description: `${version.name} is now Main`,
+      });
+    } catch (error) {
+      console.error("Error setting Main version:", error);
+      toast.error("Failed to set Main version", {
+        description: error instanceof Error ? error.message : "Unknown error occurred",
+      });
+    } finally {
+      setIsSettingMainVersion(false);
     }
   };
 
@@ -693,10 +792,11 @@ const Index = () => {
         isInspectorOpen={rightPanel === 'inspector'}
         isChatOpen={rightPanel === 'chat'}
         isVersionsOpen={rightPanel === 'versions'}
+        activeVersionName={activeVersionName}
         onToggleLibrary={handleToggleLibrary}
         onToggleInspector={() => handleToggleRightPanel('inspector')}
         onToggleChat={() => handleToggleRightPanel('chat')}
-        onToggleVersions={() => handleToggleRightPanel('versions')}
+        onToggleVersions={() => { void handleToggleVersionsPanel(); }}
         onOpenHelp={() => setIsHelpOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
       />
@@ -729,6 +829,9 @@ const Index = () => {
                   isLightMode={isLightMode}
                   activeChatbotConfig={activeConfig}
                   onVersionSaved={handleVersionSaved}
+                  onCanvasEdited={scheduleActiveVersionSnapshot}
+                  onActiveVersionChange={updateActiveVersion}
+                  onActiveVersionNameChange={setActiveVersionName}
                   flowCanvasRef={flowCanvasRef}
                 />
               </div>
@@ -766,8 +869,10 @@ const Index = () => {
                     <VersionsPanel
                       className="bg-card/95"
                       refreshKey={versionsRefreshKey}
-                      isRestoring={isRestoringVersion}
+                      activeVersionUid={activeVersionUid}
+                      isRestoring={isRestoringVersion || isSettingMainVersion}
                       onRestoreVersion={(version) => { void handleRestoreVersion(version); }}
+                      onSetMainVersion={(version) => { void handleSetMainVersion(version); }}
                     />
                   )}
                 </ResizablePanel>
@@ -874,7 +979,7 @@ const Index = () => {
                 <Button
                   variant={rightPanel === 'versions' ? "default" : "outline"}
                   size="sm"
-                  onClick={() => handleToggleRightPanel('versions')}
+                  onClick={handleToggleVersionsPanel}
                 >
                   <RotateCcw className="h-4 w-4" />
                   Versions

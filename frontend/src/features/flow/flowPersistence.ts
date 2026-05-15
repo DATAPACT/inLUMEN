@@ -3,13 +3,25 @@ import { apiFetch } from '@/utils/apiFetch';
 import { MINIO_API_URL, NEO4J_API_URL, LLM_API_URL } from '@/config/api';
 import { ChatbotConfig, buildLLMRequestConfig } from '@/services/chatbotService';
 
+export const MAIN_PIPELINE_VERSION_UID = 'main';
+
+export type PipelineVersionGraph = {
+  updated_at?: string | null;
+  nodes?: Node[];
+  edges?: Edge[];
+  viewport?: unknown;
+  [key: string]: unknown;
+};
+
 export type PipelineVersionSummary = {
   uid: string;
   name: string;
   version?: string;
   version_index?: number;
+  is_main?: boolean;
   node_count?: number;
   edge_count?: number;
+  file_count?: number;
   created_at?: string | null;
   updated_at?: string | null;
   pipeline_updated_at?: string | null;
@@ -17,13 +29,12 @@ export type PipelineVersionSummary = {
 
 export type PipelineVersionRestore = {
   version: PipelineVersionSummary;
-  graph: {
-    updated_at?: string | null;
-    nodes?: Node[];
-    edges?: Edge[];
-    viewport?: unknown;
-    [key: string]: unknown;
-  };
+  graph: PipelineVersionGraph;
+  file_restore?: Array<Record<string, unknown>>;
+};
+
+export type PipelineVersionSetMainResult = PipelineVersionRestore & {
+  source_version?: PipelineVersionSummary;
 };
 
 export const addNodeToNeo4j = async (node: Node) => {
@@ -197,7 +208,7 @@ export const fetchPipelineVersions = async (): Promise<PipelineVersionSummary[]>
 
 export const savePipelineVersion = async (
   name: string,
-  graph: PipelineVersionRestore["graph"],
+  graph: PipelineVersionGraph,
 ): Promise<PipelineVersionSummary> => {
   const res = await apiFetch(`${NEO4J_API_URL}/neo4j_save_pipeline_version`, {
     method: "POST",
@@ -211,6 +222,46 @@ export const savePipelineVersion = async (
   const data = await res.json().catch(() => ({}));
   if (!data?.version?.uid) {
     throw new Error("Saved version response did not include a version id.");
+  }
+  return data.version;
+};
+
+export const savePipelineMain = async (
+  graph: PipelineVersionGraph,
+): Promise<PipelineVersionSummary> => {
+  const res = await apiFetch(`${NEO4J_API_URL}/neo4j_save_pipeline_main`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ graph }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Failed to save main pipeline version (${res.status}): ${txt}`);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!data?.version?.uid) {
+    throw new Error("Main version response did not include a version id.");
+  }
+  return data.version;
+};
+
+export const savePipelineActiveVersion = async (
+  graph: PipelineVersionGraph,
+  versionUid: string,
+  versionName: string,
+): Promise<PipelineVersionSummary> => {
+  const res = await apiFetch(`${NEO4J_API_URL}/neo4j_save_pipeline_active_version`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ graph, uid: versionUid, name: versionName }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Failed to save active pipeline version (${res.status}): ${txt}`);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!data?.version?.uid) {
+    throw new Error("Active version response did not include a version id.");
   }
   return data.version;
 };
@@ -232,6 +283,25 @@ export const restorePipelineVersion = async (
     throw new Error("Restore response did not include a version graph.");
   }
   return data as PipelineVersionRestore;
+};
+
+export const setPipelineVersionAsMain = async (
+  versionUid: string,
+): Promise<PipelineVersionSetMainResult> => {
+  const res = await apiFetch(`${NEO4J_API_URL}/neo4j_set_pipeline_version_as_main`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uid: versionUid }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Failed to set pipeline version as Main (${res.status}): ${txt}`);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!data?.version?.uid || !data?.graph) {
+    throw new Error("Set Main response did not include a version graph.");
+  }
+  return data as PipelineVersionSetMainResult;
 };
 
 export const deletePipelineVersion = async (

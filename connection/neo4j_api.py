@@ -4,8 +4,11 @@ from auth_middleware import require_auth
 import uuid
 import json
 import os
+import tempfile
+from urllib.parse import quote
 from runtime_config import default_frontend_origin, get_neo4j_settings, get_service_port
 from step_types import normalize_step_type
+from minio_access import create_bucket, list_objects, read_object_bytes, remove_object, upload_object
 
 CORS_ALLOWED_ORIGIN = os.getenv("CORS_ALLOWED_ORIGIN", "").strip() or default_frontend_origin()
 NEO4J_API_PORT = get_service_port("NEO4J_API_PORT", 5001)
@@ -18,6 +21,10 @@ app = Flask(__name__)
 
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
 
+MAIN_VERSION_UID = "main"
+MAIN_VERSION_NAME = "Main"
+VERSION_FILE_SNAPSHOT_BUCKET = "pipeline-version-file-snapshots"
+
 
 def _label_exists(session, label_name: str) -> bool:
     result = session.run("CALL db.labels() YIELD label RETURN collect(label) AS labels").single()
@@ -28,7 +35,11 @@ def _label_exists(session, label_name: str) -> bool:
 def _default_pipeline_version_name(session) -> str:
     if not _label_exists(session, "PIPELINE_VERSION"):
         return "Version 1"
-    record = session.run("MATCH (v:PIPELINE_VERSION) RETURN count(v) AS version_count").single()
+    record = session.run("""
+    MATCH (v:PIPELINE_VERSION)
+    WHERE coalesce(v.is_main, false) = false
+    RETURN count(v) AS version_count
+    """).single()
     version_count = record["version_count"] if record else 0
     return f"Version {int(version_count) + 1}"
 
@@ -48,7 +59,8 @@ def _ensure_design_pipeline(session) -> str:
           name: '',
           label: '',
           description: '',
-          version: 'Version 1',
+          version: 'Main',
+          active_version_uid: 'main',
           created_at: datetime(),
           updated_at: datetime(),
           status: 'design'
@@ -59,7 +71,12 @@ def _ensure_design_pipeline(session) -> str:
 
       WITH candidate
       WITH candidate WHERE candidate IS NOT NULL
-      SET candidate.updated_at = datetime()
+      SET candidate.version = CASE
+            WHEN candidate.active_version_uid IS NULL THEN 'Main'
+            ELSE coalesce(candidate.version, 'Main')
+          END,
+          candidate.active_version_uid = coalesce(candidate.active_version_uid, 'main'),
+          candidate.updated_at = datetime()
       RETURN candidate AS p
     }
     RETURN p.uid AS pipeline_uid
@@ -78,18 +95,26 @@ def _file_refs_from_graph_node(flow_id: str, data: dict) -> list[dict]:
     for item in raw_files:
         filename = ""
         bucket = default_bucket
+        snapshot_bucket = ""
+        snapshot_object = ""
         if isinstance(item, str):
             filename = item.strip()
         elif isinstance(item, dict):
             filename = str(item.get("filename") or item.get("name") or "").strip()
             bucket = str(item.get("bucket") or default_bucket).strip().lower()
+            snapshot_bucket = str(item.get("snapshot_bucket") or "").strip().lower()
+            snapshot_object = str(item.get("snapshot_object") or "").strip()
         if not filename:
             continue
         key = (filename, bucket)
         if key in seen:
             continue
         seen.add(key)
-        refs.append({"filename": filename, "bucket": bucket})
+        file_ref = {"filename": filename, "bucket": bucket}
+        if snapshot_bucket and snapshot_object:
+            file_ref["snapshot_bucket"] = snapshot_bucket
+            file_ref["snapshot_object"] = snapshot_object
+        refs.append(file_ref)
     return refs
 
 
@@ -192,7 +217,12 @@ def _clear_active_steps(session) -> list[str]:
     return flow_ids
 
 
-def _sync_graph_to_session(session, graph: dict, version_name: str | None = None) -> dict:
+def _sync_graph_to_session(
+    session,
+    graph: dict,
+    version_name: str | None = None,
+    active_version_uid: str | None = None,
+) -> dict:
     nodes, edges = _parse_visible_graph(graph)
     pipeline_uid = _ensure_design_pipeline(session)
 
@@ -202,8 +232,12 @@ def _sync_graph_to_session(session, graph: dict, version_name: str | None = None
         MATCH (p:PIPELINE {uid: $pipeline_uid})
         SET p.updated_at = datetime()
         SET p.version = CASE WHEN $version_name IS NULL THEN p.version ELSE $version_name END
+        SET p.active_version_uid = CASE
+            WHEN $active_version_uid IS NULL THEN p.active_version_uid
+            ELSE $active_version_uid
+          END
         RETURN toString(p.updated_at) AS updated_at
-        """, pipeline_uid=pipeline_uid, version_name=version_name).single()
+        """, pipeline_uid=pipeline_uid, version_name=version_name, active_version_uid=active_version_uid).single()
         return {
             "ok": True,
             "pipeline_uid": pipeline_uid,
@@ -278,8 +312,12 @@ def _sync_graph_to_session(session, graph: dict, version_name: str | None = None
     MATCH (p:PIPELINE {uid: $pipeline_uid})
     SET p.updated_at = datetime()
     SET p.version = CASE WHEN $version_name IS NULL THEN p.version ELSE $version_name END
+    SET p.active_version_uid = CASE
+        WHEN $active_version_uid IS NULL THEN p.active_version_uid
+        ELSE $active_version_uid
+      END
     RETURN toString(p.updated_at) AS updated_at
-    """, pipeline_uid=pipeline_uid, version_name=version_name).single()
+    """, pipeline_uid=pipeline_uid, version_name=version_name, active_version_uid=active_version_uid).single()
 
     return {
         "ok": True,
@@ -289,6 +327,289 @@ def _sync_graph_to_session(session, graph: dict, version_name: str | None = None
         "edge_count": len(edges),
         "deleted_step_flow_ids": [],
     }
+
+
+def _graph_with_metadata(graph: dict, updated_at: str | None = None) -> dict:
+    graph_with_metadata = dict(graph) if isinstance(graph, dict) else {}
+    if updated_at is not None:
+        graph_with_metadata["updated_at"] = updated_at
+    return graph_with_metadata
+
+
+def _snapshot_object_name(version_uid: str, bucket: str, filename: str) -> str:
+    return "/".join([
+        quote(str(version_uid), safe=""),
+        quote(str(bucket).lower(), safe=""),
+        quote(str(filename), safe=""),
+    ])
+
+
+def _upload_bytes_to_minio(bucket: str, object_name: str, content: bytes) -> None:
+    create_bucket(bucket_name=bucket)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile("wb", delete=False) as temp_file:
+            temp_file.write(content)
+            temp_path = temp_file.name
+        upload_object(bucket, object_name, temp_path)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+def _copy_minio_object(source_bucket: str, source_name: str, target_bucket: str, target_name: str) -> None:
+    content = read_object_bytes(source_bucket, source_name)
+    _upload_bytes_to_minio(target_bucket, target_name, content)
+
+
+def _delete_version_file_snapshots(version_uid: str) -> None:
+    prefix = f"{quote(str(version_uid), safe='')}/"
+    try:
+        objects = list_objects(
+            bucket_name=VERSION_FILE_SNAPSHOT_BUCKET,
+            prefix=prefix,
+            recursive=True,
+        )
+        for obj in list(objects or []):
+            object_name = getattr(obj, "object_name", None)
+            if object_name:
+                remove_object(VERSION_FILE_SNAPSHOT_BUCKET, object_name)
+    except Exception as exc:
+        print("[neo4j_api.py] Could not clear version file snapshots:", exc)
+
+
+def _iter_graph_file_entries(graph: dict):
+    raw_nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    for raw_node in raw_nodes:
+        if not isinstance(raw_node, dict):
+            continue
+        data = raw_node.get("data") if isinstance(raw_node.get("data"), dict) else raw_node
+        flow_id = str(raw_node.get("id") or data.get("id") or "").strip()
+        if not flow_id:
+            continue
+
+        file_list = None
+        if isinstance(data.get("file_buckets"), list):
+            file_list = data["file_buckets"]
+        elif isinstance(data.get("files"), list):
+            file_list = data["files"]
+        if file_list is None:
+            continue
+
+        default_bucket = f"files-step-id-{flow_id}".lower()
+        for index, item in enumerate(file_list):
+            filename = ""
+            bucket = default_bucket
+            snapshot_bucket = ""
+            snapshot_object = ""
+            if isinstance(item, str):
+                filename = item.strip()
+            elif isinstance(item, dict):
+                filename = str(item.get("filename") or item.get("name") or "").strip()
+                bucket = str(item.get("bucket") or default_bucket).strip().lower()
+                snapshot_bucket = str(item.get("snapshot_bucket") or "").strip().lower()
+                snapshot_object = str(item.get("snapshot_object") or "").strip()
+            if not filename:
+                continue
+            yield file_list, index, item, {
+                "filename": filename,
+                "bucket": bucket,
+                "snapshot_bucket": snapshot_bucket,
+                "snapshot_object": snapshot_object,
+            }
+
+
+def _count_graph_files(graph: dict) -> int:
+    return sum(1 for _ in _iter_graph_file_entries(graph))
+
+
+def _count_graph_files_from_json(graph_json: str | None) -> int:
+    if not graph_json:
+        return 0
+    try:
+        graph = json.loads(graph_json)
+    except Exception:
+        return 0
+    return _count_graph_files(graph) if isinstance(graph, dict) else 0
+
+
+def _set_file_entry_snapshot(file_list: list, index: int, item, file_ref: dict, snapshot_object: str) -> None:
+    snapshot_fields = {
+        "filename": file_ref["filename"],
+        "bucket": file_ref["bucket"],
+        "snapshot_bucket": VERSION_FILE_SNAPSHOT_BUCKET,
+        "snapshot_object": snapshot_object,
+    }
+    if isinstance(item, dict):
+        item.update(snapshot_fields)
+        return
+    file_list[index] = snapshot_fields
+
+
+def _snapshot_version_files(version_uid: str, graph: dict) -> list[dict]:
+    snapshots = []
+    _delete_version_file_snapshots(version_uid)
+    for file_list, index, item, file_ref in _iter_graph_file_entries(graph):
+        snapshot_object = _snapshot_object_name(version_uid, file_ref["bucket"], file_ref["filename"])
+        snapshot = {
+            "filename": file_ref["filename"],
+            "bucket": file_ref["bucket"],
+            "snapshot_bucket": VERSION_FILE_SNAPSHOT_BUCKET,
+            "snapshot_object": snapshot_object,
+        }
+        try:
+            _copy_minio_object(
+                file_ref["bucket"],
+                file_ref["filename"],
+                VERSION_FILE_SNAPSHOT_BUCKET,
+                snapshot_object,
+            )
+            _set_file_entry_snapshot(file_list, index, item, file_ref, snapshot_object)
+            snapshot["status"] = "ok"
+        except Exception as exc:
+            print("[neo4j_api.py] Could not snapshot file object:", file_ref, exc)
+            snapshot["status"] = "missing"
+            snapshot["error"] = str(exc)
+        snapshots.append(snapshot)
+    return snapshots
+
+
+def _restore_version_file_snapshots(graph: dict) -> list[dict]:
+    restored = []
+    for _, _, _, file_ref in _iter_graph_file_entries(graph):
+        snapshot_bucket = file_ref.get("snapshot_bucket")
+        snapshot_object = file_ref.get("snapshot_object")
+        if not snapshot_bucket or not snapshot_object:
+            continue
+        result = {
+            "filename": file_ref["filename"],
+            "bucket": file_ref["bucket"],
+            "snapshot_bucket": snapshot_bucket,
+            "snapshot_object": snapshot_object,
+        }
+        try:
+            _copy_minio_object(
+                snapshot_bucket,
+                snapshot_object,
+                file_ref["bucket"],
+                file_ref["filename"],
+            )
+            result["status"] = "ok"
+        except Exception as exc:
+            print("[neo4j_api.py] Could not restore file snapshot:", file_ref, exc)
+            result["status"] = "missing"
+            result["error"] = str(exc)
+        restored.append(result)
+    return restored
+
+
+def _upsert_main_pipeline_version(
+    session,
+    pipeline_uid: str,
+    graph: dict,
+    updated_at: str | None = None,
+) -> dict | None:
+    graph_with_metadata = _graph_with_metadata(graph, updated_at)
+    snapshots = _snapshot_version_files(MAIN_VERSION_UID, graph_with_metadata)
+    nodes = graph_with_metadata.get("nodes") if isinstance(graph_with_metadata.get("nodes"), list) else []
+    edges = graph_with_metadata.get("edges") if isinstance(graph_with_metadata.get("edges"), list) else []
+    file_count = _count_graph_files(graph_with_metadata)
+    graph_json = json.dumps(graph_with_metadata, ensure_ascii=False)
+    file_snapshots_json = json.dumps(snapshots, ensure_ascii=False)
+    record = session.run("""
+    MATCH (p:PIPELINE {uid: $pipeline_uid})
+    MERGE (v:PIPELINE_VERSION {uid: $main_uid})
+    ON CREATE SET v.created_at = datetime()
+    SET v.name = $main_name,
+        v.version = $main_name,
+        v.version_index = 0,
+        v.is_main = true,
+        v.node_count = $node_count,
+        v.edge_count = $edge_count,
+        v.file_count = $file_count,
+        v.graph_json = $graph_json,
+        v.file_snapshots_json = $file_snapshots_json,
+        v.updated_at = datetime()
+    MERGE (p)-[:HAS_VERSION]->(v)
+    RETURN
+      v.uid AS uid,
+      v.name AS name,
+      v.version AS version,
+      v.version_index AS version_index,
+      v.is_main AS is_main,
+      v.node_count AS node_count,
+      v.edge_count AS edge_count,
+      v.file_count AS file_count,
+      toString(v.created_at) AS created_at,
+      toString(v.updated_at) AS updated_at,
+      toString(p.updated_at) AS pipeline_updated_at
+    """, pipeline_uid=pipeline_uid,
+         main_uid=MAIN_VERSION_UID,
+         main_name=MAIN_VERSION_NAME,
+         node_count=len(nodes),
+         edge_count=len(edges),
+         file_count=file_count,
+         graph_json=graph_json,
+         file_snapshots_json=file_snapshots_json).single()
+    return record.data() if record else None
+
+
+def _upsert_pipeline_version_snapshot(
+    session,
+    pipeline_uid: str,
+    version_uid: str,
+    version_name: str,
+    graph: dict,
+    updated_at: str | None = None,
+) -> dict | None:
+    if version_uid == MAIN_VERSION_UID:
+        return _upsert_main_pipeline_version(session, pipeline_uid, graph, updated_at)
+
+    graph_with_metadata = _graph_with_metadata(graph, updated_at)
+    snapshots = _snapshot_version_files(version_uid, graph_with_metadata)
+    nodes = graph_with_metadata.get("nodes") if isinstance(graph_with_metadata.get("nodes"), list) else []
+    edges = graph_with_metadata.get("edges") if isinstance(graph_with_metadata.get("edges"), list) else []
+    file_count = _count_graph_files(graph_with_metadata)
+    graph_json = json.dumps(graph_with_metadata, ensure_ascii=False)
+    file_snapshots_json = json.dumps(snapshots, ensure_ascii=False)
+
+    record = session.run("""
+    MATCH (p:PIPELINE {uid: $pipeline_uid})
+    MATCH (v:PIPELINE_VERSION {uid: $version_uid})
+    SET v.name = $version_name,
+        v.version = $version_name,
+        v.is_main = false,
+        v.node_count = $node_count,
+        v.edge_count = $edge_count,
+        v.file_count = $file_count,
+        v.graph_json = $graph_json,
+        v.file_snapshots_json = $file_snapshots_json,
+        v.updated_at = datetime()
+    MERGE (p)-[:HAS_VERSION]->(v)
+    SET p.version = $version_name,
+        p.active_version_uid = $version_uid,
+        p.updated_at = datetime()
+    RETURN
+      v.uid AS uid,
+      v.name AS name,
+      v.version AS version,
+      v.version_index AS version_index,
+      v.is_main AS is_main,
+      v.node_count AS node_count,
+      v.edge_count AS edge_count,
+      v.file_count AS file_count,
+      toString(v.created_at) AS created_at,
+      toString(v.updated_at) AS updated_at,
+      toString(p.updated_at) AS pipeline_updated_at
+    """, pipeline_uid=pipeline_uid,
+         version_uid=version_uid,
+         version_name=version_name,
+         node_count=len(nodes),
+         edge_count=len(edges),
+         file_count=file_count,
+         graph_json=graph_json,
+         file_snapshots_json=file_snapshots_json).single()
+    return record.data() if record else None
 
 # Define a function to set the CORS headers
 def add_cors_headers(response):
@@ -367,7 +688,8 @@ def neo4j_add_node():
           name:       '',
           label:       '',
           description: '',
-          version:    '1.1',
+          version:    'Main',
+          active_version_uid: 'main',
           created_at: datetime(),
           updated_at: datetime(),
           status:     'design'
@@ -600,6 +922,10 @@ def neo4j_delete_node(flow_id):
                     """,
                     flow_id=flow_id,
                 )
+                session.run("""
+                MATCH (p:PIPELINE {status:'design'})
+                SET p.updated_at = datetime()
+                """)
         return jsonify({"status": "ok", "deleted": flow_id}), 200
     except Exception as e:
         print("[neo4j_api.py] Delete error:", e)
@@ -778,18 +1104,27 @@ def neo4j_list_pipeline_versions():
       v.name AS name,
       v.version AS version,
       v.version_index AS version_index,
+      coalesce(v.is_main, false) AS is_main,
       v.node_count AS node_count,
       v.edge_count AS edge_count,
+      v.file_count AS file_count,
+      v.graph_json AS graph_json,
       toString(v.created_at) AS created_at,
       toString(v.updated_at) AS updated_at
-    ORDER BY v.created_at DESC
+    ORDER BY coalesce(v.is_main, false) DESC, v.created_at DESC
     """
     try:
         with driver.session() as session:
             if not _label_exists(session, "PIPELINE_VERSION"):
                 return jsonify({"versions": []}), 200
             result = session.run(query)
-            versions = [record.data() for record in result]
+            versions = []
+            for record in result:
+                version = record.data()
+                graph_json = version.pop("graph_json", None)
+                if version.get("file_count") is None:
+                    version["file_count"] = _count_graph_files_from_json(graph_json)
+                versions.append(version)
             return jsonify({"versions": versions}), 200
     except Exception as e:
         print("[neo4j_api.py] Error listing pipeline versions:", e)
@@ -807,49 +1142,139 @@ def neo4j_save_pipeline_version():
     try:
         with driver.session() as session:
             version_name = str(payload.get("name") or "").strip() or _default_pipeline_version_name(session)
-            sync_result = _sync_graph_to_session(session, graph, version_name=version_name)
+            version_uid = str(uuid.uuid4())
+            sync_result = _sync_graph_to_session(
+                session,
+                graph,
+                version_name=MAIN_VERSION_NAME,
+                active_version_uid=MAIN_VERSION_UID,
+            )
             pipeline_uid = sync_result["pipeline_uid"]
-            graph_with_metadata = {
-                **graph,
-                "updated_at": sync_result.get("updated_at"),
-            }
+            graph_with_metadata = _graph_with_metadata(graph, sync_result.get("updated_at"))
+            _upsert_main_pipeline_version(
+                session,
+                pipeline_uid,
+                graph_with_metadata,
+                sync_result.get("updated_at"),
+            )
+            file_snapshots = _snapshot_version_files(version_uid, graph_with_metadata)
+            file_count = _count_graph_files(graph_with_metadata)
             graph_json = json.dumps(graph_with_metadata, ensure_ascii=False)
             record = session.run("""
             MATCH (p:PIPELINE {uid: $pipeline_uid})
             OPTIONAL MATCH (p)-[:HAS_VERSION]->(existing:PIPELINE_VERSION)
-            WITH p, count(existing) + 1 AS version_index
+            WITH p, count(CASE WHEN coalesce(existing.is_main, false) = false THEN existing END) + 1 AS version_index
             CREATE (v:PIPELINE_VERSION {
-                uid: randomUUID(),
+                uid: $version_uid,
                 name: $version_name,
                 version: $version_name,
                 version_index: version_index,
+                is_main: false,
                 node_count: $node_count,
                 edge_count: $edge_count,
+                file_count: $file_count,
                 graph_json: $graph_json,
+                file_snapshots_json: $file_snapshots_json,
                 created_at: datetime(),
                 updated_at: datetime()
             })
             MERGE (p)-[:HAS_VERSION]->(v)
-            SET p.version = $version_name,
+            SET p.version = $main_name,
+                p.active_version_uid = $main_uid,
                 p.updated_at = datetime()
             RETURN
               v.uid AS uid,
               v.name AS name,
               v.version AS version,
               v.version_index AS version_index,
+              v.is_main AS is_main,
               v.node_count AS node_count,
               v.edge_count AS edge_count,
+              v.file_count AS file_count,
               toString(v.created_at) AS created_at,
               toString(v.updated_at) AS updated_at,
               toString(p.updated_at) AS pipeline_updated_at
             """, pipeline_uid=pipeline_uid,
+                 version_uid=version_uid,
                  version_name=version_name,
+                 main_name=MAIN_VERSION_NAME,
+                 main_uid=MAIN_VERSION_UID,
                  node_count=sync_result["node_count"],
                  edge_count=sync_result["edge_count"],
-                 graph_json=graph_json).single()
+                 file_count=file_count,
+                 graph_json=graph_json,
+                 file_snapshots_json=json.dumps(file_snapshots, ensure_ascii=False)).single()
             return jsonify({"version": record.data() if record else None}), 200
     except Exception as e:
         print("[neo4j_api.py] Error saving pipeline version:", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/neo4j_save_pipeline_main', methods=['POST', 'OPTIONS'])
+@require_auth
+def neo4j_save_pipeline_main():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    payload = request.get_json(force=True) or {}
+    graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+
+    try:
+        with driver.session() as session:
+            sync_result = _sync_graph_to_session(
+                session,
+                graph,
+                version_name=MAIN_VERSION_NAME,
+                active_version_uid=MAIN_VERSION_UID,
+            )
+            version = _upsert_main_pipeline_version(
+                session,
+                sync_result["pipeline_uid"],
+                graph,
+                sync_result.get("updated_at"),
+            )
+            return jsonify({"version": version}), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error saving main pipeline version:", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/neo4j_save_pipeline_active_version', methods=['POST', 'OPTIONS'])
+@require_auth
+def neo4j_save_pipeline_active_version():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    payload = request.get_json(force=True) or {}
+    graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+    version_uid = str(payload.get("uid") or payload.get("version_uid") or MAIN_VERSION_UID).strip()
+    version_name = str(payload.get("name") or payload.get("version_name") or "").strip()
+
+    try:
+        with driver.session() as session:
+            pipeline_uid = _ensure_design_pipeline(session)
+            if version_uid != MAIN_VERSION_UID and not version_name:
+                record = session.run("""
+                MATCH (:PIPELINE {uid: $pipeline_uid})-[:HAS_VERSION]->(v:PIPELINE_VERSION {uid: $version_uid})
+                RETURN v.name AS name
+                """, pipeline_uid=pipeline_uid, version_uid=version_uid).single()
+                if not record:
+                    return jsonify({"error": f"Pipeline version not found: {version_uid}"}), 404
+                version_name = record["name"] or ""
+
+            if version_uid == MAIN_VERSION_UID:
+                version = _upsert_main_pipeline_version(session, pipeline_uid, graph, graph.get("updated_at"))
+            else:
+                version = _upsert_pipeline_version_snapshot(
+                    session,
+                    pipeline_uid,
+                    version_uid,
+                    version_name or MAIN_VERSION_NAME,
+                    graph,
+                    graph.get("updated_at"),
+                )
+
+            return jsonify({"version": version}), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error saving active pipeline version:", e)
         return jsonify({"error": str(e)}), 500
 
 
@@ -874,8 +1299,10 @@ def neo4j_restore_pipeline_version():
               v.name AS name,
               v.version AS version,
               v.version_index AS version_index,
+              coalesce(v.is_main, false) AS is_main,
               v.node_count AS node_count,
               v.edge_count AS edge_count,
+              v.file_count AS file_count,
               v.graph_json AS graph_json,
               toString(v.created_at) AS created_at,
               toString(v.updated_at) AS updated_at
@@ -889,22 +1316,106 @@ def neo4j_restore_pipeline_version():
                 graph = {}
             if not isinstance(graph, dict):
                 graph = {}
-            sync_result = _sync_graph_to_session(session, graph, version_name=record["name"])
+            file_restore = _restore_version_file_snapshots(graph)
+            sync_result = _sync_graph_to_session(
+                session,
+                graph,
+                version_name=record["name"],
+                active_version_uid=record["uid"],
+            )
             graph["updated_at"] = sync_result.get("updated_at")
             version = {
                 "uid": record["uid"],
                 "name": record["name"],
                 "version": record["version"],
                 "version_index": record["version_index"],
+                "is_main": record["is_main"],
                 "node_count": record["node_count"],
                 "edge_count": record["edge_count"],
+                "file_count": record["file_count"] if record["file_count"] is not None else _count_graph_files(graph),
                 "created_at": record["created_at"],
                 "updated_at": record["updated_at"],
                 "pipeline_updated_at": sync_result.get("updated_at"),
             }
-            return jsonify({"version": version, "graph": graph}), 200
+            return jsonify({"version": version, "graph": graph, "file_restore": file_restore}), 200
     except Exception as e:
         print("[neo4j_api.py] Error restoring pipeline version:", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/neo4j_set_pipeline_version_as_main', methods=['POST', 'OPTIONS'])
+@require_auth
+def neo4j_set_pipeline_version_as_main():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    payload = request.get_json(force=True) or {}
+    version_uid = str(payload.get("uid") or payload.get("version_uid") or "").strip()
+    if not version_uid:
+        return jsonify({"error": "Missing version uid"}), 400
+
+    try:
+        with driver.session() as session:
+            if not _label_exists(session, "PIPELINE_VERSION"):
+                return jsonify({"error": "No pipeline versions exist"}), 404
+            record = session.run("""
+            MATCH (:PIPELINE {status:'design'})-[:HAS_VERSION]->(v:PIPELINE_VERSION {uid: $version_uid})
+            RETURN
+              v.uid AS uid,
+              v.name AS name,
+              v.version AS version,
+              v.version_index AS version_index,
+              coalesce(v.is_main, false) AS is_main,
+              v.node_count AS node_count,
+              v.edge_count AS edge_count,
+              v.file_count AS file_count,
+              v.graph_json AS graph_json,
+              toString(v.created_at) AS created_at,
+              toString(v.updated_at) AS updated_at
+            """, version_uid=version_uid).single()
+            if not record:
+                return jsonify({"error": f"Pipeline version not found: {version_uid}"}), 404
+
+            try:
+                graph = json.loads(record["graph_json"] or "{}")
+            except Exception:
+                graph = {}
+            if not isinstance(graph, dict):
+                graph = {}
+
+            file_restore = _restore_version_file_snapshots(graph)
+            sync_result = _sync_graph_to_session(
+                session,
+                graph,
+                version_name=MAIN_VERSION_NAME,
+                active_version_uid=MAIN_VERSION_UID,
+            )
+            graph["updated_at"] = sync_result.get("updated_at")
+            main_version = _upsert_main_pipeline_version(
+                session,
+                sync_result["pipeline_uid"],
+                graph,
+                sync_result.get("updated_at"),
+            )
+            source_version = {
+                "uid": record["uid"],
+                "name": record["name"],
+                "version": record["version"],
+                "version_index": record["version_index"],
+                "is_main": record["is_main"],
+                "node_count": record["node_count"],
+                "edge_count": record["edge_count"],
+                "file_count": record["file_count"] if record["file_count"] is not None else _count_graph_files(graph),
+                "created_at": record["created_at"],
+                "updated_at": record["updated_at"],
+            }
+            return jsonify({
+                "version": main_version,
+                "source_version": source_version,
+                "graph": graph,
+                "file_restore": file_restore,
+            }), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error setting pipeline version as Main:", e)
         return jsonify({"error": str(e)}), 500
 
 
@@ -928,6 +1439,15 @@ def neo4j_delete_pipeline_version():
         with driver.session() as session:
             if not _label_exists(session, "PIPELINE_VERSION"):
                 return jsonify({"error": "No pipeline versions exist"}), 404
+            candidate = session.run("""
+            MATCH (:PIPELINE {status:'design'})-[:HAS_VERSION]->(v:PIPELINE_VERSION {uid: $version_uid})
+            RETURN coalesce(v.is_main, false) AS is_main
+            """, version_uid=version_uid).single()
+            if not candidate:
+                return jsonify({"error": f"Pipeline version not found: {version_uid}"}), 404
+            if candidate["is_main"]:
+                return jsonify({"error": "Main pipeline version cannot be deleted"}), 400
+            _delete_version_file_snapshots(version_uid)
             record = session.run("""
             MATCH (p:PIPELINE {status:'design'})-[:HAS_VERSION]->(v:PIPELINE_VERSION {uid: $version_uid})
             WITH p, v, v.name AS deleted_name
@@ -943,7 +1463,11 @@ def neo4j_delete_pipeline_version():
             SET p.version = CASE
                 WHEN p.version <> deleted_name THEN p.version
                 WHEN same_name_remaining > 0 THEN p.version
-                ELSE 'Current'
+                ELSE 'Main'
+              END,
+              p.active_version_uid = CASE
+                WHEN p.active_version_uid <> $version_uid THEN p.active_version_uid
+                ELSE 'main'
               END,
               p.updated_at = datetime()
             RETURN
@@ -1015,7 +1539,12 @@ def neo4j_sync_graph():
 
     try:
         with driver.session() as session:
-            result = _sync_graph_to_session(session, graph)
+            result = _sync_graph_to_session(
+                session,
+                graph,
+                version_name=MAIN_VERSION_NAME,
+                active_version_uid=MAIN_VERSION_UID,
+            )
         return jsonify(result), 200
     except Exception as e:
         print("[neo4j_api.py] Error syncing visible graph:", e)
@@ -1053,6 +1582,7 @@ def neo4j_get_graph():
         .label,
         .description,
         .version,
+        .active_version_uid,
         .status,
         created_at: toString(p.created_at),
         updated_at: toString(p.updated_at)
@@ -1092,6 +1622,13 @@ def neo4j_get_graph():
             if isinstance(pipeline, dict):
                 pipeline["design_pipeline_count"] = record["design_pipeline_count"]
                 pipeline["step_count"] = record["pipeline_step_count"]
+                active_version_uid = pipeline.get("active_version_uid")
+                if isinstance(active_version_uid, str) and active_version_uid.strip():
+                    active_version_record = session.run("""
+                    MATCH (:PIPELINE {status:'design'})-[:HAS_VERSION]->(v:PIPELINE_VERSION {uid: $active_version_uid})
+                    RETURN v.name AS name
+                    """, active_version_uid=active_version_uid.strip()).single()
+                    pipeline["active_version_name"] = active_version_record["name"] if active_version_record else None
             step_rows = record["step_rows"] or []
             flows = record["flows"] or []
 
