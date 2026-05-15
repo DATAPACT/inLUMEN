@@ -1185,6 +1185,7 @@ def neo4j_get_pipeline_updated_at():
 @require_auth
 def neo4j_list_pipeline_versions():
     print("[neo4j_api.py] Received request to list pipeline versions.")
+    include_graph = str(request.args.get("include_graph") or "").strip().lower() in ("1", "true", "yes")
     query = """
     MATCH (p:PIPELINE {status:'design'})-[:HAS_VERSION]->(v:PIPELINE_VERSION)
     RETURN
@@ -1213,6 +1214,12 @@ def neo4j_list_pipeline_versions():
                 graph_json = version.pop("graph_json", None)
                 if version.get("file_count") is None:
                     version["file_count"] = _count_graph_files_from_json(graph_json)
+                if include_graph:
+                    try:
+                        graph = json.loads(graph_json or "{}")
+                    except Exception:
+                        graph = {}
+                    version["graph"] = graph if isinstance(graph, dict) else {}
                 versions.append(version)
             return jsonify({"versions": versions}), 200
     except Exception as e:

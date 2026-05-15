@@ -74,10 +74,12 @@ def _minio_codefetch_tool(params: Optional[dict] = None) -> dict:
         bucket = str(entry.get("bucket") or "").lower()
         filename = str(entry.get("filename") or "")
         step_id = str(entry.get("step_id") or "")
+        read_bucket = str(entry.get("snapshot_bucket") or bucket).lower()
+        read_object = str(entry.get("snapshot_object") or filename)
         if not bucket or not filename:
             continue
         try:
-            content = run_async(read_minio_object(bucket, filename))
+            content = run_async(read_minio_object(read_bucket, read_object))
         except Exception as exc:
             content = f"[ERROR: {exc}]"
         retrieved.append(
@@ -85,14 +87,31 @@ def _minio_codefetch_tool(params: Optional[dict] = None) -> dict:
                 "step_id": step_id,
                 "bucket": bucket,
                 "filename": filename,
+                "read_bucket": read_bucket,
+                "read_object": read_object,
                 "content": content,
             }
         )
         print(
-            f"[deployment_agents.py] _minio_codefetch_tool read {filename} from {bucket} "
+            f"[deployment_agents.py] _minio_codefetch_tool read {read_object} from {read_bucket} "
             f"(step {step_id}): {'error' if content.startswith('[ERROR') else 'success'}"
         )
     return {"files": retrieved}
+
+
+def generate_argo_yaml_from_graph(
+    pipeline_graph: dict,
+    file_refs: list[dict],
+    dockerfiles: dict | list[dict] | None = None,
+) -> str:
+    """Generate Argo YAML from a provided graph instead of reading the active graph."""
+    file_contents = _minio_codefetch_tool({"files": file_refs})
+    dockerfile_payload = dockerfiles or {"dockerfiles": []}
+    return _generate_argo_yaml_tool({
+        "pipeline_graph": pipeline_graph or {},
+        "file_contents": file_contents,
+        "dockerfiles": dockerfile_payload,
+    })
 
 
 def _generate_argo_yaml_tool(params: Optional[dict] = None) -> str:
