@@ -1143,20 +1143,10 @@ def neo4j_save_pipeline_version():
         with driver.session() as session:
             version_name = str(payload.get("name") or "").strip() or _default_pipeline_version_name(session)
             version_uid = str(uuid.uuid4())
-            sync_result = _sync_graph_to_session(
-                session,
-                graph,
-                version_name=MAIN_VERSION_NAME,
-                active_version_uid=MAIN_VERSION_UID,
-            )
-            pipeline_uid = sync_result["pipeline_uid"]
-            graph_with_metadata = _graph_with_metadata(graph, sync_result.get("updated_at"))
-            _upsert_main_pipeline_version(
-                session,
-                pipeline_uid,
-                graph_with_metadata,
-                sync_result.get("updated_at"),
-            )
+            pipeline_uid = _ensure_design_pipeline(session)
+            graph_with_metadata = _graph_with_metadata(graph, graph.get("updated_at"))
+            nodes = graph_with_metadata.get("nodes") if isinstance(graph_with_metadata.get("nodes"), list) else []
+            edges = graph_with_metadata.get("edges") if isinstance(graph_with_metadata.get("edges"), list) else []
             file_snapshots = _snapshot_version_files(version_uid, graph_with_metadata)
             file_count = _count_graph_files(graph_with_metadata)
             graph_json = json.dumps(graph_with_metadata, ensure_ascii=False)
@@ -1179,9 +1169,6 @@ def neo4j_save_pipeline_version():
                 updated_at: datetime()
             })
             MERGE (p)-[:HAS_VERSION]->(v)
-            SET p.version = $main_name,
-                p.active_version_uid = $main_uid,
-                p.updated_at = datetime()
             RETURN
               v.uid AS uid,
               v.name AS name,
@@ -1197,10 +1184,8 @@ def neo4j_save_pipeline_version():
             """, pipeline_uid=pipeline_uid,
                  version_uid=version_uid,
                  version_name=version_name,
-                 main_name=MAIN_VERSION_NAME,
-                 main_uid=MAIN_VERSION_UID,
-                 node_count=sync_result["node_count"],
-                 edge_count=sync_result["edge_count"],
+                 node_count=len(nodes),
+                 edge_count=len(edges),
                  file_count=file_count,
                  graph_json=graph_json,
                  file_snapshots_json=json.dumps(file_snapshots, ensure_ascii=False)).single()
