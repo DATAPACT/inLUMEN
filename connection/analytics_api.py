@@ -9,9 +9,14 @@ from flask import Flask, jsonify, make_response, request
 from async_runtime import run_async
 from auth_middleware import require_auth
 from chat_state import clear_state_from_disk, load_state_from_disk, save_state_to_disk
-from deployment_agents import generate_dockerfiles_with_agent, build_argo_yaml_team
+from deployment_agents import (
+    build_argo_yaml_team,
+    generate_argo_yaml_from_graph,
+    generate_dockerfiles_with_agent,
+)
 from graph_client import (
     fetch_pipeline_graph,
+    fetch_pipeline_versions,
     save_active_pipeline_version,
     sync_backend_to_canvas_graph,
 )
@@ -54,12 +59,65 @@ def _dockerfile_inputs(files: list[dict]) -> tuple[list[str], list[str], list[st
     filenames = [file["filename"] for file in files]
     buckets = [file["bucket"] for file in files]
     ids = []
-    for bucket in buckets:
+    for file, bucket in zip(files, buckets):
         match = re.search(r"files-step-id-(\d+)", bucket)
-        if not match:
+        step_id = str(file.get("step_id") or "").strip()
+        if match:
+            ids.append(match.group(1))
+        elif step_id:
+            ids.append(step_id)
+        else:
             raise ValueError(f"Could not extract step id from bucket '{bucket}'.")
-        ids.append(match.group(1))
     return filenames, buckets, ids
+
+
+def _file_refs_from_version_graph(graph: dict) -> list[dict]:
+    if not isinstance(graph, dict):
+        return []
+
+    refs: list[dict] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        data = node.get("data") if isinstance(node.get("data"), dict) else node
+        step_id = str(data.get("flow_id") or node.get("id") or data.get("id") or "").strip()
+        if not step_id:
+            continue
+        default_bucket = f"files-step-id-{step_id}".lower()
+        raw_files = data.get("file_buckets") if isinstance(data.get("file_buckets"), list) else data.get("files")
+        if not isinstance(raw_files, list):
+            continue
+
+        for item in raw_files:
+            filename = ""
+            bucket = default_bucket
+            snapshot_bucket = ""
+            snapshot_object = ""
+            if isinstance(item, str):
+                filename = item.strip()
+            elif isinstance(item, dict):
+                filename = str(item.get("filename") or item.get("name") or "").strip()
+                bucket = str(item.get("bucket") or default_bucket).strip().lower()
+                snapshot_bucket = str(item.get("snapshot_bucket") or "").strip().lower()
+                snapshot_object = str(item.get("snapshot_object") or "").strip()
+            if not filename:
+                continue
+            key = (step_id, filename, bucket, snapshot_object)
+            if key in seen:
+                continue
+            seen.add(key)
+            ref = {
+                "step_id": step_id,
+                "filename": filename,
+                "bucket": bucket,
+            }
+            if snapshot_bucket and snapshot_object:
+                ref["snapshot_bucket"] = snapshot_bucket
+                ref["snapshot_object"] = snapshot_object
+            refs.append(ref)
+    return refs
 
 
 def _assistant_message_from_result(result) -> str:
@@ -394,6 +452,51 @@ def agentic_generate_yaml():
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:
         print("[analytics_api.py] Error generating YAML:", exc)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/agentic_generate_version_yamls", methods=["GET", "POST", "OPTIONS"])
+@require_auth
+def agentic_generate_version_yamls():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+
+    data = request.get_json(silent=True) or {}
+
+    try:
+        llm_config = llm_config_from_payload(data)
+        log_llm_selection("Generating YAML for all pipeline versions", llm_config)
+        versions = run_async(fetch_pipeline_versions(NEO4J_API_BASE_URL, include_graph=True))
+        generated_versions = []
+
+        for version in versions:
+            graph = version.get("graph") if isinstance(version.get("graph"), dict) else {}
+            file_refs = _file_refs_from_version_graph(graph)
+            dockerfiles_json = {"dockerfiles": []}
+
+            if file_refs:
+                filenames, _buckets, ids = _dockerfile_inputs(file_refs)
+                dockerfiles = run_async(
+                    generate_dockerfiles_with_agent(filenames, ids, llm_config)
+                )
+                dockerfiles_json = dockerfiles.model_dump()
+
+            yaml_text = generate_argo_yaml_from_graph(
+                pipeline_graph=graph,
+                file_refs=file_refs,
+                dockerfiles=dockerfiles_json,
+            )
+            generated_versions.append({
+                "uid": str(version.get("uid") or ""),
+                "name": str(version.get("name") or ""),
+                "yaml": yaml_text,
+            })
+
+        return jsonify({"versions": generated_versions}), 200
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        print("[analytics_api.py] Error generating version YAMLs:", exc)
         return jsonify({"error": str(exc)}), 500
 
 
