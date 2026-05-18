@@ -24,10 +24,14 @@ import {
   addNodeToNeo4j,
   deleteEdgeToNeo4j,
   deleteNodeFromNeo4jAndMinIO,
+  fetchPipelineVersions,
   fetchPipelineGraph,
   fetchPipelineUpdatedAt,
   generatePipelineYaml,
+  type PipelineVersionGraph,
+  type PipelineVersionSummary,
   rebuildBackendFromFlow,
+  savePipelineVersion,
   updateNodePositionInNeo4j,
   clearNeo4jAndMinIO,
 } from '@/features/flow/flowPersistence';
@@ -40,23 +44,58 @@ import {
   type AgentGraphSnapshot,
   type NormalizedGraph,
 } from '@/features/flow/flowGraph';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 
 interface FlowCanvasProps {
-  onNodeSelect: (node: Node | null) => void;
+  onNodeSelect: (node: Node | null, options?: { openInspector?: boolean }) => void;
   onNodesChange?: (nodes: Node[]) => void;
   onRemoveNode?: (nodeId: string) => void;
   onRemoveEdge?: (edgeId: string) => void;
   isLightMode?: boolean;
   activeChatbotConfig?: ChatbotConfig;
+  onVersionSaved?: (version: PipelineVersionSummary) => void;
+  onCanvasEdited?: () => void;
+  onActiveVersionChange?: (versionUid: string) => void;
+  onActiveVersionNameChange?: (versionName: string) => void;
 }
 
 export interface FlowCanvasRef {
   updateNode: (id: string, data: Record<string, unknown>) => void;
   syncFromBackend: (graphData?: unknown) => Promise<NormalizedGraph>;
   getCurrentGraph: () => AgentGraphSnapshot;
+  getCurrentVersionGraph: () => PipelineVersionGraph;
 }
 
 let nodeId = 1;
+
+const getSnapshotFileRef = (file: unknown, nodeIdValue: string) => {
+  if (typeof file === "string") return file;
+  if (typeof File !== "undefined" && file instanceof File) return file.name;
+  if (file && typeof file === "object") {
+    const entry = file as { filename?: unknown; name?: unknown; bucket?: unknown };
+    const filename = typeof entry.filename === "string"
+      ? entry.filename
+      : typeof entry.name === "string"
+        ? entry.name
+        : "";
+    if (!filename) return null;
+    const bucket = typeof entry.bucket === "string" && entry.bucket.trim()
+      ? entry.bucket.trim()
+      : `files-step-id-${nodeIdValue}`.toLowerCase();
+    return { filename, bucket };
+  }
+  return null;
+};
 
 export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   onNodeSelect,
@@ -65,6 +104,10 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   onRemoveEdge,
   isLightMode,
   activeChatbotConfig,
+  onVersionSaved,
+  onCanvasEdited,
+  onActiveVersionChange,
+  onActiveVersionNameChange,
 }, ref) => {
   const [nodes, setNodes] = useState<Node[]>(() => {
     const savedNodes = localStorage.getItem('ai-flow-nodes');
@@ -83,6 +126,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const syncBackoffUntilRef = useRef<number>(0);
   const syncFailureLoggedRef = useRef(false);
   const selectedNodeIdRef = useRef<string | null>(null);
+  const [isSaveVersionOpen, setIsSaveVersionOpen] = useState(false);
+  const [versionName, setVersionName] = useState("");
+  const [isSavingVersion, setIsSavingVersion] = useState(false);
 
   const markLocalWrite = useCallback((ms = 800) => {
     refreshCooldownUntilRef.current = Date.now() + ms;
@@ -103,6 +149,15 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
   const applyGraph = useCallback((data: unknown) => {
     const g = normalizeGraph(data);
+    const pipeline = data && typeof data === "object"
+      ? (data as { pipeline?: { active_version_uid?: unknown } }).pipeline
+      : null;
+    if (typeof pipeline?.active_version_uid === "string" && pipeline.active_version_uid.trim()) {
+      onActiveVersionChange?.(pipeline.active_version_uid);
+    }
+    if (typeof pipeline?.active_version_name === "string" && pipeline.active_version_name.trim()) {
+      onActiveVersionNameChange?.(pipeline.active_version_name);
+    }
     setNodes(g.nodes);
     setEdges(g.edges);
     lastSeenUpdatedAtRef.current = g.updated_at;
@@ -113,11 +168,11 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       const refreshedSelection = g.nodes.find((node) => node.id === selectedNodeId) || null;
       selectedNodeIdRef.current = refreshedSelection?.id ?? null;
       setSelectedNode(refreshedSelection);
-      onNodeSelect(refreshedSelection);
+      onNodeSelect(refreshedSelection, { openInspector: false });
     }
 
     return g;
-  }, [onNodeSelect]);
+  }, [onActiveVersionChange, onActiveVersionNameChange, onNodeSelect]);
 
   const fetchGraphAndApply = useCallback(async () => {
     const data = await fetchPipelineGraph();
@@ -191,6 +246,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
   // Expose updateNode 
   const updateNode = useCallback((id: string, data: Record<string, unknown>) => {
+    onCanvasEdited?.();
     setNodes((nds) =>
       nds.map((node) => {
         if (node.id === id) {
@@ -207,15 +263,37 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       }
       return prev;
     });
-  }, []);
+  }, [onCanvasEdited]);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const triggerImport = () => fileInputRef.current?.click();
+
+  const createSerializableFlow = useCallback((): PipelineVersionGraph => {
+    const viewport = reactFlowInstance?.toObject().viewport ?? { x: 0, y: 0, zoom: 1 };
+    return {
+      updated_at: lastSeenUpdatedAtRef.current,
+      nodes: nodes.map((node) => {
+        const data = { ...(node.data || {}) };
+        if (Array.isArray(data.files)) {
+          data.files = data.files
+            .map((file) => getSnapshotFileRef(file, node.id))
+            .filter(Boolean);
+        }
+        return {
+          ...node,
+          data,
+        };
+      }),
+      edges,
+      viewport,
+    };
+  }, [edges, nodes, reactFlowInstance]);
+
   useImperativeHandle(ref, () => ({
     updateNode,
     syncFromBackend,
     getCurrentGraph,
-  }), [getCurrentGraph, syncFromBackend, updateNode]);
-
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const triggerImport = () => fileInputRef.current?.click();
+    getCurrentVersionGraph: createSerializableFlow,
+  }), [createSerializableFlow, getCurrentGraph, syncFromBackend, updateNode]);
 
   useEffect(() => {
     localStorage.setItem('ai-flow-nodes', JSON.stringify(nodes));
@@ -228,6 +306,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
   const onNodesChangeInternal = useCallback(
     (changes: NodeChange[]) => {
+      if (changes.some((change) => change.type !== 'select' && change.type !== 'dimensions')) {
+        onCanvasEdited?.();
+      }
       const removedNodeIds = changes
         .filter(change => change.type === 'remove')
         .map(change => change.id);
@@ -245,15 +326,18 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         if (updatedSelectedNode) {
           selectedNodeIdRef.current = updatedSelectedNode.id;
           setSelectedNode(updatedSelectedNode);
-          onNodeSelect(updatedSelectedNode);
+          onNodeSelect(updatedSelectedNode, { openInspector: false });
         }
       }
     },
-    [nodes, selectedNode, onNodeSelect, markLocalWrite]
+    [nodes, selectedNode, onNodeSelect, markLocalWrite, onCanvasEdited]
   );
 
   const onEdgesChange = useCallback(
     (changes: EdgeChange[]) => {
+      if (changes.some((change) => change.type !== 'select')) {
+        onCanvasEdited?.();
+      }
       const removedEdgeIds = changes
         .filter((c) => c.type === "remove")
         .map((c) => c.id);
@@ -279,7 +363,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       }
       setEdges((eds) => applyEdgeChanges(changes, eds));
     },
-    [nodes, markLocalWrite]
+    [nodes, markLocalWrite, onCanvasEdited]
   );
 
   const onConnect = useCallback(
@@ -303,6 +387,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         toast("Connection already exists", { description: "This connection is already in place" });
         return;
       }
+      onCanvasEdited?.();
 
       // Find the actual Node objects
       const sourceNode = nodes.find((n) => n.id === params.source);
@@ -314,7 +399,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       markLocalWrite(800);
       await addEdgeToNeo4j(sourceNode, targetNode);
     },
-    [nodes, markLocalWrite]
+    [nodes, markLocalWrite, onCanvasEdited]
   );
 
   const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
@@ -358,6 +443,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         },
       };
 
+      onCanvasEdited?.();
       setNodes((nds) => {
         const updated = nds.concat(newNode);
         markLocalWrite(800);
@@ -365,23 +451,45 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         return updated;
       });
     },
-    [reactFlowInstance, markLocalWrite]
+    [reactFlowInstance, markLocalWrite, onCanvasEdited]
   );
 
-  const saveFlow = () => {
+  const openSaveVersionDialog = async () => {
     try {
-      if (reactFlowInstance) {
-        const flow = reactFlowInstance.toObject();
-        localStorage.setItem('ai-flow', JSON.stringify(flow));
-        toast.success('Flow saved successfully', {
-          description: 'Your AI pipeline has been saved',
-        });
+      const versions = await fetchPipelineVersions();
+      const savedVersionCount = versions.filter((version) => !version.is_main).length;
+      setVersionName(`Version ${savedVersionCount + 1}`);
+    } catch {
+      setVersionName(`Version ${new Date().toISOString().slice(0, 19).replace("T", " ")}`);
+    }
+    setIsSaveVersionOpen(true);
+  };
+
+  const saveFlow = async () => {
+    try {
+      if (!reactFlowInstance) return;
+      const trimmedName = versionName.trim();
+      if (!trimmedName) {
+        toast.error("Version name is required");
+        return;
       }
+      setIsSavingVersion(true);
+      const flow = createSerializableFlow();
+      const savedVersion = await savePipelineVersion(trimmedName, flow);
+      localStorage.setItem('ai-flow', JSON.stringify(flow));
+      markLocalWrite(1200);
+      setIsSaveVersionOpen(false);
+      onVersionSaved?.(savedVersion);
+      toast.success('Version saved', {
+        description: savedVersion.name,
+      });
     } catch (error) {
       console.error('Error saving flow:', error);
       toast.error('Failed to save flow', {
         description: 'There was an error saving your pipeline',
       });
+    } finally {
+      setIsSavingVersion(false);
     }
   };
 
@@ -436,6 +544,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       }
       const importedNodes = flowData.nodes;
       const importedEdges = flowData.edges;
+      onCanvasEdited?.();
       markLocalWrite(1200); // avoid immediate poll-refresh
       await rebuildBackendFromFlow(importedNodes, importedEdges);
       setNodes(importedNodes);
@@ -455,6 +564,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   };
 
   const clearCanvas = async () => {
+    onCanvasEdited?.();
     setNodes([]);
     setEdges([]);
     selectedNodeIdRef.current = null;
@@ -485,6 +595,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         onDrop={onDrop}
         onDragOver={onDragOver}
         onNodeDragStop={(_, node) => {
+          onCanvasEdited?.();
           markLocalWrite(800);
           updateNodePositionInNeo4j(node);
         }}
@@ -516,7 +627,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
         <FlowCanvasActionsPanel
           fileInputRef={fileInputRef}
-          onSave={saveFlow}
+          onSave={openSaveVersionDialog}
           onExportJson={exportFlow}
           onExportYaml={exportFlowYAML}
           onImportClick={triggerImport}
@@ -524,6 +635,47 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           onClear={clearCanvas}
         />
       </ReactFlow>
+
+      <Dialog open={isSaveVersionOpen} onOpenChange={setIsSaveVersionOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Save Version</DialogTitle>
+            <DialogDescription>
+              Name this pipeline snapshot before saving it.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            <Label htmlFor="pipeline-version-name">Version name</Label>
+            <Input
+              id="pipeline-version-name"
+              value={versionName}
+              onChange={(event) => setVersionName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void saveFlow();
+                }
+              }}
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setIsSaveVersionOpen(false)}
+              disabled={isSavingVersion}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => { void saveFlow(); }}
+              disabled={isSavingVersion || !versionName.trim()}
+            >
+              {isSavingVersion ? "Saving..." : "Save Version"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 });
@@ -539,6 +691,10 @@ export const WrappedFlowCanvas = ({
   onRemoveEdge,
   isLightMode,
   activeChatbotConfig,
+  onVersionSaved,
+  onCanvasEdited,
+  onActiveVersionChange,
+  onActiveVersionNameChange,
   flowCanvasRef,
 }: WrappedFlowCanvasProps) => (
   <ReactFlowProvider>
@@ -550,6 +706,10 @@ export const WrappedFlowCanvas = ({
       onRemoveEdge={onRemoveEdge}
       isLightMode={isLightMode}
       activeChatbotConfig={activeChatbotConfig}
+      onVersionSaved={onVersionSaved}
+      onCanvasEdited={onCanvasEdited}
+      onActiveVersionChange={onActiveVersionChange}
+      onActiveVersionNameChange={onActiveVersionNameChange}
     />
   </ReactFlowProvider>
 );

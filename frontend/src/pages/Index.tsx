@@ -7,7 +7,15 @@ import { PropertiesPanel, PropertyNodeData } from '@/components/PropertiesPanel'
 import { Toolbar } from '@/components/Toolbar';
 import { WrappedFlowCanvas, FlowCanvasRef } from '@/components/FlowCanvas';
 import { ChatPanel } from '@/components/chat/ChatPanel';
+import { VersionsPanel } from '@/components/versions/VersionsPanel';
 import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
+import {
+  MAIN_PIPELINE_VERSION_UID,
+  restorePipelineVersion,
+  savePipelineActiveVersion,
+  setPipelineVersionAsMain,
+  type PipelineVersionSummary,
+} from '@/features/flow/flowPersistence';
 import { toast } from 'sonner';
 import {
   Settings,
@@ -64,7 +72,7 @@ const CHAT_PROMPT_SUGGESTIONS = [
   "Build a fraud detection workflow with batch feature engineering, real-time scoring, and monitoring.",
 ];
 
-type RightPanel = 'inspector' | 'chat' | null;
+type RightPanel = 'inspector' | 'chat' | 'versions' | null;
 
 type PanelPreferences = {
   libraryOpen: boolean;
@@ -82,7 +90,7 @@ const readPanelPreferences = (): PanelPreferences => {
     if (!saved) return DEFAULT_PANEL_PREFERENCES;
     const parsed = JSON.parse(saved) as Partial<PanelPreferences>;
     const rightPanel =
-      parsed.rightPanel === 'inspector' || parsed.rightPanel === 'chat'
+      parsed.rightPanel === 'inspector' || parsed.rightPanel === 'chat' || parsed.rightPanel === 'versions'
         ? parsed.rightPanel
         : null;
     return {
@@ -185,6 +193,15 @@ const Index = () => {
   const [selectedConfig, setSelectedConfig] = useState<ChatbotConfig | null>(null);
   const [isConfigFormOpen, setIsConfigFormOpen] = useState(false);
   const [configToEdit, setConfigToEdit] = useState<ChatbotConfig | undefined>(undefined);
+  const [versionsRefreshKey, setVersionsRefreshKey] = useState(0);
+  const [isRestoringVersion, setIsRestoringVersion] = useState(false);
+  const [isSettingMainVersion, setIsSettingMainVersion] = useState(false);
+  const [activeVersionUid, setActiveVersionUid] = useState(MAIN_PIPELINE_VERSION_UID);
+  const [activeVersionName, setActiveVersionName] = useState('Main');
+  const [activePipelineDescription, setActivePipelineDescription] = useState('');
+  const activeVersionSaveTimeoutRef = useRef<number | null>(null);
+  const activeVersionUidRef = useRef(MAIN_PIPELINE_VERSION_UID);
+  const activeVersionNameRef = useRef('Main');
   const defaultConfig = React.useMemo(() => getDefaultChatbotConfig(), []);
   const isLibraryOpen = panelPreferences.libraryOpen;
   const rightPanel = panelPreferences.rightPanel;
@@ -255,13 +272,14 @@ const Index = () => {
     }, 0);
 
     return {
-      version: '1.0.0',
+      version: activeVersionName,
+      description: activePipelineDescription,
       lastUpdate: pipelineLastUpdate,
       createdAt: pipelineCreatedAt,
       stepCount: flowNodes.length,
       fileCount
     };
-  }, [flowNodes, pipelineLastUpdate, pipelineCreatedAt]);
+  }, [activePipelineDescription, activeVersionName, flowNodes, pipelineLastUpdate, pipelineCreatedAt]);
 
   useEffect(() => {
     const savedToken = localStorage.getItem('github_token');
@@ -297,9 +315,67 @@ const Index = () => {
     });
   }, [conversation, isProcessing]);
 
-  const onNodeSelect = useCallback((node: FlowNode | null) => {
+  const updateActiveVersionName = useCallback((name: string) => {
+    activeVersionNameRef.current = name;
+    setActiveVersionName(name);
+  }, []);
+
+  const updateActiveVersion = useCallback((uid: string, name?: string) => {
+    const nextName = uid === MAIN_PIPELINE_VERSION_UID
+      ? 'Main'
+      : name !== undefined
+        ? name
+        : activeVersionNameRef.current;
+    activeVersionUidRef.current = uid;
+    activeVersionNameRef.current = nextName;
+    setActiveVersionUid(uid);
+    updateActiveVersionName(nextName);
+  }, [updateActiveVersionName]);
+
+  const handleActiveVersionNameChange = useCallback((name: string) => {
+    updateActiveVersionName(
+      activeVersionUidRef.current === MAIN_PIPELINE_VERSION_UID
+        ? 'Main'
+        : name,
+    );
+  }, [updateActiveVersionName]);
+
+  const flushActiveVersionSnapshot = useCallback(async () => {
+    if (!flowCanvasRef.current) return null;
+    const version = await savePipelineActiveVersion(
+      flowCanvasRef.current.getCurrentVersionGraph(),
+      activeVersionUidRef.current,
+      activeVersionNameRef.current,
+    );
+    setVersionsRefreshKey((key) => key + 1);
+    if (version.pipeline_updated_at) {
+      setPipelineLastUpdate(new Date(version.pipeline_updated_at).toLocaleString());
+    }
+    return version;
+  }, []);
+
+  const scheduleActiveVersionSnapshot = useCallback(() => {
+    if (activeVersionSaveTimeoutRef.current) {
+      window.clearTimeout(activeVersionSaveTimeoutRef.current);
+    }
+    activeVersionSaveTimeoutRef.current = window.setTimeout(() => {
+      void flushActiveVersionSnapshot().catch((error) => {
+        console.warn("Failed to save active pipeline version:", error);
+      });
+    }, 600);
+  }, [flushActiveVersionSnapshot]);
+
+  useEffect(() => {
+    return () => {
+      if (activeVersionSaveTimeoutRef.current) {
+        window.clearTimeout(activeVersionSaveTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const onNodeSelect = useCallback((node: FlowNode | null, options?: { openInspector?: boolean }) => {
     setSelectedNode(node);
-    if (node) {
+    if (node && options?.openInspector !== false) {
       setPanelPreferences((current) => ({ ...current, rightPanel: 'inspector' }));
     }
   }, []);
@@ -357,6 +433,8 @@ const Index = () => {
           session_id: chatSessionId || null,
           user_message: messageText,
           canvas_graph: canvasGraph,
+          active_version_uid: activeVersionUidRef.current,
+          active_version_name: activeVersionNameRef.current,
           model: activeCfg.model,
           llm_config: buildLLMRequestConfig(activeCfg),
         }),
@@ -390,6 +468,7 @@ const Index = () => {
       }
 
       const syncedGraph = await flowCanvasRef.current.syncFromBackend(data.graph);
+      scheduleActiveVersionSnapshot();
       const sync = data.sync;
       const nodeCount = sync?.node_count ?? syncedGraph.nodes.length;
       const edgeCount = sync?.edge_count ?? syncedGraph.edges.length;
@@ -463,6 +542,15 @@ const Index = () => {
       ...current,
       rightPanel: current.rightPanel === panel ? null : panel,
     }));
+  };
+
+  const handleToggleVersionsPanel = async () => {
+    if (rightPanel !== 'versions') {
+      await flushActiveVersionSnapshot().catch((error) => {
+        console.warn("Failed to refresh active pipeline version:", error);
+      });
+    }
+    handleToggleRightPanel('versions');
   };
 
   const handleResetPanelLayout = () => {
@@ -598,6 +686,7 @@ const Index = () => {
   };
 
   const handleBlankPipeline = () => {
+    updateActiveVersion(MAIN_PIPELINE_VERSION_UID, 'Main');
     setFlowNodes([]);
     setSelectedNode(null);
     localStorage.removeItem('ai-flow-nodes');
@@ -622,6 +711,113 @@ const Index = () => {
     });
   };
 
+  const handleVersionSaved = (version: PipelineVersionSummary) => {
+    setVersionsRefreshKey((key) => key + 1);
+    if (version.pipeline_updated_at) {
+      setPipelineLastUpdate(new Date(version.pipeline_updated_at).toLocaleString());
+    }
+  };
+
+  const handleOverviewUpdated = useCallback((overview: {
+    version?: string;
+    description?: string;
+    activeVersionUid?: string;
+    updatedAt?: string | null;
+  }) => {
+    const nextVersionName = overview.version?.trim();
+    if (nextVersionName && nextVersionName !== activeVersionName) {
+      updateActiveVersionName(
+        (overview.activeVersionUid ?? activeVersionUidRef.current) === MAIN_PIPELINE_VERSION_UID
+          ? 'Main'
+          : nextVersionName,
+      );
+      setVersionsRefreshKey((key) => key + 1);
+    }
+    if (overview.description !== undefined) {
+      setActivePipelineDescription(overview.description);
+    }
+    if (overview.activeVersionUid) {
+      activeVersionUidRef.current = overview.activeVersionUid;
+      setActiveVersionUid(overview.activeVersionUid);
+    }
+    if (overview.updatedAt) {
+      setPipelineLastUpdate(new Date(overview.updatedAt).toLocaleString());
+    }
+  }, [activeVersionName, updateActiveVersionName]);
+
+  const handleRestoreVersion = async (version: PipelineVersionSummary) => {
+    if (!flowCanvasRef.current) {
+      toast.error("Canvas is not ready for restore");
+      return;
+    }
+
+    try {
+      setIsRestoringVersion(true);
+      await flushActiveVersionSnapshot();
+      const restored = await restorePipelineVersion(version.uid);
+      const syncedGraph = await flowCanvasRef.current.syncFromBackend(restored.graph);
+      updateActiveVersion(restored.version.uid, restored.version.name);
+      setVersionsRefreshKey((key) => key + 1);
+
+      const updatedAt = restored.version.pipeline_updated_at ?? syncedGraph.updated_at ?? null;
+      if (updatedAt) {
+        setPipelineLastUpdate(new Date(updatedAt).toLocaleString());
+      }
+      setCanvasSyncStatus({
+        state: 'idle',
+        message: '',
+        updatedAt,
+      });
+      toast.success("Version restored", {
+        description: restored.version.name,
+      });
+    } catch (error) {
+      console.error("Error restoring version:", error);
+      toast.error("Failed to restore version", {
+        description: error instanceof Error ? error.message : "Unknown error occurred",
+      });
+    } finally {
+      setIsRestoringVersion(false);
+    }
+  };
+
+  const handleSetMainVersion = async (version: PipelineVersionSummary) => {
+    if (!flowCanvasRef.current) {
+      toast.error("Canvas is not ready");
+      return;
+    }
+    if (version.is_main || version.uid === MAIN_PIPELINE_VERSION_UID) return;
+
+    try {
+      setIsSettingMainVersion(true);
+      await flushActiveVersionSnapshot();
+      const result = await setPipelineVersionAsMain(version.uid);
+      const syncedGraph = await flowCanvasRef.current.syncFromBackend(result.graph);
+      updateActiveVersion(MAIN_PIPELINE_VERSION_UID, 'Main');
+      setVersionsRefreshKey((key) => key + 1);
+
+      const updatedAt = result.version.pipeline_updated_at ?? syncedGraph.updated_at ?? null;
+      if (updatedAt) {
+        setPipelineLastUpdate(new Date(updatedAt).toLocaleString());
+      }
+      setCanvasSyncStatus({
+        state: 'idle',
+        message: '',
+        updatedAt,
+      });
+      toast.success("Main updated", {
+        description: `${version.name} is now Main`,
+      });
+    } catch (error) {
+      console.error("Error setting Main version:", error);
+      toast.error("Failed to set Main version", {
+        description: error instanceof Error ? error.message : "Unknown error occurred",
+      });
+    } finally {
+      setIsSettingMainVersion(false);
+    }
+  };
+
   const handleRemoveNode = (nodeId: string) => {
     setFlowNodes(prev => prev.filter(node => node.id !== nodeId));
     if (selectedNode?.id === nodeId) {
@@ -644,9 +840,12 @@ const Index = () => {
         isLibraryOpen={isLibraryOpen}
         isInspectorOpen={rightPanel === 'inspector'}
         isChatOpen={rightPanel === 'chat'}
+        isVersionsOpen={rightPanel === 'versions'}
+        activeVersionName={activeVersionName}
         onToggleLibrary={handleToggleLibrary}
         onToggleInspector={() => handleToggleRightPanel('inspector')}
         onToggleChat={() => handleToggleRightPanel('chat')}
+        onToggleVersions={() => { void handleToggleVersionsPanel(); }}
         onOpenHelp={() => setIsHelpOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
       />
@@ -663,6 +862,8 @@ const Index = () => {
             onBlankPipeline={handleBlankPipeline}
             onSavePipeline={handleSavePipeline}
             pipelineOverview={pipelineOverview}
+            activeVersionUid={activeVersionUid}
+            onOverviewUpdated={handleOverviewUpdated}
             activeChatbotConfig={activeConfig}
           />
         )}
@@ -678,6 +879,10 @@ const Index = () => {
                   onRemoveEdge={handleRemoveEdge}
                   isLightMode={isLightMode}
                   activeChatbotConfig={activeConfig}
+                  onVersionSaved={handleVersionSaved}
+                  onCanvasEdited={scheduleActiveVersionSnapshot}
+                  onActiveVersionChange={updateActiveVersion}
+                  onActiveVersionNameChange={handleActiveVersionNameChange}
                   flowCanvasRef={flowCanvasRef}
                 />
               </div>
@@ -694,7 +899,7 @@ const Index = () => {
                       onNodeUpdate={onNodeUpdate}
                       onRemoveNode={handleRemoveNode}
                     />
-                  ) : (
+                  ) : rightPanel === 'chat' ? (
                     <ChatPanel
                       activeConfig={activeConfig}
                       conversation={conversation}
@@ -710,6 +915,15 @@ const Index = () => {
                       onSaveConversation={handleSaveConversation}
                       onExportConversation={handleExportConversation}
                       onSuggestionClick={handleSuggestionClick}
+                    />
+                  ) : (
+                    <VersionsPanel
+                      className="bg-card/95"
+                      refreshKey={versionsRefreshKey}
+                      activeVersionUid={activeVersionUid}
+                      isRestoring={isRestoringVersion || isSettingMainVersion}
+                      onRestoreVersion={(version) => { void handleRestoreVersion(version); }}
+                      onSetMainVersion={(version) => { void handleSetMainVersion(version); }}
                     />
                   )}
                 </ResizablePanel>
@@ -741,7 +955,7 @@ const Index = () => {
                 <PanelLeft className="h-4 w-4 text-emerald-500" />
                 Panels
               </div>
-              Use the header toggles to show only what you need: Library for dragging nodes, Inspector for editing selected nodes, and Chat for pipeline assistance.
+              Use the header toggles to show only what you need: Library, Inspector, Chat, and Versions.
             </div>
             <div className="rounded-xl border border-border bg-muted/35 p-3">
               <div className="mb-1 flex items-center gap-2 font-medium">
@@ -755,7 +969,7 @@ const Index = () => {
                 <SlidersHorizontal className="h-4 w-4 text-emerald-500" />
                 Canvas workflow
               </div>
-              Select a node to open the Inspector automatically. Use the canvas Save, Export, Import, and Clear controls for pipeline files.
+              Select a node to open the Inspector automatically. Use canvas Save to create a named version.
             </div>
           </div>
         </DialogContent>
@@ -788,7 +1002,7 @@ const Index = () => {
 
             <div className="rounded-xl border border-border bg-muted/30 p-3">
               <div className="mb-3 text-sm font-medium">Panel visibility</div>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-4 gap-2">
                 <Button
                   variant={isLibraryOpen ? "default" : "outline"}
                   size="sm"
@@ -812,6 +1026,14 @@ const Index = () => {
                 >
                   <MessageSquare className="h-4 w-4" />
                   Chat
+                </Button>
+                <Button
+                  variant={rightPanel === 'versions' ? "default" : "outline"}
+                  size="sm"
+                  onClick={handleToggleVersionsPanel}
+                >
+                  <RotateCcw className="h-4 w-4" />
+                  Versions
                 </Button>
               </div>
               <Button
