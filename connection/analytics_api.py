@@ -4,11 +4,12 @@ import os
 import re
 import uuid
 
-from flask import Flask, jsonify, make_response, request
+from flask import Flask, jsonify, has_request_context, make_response, request
 
 from async_runtime import run_async
 from auth_middleware import require_auth
 from chat_state import clear_state_from_disk, load_state_from_disk, save_state_to_disk
+from deployment_artifacts import build_argo_workflow_yaml
 from deployment_agents import (
     build_argo_yaml_team,
     generate_argo_yaml_from_graph,
@@ -291,10 +292,32 @@ def _build_agent_task(
 
 async def _safe_fetch_pipeline_graph() -> tuple[dict | None, str | None]:
     try:
-        return await fetch_pipeline_graph(NEO4J_API_BASE_URL), None
+        return await fetch_pipeline_graph(
+            NEO4J_API_BASE_URL,
+            authorization=_request_authorization_header(),
+        ), None
     except Exception as exc:
         print("[analytics_api.py] Failed to fetch pipeline graph for sync guardrail:", exc)
         return None, str(exc)
+
+
+def _request_authorization_header() -> str | None:
+    if not has_request_context():
+        return None
+    auth_header = request.headers.get("Authorization", "")
+    return auth_header if auth_header else None
+
+
+def _pipeline_graph_from_payload_or_backend(data: dict) -> dict:
+    payload_graph = data.get("pipeline_graph")
+    if isinstance(payload_graph, dict):
+        return payload_graph
+    return run_async(
+        fetch_pipeline_graph(
+            NEO4J_API_BASE_URL,
+            authorization=_request_authorization_header(),
+        )
+    )
 
 
 def _build_graph_sync_guardrail(
@@ -397,12 +420,19 @@ def agentic_generate_dockerfiles():
         print("[analytics_api.py] Buckets received:", buckets)
         print("[analytics_api.py] Corresponding IDs to filenames that were received:", ids)
 
-        llm_config = llm_config_from_payload(data)
-        log_llm_selection("Generating Dockerfiles", llm_config)
+        print("[analytics_api.py] Generating Dockerfiles with deterministic artifact builder.")
+        pipeline_graph = _pipeline_graph_from_payload_or_backend(data)
         parsed = run_async(
-            generate_dockerfiles_with_agent(filenames, ids, llm_config)
+            generate_dockerfiles_with_agent(
+                filenames,
+                ids,
+                None,
+                pipeline_graph=pipeline_graph,
+                file_refs=files,
+            )
         )
-        return jsonify(parsed.model_dump()), 200
+        response_payload = parsed.model_dump() if hasattr(parsed, "model_dump") else parsed.dict()
+        return jsonify(response_payload), 200
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:
@@ -419,32 +449,11 @@ def agentic_generate_yaml():
     data = request.get_json() or {}
     dockerfile_json = data.get("dockerfile_json") or data.get("dockerfiles_json")
     print("[analytics_api.py] Dockerfile received:", dockerfile_json)
-    task = data.get(
-        "task",
-        "Generate an Argo Workflow YAML file based on the given pipeline design.",
-    )
-    task_message = task
-    if dockerfile_json:
-        try:
-            dockerfile_dump = json.dumps(dockerfile_json)
-        except Exception:
-            dockerfile_dump = str(dockerfile_json)
-        task_message += "\n\nDockerfile metadata: " + dockerfile_dump
-
-    async def run_team():
-        llm_config = llm_config_from_payload(data)
-        log_llm_selection("Generating Argo YAML", llm_config)
-        team = build_argo_yaml_team(llm_config, NEO4J_API_BASE_URL)
-        result = await team.run(task=task_message)
-        print("[analytics_api.py] build_argo_yaml_team run result messages:")
-        for idx, msg in enumerate(result.messages or []):
-            source = getattr(msg, "source", None)
-            content = getattr(msg, "content", None)
-            print(f"  message[{idx}] source={source} content_preview={str(content)[:200]}")
-        return _assistant_message_from_result(result)
 
     try:
-        yaml_text = asyncio.run(run_team())
+        print("[analytics_api.py] Generating Argo YAML with deterministic artifact builder.")
+        pipeline_graph = _pipeline_graph_from_payload_or_backend(data)
+        yaml_text = build_argo_workflow_yaml(pipeline_graph, dockerfile_json)
         resp = make_response(yaml_text, 200)
         resp.headers["Content-Type"] = "application/x-yaml; charset=utf-8"
         return resp

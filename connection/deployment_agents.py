@@ -1,13 +1,12 @@
-import re
-from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Optional
 
 from autogen_agentchat.agents import AssistantAgent
 from autogen_agentchat.teams import RoundRobinGroupChat
 from autogen_core.tools import FunctionTool
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from async_runtime import run_async
+from deployment_artifacts import build_argo_workflow_yaml, build_dockerfile_artifacts
 from graph_client import fetch_pipeline_graph
 from llm_config import LLMConfig, select_model_client
 from minio_gateway import read_minio_object
@@ -17,42 +16,49 @@ class ListDockerfilesResponse(BaseModel):
     class DockerfileItem(BaseModel):
         dockerfile_filename: str
         content: str
+        flow_id: Optional[str] = None
+        image: Optional[str] = None
+        command: list[str] = Field(default_factory=list)
+        files: list[str] = Field(default_factory=list)
+
+    class GuardrailReport(BaseModel):
+        valid: bool
+        checks: list[str] = Field(default_factory=list)
 
     dockerfiles: list[DockerfileItem]
+    guardrails: Optional[GuardrailReport] = None
 
 
 async def generate_dockerfiles_with_agent(
     filenames: list[str],
     ids: list[str],
     llm_config: Optional[LLMConfig] = None,
+    pipeline_graph: Optional[dict] = None,
+    file_refs: Optional[list[dict]] = None,
 ) -> ListDockerfilesResponse:
-    model_client = select_model_client(llm_config)
-    dockerfile_generator = AssistantAgent(
-        name="dockerfile_generator",
-        model_client=model_client,
-        description="An agent that generates Dockerfiles.",
-        system_message=""" You will be given a list of files and another containing their corresponding IDs (files with same ID means they belong to the same folder). Generate a Dockerfile file per folder. Name them Dockerfile.<insert folder ID and no extension>. Follow the rules:
-        1) Start with a base image. 2) Copy files into the container. 3) Install dependencies from requirements file (if present). 4) Make .sh files executable. 5) Set the startup command.
-        See example below:
-        FROM ubuntu:latest
-        ENV DEBIAN_FRONTEND=noninteractive
-        RUN apt-get update && apt-get install -y \
-            bash \
-            bc \
-            && rm -rf /var/lib/apt/lists/*
-        WORKDIR /app
-        COPY ./<insert filename> /app/<insert filename>
-        RUN chmod +x /app/<insert filename>
-        CMD ["/app/<insert filename>", "10"]
-        """,
-        output_content_type=ListDockerfilesResponse,
-    )
-    result = await dockerfile_generator.run(
-        task="List of files: " + str(filenames) + ". List of IDs: " + str(ids)
-    )
-    print("[deployment_agents.py] Dockerfile generator response:")
-    print(result.messages[-1].content)
-    return result.messages[-1].content
+    """Generate one validated Dockerfile per pipeline step.
+
+    The public name is kept for API compatibility, but artifact generation is now
+    deterministic and guarded instead of relying on free-form LLM output.
+    """
+    _ = llm_config
+    if file_refs is None:
+        if len(filenames) != len(ids):
+            raise ValueError("filenames and ids must have the same length.")
+        file_refs = [
+            {
+                "filename": filename,
+                "bucket": f"files-step-id-{step_id}",
+                "step_id": step_id,
+            }
+            for filename, step_id in zip(filenames, ids)
+        ]
+
+    artifact_payload = build_dockerfile_artifacts(pipeline_graph, file_refs)
+    print("[deployment_agents.py] Deterministic Dockerfile artifacts generated.")
+    if hasattr(ListDockerfilesResponse, "model_validate"):
+        return ListDockerfilesResponse.model_validate(artifact_payload)
+    return ListDockerfilesResponse.parse_obj(artifact_payload)
 
 
 def _make_pipeline_design_tool(neo4j_api_base_url: str):
@@ -130,161 +136,8 @@ def _generate_argo_yaml_tool(params: Optional[dict] = None) -> str:
         if isinstance(dockerfiles_raw, dict)
         else dockerfiles_raw
     )
-
-    def _steps_from_pipeline_graph(graph: dict) -> List[dict]:
-        if graph.get("step_rows"):
-            steps = []
-            for row in graph.get("step_rows", []) or []:
-                step = row.get("step") or {}
-                flow_id = str(step.get("flow_id") or "").strip()
-                if not flow_id:
-                    continue
-                steps.append(
-                    {
-                        "flow_id": flow_id,
-                        "label": step.get("label", ""),
-                        "description": step.get("description", ""),
-                        "type": step.get("type", "custom"),
-                        "files": row.get("files") or [],
-                    }
-                )
-            return steps
-
-        steps = []
-        for node in graph.get("nodes", []) or []:
-            data = node.get("data") or {}
-            flow_id = str(data.get("flow_id") or node.get("id") or "").strip()
-            if not flow_id:
-                continue
-            files = data.get("file_buckets") or []
-            if not files:
-                files = [
-                    {"filename": filename, "bucket": f"files-step-id-{flow_id}"}
-                    for filename in data.get("files", []) or []
-                    if isinstance(filename, str)
-                ]
-            steps.append(
-                {
-                    "flow_id": flow_id,
-                    "label": data.get("label", ""),
-                    "description": data.get("description", ""),
-                    "type": data.get("type", "custom"),
-                    "files": files,
-                }
-            )
-        return steps
-
-    steps = []
-    if isinstance(pipeline, dict):
-        steps = _steps_from_pipeline_graph(pipeline)
-
-    def _to_int(flow_id: str) -> int:
-        try:
-            return int(flow_id)
-        except Exception:
-            return float("inf")
-
-    ordered_steps = sorted(steps, key=lambda s: _to_int(s["flow_id"]))
-
-    file_lookup: Dict[str, List[dict]] = {}
-    for entry in file_contents:
-        step_id = str(entry.get("step_id") or "")
-        file_lookup.setdefault(step_id, []).append(entry)
-
-    dockerfile_lookup: Dict[str, List[dict]] = {}
-    for entry in dockerfiles:
-        name = str(
-            entry.get("flow_id")
-            or entry.get("step_id")
-            or entry.get("dockerfile_filename")
-            or entry.get("name")
-            or ""
-        )
-        flow_match = re.search(r"(\d+)", name)
-        flow_id = str(entry.get("flow_id") or entry.get("step_id") or "").strip()
-        if not flow_id and flow_match:
-            flow_id = flow_match.group(1)
-        if flow_id:
-            dockerfile_lookup.setdefault(flow_id, []).append(entry)
-
-    def _image_name(entry: dict, flow_id: str) -> str:
-        name = str(entry.get("name") or entry.get("dockerfile_filename") or "").strip()
-        if not name:
-            return f"inlumen/step-{flow_id}:latest"
-        base = name.replace(".", "-") if name.lower().startswith("dockerfile.") else Path(name).stem
-        base = re.sub(r"[^a-zA-Z0-9._-]", "-", base)
-        base = base.lower()
-        if not base:
-            base = f"step-{flow_id}"
-        return f"inlumen/{base}:latest"
-
-    lines = [
-        "apiVersion: argoproj.io/v1alpha1",
-        "kind: Workflow",
-        "metadata:",
-        "  name: inlumen-pipeline",
-        "spec:",
-        "  entrypoint: pipeline-steps",
-        "  templates:",
-        "  - name: pipeline-steps",
-        "    steps:",
-    ]
-
-    for step in ordered_steps:
-        template = f"step-{step['flow_id']}"
-        lines.append("      - - name: " + template)
-        lines.append("           template: " + template)
-
-    for step in ordered_steps:
-        template = f"step-{step['flow_id']}"
-        files = file_lookup.get(step["flow_id"], [])
-        docker_entries = dockerfile_lookup.get(step["flow_id"], [])
-        script_body = [
-            f"# Step {step['flow_id']}: {step['label'] or 'Unnamed'}",
-            f"# Type: {step['type']}",
-        ]
-        if docker_entries:
-            script_body.append(
-                f"# Dockerfiles: {', '.join([entry.get('name') or 'unknown' for entry in docker_entries])}"
-            )
-        if step["description"]:
-            script_body.append(f"# Description: {step['description']}")
-        if files:
-            for idx, file_entry in enumerate(files, start=1):
-                script_body.append(
-                    f"# File {idx}: {file_entry['filename']} (bucket {file_entry['bucket']})"
-                )
-                if file_entry["content"]:
-                    script_body.append("")
-                    script_body.extend(file_entry["content"].splitlines() or [""])
-                    script_body.append("")
-        else:
-            script_body.append(f'print("Executing step {step["flow_id"]} ({step["label"]})");')
-
-        image = (
-            _image_name(docker_entries[0], step["flow_id"])
-            if docker_entries
-            else "python:3.11"
-        )
-
-        lines.extend(
-            [
-                "  - name: " + template,
-                "    script:",
-                f"      image: {image}",
-                "      command: [python]",
-                "      source: |-",
-            ]
-        )
-        for line in script_body:
-            lines.append("        " + line)
-        lines.append("")
-
-    workflow_text = "\n".join(lines)
-    print(
-        "[deployment_agents.py] _generate_argo_yaml_tool produced Argo workflow for steps:",
-        [step["flow_id"] for step in ordered_steps],
-    )
+    workflow_text = build_argo_workflow_yaml(pipeline, {"dockerfiles": dockerfiles}, file_contents)
+    print("[deployment_agents.py] _generate_argo_yaml_tool produced guarded Argo workflow.")
     return workflow_text
 
 
