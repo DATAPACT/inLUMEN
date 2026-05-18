@@ -10,7 +10,11 @@ from async_runtime import run_async
 from auth_middleware import require_auth
 from chat_state import clear_state_from_disk, load_state_from_disk, save_state_to_disk
 from deployment_agents import generate_dockerfiles_with_agent, build_argo_yaml_team
-from graph_client import fetch_pipeline_graph, sync_backend_to_canvas_graph
+from graph_client import (
+    fetch_pipeline_graph,
+    save_active_pipeline_version,
+    sync_backend_to_canvas_graph,
+)
 from llm_config import llm_config_from_payload, log_llm_selection
 from pipeline_editor_team import build_pipeline_editing_team
 from runtime_config import default_frontend_origin, get_service_port
@@ -405,6 +409,10 @@ def agentic_pipeline_editor():
     if not user_message:
         return jsonify({"error": "Missing user_message"}), 400
     canvas_graph = _clean_client_graph(payload.get("canvas_graph"))
+    active_version_uid = str(payload.get("active_version_uid") or payload.get("version_uid") or "main").strip() or "main"
+    active_version_name = str(payload.get("active_version_name") or payload.get("version_name") or "").strip()
+    if active_version_uid == "main":
+        active_version_name = "Main"
 
     session_id = payload.get("session_id") or str(uuid.uuid4())
     try:
@@ -419,7 +427,12 @@ def agentic_pipeline_editor():
         canvas_sync_error = None
         if canvas_graph is not None:
             try:
-                await sync_backend_to_canvas_graph(NEO4J_API_BASE_URL, canvas_graph)
+                await sync_backend_to_canvas_graph(
+                    NEO4J_API_BASE_URL,
+                    canvas_graph,
+                    active_version_uid,
+                    active_version_name,
+                )
                 before_graph, before_graph_error = await _safe_fetch_pipeline_graph()
             except Exception as exc:
                 canvas_sync_error = str(exc)
@@ -463,6 +476,27 @@ def agentic_pipeline_editor():
                 before_graph_error or repaired_graph_error,
                 repaired=True,
             )
+
+        if isinstance(after_graph, dict):
+            pipeline = after_graph.get("pipeline") if isinstance(after_graph.get("pipeline"), dict) else {}
+            version_uid_to_save = active_version_uid or str(pipeline.get("active_version_uid") or "main")
+            version_name_to_save = active_version_name or str(pipeline.get("active_version_name") or pipeline.get("version") or "")
+            if version_uid_to_save == "main":
+                version_name_to_save = "Main"
+            try:
+                await save_active_pipeline_version(
+                    NEO4J_API_BASE_URL,
+                    after_graph,
+                    version_uid_to_save,
+                    version_name_to_save,
+                )
+            except Exception as exc:
+                print("[analytics_api.py] Failed to persist agent graph to active version:", exc)
+                sync["message"] = (
+                    (sync.get("message") or "Agent graph sync completed.")
+                    + f" Active version save failed: {exc}"
+                )
+                sync["guardrail_passed"] = False
 
         new_state = await team.save_state()
         save_state_to_disk(session_id, new_state)

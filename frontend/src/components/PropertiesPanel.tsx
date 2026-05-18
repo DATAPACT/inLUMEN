@@ -15,6 +15,7 @@ import {
   STORAGE_DATABASE_OPTIONS,
   StorageDatabaseOption,
   normalizeStorageDatabaseOption,
+  getNodeFileBucket,
   getNodeFileName,
   isBrowserFile,
   typeHasContent,
@@ -55,6 +56,11 @@ const normalizeFileReferences = (value: unknown): NodeFileReference[] => {
     return getNodeFileName(file as NodeFileReference).length > 0;
   });
 };
+
+const uploadedFileReference = (nodeId: string, fileName: string): NodeFileReference => ({
+  filename: fileName,
+  bucket: `files-step-id-${nodeId}`.toLowerCase(),
+});
 
 interface PropertiesPanelProps {
   selectedNode: Node<PropertyNodeData> | null;
@@ -256,31 +262,27 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
       const fileName = getNodeFileName(f);
       if (fileName) nameToIndex.set(fileName, idx);
     });
-    const updatedFiles = [...existing];
-    const changedFiles: File[] = [];
+    const uploadedFiles = [...existing];
+    let changedCount = 0;
     for (const f of picked) {
-      const idx = nameToIndex.get(f.name);
-      if (idx != null) {
-        // Replace existing file with same name
-        updatedFiles[idx] = f;
-      } else {
-        // Add new file
-        updatedFiles.push(f);
-        nameToIndex.set(f.name, updatedFiles.length - 1);
+      try {
+        await uploadNodeFile(selectedNode.id, f);
+        const uploadedRef = uploadedFileReference(selectedNode.id, f.name);
+        const idx = nameToIndex.get(f.name);
+        if (idx != null) {
+          uploadedFiles[idx] = uploadedRef;
+        } else {
+          uploadedFiles.push(uploadedRef);
+          nameToIndex.set(f.name, uploadedFiles.length - 1);
+        }
+        changedCount += 1;
+      } catch (err) {
+        console.warn(`[PropertiesPanel.tsx] Upload failed for ${f.name} on node ${selectedNode.id}:`, err);
       }
-      changedFiles.push(f);
     }
-    setFiles(updatedFiles);
-    pushNodeUpdate({ files: updatedFiles });
-    const nodeId = selectedNode.id;
-    const results = await Promise.allSettled(
-      changedFiles.map((f) => uploadNodeFile(nodeId, f))
-    );
-    const failed = results.filter((r) => r.status === "rejected");
-    if (failed.length > 0) {
-      console.warn(
-        `[PropertiesPanel.tsx] ${failed.length}/${changedFiles.length} uploads failed for node ${nodeId}`
-      );
+    if (changedCount > 0) {
+      setFiles(uploadedFiles);
+      pushNodeUpdate({ files: uploadedFiles });
     }
     e.target.value = "";
   };
@@ -289,13 +291,13 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
     if (!selectedNode) return;
     const fileToRemove = files[index];
     if (!fileToRemove) return;
-    const updatedFiles = files.filter((_, i) => i !== index);
-    setFiles(updatedFiles);
-    pushNodeUpdate({ files: updatedFiles });
     try {
       await removeNodeFile(selectedNode.id, fileToRemove);
+      const updatedFiles = files.filter((_, i) => i !== index);
+      setFiles(updatedFiles);
+      pushNodeUpdate({ files: updatedFiles });
     } catch (err) {
-      console.warn("[PropertiesPanel.tsx] Removed locally, but MinIO removal failed:", err);
+      console.warn("[PropertiesPanel.tsx] File removal failed; keeping frontend state unchanged:", err);
     }
   };
 
@@ -379,27 +381,27 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
       lastModified: Date.now(),
     });
 
-    const updatedFiles = [...files];
-    updatedFiles[previewFileIndex] = isBrowserFile(currentFile) ? newFile : currentFile;
-
-    // 1) Update UI/state + Neo4j
-    setFiles(updatedFiles);
-    pushNodeUpdate({ files: updatedFiles });
-
-    // 2) Upload updated file to MinIO
     try {
+      const updatedFiles = [...files];
       if (isBrowserFile(currentFile)) {
         await uploadNodeFile(selectedNode.id, newFile);
+        updatedFiles[previewFileIndex] = uploadedFileReference(selectedNode.id, currentFileName);
         setPreviewFile(newFile);
       } else {
         await updateNodeTextFile(selectedNode.id, currentFile, editedContent);
+        updatedFiles[previewFileIndex] = {
+          filename: currentFileName,
+          bucket: getNodeFileBucket(currentFile, selectedNode.id),
+        };
       }
-    } catch (err) {
-      console.warn("[PropertiesPanel.tsx] File saved locally, but MinIO update failed:", err);
-    }
 
-    setPreviewContent(editedContent);
-    setIsEditing(false);
+      setFiles(updatedFiles);
+      pushNodeUpdate({ files: updatedFiles });
+      setPreviewContent(editedContent);
+      setIsEditing(false);
+    } catch (err) {
+      console.warn("[PropertiesPanel.tsx] File update failed; keeping frontend state unchanged:", err);
+    }
   };
 
   // Config param helpers

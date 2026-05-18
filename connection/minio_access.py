@@ -93,8 +93,9 @@ def list_objects(bucket_name, prefix = None, recursive = False):
     found = client.bucket_exists(bucket_name)
     if not found:
         print(f"[minio_access.py] Bucket {bucket_name} does not exist.")
+        return []
     else:
-        objects = client.list_objects(bucket_name, prefix=prefix)
+        objects = client.list_objects(bucket_name, prefix=prefix, recursive=recursive)
     return objects
 
 #TODO: Other bucket operations: set/delete encryption
