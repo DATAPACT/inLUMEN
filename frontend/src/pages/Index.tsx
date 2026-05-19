@@ -818,6 +818,52 @@ const Index = () => {
     }
   };
 
+  const handleVersionDeleted = async (version: PipelineVersionSummary) => {
+    if (!flowCanvasRef.current) {
+      updateActiveVersion(MAIN_PIPELINE_VERSION_UID, 'Main');
+      setVersionsRefreshKey((key) => key + 1);
+      return;
+    }
+
+    if (activeVersionSaveTimeoutRef.current) {
+      window.clearTimeout(activeVersionSaveTimeoutRef.current);
+      activeVersionSaveTimeoutRef.current = null;
+    }
+
+    try {
+      setIsRestoringVersion(true);
+      if (activeVersionUidRef.current !== version.uid) {
+        await flushActiveVersionSnapshot().catch((error) => {
+          console.warn("Failed to save active version before switching to Main:", error);
+        });
+      }
+      const restored = await restorePipelineVersion(MAIN_PIPELINE_VERSION_UID);
+      const syncedGraph = await flowCanvasRef.current.syncFromBackend(restored.graph);
+      updateActiveVersion(MAIN_PIPELINE_VERSION_UID, 'Main');
+      setVersionsRefreshKey((key) => key + 1);
+
+      const updatedAt = restored.version.pipeline_updated_at ?? syncedGraph.updated_at ?? null;
+      if (updatedAt) {
+        setPipelineLastUpdate(new Date(updatedAt).toLocaleString());
+      }
+      setCanvasSyncStatus({
+        state: 'idle',
+        message: '',
+        updatedAt,
+      });
+      toast.success("Version deleted", {
+        description: `${version.name} was deleted. Main is now active.`,
+      });
+    } catch (error) {
+      console.error("Error restoring Main after version delete:", error);
+      toast.error("Version deleted, but failed to switch to Main", {
+        description: error instanceof Error ? error.message : "Unknown error occurred",
+      });
+    } finally {
+      setIsRestoringVersion(false);
+    }
+  };
+
   const handleRemoveNode = (nodeId: string) => {
     setFlowNodes(prev => prev.filter(node => node.id !== nodeId));
     if (selectedNode?.id === nodeId) {
@@ -924,6 +970,7 @@ const Index = () => {
                       isRestoring={isRestoringVersion || isSettingMainVersion}
                       onRestoreVersion={(version) => { void handleRestoreVersion(version); }}
                       onSetMainVersion={(version) => { void handleSetMainVersion(version); }}
+                      onVersionDeleted={handleVersionDeleted}
                     />
                   )}
                 </ResizablePanel>

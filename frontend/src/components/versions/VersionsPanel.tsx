@@ -16,6 +16,7 @@ type VersionsPanelProps = {
   isRestoring?: boolean;
   onRestoreVersion: (version: PipelineVersionSummary) => void;
   onSetMainVersion: (version: PipelineVersionSummary) => void;
+  onVersionDeleted?: (version: PipelineVersionSummary) => void | Promise<void>;
 };
 
 const formatDate = (value?: string | null) => {
@@ -31,6 +32,7 @@ export const VersionsPanel = ({
   isRestoring = false,
   onRestoreVersion,
   onSetMainVersion,
+  onVersionDeleted,
 }: VersionsPanelProps) => {
   const [versions, setVersions] = useState<PipelineVersionSummary[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -61,6 +63,7 @@ export const VersionsPanel = ({
       setError('');
       await deletePipelineVersion(version.uid);
       setVersions((current) => current.filter((item) => item.uid !== version.uid));
+      await onVersionDeleted?.(version);
       void loadVersions();
     } catch (err) {
       console.error('[VersionsPanel.tsx] Failed to delete version:', err);

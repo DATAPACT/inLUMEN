@@ -481,14 +481,17 @@ def agentic_generate_version_yamls():
         for version in versions:
             graph = version.get("graph") if isinstance(version.get("graph"), dict) else {}
             file_refs = _file_refs_from_version_graph(graph)
-            dockerfiles_json = {"dockerfiles": []}
-
-            if file_refs:
-                filenames, _buckets, ids = _dockerfile_inputs(file_refs)
-                dockerfiles = run_async(
-                    generate_dockerfiles_with_agent(filenames, ids, llm_config)
+            filenames, _buckets, ids = _dockerfile_inputs(file_refs) if file_refs else ([], [], [])
+            dockerfiles = run_async(
+                generate_dockerfiles_with_agent(
+                    filenames,
+                    ids,
+                    llm_config,
+                    pipeline_graph=graph,
+                    file_refs=file_refs,
                 )
-                dockerfiles_json = dockerfiles.model_dump()
+            )
+            dockerfiles_json = dockerfiles.model_dump() if hasattr(dockerfiles, "model_dump") else dockerfiles.dict()
 
             yaml_text = generate_argo_yaml_from_graph(
                 pipeline_graph=graph,
@@ -498,6 +501,13 @@ def agentic_generate_version_yamls():
             generated_versions.append({
                 "uid": str(version.get("uid") or ""),
                 "name": str(version.get("name") or ""),
+                "version": version.get("version"),
+                "description": version.get("description"),
+                "created_at": version.get("created_at"),
+                "updated_at": version.get("updated_at"),
+                "file_count": version.get("file_count"),
+                "node_count": version.get("node_count"),
+                "edge_count": version.get("edge_count"),
                 "yaml": yaml_text,
             })
 
