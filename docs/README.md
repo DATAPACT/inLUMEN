@@ -29,7 +29,7 @@ The picture below shows the component in the DATAPACT architecture.
 [![Component Diagram](./images/component-image.png)]
 
 ## **Component Definition**
-inLUMEN's core functionality is provided by LLM-powered agents that serve as helpful assistants in pipeline design, translating high-level business-level intents to pure AI/data pipeline design choices. inLUMEN agents reason on user intents and context, draw pipeline steps, and give recommandations according to compliance insights provided by the user or via tool integrations. They can also support deployment artitfact generation, making pipelines deployable. The chat dialog window enables human-machine interactions to co-design pipelines. inLUMEN integrates with DATAPACT tools such as SIM-PIPE and LexAlign.
+inLUMEN's core functionality is provided by LLM-powered agents that serve as helpful assistants in pipeline design, translating high-level business-level intents to pure AI/data pipeline design choices. inLUMEN agents reason on user intents and context, draw pipeline steps, and give recommandations according to compliance insights provided by the user or via tool integrations. They can also support deployment artitfact generation, making pipelines deployable. The chat dialog window enables human-machine interactions to co-design pipelines. inLUMEN integrates with external DATAPACT tools through public workflow and artifact APIs.
 
 [![inLUMEN Architecture](./images/conceptual_diagram_datapact_lumen.png)]
 
@@ -171,17 +171,23 @@ curl -H "Authorization: Bearer $API_AUTH_TOKEN" \
 curl -X POST http://localhost:5002/api/v1/pipelines \
   -H "Authorization: Bearer $API_AUTH_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name":"Remote patient monitoring","description":"SIM-PIPE integration pipeline"}'
+  -d '{"name":"Remote patient monitoring","description":"Integration-ready pipeline"}'
 
 curl -H "Authorization: Bearer $API_AUTH_TOKEN" \
-  "http://localhost:5002/api/v1/sim-pipe/workflows?include_download_urls=true"
+  "http://localhost:5002/api/v1/workflows?include_download_urls=true"
+
+curl -H "Authorization: Bearer $API_AUTH_TOKEN" \
+  http://localhost:5002/api/v1/pipelines/pipeline-123/artifacts/dockerfiles
+
+curl -H "Authorization: Bearer $API_AUTH_TOKEN" \
+  http://localhost:5002/api/v1/pipelines/pipeline-123/artifacts/argo-workflow.yaml
 ```
 
 Available public endpoint groups:
 
 - `Pipelines`: create, list, fetch, and list versions for the current design pipeline
-- `Workflows`: list available Argo Workflow metadata and workflow versions derived from modification dates
-- `SIM-PIPE`: return workflows with associated pipeline IDs, version metadata, and temporary MinIO signed access URLs when files are available
+- `Artifacts`: generate Dockerfiles and Argo Workflow YAML for a pipeline or pipeline version
+- `Workflows`: list available workflow metadata, associated pipeline IDs, version metadata, and temporary MinIO signed access URLs when files are available
 - `Health`: public liveness and readiness checks
 
 The public API does not expose MinIO credentials. When file access is available through MinIO, responses contain temporary signed URLs only.

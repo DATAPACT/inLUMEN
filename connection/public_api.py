@@ -13,6 +13,11 @@ import requests
 from flask import Blueprint, jsonify, make_response, request
 
 from async_runtime import run_async
+from deployment_artifacts import (
+    DeploymentArtifactValidationError,
+    build_argo_workflow_yaml,
+    build_dockerfile_artifacts,
+)
 from graph_client import fetch_pipeline_graph, fetch_pipeline_versions
 from minio_gateway import get_minio_client
 
@@ -149,6 +154,73 @@ def create_public_api_blueprint(neo4j_api_base_url: str) -> Blueprint:
             "versions": [_public_version(version) for version in versions],
         }), 200
 
+    @public_api.route("/api/v1/pipelines/<pipeline_id>/artifacts/dockerfiles", methods=["GET", "OPTIONS"])
+    @api_auth_required
+    def get_pipeline_dockerfiles(pipeline_id: str):
+        if request.method == "OPTIONS":
+            return _preflight_response()
+        graph, pipeline = _pipeline_graph_or_404(neo4j_api_base_url, pipeline_id)
+        dockerfiles = _build_dockerfile_artifacts_or_error(graph)
+        return jsonify({
+            "pipeline_id": pipeline["id"],
+            "version_id": pipeline["active_version_id"],
+            "version_name": pipeline["active_version_name"],
+            "dockerfiles": dockerfiles["dockerfiles"],
+            "guardrails": dockerfiles["guardrails"],
+        }), 200
+
+    @public_api.route("/api/v1/pipelines/<pipeline_id>/artifacts/argo-workflow.yaml", methods=["GET", "OPTIONS"])
+    @api_auth_required
+    def get_pipeline_argo_workflow_yaml(pipeline_id: str):
+        if request.method == "OPTIONS":
+            return _preflight_response()
+        graph, _pipeline = _pipeline_graph_or_404(neo4j_api_base_url, pipeline_id)
+        yaml_text = _build_argo_workflow_yaml_or_error(graph)
+        response = make_response(yaml_text, 200)
+        response.headers["Content-Type"] = "application/x-yaml; charset=utf-8"
+        return response
+
+    @public_api.route(
+        "/api/v1/pipelines/<pipeline_id>/versions/<version_id>/artifacts/dockerfiles",
+        methods=["GET", "OPTIONS"],
+    )
+    @api_auth_required
+    def get_pipeline_version_dockerfiles(pipeline_id: str, version_id: str):
+        if request.method == "OPTIONS":
+            return _preflight_response()
+        graph, pipeline, version = _pipeline_version_graph_or_404(
+            neo4j_api_base_url,
+            pipeline_id,
+            version_id,
+        )
+        dockerfiles = _build_dockerfile_artifacts_or_error(graph)
+        public_version = _public_version(version)
+        return jsonify({
+            "pipeline_id": pipeline["id"],
+            "version_id": public_version["id"],
+            "version_name": public_version["version_name"],
+            "dockerfiles": dockerfiles["dockerfiles"],
+            "guardrails": dockerfiles["guardrails"],
+        }), 200
+
+    @public_api.route(
+        "/api/v1/pipelines/<pipeline_id>/versions/<version_id>/artifacts/argo-workflow.yaml",
+        methods=["GET", "OPTIONS"],
+    )
+    @api_auth_required
+    def get_pipeline_version_argo_workflow_yaml(pipeline_id: str, version_id: str):
+        if request.method == "OPTIONS":
+            return _preflight_response()
+        graph, _pipeline, _version = _pipeline_version_graph_or_404(
+            neo4j_api_base_url,
+            pipeline_id,
+            version_id,
+        )
+        yaml_text = _build_argo_workflow_yaml_or_error(graph)
+        response = make_response(yaml_text, 200)
+        response.headers["Content-Type"] = "application/x-yaml; charset=utf-8"
+        return response
+
     @public_api.route("/api/v1/workflows", methods=["GET", "OPTIONS"])
     @api_auth_required
     def list_workflows():
@@ -176,18 +248,6 @@ def create_public_api_blueprint(neo4j_api_base_url: str) -> Blueprint:
                 }
                 for workflow in workflows
             ]
-        }), 200
-
-    @public_api.route("/api/v1/sim-pipe/workflows", methods=["GET", "OPTIONS"])
-    @api_auth_required
-    def sim_pipe_workflows():
-        if request.method == "OPTIONS":
-            return _preflight_response()
-        include_urls = _bool_query("include_download_urls", default=True)
-        workflows = _list_workflows(neo4j_api_base_url, include_download_urls=include_urls)
-        return jsonify({
-            "integration": "SIM-PIPE",
-            "workflows": workflows,
         }), 200
 
     return public_api
@@ -449,6 +509,78 @@ def _pipeline_id_matches(pipeline: dict[str, Any], requested_id: str) -> bool:
     if pipeline.get("id") == "design":
         aliases.add("design")
     return requested_id in aliases
+
+
+def _pipeline_graph_or_404(
+    neo4j_api_base_url: str,
+    pipeline_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    requested_id = _validate_id("pipeline_id", pipeline_id)
+    graph = _load_pipeline_graph(neo4j_api_base_url)
+    pipeline = _pipeline_summary_from_graph(graph)
+    if not pipeline or not _pipeline_id_matches(pipeline, requested_id):
+        raise ApiError(404, "pipeline_not_found", "Pipeline not found")
+    return graph, pipeline
+
+
+def _pipeline_version_graph_or_404(
+    neo4j_api_base_url: str,
+    pipeline_id: str,
+    version_id: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    active_graph, pipeline = _pipeline_graph_or_404(neo4j_api_base_url, pipeline_id)
+    requested_version_id = _validate_id("version_id", version_id)
+    versions = _load_pipeline_versions(neo4j_api_base_url, include_graph=True)
+    if not versions:
+        active_version = _active_graph_version(active_graph, pipeline)
+        if _version_id_matches(active_version, requested_version_id):
+            return active_graph, pipeline, active_version
+        raise ApiError(404, "pipeline_version_not_found", "Pipeline version not found")
+
+    for version in versions:
+        if not _version_id_matches(version, requested_version_id):
+            continue
+        version_graph = version.get("graph") if isinstance(version.get("graph"), dict) else active_graph
+        return version_graph, pipeline, version
+
+    raise ApiError(404, "pipeline_version_not_found", "Pipeline version not found")
+
+
+def _version_id_matches(version: dict[str, Any], requested_version_id: str) -> bool:
+    aliases = {
+        str(version.get("uid") or ""),
+        str(version.get("id") or ""),
+        str(version.get("name") or ""),
+        str(version.get("version") or ""),
+    }
+    if bool(version.get("is_main")) or str(version.get("uid") or "") == "main":
+        aliases.add("main")
+        aliases.add("Main")
+    aliases.discard("")
+    return requested_version_id in aliases
+
+
+def _build_dockerfile_artifacts_or_error(graph: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return build_dockerfile_artifacts(graph)
+    except (ValueError, DeploymentArtifactValidationError) as error:
+        raise ApiError(
+            422,
+            "artifact_generation_failed",
+            str(error),
+        ) from error
+
+
+def _build_argo_workflow_yaml_or_error(graph: dict[str, Any]) -> str:
+    dockerfiles = _build_dockerfile_artifacts_or_error(graph)
+    try:
+        return build_argo_workflow_yaml(graph, dockerfiles)
+    except (ValueError, DeploymentArtifactValidationError) as error:
+        raise ApiError(
+            422,
+            "artifact_generation_failed",
+            str(error),
+        ) from error
 
 
 def _public_version(version: dict[str, Any]) -> dict[str, Any]:
@@ -717,12 +849,12 @@ def build_openapi_schema() -> dict[str, Any]:
         "info": {
             "title": "inLUMEN Public API",
             "version": API_VERSION,
-            "description": "Public API for pipeline, workflow, and SIM-PIPE integration access.",
+            "description": "Public API for pipeline, workflow, and deployment artifact access.",
         },
         "servers": [{"url": "/"}],
         "tags": [
             {"name": "Pipelines", "description": "Pipeline creation, lookup, listing, and versions."},
-            {"name": "SIM-PIPE", "description": "SIM-PIPE integration workflow discovery."},
+            {"name": "Artifacts", "description": "Generated Dockerfiles and Argo Workflow YAML for pipelines."},
             {"name": "Workflows", "description": "Argo Workflow metadata and version discovery."},
             {"name": "Health", "description": "Public service health and readiness checks."},
         ],
@@ -865,6 +997,88 @@ def build_openapi_schema() -> dict[str, Any]:
                     },
                 }
             },
+            "/api/v1/pipelines/{pipeline_id}/artifacts/dockerfiles": {
+                "get": {
+                    "tags": ["Artifacts"],
+                    "summary": "Generate Dockerfiles for a pipeline",
+                    "operationId": "getPipelineDockerfiles",
+                    "parameters": [{"$ref": "#/components/parameters/PipelineId"}],
+                    "responses": {
+                        "200": {
+                            "description": "Generated Dockerfiles for the active pipeline graph.",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/DockerfileArtifactsResponse"}
+                                }
+                            },
+                        },
+                        **not_found_responses,
+                    },
+                }
+            },
+            "/api/v1/pipelines/{pipeline_id}/artifacts/argo-workflow.yaml": {
+                "get": {
+                    "tags": ["Artifacts"],
+                    "summary": "Generate Argo Workflow YAML for a pipeline",
+                    "operationId": "getPipelineArgoWorkflowYaml",
+                    "parameters": [{"$ref": "#/components/parameters/PipelineId"}],
+                    "responses": {
+                        "200": {
+                            "description": "Generated Argo Workflow YAML for the active pipeline graph.",
+                            "content": {
+                                "application/x-yaml": {
+                                    "schema": {"type": "string"}
+                                }
+                            },
+                        },
+                        **not_found_responses,
+                    },
+                }
+            },
+            "/api/v1/pipelines/{pipeline_id}/versions/{version_id}/artifacts/dockerfiles": {
+                "get": {
+                    "tags": ["Artifacts"],
+                    "summary": "Generate Dockerfiles for a pipeline version",
+                    "operationId": "getPipelineVersionDockerfiles",
+                    "parameters": [
+                        {"$ref": "#/components/parameters/PipelineId"},
+                        {"$ref": "#/components/parameters/VersionId"},
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Generated Dockerfiles for the selected pipeline version.",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/DockerfileArtifactsResponse"}
+                                }
+                            },
+                        },
+                        **not_found_responses,
+                    },
+                }
+            },
+            "/api/v1/pipelines/{pipeline_id}/versions/{version_id}/artifacts/argo-workflow.yaml": {
+                "get": {
+                    "tags": ["Artifacts"],
+                    "summary": "Generate Argo Workflow YAML for a pipeline version",
+                    "operationId": "getPipelineVersionArgoWorkflowYaml",
+                    "parameters": [
+                        {"$ref": "#/components/parameters/PipelineId"},
+                        {"$ref": "#/components/parameters/VersionId"},
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Generated Argo Workflow YAML for the selected pipeline version.",
+                            "content": {
+                                "application/x-yaml": {
+                                    "schema": {"type": "string"}
+                                }
+                            },
+                        },
+                        **not_found_responses,
+                    },
+                }
+            },
             "/api/v1/workflows": {
                 "get": {
                     "tags": ["Workflows"],
@@ -902,25 +1116,6 @@ def build_openapi_schema() -> dict[str, Any]:
                     },
                 }
             },
-            "/api/v1/sim-pipe/workflows": {
-                "get": {
-                    "tags": ["SIM-PIPE"],
-                    "summary": "SIM-PIPE workflow discovery endpoint",
-                    "operationId": "listSimPipeWorkflows",
-                    "parameters": [{"$ref": "#/components/parameters/IncludeDownloadUrls"}],
-                    "responses": {
-                        "200": {
-                            "description": "SIM-PIPE workflow discovery payload.",
-                            "content": {
-                                "application/json": {
-                                    "schema": {"$ref": "#/components/schemas/SimPipeWorkflowResponse"}
-                                }
-                            },
-                        },
-                        **protected_responses,
-                    },
-                }
-            },
         },
         "components": {
             "securitySchemes": {
@@ -934,6 +1129,12 @@ def build_openapi_schema() -> dict[str, Any]:
             "parameters": {
                 "PipelineId": {
                     "name": "pipeline_id",
+                    "in": "path",
+                    "required": True,
+                    "schema": {"type": "string", "minLength": 1, "maxLength": 160},
+                },
+                "VersionId": {
+                    "name": "version_id",
                     "in": "path",
                     "required": True,
                     "schema": {"type": "string", "minLength": 1, "maxLength": 160},
@@ -1062,6 +1263,38 @@ def build_openapi_schema() -> dict[str, Any]:
                         },
                     },
                 },
+                "DockerfileArtifact": {
+                    "type": "object",
+                    "required": ["dockerfile_filename", "content", "flow_id", "image", "command", "files"],
+                    "properties": {
+                        "dockerfile_filename": {"type": "string"},
+                        "content": {"type": "string"},
+                        "flow_id": {"type": "string"},
+                        "image": {"type": "string"},
+                        "command": {"type": "array", "items": {"type": "string"}},
+                        "files": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+                "DockerfileArtifactsResponse": {
+                    "type": "object",
+                    "required": ["pipeline_id", "version_id", "version_name", "dockerfiles", "guardrails"],
+                    "properties": {
+                        "pipeline_id": {"type": "string"},
+                        "version_id": {"type": "string"},
+                        "version_name": {"type": "string"},
+                        "dockerfiles": {
+                            "type": "array",
+                            "items": {"$ref": "#/components/schemas/DockerfileArtifact"},
+                        },
+                        "guardrails": {
+                            "type": "object",
+                            "properties": {
+                                "valid": {"type": "boolean"},
+                                "checks": {"type": "array", "items": {"type": "string"}},
+                            },
+                        },
+                    },
+                },
                 "AccessUrl": {
                     "type": "object",
                     "required": ["name", "url", "expires_in_seconds"],
@@ -1120,17 +1353,6 @@ def build_openapi_schema() -> dict[str, Any]:
                                 },
                             },
                         }
-                    },
-                },
-                "SimPipeWorkflowResponse": {
-                    "type": "object",
-                    "required": ["integration", "workflows"],
-                    "properties": {
-                        "integration": {"type": "string", "example": "SIM-PIPE"},
-                        "workflows": {
-                            "type": "array",
-                            "items": {"$ref": "#/components/schemas/Workflow"},
-                        },
                     },
                 },
             },

@@ -122,7 +122,9 @@ class PublicApiTest(unittest.TestCase):
             "bearer",
             schema["components"]["securitySchemes"]["bearerAuth"]["scheme"],
         )
-        self.assertIn("/api/v1/sim-pipe/workflows", schema["paths"])
+        self.assertIn("/api/v1/pipelines/{pipeline_id}/artifacts/dockerfiles", schema["paths"])
+        self.assertIn("/api/v1/pipelines/{pipeline_id}/artifacts/argo-workflow.yaml", schema["paths"])
+        self.assertFalse(any("sim-pipe" in path for path in schema["paths"]))
         self.assertIn("/openapi.json", schema["paths"])
         self.assertEqual(["Health"], schema["paths"]["/health"]["get"]["tags"])
 
@@ -175,7 +177,7 @@ class PublicApiTest(unittest.TestCase):
     @patch("public_api.generate_signed_url")
     @patch("public_api.fetch_pipeline_versions")
     @patch("public_api.fetch_pipeline_graph")
-    def test_sim_pipe_endpoint_returns_workflows_versions_and_signed_urls(
+    def test_workflows_endpoint_returns_pipeline_ids_versions_and_signed_urls(
         self,
         fetch_pipeline_graph_mock,
         fetch_pipeline_versions_mock,
@@ -190,19 +192,74 @@ class PublicApiTest(unittest.TestCase):
         generate_signed_url_mock.return_value = "https://minio.example/signed/retrieve.sh"
 
         response = self.client.get(
-            "/api/v1/sim-pipe/workflows?include_download_urls=true",
+            "/api/v1/workflows?include_download_urls=true",
             headers=_auth_headers(),
         )
 
         self.assertEqual(200, response.status_code)
         payload = response.get_json()
-        self.assertEqual("SIM-PIPE", payload["integration"])
         workflow = payload["workflows"][0]
         self.assertEqual("pipeline-123", workflow["pipeline_id"])
         self.assertEqual(["pipeline-123"], workflow["pipeline_ids"])
         self.assertEqual("v20260102T030405Z", workflow["version"])
         self.assertEqual("https://minio.example/signed/retrieve.sh", workflow["download_url"])
         self.assertEqual("retrieve.sh", workflow["access_urls"][0]["name"])
+
+    @patch("public_api.fetch_pipeline_graph")
+    def test_pipeline_artifact_endpoints_return_dockerfiles_and_yaml(self, fetch_pipeline_graph_mock):
+        fetch_pipeline_graph_mock.side_effect = _async_return(_sample_graph())
+
+        dockerfiles = self.client.get(
+            "/api/v1/pipelines/pipeline-123/artifacts/dockerfiles",
+            headers=_auth_headers(),
+        )
+        yaml_response = self.client.get(
+            "/api/v1/pipelines/pipeline-123/artifacts/argo-workflow.yaml",
+            headers=_auth_headers(),
+        )
+
+        self.assertEqual(200, dockerfiles.status_code)
+        dockerfile_payload = dockerfiles.get_json()
+        self.assertEqual("pipeline-123", dockerfile_payload["pipeline_id"])
+        self.assertEqual("Dockerfile.1", dockerfile_payload["dockerfiles"][0]["dockerfile_filename"])
+        self.assertIn("FROM", dockerfile_payload["dockerfiles"][0]["content"])
+        self.assertTrue(dockerfile_payload["guardrails"]["valid"])
+
+        self.assertEqual(200, yaml_response.status_code)
+        self.assertIn("application/x-yaml", yaml_response.headers["Content-Type"])
+        yaml_text = yaml_response.get_data(as_text=True)
+        self.assertIn('apiVersion: "argoproj.io/v1alpha1"', yaml_text)
+        self.assertIn('kind: "Workflow"', yaml_text)
+
+    @patch("public_api.fetch_pipeline_versions")
+    @patch("public_api.fetch_pipeline_graph")
+    def test_version_artifact_endpoint_uses_requested_version_graph(
+        self,
+        fetch_pipeline_graph_mock,
+        fetch_pipeline_versions_mock,
+    ):
+        version_graph = _sample_graph()
+        version_graph["nodes"][0]["id"] = "version-step"
+        version_graph["nodes"][0]["data"]["file_buckets"][0]["bucket"] = "files-step-id-version-step"
+        fetch_pipeline_graph_mock.side_effect = _async_return(_sample_graph())
+        fetch_pipeline_versions_mock.side_effect = _async_return([
+            {
+                **_sample_versions(include_graph=False)[0],
+                "uid": "version-1",
+                "name": "Version 1",
+                "graph": version_graph,
+            }
+        ])
+
+        response = self.client.get(
+            "/api/v1/pipelines/pipeline-123/versions/version-1/artifacts/dockerfiles",
+            headers=_auth_headers(),
+        )
+
+        self.assertEqual(200, response.status_code)
+        payload = response.get_json()
+        self.assertEqual("version-1", payload["version_id"])
+        self.assertEqual("Dockerfile.version-step", payload["dockerfiles"][0]["dockerfile_filename"])
 
     @patch("public_api.get_minio_client")
     def test_signed_url_generation_uses_temporary_minio_url(self, get_minio_client_mock):
