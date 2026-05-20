@@ -23,6 +23,7 @@ from graph_client import (
 )
 from llm_config import llm_config_from_payload, log_llm_selection
 from pipeline_editor_team import build_pipeline_editing_team
+from public_api import create_public_api_blueprint
 from runtime_config import default_frontend_origin, get_service_port
 
 
@@ -38,12 +39,14 @@ CORS_ALLOWED_ORIGIN = (
 )
 
 app = Flask(__name__)
+app.register_blueprint(create_public_api_blueprint(NEO4J_API_BASE_URL))
 
 
 def add_cors_headers(response):
     response.headers["Access-Control-Allow-Origin"] = CORS_ALLOWED_ORIGIN
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    response.headers.add("Vary", "Origin")
     return response
 
 

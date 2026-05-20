@@ -89,6 +89,7 @@ services:
       NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/password}
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio-datapact}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio-datapact}
+      API_AUTH_TOKEN: ${API_AUTH_TOKEN:-}
       AUTH_ENABLED: ${AUTH_ENABLED:-false}
       KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-}
       KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-}

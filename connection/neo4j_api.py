@@ -1102,6 +1102,8 @@ def neo4j_update_pipeline_overview():
         return jsonify({}), 200
 
     payload = request.get_json(force=True) or {}
+    name = str(payload.get("name") or "").strip()
+    label = str(payload.get("label") or name).strip()
     version_name = str(payload.get("version") or payload.get("version_name") or "").strip()
     description = str(payload.get("description") or "")
     version_uid = str(payload.get("active_version_uid") or payload.get("version_uid") or "").strip()
@@ -1121,6 +1123,14 @@ def neo4j_update_pipeline_overview():
             record = session.run("""
             MATCH (p:PIPELINE {uid: $pipeline_uid})
             SET p.version = $version_name,
+                p.name = CASE
+                  WHEN $name = '' THEN p.name
+                  ELSE $name
+                END,
+                p.label = CASE
+                  WHEN $label = '' THEN p.label
+                  ELSE $label
+                END,
                 p.description = CASE
                   WHEN $active_version_uid = $main_uid THEN $description
                   ELSE p.description
@@ -1137,12 +1147,17 @@ def neo4j_update_pipeline_overview():
                 v.updated_at = datetime()
             MERGE (p)-[:HAS_VERSION]->(v)
             RETURN
+              p.uid AS pipeline_uid,
+              coalesce(p.name, '') AS name,
+              coalesce(p.label, '') AS label,
               coalesce(v.name, p.version, 'Main') AS version,
               coalesce(v.description, '') AS description,
               v.uid AS active_version_uid,
               toString(p.created_at) AS created_at,
               toString(p.updated_at) AS updated_at
             """, pipeline_uid=pipeline_uid,
+                 name=name,
+                 label=label,
                  version_name=version_name,
                  description=description,
                  active_version_uid=active_version_uid,

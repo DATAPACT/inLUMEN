@@ -79,6 +79,7 @@ Common values you may change include:
 - `FRONTEND_PORT`, `MINIO_API_PORT`, `NEO4J_API_PORT`, `LLM_API_PORT`
 - `NEO4J_HTTP_PORT`, `NEO4J_BOLT_PORT`, `MINIO_S3_PORT`, `MINIO_CONSOLE_PORT`
 - `NEO4J_AUTH`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`
+- `API_AUTH_TOKEN` for the public API and Swagger/OpenAPI documentation
 - `AUTH_ENABLED` plus the Keycloak values when enabling authentication
 
 For Keycloak SSO, keep the original integration contract: set `AUTH_ENABLED=true` and configure `KEYCLOAK_JWKS_URL`, `KEYCLOAK_ISSUER`, and `KEYCLOAK_AUDIENCE` in the root `.env`. The frontend infers the toolbox parent origin when embedded, so `VITE_TOOLBOX_ORIGIN` is not normally needed; it remains supported in `frontend/.env` only as a fallback for deployments that hide iframe referrers. Standalone frontend setups can also keep using `VITE_AUTH_ENABLED` and `VITE_*_API_URL` in `frontend/.env`; Docker Compose derives those values from the root `.env` unless explicitly overridden.
@@ -129,13 +130,69 @@ The compose setup also exposes the internal APIs at the configured `MINIO_API_PO
 
 LLM agents use OpenAI-compatible Chat Completions endpoints. Configure OpenRouter, Ollama Cloud, or a custom on-prem endpoint in the dialog window or through the root `.env` file.
 
+## **Public API and Swagger**
+
+The public API is served by the connection analytics service on `LLM_API_PORT`, which is `5002` by default.
+
+Required public API environment variable:
+
+```
+API_AUTH_TOKEN=change-me-local-token
+```
+
+Local URLs:
+
+- Swagger UI: `http://localhost:5002/docs`
+- OpenAPI JSON schema: `http://localhost:5002/openapi.json`
+- Health check: `http://localhost:5002/health`
+- Readiness check: `http://localhost:5002/ready`
+
+Swagger UI is enabled by default. Open `http://localhost:5002/docs`, enter the token from `API_AUTH_TOKEN`, then use the Swagger `Authorize` button or the pre-filled bearer auth to run live requests.
+
+Authentication uses a static bearer token:
+
+```
+Authorization: Bearer <API_AUTH_TOKEN>
+```
+
+`/health` and `/ready` are public. The OpenAPI JSON and all `/api/v1/*` endpoints require the bearer token. Invalid or missing tokens return `401` or `403`; validation errors return `400` or `422`; missing resources return `404`.
+
+Example requests:
+
+```
+curl http://localhost:5002/health
+
+curl -H "Authorization: Bearer $API_AUTH_TOKEN" \
+  http://localhost:5002/openapi.json
+
+curl -H "Authorization: Bearer $API_AUTH_TOKEN" \
+  http://localhost:5002/api/v1/pipelines
+
+curl -X POST http://localhost:5002/api/v1/pipelines \
+  -H "Authorization: Bearer $API_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Remote patient monitoring","description":"SIM-PIPE integration pipeline"}'
+
+curl -H "Authorization: Bearer $API_AUTH_TOKEN" \
+  "http://localhost:5002/api/v1/sim-pipe/workflows?include_download_urls=true"
+```
+
+Available public endpoint groups:
+
+- `Pipelines`: create, list, fetch, and list versions for the current design pipeline
+- `Workflows`: list available Argo Workflow metadata and workflow versions derived from modification dates
+- `SIM-PIPE`: return workflows with associated pipeline IDs, version metadata, and temporary MinIO signed access URLs when files are available
+- `Health`: public liveness and readiness checks
+
+The public API does not expose MinIO credentials. When file access is available through MinIO, responses contain temporary signed URLs only.
+
 ## **Other Information**
 
 inLUMEN is still under development, any current users should expect unstable behaviour.
 
 ## **OpenAPI Specification**
 
-n/a
+The live OpenAPI 3 schema is available at `http://localhost:5002/openapi.json` with bearer authentication. The schema is the source used by Swagger UI at `http://localhost:5002/docs`.
 
 ## **Additional Links**
 
