@@ -82,7 +82,7 @@ Common values you may change include:
 - `API_AUTH_TOKEN` for the public API and Swagger/OpenAPI documentation
 - `AUTH_ENABLED` plus the Keycloak values when enabling authentication
 
-For Keycloak SSO, keep the original integration contract: set `AUTH_ENABLED=true` and configure `KEYCLOAK_JWKS_URL`, `KEYCLOAK_ISSUER`, and `KEYCLOAK_AUDIENCE` in the root `.env`. The frontend infers the toolbox parent origin when embedded, so `VITE_TOOLBOX_ORIGIN` is not normally needed; it remains supported in `frontend/.env` only as a fallback for deployments that hide iframe referrers. Standalone frontend setups can also keep using `VITE_AUTH_ENABLED` and `VITE_*_API_URL` in `frontend/.env`; Docker Compose derives those values from the root `.env` unless explicitly overridden.
+For Keycloak SSO, set `AUTH_ENABLED=true` and configure `KEYCLOAK_JWKS_URL`, `KEYCLOAK_ISSUER`, and `KEYCLOAK_AUDIENCE` in the root `.env`. For a local Keycloak on port `8081`, the default frontend client values are `VITE_KEYCLOAK_URL=http://localhost:8081`, `VITE_KEYCLOAK_REALM=inlumen`, and `VITE_KEYCLOAK_CLIENT_ID=inlumen-frontend`. The same frontend still supports the embedded toolbox contract: when loaded in an iframe it waits for an `SSO_TOKEN` postMessage and infers the toolbox parent origin, so `VITE_TOOLBOX_ORIGIN` is not normally needed; it remains supported in `frontend/.env` only as a fallback for deployments that hide iframe referrers. Standalone frontend setups can also keep using `VITE_AUTH_ENABLED` and `VITE_*_API_URL` in `frontend/.env`; Docker Compose derives those values from the root `.env` unless explicitly overridden.
 
 Step 4: Run the following command to build the docker containers:
 ```
