@@ -11,6 +11,12 @@ def _auth_headers(authorization: str | None = None) -> dict:
     return headers
 
 
+def _json_headers(authorization: str | None = None) -> dict:
+    headers = _auth_headers(authorization)
+    headers["Content-Type"] = "application/json"
+    return headers
+
+
 async def fetch_pipeline_graph(
     neo4j_api_base_url: str,
     authorization: str | None = None,
@@ -38,6 +44,7 @@ async def fetch_pipeline_graph(
 async def fetch_pipeline_versions(
     neo4j_api_base_url: str,
     include_graph: bool = False,
+    authorization: str | None = None,
 ) -> list[dict]:
     """Fetch available pipeline versions, optionally including each saved graph."""
     api_url = f"{neo4j_api_base_url}/neo4j_list_pipeline_versions"
@@ -45,7 +52,13 @@ async def fetch_pipeline_versions(
     try:
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
-            None, lambda: requests.get(api_url, params=params, timeout=60)
+            None,
+            lambda: requests.get(
+                api_url,
+                params=params,
+                timeout=60,
+                headers=_auth_headers(authorization),
+            ),
         )
         response.raise_for_status()
         payload = response.json()
@@ -62,6 +75,7 @@ async def sync_backend_to_canvas_graph(
     graph: dict,
     active_version_uid: str | None = None,
     active_version_name: str | None = None,
+    authorization: str | None = None,
 ) -> dict:
     """Make Neo4j match the visible canvas graph before an agent turn."""
     api_url = f"{neo4j_api_base_url}/neo4j_sync_graph"
@@ -77,7 +91,7 @@ async def sync_backend_to_canvas_graph(
             lambda: requests.post(
                 api_url,
                 data=json.dumps(payload),
-                headers={"Content-Type": "application/json"},
+                headers=_json_headers(authorization),
                 timeout=60,
             ),
         )
@@ -94,6 +108,7 @@ async def save_active_pipeline_version(
     graph: dict,
     active_version_uid: str,
     active_version_name: str,
+    authorization: str | None = None,
 ) -> dict:
     """Persist the current live graph into the requested active pipeline version."""
     api_url = f"{neo4j_api_base_url}/neo4j_save_pipeline_active_version"
@@ -109,7 +124,7 @@ async def save_active_pipeline_version(
             lambda: requests.post(
                 api_url,
                 data=json.dumps(payload),
-                headers={"Content-Type": "application/json"},
+                headers=_json_headers(authorization),
                 timeout=60,
             ),
         )
@@ -125,13 +140,14 @@ async def run_neo4j_query(
     neo4j_api_base_url: str,
     query: str,
     query_type: str,
+    authorization: str | None = None,
 ) -> str:
     """Run a Cypher query through the Neo4j API and return a string payload."""
     try:
         print("[graph_client.py] Executing Neo4J query of type: " + query_type)
         api_url = f"{neo4j_api_base_url}/neo4j_run_query"
         payload = {"query": query}
-        headers = {"Content-Type": "application/json"}
+        headers = _json_headers(authorization)
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
             None,
