@@ -2,6 +2,7 @@ neo4j==5.25.0
 minio==7.1.17
 flask==3.0.0
 flask-restful
+requests
 pip==23.3
 openai
 pyyaml==6.0.1

@@ -10,6 +10,12 @@
  */
 export const AUTH_ENABLED = import.meta.env.VITE_AUTH_ENABLED === 'true';
 
+export const KEYCLOAK_URL =
+  ((import.meta.env.VITE_KEYCLOAK_URL as string) || 'http://localhost:8081').replace(/\/$/, '');
+export const KEYCLOAK_REALM = (import.meta.env.VITE_KEYCLOAK_REALM as string) || 'inlumen';
+export const KEYCLOAK_CLIENT_ID =
+  (import.meta.env.VITE_KEYCLOAK_CLIENT_ID as string) || 'inlumen-frontend';
+
 const configuredToolboxOrigin = ((import.meta.env.VITE_TOOLBOX_ORIGIN as string) || '').trim();
 
 const inferParentOrigin = (): string => {

@@ -89,6 +89,7 @@ services:
       NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/password}
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio-datapact}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio-datapact}
+      API_AUTH_TOKEN: ${API_AUTH_TOKEN:-}
       AUTH_ENABLED: ${AUTH_ENABLED:-false}
       KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-}
       KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-}
@@ -121,6 +122,9 @@ services:
       VITE_NEO4J_API_PORT: ${NEO4J_API_PORT:-5001}
       VITE_LLM_API_PORT: ${LLM_API_PORT:-5002}
       VITE_AUTH_ENABLED: ${VITE_AUTH_ENABLED:-${AUTH_ENABLED:-false}}
+      VITE_KEYCLOAK_URL: ${VITE_KEYCLOAK_URL:-http://localhost:8081}
+      VITE_KEYCLOAK_REALM: ${VITE_KEYCLOAK_REALM:-inlumen}
+      VITE_KEYCLOAK_CLIENT_ID: ${VITE_KEYCLOAK_CLIENT_ID:-inlumen-frontend}
     command: npm run dev -- --host 0.0.0.0
     networks:
       - datapact_network

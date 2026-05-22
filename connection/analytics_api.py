@@ -23,6 +23,7 @@ from graph_client import (
 )
 from llm_config import llm_config_from_payload, log_llm_selection
 from pipeline_editor_team import build_pipeline_editing_team
+from public_api import create_public_api_blueprint
 from runtime_config import default_frontend_origin, get_service_port
 
 
@@ -38,12 +39,14 @@ CORS_ALLOWED_ORIGIN = (
 )
 
 app = Flask(__name__)
+app.register_blueprint(create_public_api_blueprint(NEO4J_API_BASE_URL))
 
 
 def add_cors_headers(response):
     response.headers["Access-Control-Allow-Origin"] = CORS_ALLOWED_ORIGIN
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    response.headers.add("Vary", "Origin")
     return response
 
 
@@ -475,7 +478,11 @@ def agentic_generate_version_yamls():
     try:
         llm_config = llm_config_from_payload(data)
         log_llm_selection("Generating YAML for all pipeline versions", llm_config)
-        versions = run_async(fetch_pipeline_versions(NEO4J_API_BASE_URL, include_graph=True))
+        versions = run_async(fetch_pipeline_versions(
+            NEO4J_API_BASE_URL,
+            include_graph=True,
+            authorization=_request_authorization_header(),
+        ))
         generated_versions = []
 
         for version in versions:
@@ -543,6 +550,7 @@ def agentic_pipeline_editor():
         return jsonify({"error": str(exc)}), 400
 
     log_llm_selection("User message sent to pipeline editor", llm_config)
+    authorization = _request_authorization_header()
 
     async def run_turn():
         before_graph, before_graph_error = await _safe_fetch_pipeline_graph()
@@ -554,6 +562,7 @@ def agentic_pipeline_editor():
                     canvas_graph,
                     active_version_uid,
                     active_version_name,
+                    authorization=authorization,
                 )
                 before_graph, before_graph_error = await _safe_fetch_pipeline_graph()
             except Exception as exc:
@@ -564,6 +573,7 @@ def agentic_pipeline_editor():
         team = build_pipeline_editing_team(
             llm_config=llm_config,
             neo4j_api_base_url=NEO4J_API_BASE_URL,
+            authorization=authorization,
         )
         team_state = load_state_from_disk(session_id)
         if team_state:
@@ -611,6 +621,7 @@ def agentic_pipeline_editor():
                     after_graph,
                     version_uid_to_save,
                     version_name_to_save,
+                    authorization=authorization,
                 )
             except Exception as exc:
                 print("[analytics_api.py] Failed to persist agent graph to active version:", exc)
