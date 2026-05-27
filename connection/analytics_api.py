@@ -11,7 +11,6 @@ from auth_middleware import require_auth
 from chat_state import clear_state_from_disk, load_state_from_disk, save_state_to_disk
 from deployment_artifacts import build_argo_workflow_yaml
 from deployment_agents import (
-    build_argo_yaml_team,
     generate_argo_yaml_from_graph,
     generate_dockerfiles_with_agent,
 )
@@ -423,13 +422,15 @@ def agentic_generate_dockerfiles():
         print("[analytics_api.py] Buckets received:", buckets)
         print("[analytics_api.py] Corresponding IDs to filenames that were received:", ids)
 
-        print("[analytics_api.py] Generating Dockerfiles with deterministic artifact builder.")
+        llm_config = llm_config_from_payload(data)
+        log_llm_selection("Generating Dockerfiles from pipeline context", llm_config)
+        print("[analytics_api.py] Generating Dockerfiles with LLM artifact generator.")
         pipeline_graph = _pipeline_graph_from_payload_or_backend(data)
         parsed = run_async(
             generate_dockerfiles_with_agent(
                 filenames,
                 ids,
-                None,
+                llm_config,
                 pipeline_graph=pipeline_graph,
                 file_refs=files,
             )
@@ -477,7 +478,7 @@ def agentic_generate_version_yamls():
 
     try:
         llm_config = llm_config_from_payload(data)
-        log_llm_selection("Generating YAML for all pipeline versions", llm_config)
+        log_llm_selection("Generating Dockerfiles for all pipeline versions", llm_config)
         versions = run_async(fetch_pipeline_versions(
             NEO4J_API_BASE_URL,
             include_graph=True,

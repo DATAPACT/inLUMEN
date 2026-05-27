@@ -10,6 +10,7 @@ from flask import Flask
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from deployment_artifacts import build_dockerfile_artifacts  # noqa: E402
 from public_api import create_public_api_blueprint, generate_signed_url  # noqa: E402
 
 
@@ -205,9 +206,15 @@ class PublicApiTest(unittest.TestCase):
         self.assertEqual("https://minio.example/signed/retrieve.sh", workflow["download_url"])
         self.assertEqual("retrieve.sh", workflow["access_urls"][0]["name"])
 
+    @patch("public_api._build_dockerfile_artifacts_or_error")
     @patch("public_api.fetch_pipeline_graph")
-    def test_pipeline_artifact_endpoints_return_dockerfiles_and_yaml(self, fetch_pipeline_graph_mock):
+    def test_pipeline_artifact_endpoints_return_dockerfiles_and_yaml(
+        self,
+        fetch_pipeline_graph_mock,
+        build_dockerfile_artifacts_mock,
+    ):
         fetch_pipeline_graph_mock.side_effect = _async_return(_sample_graph())
+        build_dockerfile_artifacts_mock.side_effect = build_dockerfile_artifacts
 
         dockerfiles = self.client.get(
             "/api/v1/pipelines/pipeline-123/artifacts/dockerfiles",
@@ -231,17 +238,20 @@ class PublicApiTest(unittest.TestCase):
         self.assertIn('apiVersion: "argoproj.io/v1alpha1"', yaml_text)
         self.assertIn('kind: "Workflow"', yaml_text)
 
+    @patch("public_api._build_dockerfile_artifacts_or_error")
     @patch("public_api.fetch_pipeline_versions")
     @patch("public_api.fetch_pipeline_graph")
     def test_version_artifact_endpoint_uses_requested_version_graph(
         self,
         fetch_pipeline_graph_mock,
         fetch_pipeline_versions_mock,
+        build_dockerfile_artifacts_mock,
     ):
         version_graph = _sample_graph()
         version_graph["nodes"][0]["id"] = "version-step"
         version_graph["nodes"][0]["data"]["file_buckets"][0]["bucket"] = "files-step-id-version-step"
         fetch_pipeline_graph_mock.side_effect = _async_return(_sample_graph())
+        build_dockerfile_artifacts_mock.side_effect = build_dockerfile_artifacts
         fetch_pipeline_versions_mock.side_effect = _async_return([
             {
                 **_sample_versions(include_graph=False)[0],

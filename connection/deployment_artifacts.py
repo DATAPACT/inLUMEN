@@ -375,6 +375,12 @@ def build_dockerfile_artifacts(
     pipeline_graph: Optional[dict] = None,
     files: Any = None,
 ) -> dict:
+    """Build baseline Dockerfile artifacts for tests and non-agent guardrail fixtures.
+
+    Runtime Dockerfile generation uses the LLM-backed generator in
+    deployment_agents.py so attached files and step semantics can be interpreted
+    with natural-language context.
+    """
     steps = extract_pipeline_steps(pipeline_graph, files)
     if not steps:
         raise ValueError("No pipeline steps were found for Dockerfile generation.")

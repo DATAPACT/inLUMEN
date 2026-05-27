@@ -186,7 +186,7 @@ curl -H "Authorization: Bearer $API_AUTH_TOKEN" \
 Available public endpoint groups:
 
 - `Pipelines`: create, list, fetch, and list versions for the current design pipeline
-- `Artifacts`: generate Dockerfiles and Argo Workflow YAML for a pipeline or pipeline version
+- `Artifacts`: generate Dockerfiles with the configured LLM, then assemble Argo Workflow YAML deterministically from the pipeline graph and Dockerfile metadata
 - `Workflows`: list available workflow metadata, associated pipeline IDs, version metadata, and temporary MinIO signed access URLs when files are available
 - `Health`: public liveness and readiness checks
 
