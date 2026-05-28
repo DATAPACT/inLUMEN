@@ -12,6 +12,7 @@ from typing import Any
 import requests
 from flask import Blueprint, jsonify, make_response, request
 
+from auth_middleware import is_auth_enabled, validate_keycloak_bearer_token
 from async_runtime import run_async
 from deployment_artifacts import (
     DeploymentArtifactValidationError,
@@ -82,14 +83,15 @@ def create_public_api_blueprint(neo4j_api_base_url: str) -> Blueprint:
 
     @public_api.route("/ready", methods=["GET"])
     def readiness():
-        if not _configured_api_token():
+        auth_checks = _auth_readiness_checks()
+        if not _auth_checks_ready(auth_checks):
             return jsonify({
                 "status": "not_ready",
-                "checks": {"api_auth_token": "missing"},
+                "checks": auth_checks,
             }), 503
         return jsonify({
             "status": "ready",
-            "checks": {"api_auth_token": "configured"},
+            "checks": auth_checks,
         }), 200
 
     @public_api.route("/docs", methods=["GET"])
@@ -257,10 +259,50 @@ def _configured_api_token() -> str:
     return os.getenv("API_AUTH_TOKEN", "").strip()
 
 
+def _request_authorization_header() -> str | None:
+    auth_header = request.headers.get("Authorization", "")
+    return auth_header if auth_header else None
+
+
+def _auth_readiness_checks() -> dict[str, str]:
+    if is_auth_enabled():
+        if os.getenv("KEYCLOAK_JWKS_URL", "").strip():
+            return {"auth_mode": "keycloak", "keycloak_jwks_url": "configured"}
+        return {"auth_mode": "keycloak", "keycloak_jwks_url": "missing"}
+    if _configured_api_token():
+        return {"auth_mode": "static_bearer", "api_auth_token": "configured"}
+    return {"auth_mode": "static_bearer", "api_auth_token": "missing"}
+
+
+def _auth_checks_ready(auth_checks: dict[str, str]) -> bool:
+    if auth_checks["auth_mode"] == "keycloak":
+        return auth_checks.get("keycloak_jwks_url") == "configured"
+    return auth_checks.get("api_auth_token") == "configured"
+
+
+def _keycloak_public_error_code(error_name: str, status_code: int) -> str:
+    if status_code == 503:
+        return "auth_unavailable"
+    if status_code >= 500:
+        return "auth_misconfigured"
+    return "unauthorized" if error_name.lower() == "unauthorized" else "forbidden"
+
+
 def api_auth_required(route_handler):
     @functools.wraps(route_handler)
     def decorated(*args, **kwargs):
         if request.method == "OPTIONS":
+            return route_handler(*args, **kwargs)
+
+        if is_auth_enabled():
+            _claims, error = validate_keycloak_bearer_token()
+            if error is not None:
+                return _error_response(
+                    error.status_code,
+                    _keycloak_public_error_code(error.error, error.status_code),
+                    error.detail,
+                    error.details,
+                )
             return route_handler(*args, **kwargs)
 
         configured_token = _configured_api_token()
@@ -394,7 +436,12 @@ def _bool_query(name: str, *, default: bool) -> bool:
 
 def _load_pipeline_graph(neo4j_api_base_url: str) -> dict[str, Any]:
     try:
-        graph = run_async(fetch_pipeline_graph(neo4j_api_base_url))
+        graph = run_async(
+            fetch_pipeline_graph(
+                neo4j_api_base_url,
+                authorization=_request_authorization_header(),
+            )
+        )
     except Exception as error:
         _log_event("pipeline_graph_load_failed", error_type=type(error).__name__)
         raise ApiError(500, "backend_unavailable", "Pipeline backend unavailable") from error
@@ -407,7 +454,13 @@ def _load_pipeline_versions(
     include_graph: bool,
 ) -> list[dict[str, Any]]:
     try:
-        versions = run_async(fetch_pipeline_versions(neo4j_api_base_url, include_graph=include_graph))
+        versions = run_async(
+            fetch_pipeline_versions(
+                neo4j_api_base_url,
+                include_graph=include_graph,
+                authorization=_request_authorization_header(),
+            )
+        )
     except Exception as error:
         _log_event("pipeline_versions_load_failed", error_type=type(error).__name__)
         raise ApiError(500, "backend_unavailable", "Pipeline backend unavailable") from error
@@ -420,7 +473,11 @@ def _create_pipeline(
 ) -> dict[str, Any]:
     api_url = f"{neo4j_api_base_url.rstrip('/')}/neo4j_update_pipeline_overview"
     try:
-        response = requests.post(api_url, json=payload, timeout=30)
+        headers = {}
+        authorization = _request_authorization_header()
+        if authorization:
+            headers["Authorization"] = authorization
+        response = requests.post(api_url, json=payload, headers=headers, timeout=30)
     except requests.RequestException as error:
         _log_event("pipeline_create_failed", error_type=type(error).__name__)
         raise ApiError(500, "backend_unavailable", "Pipeline backend unavailable") from error
@@ -1143,8 +1200,8 @@ def build_openapi_schema() -> dict[str, Any]:
                 "bearerAuth": {
                     "type": "http",
                     "scheme": "bearer",
-                    "bearerFormat": "Opaque API token",
-                    "description": "Use `Authorization: Bearer <API_AUTH_TOKEN>`.",
+                    "bearerFormat": "JWT or opaque API token",
+                    "description": "Use `Authorization: Bearer <token>`. With `AUTH_ENABLED=true`, this must be a Keycloak JWT. Otherwise, use `API_AUTH_TOKEN`.",
                 }
             },
             "parameters": {
@@ -1403,7 +1460,7 @@ SWAGGER_UI_HTML = """<!doctype html>
 <body>
   <section id="auth-panel" class="auth-panel">
     <h1>inLUMEN Public API</h1>
-    <p>Enter the bearer token configured in API_AUTH_TOKEN to load the live Swagger documentation.</p>
+    <p>Enter a bearer token to load the live Swagger documentation. With Keycloak enabled, use a Keycloak access token; otherwise use API_AUTH_TOKEN.</p>
     <form id="auth-form" class="auth-row">
       <input id="auth-token" type="password" autocomplete="current-password" placeholder="Bearer token" aria-label="Bearer token">
       <button type="submit">Open docs</button>

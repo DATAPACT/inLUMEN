@@ -10,6 +10,7 @@ from flask import Flask
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from auth_middleware import AuthValidationError  # noqa: E402
 from deployment_artifacts import build_dockerfile_artifacts  # noqa: E402
 from public_api import create_public_api_blueprint, generate_signed_url  # noqa: E402
 
@@ -84,7 +85,11 @@ def _sample_versions(include_graph: bool = False) -> list[dict]:
 class PublicApiTest(unittest.TestCase):
     def setUp(self):
         self.previous_token = os.environ.get("API_AUTH_TOKEN")
+        self.previous_auth_enabled = os.environ.get("AUTH_ENABLED")
+        self.previous_keycloak_jwks_url = os.environ.get("KEYCLOAK_JWKS_URL")
         os.environ["API_AUTH_TOKEN"] = API_TOKEN
+        os.environ["AUTH_ENABLED"] = "false"
+        os.environ.pop("KEYCLOAK_JWKS_URL", None)
         app = Flask(__name__)
         app.register_blueprint(create_public_api_blueprint("http://neo4j.example"))
         self.client = app.test_client()
@@ -94,6 +99,14 @@ class PublicApiTest(unittest.TestCase):
             os.environ.pop("API_AUTH_TOKEN", None)
         else:
             os.environ["API_AUTH_TOKEN"] = self.previous_token
+        if self.previous_auth_enabled is None:
+            os.environ.pop("AUTH_ENABLED", None)
+        else:
+            os.environ["AUTH_ENABLED"] = self.previous_auth_enabled
+        if self.previous_keycloak_jwks_url is None:
+            os.environ.pop("KEYCLOAK_JWKS_URL", None)
+        else:
+            os.environ["KEYCLOAK_JWKS_URL"] = self.previous_keycloak_jwks_url
 
     def test_health_is_public(self):
         response = self.client.get("/health")
@@ -137,6 +150,45 @@ class PublicApiTest(unittest.TestCase):
         self.assertEqual(403, invalid.status_code)
         self.assertNotIn("wrong-token", invalid.get_data(as_text=True))
 
+    def test_ready_uses_keycloak_configuration_when_auth_is_enabled(self):
+        os.environ["AUTH_ENABLED"] = "true"
+        os.environ.pop("API_AUTH_TOKEN", None)
+        os.environ["KEYCLOAK_JWKS_URL"] = "http://keycloak.example/realms/inlumen/protocol/openid-connect/certs"
+
+        response = self.client.get("/ready")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("keycloak", response.get_json()["checks"]["auth_mode"])
+        self.assertEqual("configured", response.get_json()["checks"]["keycloak_jwks_url"])
+
+    @patch("public_api.validate_keycloak_bearer_token")
+    def test_keycloak_mode_accepts_valid_jwt_without_static_api_token(self, validate_token_mock):
+        os.environ["AUTH_ENABLED"] = "true"
+        os.environ.pop("API_AUTH_TOKEN", None)
+        validate_token_mock.return_value = ({"sub": "user-123"}, None)
+
+        with patch("public_api.fetch_pipeline_graph") as fetch_pipeline_graph_mock:
+            fetch_pipeline_graph_mock.side_effect = _async_return(_sample_graph())
+            response = self.client.get("/api/v1/pipelines", headers=_auth_headers("keycloak-jwt"))
+
+        self.assertEqual(200, response.status_code)
+        validate_token_mock.assert_called_once()
+
+    @patch("public_api.validate_keycloak_bearer_token")
+    def test_keycloak_mode_rejects_invalid_jwt_without_echoing_secret(self, validate_token_mock):
+        os.environ["AUTH_ENABLED"] = "true"
+        os.environ.pop("API_AUTH_TOKEN", None)
+        validate_token_mock.return_value = (
+            None,
+            AuthValidationError(401, "Unauthorized", "Signature verification failed"),
+        )
+
+        response = self.client.get("/api/v1/pipelines", headers=_auth_headers("bad-keycloak-jwt"))
+
+        self.assertEqual(401, response.status_code)
+        self.assertEqual("unauthorized", response.get_json()["error"]["code"])
+        self.assertNotIn("bad-keycloak-jwt", response.get_data(as_text=True))
+
     @patch("public_api.fetch_pipeline_graph")
     def test_authenticated_pipeline_listing(self, fetch_pipeline_graph_mock):
         fetch_pipeline_graph_mock.side_effect = _async_return(_sample_graph())
@@ -144,6 +196,10 @@ class PublicApiTest(unittest.TestCase):
         response = self.client.get("/api/v1/pipelines", headers=_auth_headers())
 
         self.assertEqual(200, response.status_code)
+        fetch_pipeline_graph_mock.assert_called_once_with(
+            "http://neo4j.example",
+            authorization=f"Bearer {API_TOKEN}",
+        )
         pipelines = response.get_json()["pipelines"]
         self.assertEqual("pipeline-123", pipelines[0]["id"])
         self.assertEqual(1, pipelines[0]["node_count"])
