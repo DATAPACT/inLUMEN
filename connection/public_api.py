@@ -16,7 +16,7 @@ from async_runtime import run_async
 from deployment_artifacts import (
     DeploymentArtifactValidationError,
     build_argo_workflow_yaml,
-    build_dockerfile_artifacts,
+    extract_pipeline_steps,
 )
 from graph_client import fetch_pipeline_graph, fetch_pipeline_versions
 from minio_gateway import get_minio_client
@@ -562,7 +562,28 @@ def _version_id_matches(version: dict[str, Any], requested_version_id: str) -> b
 
 def _build_dockerfile_artifacts_or_error(graph: dict[str, Any]) -> dict[str, Any]:
     try:
-        return build_dockerfile_artifacts(graph)
+        from deployment_agents import generate_dockerfiles_with_agent
+
+        steps = extract_pipeline_steps(graph)
+        file_refs = [
+            file_ref
+            for step in steps
+            for file_ref in step.get("files", [])
+        ]
+        filenames = [file_ref["filename"] for file_ref in file_refs]
+        ids = [file_ref["step_id"] for file_ref in file_refs]
+        dockerfiles = run_async(
+            generate_dockerfiles_with_agent(
+                filenames,
+                ids,
+                None,
+                pipeline_graph=graph,
+                file_refs=file_refs,
+            )
+        )
+        if hasattr(dockerfiles, "model_dump"):
+            return dockerfiles.model_dump()
+        return dockerfiles.dict()
     except (ValueError, DeploymentArtifactValidationError) as error:
         raise ApiError(
             422,
