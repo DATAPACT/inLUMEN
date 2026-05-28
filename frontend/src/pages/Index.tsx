@@ -200,6 +200,7 @@ const Index = () => {
   const [activeVersionName, setActiveVersionName] = useState('Main');
   const [activePipelineDescription, setActivePipelineDescription] = useState('');
   const activeVersionSaveTimeoutRef = useRef<number | null>(null);
+  const activeVersionDirtyRef = useRef(false);
   const activeVersionUidRef = useRef(MAIN_PIPELINE_VERSION_UID);
   const activeVersionNameRef = useRef('Main');
   const defaultConfig = React.useMemo(() => getDefaultChatbotConfig(), []);
@@ -332,6 +333,15 @@ const Index = () => {
     updateActiveVersionName(nextName);
   }, [updateActiveVersionName]);
 
+  const applyActiveVersionTimestamps = useCallback((version: PipelineVersionSummary) => {
+    if (version.updated_at) {
+      setPipelineLastUpdate(new Date(version.updated_at).toLocaleString());
+    }
+    if (version.created_at) {
+      setPipelineCreatedAt(new Date(version.created_at).toLocaleString());
+    }
+  }, []);
+
   const handleActiveVersionNameChange = useCallback((name: string) => {
     updateActiveVersionName(
       activeVersionUidRef.current === MAIN_PIPELINE_VERSION_UID
@@ -341,24 +351,30 @@ const Index = () => {
   }, [updateActiveVersionName]);
 
   const flushActiveVersionSnapshot = useCallback(async () => {
+    if (activeVersionSaveTimeoutRef.current) {
+      window.clearTimeout(activeVersionSaveTimeoutRef.current);
+      activeVersionSaveTimeoutRef.current = null;
+    }
+    if (!activeVersionDirtyRef.current) return null;
     if (!flowCanvasRef.current) return null;
     const version = await savePipelineActiveVersion(
       flowCanvasRef.current.getCurrentVersionGraph(),
       activeVersionUidRef.current,
       activeVersionNameRef.current,
     );
+    activeVersionDirtyRef.current = false;
     setVersionsRefreshKey((key) => key + 1);
-    if (version.pipeline_updated_at) {
-      setPipelineLastUpdate(new Date(version.pipeline_updated_at).toLocaleString());
-    }
+    applyActiveVersionTimestamps(version);
     return version;
-  }, []);
+  }, [applyActiveVersionTimestamps]);
 
   const scheduleActiveVersionSnapshot = useCallback(() => {
+    activeVersionDirtyRef.current = true;
     if (activeVersionSaveTimeoutRef.current) {
       window.clearTimeout(activeVersionSaveTimeoutRef.current);
     }
     activeVersionSaveTimeoutRef.current = window.setTimeout(() => {
+      activeVersionSaveTimeoutRef.current = null;
       void flushActiveVersionSnapshot().catch((error) => {
         console.warn("Failed to save active pipeline version:", error);
       });
@@ -713,9 +729,7 @@ const Index = () => {
 
   const handleVersionSaved = (version: PipelineVersionSummary) => {
     setVersionsRefreshKey((key) => key + 1);
-    if (version.pipeline_updated_at) {
-      setPipelineLastUpdate(new Date(version.pipeline_updated_at).toLocaleString());
-    }
+    applyActiveVersionTimestamps(version);
   };
 
   const handleOverviewUpdated = useCallback((overview: {
@@ -723,6 +737,7 @@ const Index = () => {
     description?: string;
     activeVersionUid?: string;
     updatedAt?: string | null;
+    createdAt?: string | null;
   }) => {
     const nextVersionName = overview.version?.trim();
     if (nextVersionName && nextVersionName !== activeVersionName) {
@@ -743,6 +758,9 @@ const Index = () => {
     if (overview.updatedAt) {
       setPipelineLastUpdate(new Date(overview.updatedAt).toLocaleString());
     }
+    if (overview.createdAt) {
+      setPipelineCreatedAt(new Date(overview.createdAt).toLocaleString());
+    }
   }, [activeVersionName, updateActiveVersionName]);
 
   const handleRestoreVersion = async (version: PipelineVersionSummary) => {
@@ -757,12 +775,11 @@ const Index = () => {
       const restored = await restorePipelineVersion(version.uid);
       const syncedGraph = await flowCanvasRef.current.syncFromBackend(restored.graph);
       updateActiveVersion(restored.version.uid, restored.version.name);
+      setActivePipelineDescription(restored.version.description ?? '');
+      applyActiveVersionTimestamps(restored.version);
       setVersionsRefreshKey((key) => key + 1);
 
-      const updatedAt = restored.version.pipeline_updated_at ?? syncedGraph.updated_at ?? null;
-      if (updatedAt) {
-        setPipelineLastUpdate(new Date(updatedAt).toLocaleString());
-      }
+      const updatedAt = restored.version.updated_at ?? syncedGraph.updated_at ?? null;
       setCanvasSyncStatus({
         state: 'idle',
         message: '',
@@ -794,12 +811,11 @@ const Index = () => {
       const result = await setPipelineVersionAsMain(version.uid);
       const syncedGraph = await flowCanvasRef.current.syncFromBackend(result.graph);
       updateActiveVersion(MAIN_PIPELINE_VERSION_UID, 'Main');
+      setActivePipelineDescription(result.version.description ?? '');
+      applyActiveVersionTimestamps(result.version);
       setVersionsRefreshKey((key) => key + 1);
 
-      const updatedAt = result.version.pipeline_updated_at ?? syncedGraph.updated_at ?? null;
-      if (updatedAt) {
-        setPipelineLastUpdate(new Date(updatedAt).toLocaleString());
-      }
+      const updatedAt = result.version.updated_at ?? syncedGraph.updated_at ?? null;
       setCanvasSyncStatus({
         state: 'idle',
         message: '',
@@ -840,12 +856,11 @@ const Index = () => {
       const restored = await restorePipelineVersion(MAIN_PIPELINE_VERSION_UID);
       const syncedGraph = await flowCanvasRef.current.syncFromBackend(restored.graph);
       updateActiveVersion(MAIN_PIPELINE_VERSION_UID, 'Main');
+      setActivePipelineDescription(restored.version.description ?? '');
+      applyActiveVersionTimestamps(restored.version);
       setVersionsRefreshKey((key) => key + 1);
 
-      const updatedAt = restored.version.pipeline_updated_at ?? syncedGraph.updated_at ?? null;
-      if (updatedAt) {
-        setPipelineLastUpdate(new Date(updatedAt).toLocaleString());
-      }
+      const updatedAt = restored.version.updated_at ?? syncedGraph.updated_at ?? null;
       setCanvasSyncStatus({
         state: 'idle',
         message: '',
@@ -929,6 +944,7 @@ const Index = () => {
                   onCanvasEdited={scheduleActiveVersionSnapshot}
                   onActiveVersionChange={updateActiveVersion}
                   onActiveVersionNameChange={handleActiveVersionNameChange}
+                  onPipelineDescriptionChange={setActivePipelineDescription}
                   flowCanvasRef={flowCanvasRef}
                 />
               </div>

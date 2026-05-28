@@ -76,7 +76,7 @@ def _ensure_design_pipeline(session) -> str:
             ELSE coalesce(candidate.version, 'Main')
           END,
           candidate.active_version_uid = coalesce(candidate.active_version_uid, 'main'),
-          candidate.updated_at = datetime()
+          candidate.updated_at = coalesce(candidate.updated_at, datetime())
       RETURN candidate AS p
     }
     RETURN p.uid AS pipeline_uid
@@ -222,6 +222,7 @@ def _sync_graph_to_session(
     graph: dict,
     version_name: str | None = None,
     active_version_uid: str | None = None,
+    touch_pipeline_updated_at: bool = True,
 ) -> dict:
     nodes, edges = _parse_visible_graph(graph)
     pipeline_uid = _ensure_design_pipeline(session)
@@ -230,14 +231,25 @@ def _sync_graph_to_session(
         deleted_ids = _clear_active_steps(session)
         record = session.run("""
         MATCH (p:PIPELINE {uid: $pipeline_uid})
-        SET p.updated_at = datetime()
+        OPTIONAL MATCH (p)-[:HAS_VERSION]->(activeVersion:PIPELINE_VERSION {uid: $active_version_uid})
+        SET p.updated_at = CASE
+            WHEN $touch_pipeline_updated_at THEN datetime()
+            ELSE p.updated_at
+          END
         SET p.version = CASE WHEN $version_name IS NULL THEN p.version ELSE $version_name END
         SET p.active_version_uid = CASE
             WHEN $active_version_uid IS NULL THEN p.active_version_uid
             ELSE $active_version_uid
           END
+        SET p.description = CASE
+            WHEN $active_version_uid IS NULL THEN p.description
+            ELSE coalesce(activeVersion.description, p.description, '')
+          END
         RETURN toString(p.updated_at) AS updated_at
-        """, pipeline_uid=pipeline_uid, version_name=version_name, active_version_uid=active_version_uid).single()
+        """, pipeline_uid=pipeline_uid,
+             version_name=version_name,
+             active_version_uid=active_version_uid,
+             touch_pipeline_updated_at=touch_pipeline_updated_at).single()
         return {
             "ok": True,
             "pipeline_uid": pipeline_uid,
@@ -273,9 +285,15 @@ def _sync_graph_to_session(
         ON CREATE SET s.uid = randomUUID()
         SET s += $props
         MERGE (p)-[:HAS_STEP]->(s)
-        SET p.updated_at = datetime()
+        SET p.updated_at = CASE
+            WHEN $touch_pipeline_updated_at THEN datetime()
+            ELSE p.updated_at
+          END
         RETURN s.flow_id AS flow_id
-        """, pipeline_uid=pipeline_uid, flow_id=props["flow_id"], props=props)
+        """, pipeline_uid=pipeline_uid,
+             flow_id=props["flow_id"],
+             props=props,
+             touch_pipeline_updated_at=touch_pipeline_updated_at)
 
         session.run("""
         MATCH (s:STEP {flow_id: $flow_id})
@@ -310,14 +328,25 @@ def _sync_graph_to_session(
 
     record = session.run("""
     MATCH (p:PIPELINE {uid: $pipeline_uid})
-    SET p.updated_at = datetime()
+    OPTIONAL MATCH (p)-[:HAS_VERSION]->(activeVersion:PIPELINE_VERSION {uid: $active_version_uid})
+    SET p.updated_at = CASE
+        WHEN $touch_pipeline_updated_at THEN datetime()
+        ELSE p.updated_at
+      END
     SET p.version = CASE WHEN $version_name IS NULL THEN p.version ELSE $version_name END
     SET p.active_version_uid = CASE
         WHEN $active_version_uid IS NULL THEN p.active_version_uid
         ELSE $active_version_uid
       END
+    SET p.description = CASE
+        WHEN $active_version_uid IS NULL THEN p.description
+        ELSE coalesce(activeVersion.description, p.description, '')
+      END
     RETURN toString(p.updated_at) AS updated_at
-    """, pipeline_uid=pipeline_uid, version_name=version_name, active_version_uid=active_version_uid).single()
+    """, pipeline_uid=pipeline_uid,
+         version_name=version_name,
+         active_version_uid=active_version_uid,
+         touch_pipeline_updated_at=touch_pipeline_updated_at).single()
 
     return {
         "ok": True,
@@ -334,6 +363,32 @@ def _graph_with_metadata(graph: dict, updated_at: str | None = None) -> dict:
     if updated_at is not None:
         graph_with_metadata["updated_at"] = updated_at
     return graph_with_metadata
+
+
+def _sync_version_graph_json_updated_at(
+    session,
+    version_uid: str,
+    updated_at: str | None,
+    graph: dict | None = None,
+) -> None:
+    if not updated_at:
+        return
+
+    if graph is None:
+        record = session.run("""
+        MATCH (v:PIPELINE_VERSION {uid: $version_uid})
+        RETURN v.graph_json AS graph_json
+        """, version_uid=version_uid).single()
+        try:
+            graph = json.loads((record["graph_json"] if record else None) or "{}")
+        except Exception:
+            graph = {}
+
+    graph_with_metadata = _graph_with_metadata(graph if isinstance(graph, dict) else {}, updated_at)
+    session.run("""
+    MATCH (v:PIPELINE_VERSION {uid: $version_uid})
+    SET v.graph_json = $graph_json
+    """, version_uid=version_uid, graph_json=json.dumps(graph_with_metadata, ensure_ascii=False))
 
 
 def _snapshot_object_name(version_uid: str, bucket: str, filename: str) -> str:
@@ -508,6 +563,7 @@ def _upsert_main_pipeline_version(
     pipeline_uid: str,
     graph: dict,
     updated_at: str | None = None,
+    description: str | None = None,
 ) -> dict | None:
     graph_with_metadata = _graph_with_metadata(graph, updated_at)
     snapshots = _snapshot_version_files(MAIN_VERSION_UID, graph_with_metadata)
@@ -527,7 +583,10 @@ def _upsert_main_pipeline_version(
         v.node_count = $node_count,
         v.edge_count = $edge_count,
         v.file_count = $file_count,
-        v.description = coalesce(v.description, ''),
+        v.description = CASE
+          WHEN $description IS NULL THEN coalesce(v.description, '')
+          ELSE $description
+        END,
         v.graph_json = $graph_json,
         v.file_snapshots_json = $file_snapshots_json,
         v.updated_at = datetime()
@@ -555,8 +614,16 @@ def _upsert_main_pipeline_version(
          node_count=len(nodes),
          edge_count=len(edges),
          file_count=file_count,
+         description=description,
          graph_json=graph_json,
          file_snapshots_json=file_snapshots_json).single()
+    if record:
+        _sync_version_graph_json_updated_at(
+            session,
+            MAIN_VERSION_UID,
+            record["updated_at"],
+            graph_with_metadata,
+        )
     return record.data() if record else None
 
 
@@ -593,6 +660,7 @@ def _upsert_pipeline_version_snapshot(
         v.updated_at = datetime()
     MERGE (p)-[:HAS_VERSION]->(v)
     SET p.version = $version_name,
+        p.description = coalesce(v.description, p.description, ''),
         p.active_version_uid = $version_uid,
         p.updated_at = datetime()
     RETURN
@@ -604,6 +672,7 @@ def _upsert_pipeline_version_snapshot(
       v.node_count AS node_count,
       v.edge_count AS edge_count,
       v.file_count AS file_count,
+      v.description AS description,
       toString(v.created_at) AS created_at,
       toString(v.updated_at) AS updated_at,
       toString(p.updated_at) AS pipeline_updated_at
@@ -615,6 +684,13 @@ def _upsert_pipeline_version_snapshot(
          file_count=file_count,
          graph_json=graph_json,
          file_snapshots_json=file_snapshots_json).single()
+    if record:
+        _sync_version_graph_json_updated_at(
+            session,
+            version_uid,
+            record["updated_at"],
+            graph_with_metadata,
+        )
     return record.data() if record else None
 
 # Define a function to set the CORS headers
@@ -1060,8 +1136,8 @@ def neo4j_get_overview_properties():
         ELSE coalesce(activeVersion.description, '')
       END AS description,
       coalesce(p.active_version_uid, 'main') AS active_version_uid,
-      toString(p.updated_at) AS updated_at, 
-      toString(p.created_at) AS created_at
+      toString(coalesce(activeVersion.updated_at, p.updated_at)) AS updated_at,
+      toString(coalesce(activeVersion.created_at, p.created_at)) AS created_at
     """
     try:
         with driver.session() as session:
@@ -1131,10 +1207,7 @@ def neo4j_update_pipeline_overview():
                   WHEN $label = '' THEN p.label
                   ELSE $label
                 END,
-                p.description = CASE
-                  WHEN $active_version_uid = $main_uid THEN $description
-                  ELSE p.description
-                END,
+                p.description = $description,
                 p.active_version_uid = $active_version_uid,
                 p.updated_at = datetime()
             MERGE (v:PIPELINE_VERSION {uid: $active_version_uid})
@@ -1153,8 +1226,8 @@ def neo4j_update_pipeline_overview():
               coalesce(v.name, p.version, 'Main') AS version,
               coalesce(v.description, '') AS description,
               v.uid AS active_version_uid,
-              toString(p.created_at) AS created_at,
-              toString(p.updated_at) AS updated_at
+              toString(v.created_at) AS created_at,
+              toString(v.updated_at) AS updated_at
             """, pipeline_uid=pipeline_uid,
                  name=name,
                  label=label,
@@ -1162,6 +1235,13 @@ def neo4j_update_pipeline_overview():
                  description=description,
                  active_version_uid=active_version_uid,
                  main_uid=MAIN_VERSION_UID).single()
+
+            if record:
+                _sync_version_graph_json_updated_at(
+                    session,
+                    active_version_uid,
+                    record["updated_at"],
+                )
 
             return jsonify(record.data() if record else {
                 "version": version_name,
@@ -1274,6 +1354,7 @@ def neo4j_save_pipeline_version():
                 node_count: $node_count,
                 edge_count: $edge_count,
                 file_count: $file_count,
+                description: coalesce(p.description, ''),
                 graph_json: $graph_json,
                 file_snapshots_json: $file_snapshots_json,
                 created_at: datetime(),
@@ -1289,6 +1370,7 @@ def neo4j_save_pipeline_version():
               v.node_count AS node_count,
               v.edge_count AS edge_count,
               v.file_count AS file_count,
+              v.description AS description,
               toString(v.created_at) AS created_at,
               toString(v.updated_at) AS updated_at,
               toString(p.updated_at) AS pipeline_updated_at
@@ -1300,6 +1382,13 @@ def neo4j_save_pipeline_version():
                  file_count=file_count,
                  graph_json=graph_json,
                  file_snapshots_json=json.dumps(file_snapshots, ensure_ascii=False)).single()
+            if record:
+                _sync_version_graph_json_updated_at(
+                    session,
+                    version_uid,
+                    record["updated_at"],
+                    graph_with_metadata,
+                )
             return jsonify({"version": record.data() if record else None}), 200
     except Exception as e:
         print("[neo4j_api.py] Error saving pipeline version:", e)
@@ -1399,6 +1488,7 @@ def neo4j_restore_pipeline_version():
               v.node_count AS node_count,
               v.edge_count AS edge_count,
               v.file_count AS file_count,
+              v.description AS description,
               v.graph_json AS graph_json,
               toString(v.created_at) AS created_at,
               toString(v.updated_at) AS updated_at
@@ -1412,14 +1502,21 @@ def neo4j_restore_pipeline_version():
                 graph = {}
             if not isinstance(graph, dict):
                 graph = {}
+            _sync_version_graph_json_updated_at(
+                session,
+                record["uid"],
+                record["updated_at"],
+                graph,
+            )
             file_restore = _restore_version_file_snapshots(graph)
             sync_result = _sync_graph_to_session(
                 session,
                 graph,
                 version_name=record["name"],
                 active_version_uid=record["uid"],
+                touch_pipeline_updated_at=False,
             )
-            graph["updated_at"] = sync_result.get("updated_at")
+            graph["updated_at"] = record["updated_at"]
             version = {
                 "uid": record["uid"],
                 "name": record["name"],
@@ -1429,6 +1526,7 @@ def neo4j_restore_pipeline_version():
                 "node_count": record["node_count"],
                 "edge_count": record["edge_count"],
                 "file_count": record["file_count"] if record["file_count"] is not None else _count_graph_files(graph),
+                "description": record["description"],
                 "created_at": record["created_at"],
                 "updated_at": record["updated_at"],
                 "pipeline_updated_at": sync_result.get("updated_at"),
@@ -1464,6 +1562,7 @@ def neo4j_set_pipeline_version_as_main():
               v.node_count AS node_count,
               v.edge_count AS edge_count,
               v.file_count AS file_count,
+              v.description AS description,
               v.graph_json AS graph_json,
               toString(v.created_at) AS created_at,
               toString(v.updated_at) AS updated_at
@@ -1477,6 +1576,12 @@ def neo4j_set_pipeline_version_as_main():
                 graph = {}
             if not isinstance(graph, dict):
                 graph = {}
+            _sync_version_graph_json_updated_at(
+                session,
+                record["uid"],
+                record["updated_at"],
+                graph,
+            )
 
             file_restore = _restore_version_file_snapshots(graph)
             sync_result = _sync_graph_to_session(
@@ -1491,6 +1596,7 @@ def neo4j_set_pipeline_version_as_main():
                 sync_result["pipeline_uid"],
                 graph,
                 sync_result.get("updated_at"),
+                description=record["description"] or "",
             )
             source_version = {
                 "uid": record["uid"],
@@ -1501,6 +1607,7 @@ def neo4j_set_pipeline_version_as_main():
                 "node_count": record["node_count"],
                 "edge_count": record["edge_count"],
                 "file_count": record["file_count"] if record["file_count"] is not None else _count_graph_files(graph),
+                "description": record["description"],
                 "created_at": record["created_at"],
                 "updated_at": record["updated_at"],
             }
@@ -1546,9 +1653,9 @@ def neo4j_delete_pipeline_version():
             _delete_version_file_snapshots(version_uid)
             record = session.run("""
             MATCH (p:PIPELINE {status:'design'})-[:HAS_VERSION]->(v:PIPELINE_VERSION {uid: $version_uid})
-            WITH p, v, v.name AS deleted_name
+            WITH p, v, v.name AS deleted_name, p.active_version_uid = $version_uid AS deleted_was_active
             DETACH DELETE v
-            WITH p, deleted_name
+            WITH p, deleted_name, deleted_was_active
             CALL {
               WITH p, deleted_name
               OPTIONAL MATCH (p)-[:HAS_VERSION]->(remaining:PIPELINE_VERSION)
@@ -1556,6 +1663,7 @@ def neo4j_delete_pipeline_version():
                 count(remaining) AS remaining_count,
                 sum(CASE WHEN remaining.name = deleted_name THEN 1 ELSE 0 END) AS same_name_remaining
             }
+            OPTIONAL MATCH (p)-[:HAS_VERSION]->(mainVersion:PIPELINE_VERSION {uid: $main_uid})
             SET p.version = CASE
                 WHEN p.version <> deleted_name THEN p.version
                 WHEN same_name_remaining > 0 THEN p.version
@@ -1565,13 +1673,17 @@ def neo4j_delete_pipeline_version():
                 WHEN p.active_version_uid <> $version_uid THEN p.active_version_uid
                 ELSE 'main'
               END,
+              p.description = CASE
+                WHEN deleted_was_active THEN coalesce(mainVersion.description, '')
+                ELSE p.description
+              END,
               p.updated_at = datetime()
             RETURN
               deleted_name,
               remaining_count,
               p.version AS pipeline_version,
               toString(p.updated_at) AS pipeline_updated_at
-            """, version_uid=version_uid).single()
+            """, version_uid=version_uid, main_uid=MAIN_VERSION_UID).single()
             if not record:
                 return jsonify({"error": f"Pipeline version not found: {version_uid}"}), 404
             return jsonify({
