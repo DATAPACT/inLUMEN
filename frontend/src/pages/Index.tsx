@@ -757,6 +757,7 @@ const Index = () => {
       const restored = await restorePipelineVersion(version.uid);
       const syncedGraph = await flowCanvasRef.current.syncFromBackend(restored.graph);
       updateActiveVersion(restored.version.uid, restored.version.name);
+      setActivePipelineDescription(restored.version.description ?? '');
       setVersionsRefreshKey((key) => key + 1);
 
       const updatedAt = restored.version.pipeline_updated_at ?? syncedGraph.updated_at ?? null;
@@ -794,6 +795,7 @@ const Index = () => {
       const result = await setPipelineVersionAsMain(version.uid);
       const syncedGraph = await flowCanvasRef.current.syncFromBackend(result.graph);
       updateActiveVersion(MAIN_PIPELINE_VERSION_UID, 'Main');
+      setActivePipelineDescription(result.version.description ?? '');
       setVersionsRefreshKey((key) => key + 1);
 
       const updatedAt = result.version.pipeline_updated_at ?? syncedGraph.updated_at ?? null;
@@ -840,6 +842,7 @@ const Index = () => {
       const restored = await restorePipelineVersion(MAIN_PIPELINE_VERSION_UID);
       const syncedGraph = await flowCanvasRef.current.syncFromBackend(restored.graph);
       updateActiveVersion(MAIN_PIPELINE_VERSION_UID, 'Main');
+      setActivePipelineDescription(restored.version.description ?? '');
       setVersionsRefreshKey((key) => key + 1);
 
       const updatedAt = restored.version.pipeline_updated_at ?? syncedGraph.updated_at ?? null;
@@ -929,6 +932,7 @@ const Index = () => {
                   onCanvasEdited={scheduleActiveVersionSnapshot}
                   onActiveVersionChange={updateActiveVersion}
                   onActiveVersionNameChange={handleActiveVersionNameChange}
+                  onPipelineDescriptionChange={setActivePipelineDescription}
                   flowCanvasRef={flowCanvasRef}
                 />
               </div>

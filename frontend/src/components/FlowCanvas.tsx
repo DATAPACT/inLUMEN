@@ -67,6 +67,7 @@ interface FlowCanvasProps {
   onCanvasEdited?: () => void;
   onActiveVersionChange?: (versionUid: string) => void;
   onActiveVersionNameChange?: (versionName: string) => void;
+  onPipelineDescriptionChange?: (description: string) => void;
 }
 
 export interface FlowCanvasRef {
@@ -108,6 +109,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   onCanvasEdited,
   onActiveVersionChange,
   onActiveVersionNameChange,
+  onPipelineDescriptionChange,
 }, ref) => {
   const [nodes, setNodes] = useState<Node[]>(() => {
     const savedNodes = localStorage.getItem('ai-flow-nodes');
@@ -150,13 +152,16 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const applyGraph = useCallback((data: unknown) => {
     const g = normalizeGraph(data);
     const pipeline = data && typeof data === "object"
-      ? (data as { pipeline?: { active_version_uid?: unknown } }).pipeline
+      ? (data as { pipeline?: { active_version_uid?: unknown; active_version_name?: unknown; description?: unknown } }).pipeline
       : null;
     if (typeof pipeline?.active_version_uid === "string" && pipeline.active_version_uid.trim()) {
       onActiveVersionChange?.(pipeline.active_version_uid);
     }
     if (typeof pipeline?.active_version_name === "string" && pipeline.active_version_name.trim()) {
       onActiveVersionNameChange?.(pipeline.active_version_name);
+    }
+    if (typeof pipeline?.description === "string") {
+      onPipelineDescriptionChange?.(pipeline.description);
     }
     setNodes(g.nodes);
     setEdges(g.edges);
@@ -172,7 +177,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     }
 
     return g;
-  }, [onActiveVersionChange, onActiveVersionNameChange, onNodeSelect]);
+  }, [onActiveVersionChange, onActiveVersionNameChange, onNodeSelect, onPipelineDescriptionChange]);
 
   const fetchGraphAndApply = useCallback(async () => {
     const data = await fetchPipelineGraph();
@@ -695,6 +700,7 @@ export const WrappedFlowCanvas = ({
   onCanvasEdited,
   onActiveVersionChange,
   onActiveVersionNameChange,
+  onPipelineDescriptionChange,
   flowCanvasRef,
 }: WrappedFlowCanvasProps) => (
   <ReactFlowProvider>
@@ -710,6 +716,7 @@ export const WrappedFlowCanvas = ({
       onCanvasEdited={onCanvasEdited}
       onActiveVersionChange={onActiveVersionChange}
       onActiveVersionNameChange={onActiveVersionNameChange}
+      onPipelineDescriptionChange={onPipelineDescriptionChange}
     />
   </ReactFlowProvider>
 );
