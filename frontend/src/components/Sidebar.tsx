@@ -47,6 +47,7 @@ type PipelineOverviewUpdate = {
   description?: string;
   activeVersionUid?: string;
   updatedAt?: string | null;
+  createdAt?: string | null;
 };
 
 interface SidebarProps {
@@ -290,6 +291,7 @@ export function Sidebar({
           description: data?.description ?? "",
           activeVersionUid: data?.active_version_uid,
           updatedAt: data?.updated_at ?? null,
+          createdAt: data?.created_at ?? null,
         });
       } catch (e: unknown) {
         if (isCancelled) return;
@@ -403,6 +405,7 @@ export function Sidebar({
         description: savedDescription,
         activeVersionUid: saved.active_version_uid,
         updatedAt: saved.updated_at ?? null,
+        createdAt: saved.created_at ?? null,
       });
     } catch (e: unknown) {
       console.error("[Sidebar.tsx] Overview save error:", e);
