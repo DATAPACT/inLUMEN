@@ -45,9 +45,12 @@ inLUMEN's core functionality is provided by LLM-powered agents that serve as hel
 
 |What (types)|How(Process)|Values|
 |------------|------------|------|
-|Workflow steps generated accurately when full pipeline descriptions are given|	User Evaluation| >80%|
-|Avg. time from design handoff to first executable/valid workflow| System logging | <5 minutes|
-|Workflow execution success rate of generated YAML > 80% in simulated environment|	Integration test success| >80%|
+|Accuracy|	Benchmark on (partly synthetic) datasets by comparing agent-generated pipelines (Argo Workflows YAML format) to existing pipelines (Argo Workflows YAML format).| Cosine similarity >= 0.8|
+|Usability| User Evaluation via Questionnaire about Usability/Ease of Use involving partners| Mean SUS score of at least 80 across representative participants from relevant use cases.|
+|Deployment Success Rate|	Record response from deployment tools after providing deployment files. | >90% of generated pipeline designs executable|
+|*Ability to perform compliance-by-design |*Modify non-compliant (mutated) pipelines so that they become compliant by providing legal analysis from LexAlign tool. Results validation done by human experts.|Expert-confirmed successful refinement for >90% of mutations.| 
+
+(*combined with LexAlign mutation testing) 
 
 ## **Related Project Links**
 | Project Links |
