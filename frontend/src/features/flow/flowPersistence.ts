@@ -1,6 +1,6 @@
 import { Edge, Node } from 'reactflow';
 import { apiFetch } from '@/utils/apiFetch';
-import { MINIO_API_URL, NEO4J_API_URL, LLM_API_URL } from '@/config/api';
+import { INLUMEN_API_URL } from '@/config/api';
 import { ChatbotConfig, buildLLMRequestConfig } from '@/services/chatbotService';
 
 export const MAIN_PIPELINE_VERSION_UID = 'main';
@@ -46,9 +46,9 @@ export type PipelineOverviewMetadata = {
   updated_at?: string | null;
 };
 
-export const addNodeToNeo4j = async (node: Node) => {
+export const addNodeToBackend = async (node: Node) => {
   try {
-    const response = await apiFetch(`${NEO4J_API_URL}/neo4j_add_node`, {
+    const response = await apiFetch(`${INLUMEN_API_URL}/api/graph/nodes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -63,17 +63,17 @@ export const addNodeToNeo4j = async (node: Node) => {
       }),
     });
 
-    if (!response.ok) throw new Error('Failed to add node to Neo4j');
+    if (!response.ok) throw new Error('Failed to add node');
     const result = await response.json();
-    console.log("[flowPersistence.ts] Neo4j add_node:", result);
+    console.log("[flowPersistence.ts] Graph add_node:", result);
   } catch (err) {
-    console.error("[flowPersistence.ts] Neo4j add node error:", err);
+    console.error("[flowPersistence.ts] Graph add node error:", err);
   }
 };
 
-export const updateNodePositionInNeo4j = async (node: Node) => {
+export const updateNodePositionInBackend = async (node: Node) => {
   try {
-    await apiFetch(`${NEO4J_API_URL}/neo4j_update_node_position`, {
+    await apiFetch(`${INLUMEN_API_URL}/api/graph/nodes/position`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -87,9 +87,9 @@ export const updateNodePositionInNeo4j = async (node: Node) => {
   }
 };
 
-export const addEdgeToNeo4j = async (sourceNode: Node, targetNode: Node) => {
+export const addEdgeToBackend = async (sourceNode: Node, targetNode: Node) => {
   try {
-    const response = await apiFetch(`${NEO4J_API_URL}/neo4j_add_edge`, {
+    const response = await apiFetch(`${INLUMEN_API_URL}/api/graph/edges`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -100,17 +100,17 @@ export const addEdgeToNeo4j = async (sourceNode: Node, targetNode: Node) => {
       }),
     });
 
-    if (!response.ok) throw new Error('Failed to add edge to Neo4j');
+    if (!response.ok) throw new Error('Failed to add edge');
     const result = await response.json();
-    console.log("[flowPersistence.ts] Neo4j adding edge:", result);
+    console.log("[flowPersistence.ts] Graph adding edge:", result);
   } catch (err) {
-    console.error("[flowPersistence.ts] Neo4j adding edge error:", err);
+    console.error("[flowPersistence.ts] Graph adding edge error:", err);
   }
 };
 
-export const deleteEdgeToNeo4j = async (sourceNode: Node, targetNode: Node) => {
+export const deleteEdgeFromBackend = async (sourceNode: Node, targetNode: Node) => {
   try {
-    const response = await apiFetch(`${NEO4J_API_URL}/neo4j_delete_edge`, {
+    const response = await apiFetch(`${INLUMEN_API_URL}/api/graph/edges`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -121,92 +121,56 @@ export const deleteEdgeToNeo4j = async (sourceNode: Node, targetNode: Node) => {
       }),
     });
 
-    if (!response.ok) throw new Error('Failed to delete edge to Neo4j');
+    if (!response.ok) throw new Error('Failed to delete edge');
     const result = await response.json();
-    console.log("[flowPersistence.ts] Neo4j deleting edge:", result);
+    console.log("[flowPersistence.ts] Graph deleting edge:", result);
   } catch (err) {
-    console.error("[flowPersistence.ts] Neo4j delete edge error:", err);
+    console.error("[flowPersistence.ts] Graph delete edge error:", err);
   }
 };
 
-export const deleteNodeFromNeo4jAndMinIO = async (nodeId: string) => {
+export const deleteNodeFromBackend = async (nodeId: string) => {
   try {
     const response = await apiFetch(
-      `${NEO4J_API_URL}/neo4j_delete_node/${nodeId}`,
+      `${INLUMEN_API_URL}/api/graph/nodes/${encodeURIComponent(nodeId)}`,
       { method: 'DELETE' },
     );
-    if (!response.ok) throw new Error('Failed to delete node from Neo4j');
+    if (!response.ok) throw new Error('Failed to delete node');
     const result = await response.json();
-    console.log("[flowPersistence.ts] Neo4j delete_node:", result);
-
-    try {
-      const minioResponse = await apiFetch(
-        `${MINIO_API_URL}/minio_clear_bucket?bucket_id=${nodeId}`,
-        { method: 'DELETE' },
-      );
-      if (!minioResponse.ok) throw new Error('Failed to clear MinIO bucket');
-      const minioResult = await minioResponse.json().catch(() => null);
-      console.log(
-        `[flowPersistence.ts] MinIO bucket cleared for nodeId=${nodeId}`,
-        minioResult,
-      );
-    } catch (minioErr) {
-      console.warn(
-        `[flowPersistence.ts] Neo4j node deleted, but MinIO cleanup failed for nodeId=${nodeId}`,
-        minioErr,
-      );
-    }
+    console.log("[flowPersistence.ts] Graph delete_node:", result);
   } catch (err) {
-    console.error("[flowPersistence.ts] deleteNodeFromNeo4jAndMinIO error:", err);
+    console.error("[flowPersistence.ts] deleteNodeFromBackend error:", err);
   }
 };
 
-export const clearNeo4jAndMinIO = async () => {
+export const clearBackendGraph = async () => {
   try {
-    const neoResponse = await apiFetch(`${NEO4J_API_URL}/neo4j_clear_nodes`, {
+    const response = await apiFetch(`${INLUMEN_API_URL}/api/graph/nodes`, {
       method: 'DELETE',
     });
-    if (!neoResponse.ok) throw new Error('Failed to clear Neo4j');
-    const result = await neoResponse.json();
-    const ids: string[] = result?.deleted_step_flow_ids ?? [];
-    console.log("Neo4j cleared:", result);
-
-    for (const id of ids) {
-      try {
-        const minioResponse = await apiFetch(
-          `${MINIO_API_URL}/minio_clear_bucket?bucket_id=${id}`,
-          { method: 'DELETE' },
-        );
-        if (!minioResponse.ok) {
-          const txt = await minioResponse.text().catch(() => "");
-          throw new Error(`MinIO clear failed (${minioResponse.status}): ${txt}`);
-        }
-        const minioResult = await minioResponse.json().catch(() => null);
-        console.log(`[flowPersistence.ts] MinIO bucket cleared for flow_id=${id}`, minioResult);
-      } catch (minioErr) {
-        console.warn(`[flowPersistence.ts] Failed to clear MinIO bucket for flow_id=${id}`, minioErr);
-      }
-    }
+    if (!response.ok) throw new Error('Failed to clear graph');
+    const result = await response.json();
+    console.log("Backend graph cleared:", result);
   } catch (err) {
-    console.error("[flowPersistence.ts] clearNeo4jAndMinIO error:", err);
+    console.error("[flowPersistence.ts] clearBackendGraph error:", err);
   }
 };
 
 export const fetchPipelineUpdatedAt = async (): Promise<string | null> => {
-  const res = await apiFetch(`${NEO4J_API_URL}/neo4j_get_pipeline_updated_at`, { method: "GET" });
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/updated-at`, { method: "GET" });
   if (!res.ok) throw new Error("Failed to fetch pipeline updated_at");
   const data = await res.json();
   return data?.updated_at ?? null;
 };
 
 export const fetchPipelineGraph = async () => {
-  const res = await apiFetch(`${NEO4J_API_URL}/neo4j_get_graph`, { method: "GET" });
-  if (!res.ok) throw new Error("Failed to fetch neo4j_get_graph");
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/graph`, { method: "GET" });
+  if (!res.ok) throw new Error("Failed to fetch pipeline graph");
   return res.json();
 };
 
 export const fetchPipelineVersions = async (): Promise<PipelineVersionSummary[]> => {
-  const res = await apiFetch(`${NEO4J_API_URL}/neo4j_list_pipeline_versions`, { method: "GET" });
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/versions`, { method: "GET" });
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
     throw new Error(`Failed to fetch pipeline versions (${res.status}): ${txt}`);
@@ -219,7 +183,7 @@ export const savePipelineVersion = async (
   name: string,
   graph: PipelineVersionGraph,
 ): Promise<PipelineVersionSummary> => {
-  const res = await apiFetch(`${NEO4J_API_URL}/neo4j_save_pipeline_version`, {
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/versions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name, graph }),
@@ -238,7 +202,7 @@ export const savePipelineVersion = async (
 export const savePipelineMain = async (
   graph: PipelineVersionGraph,
 ): Promise<PipelineVersionSummary> => {
-  const res = await apiFetch(`${NEO4J_API_URL}/neo4j_save_pipeline_main`, {
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/versions/main`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ graph }),
@@ -259,7 +223,7 @@ export const savePipelineActiveVersion = async (
   versionUid: string,
   versionName: string,
 ): Promise<PipelineVersionSummary> => {
-  const res = await apiFetch(`${NEO4J_API_URL}/neo4j_save_pipeline_active_version`, {
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/versions/active`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ graph, uid: versionUid, name: versionName }),
@@ -282,7 +246,7 @@ export const updatePipelineOverviewMetadata = async (
     activeVersionUid?: string;
   },
 ): Promise<PipelineOverviewMetadata> => {
-  const res = await apiFetch(`${NEO4J_API_URL}/neo4j_update_pipeline_overview`, {
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/overview`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -301,7 +265,7 @@ export const updatePipelineOverviewMetadata = async (
 export const restorePipelineVersion = async (
   versionUid: string,
 ): Promise<PipelineVersionRestore> => {
-  const res = await apiFetch(`${NEO4J_API_URL}/neo4j_restore_pipeline_version`, {
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/versions/restore`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ uid: versionUid }),
@@ -320,7 +284,7 @@ export const restorePipelineVersion = async (
 export const setPipelineVersionAsMain = async (
   versionUid: string,
 ): Promise<PipelineVersionSetMainResult> => {
-  const res = await apiFetch(`${NEO4J_API_URL}/neo4j_set_pipeline_version_as_main`, {
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/versions/set-main`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ uid: versionUid }),
@@ -339,7 +303,7 @@ export const setPipelineVersionAsMain = async (
 export const deletePipelineVersion = async (
   versionUid: string,
 ): Promise<{ deleted_uid?: string; remaining_count?: number; pipeline_updated_at?: string | null }> => {
-  const res = await apiFetch(`${NEO4J_API_URL}/neo4j_delete_pipeline_version`, {
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/versions`, {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ uid: versionUid }),
@@ -352,10 +316,10 @@ export const deletePipelineVersion = async (
 };
 
 export const rebuildBackendFromFlow = async (nodes: Node[], edges: Edge[]) => {
-  await clearNeo4jAndMinIO();
+  await clearBackendGraph();
 
   for (const node of nodes) {
-    await addNodeToNeo4j(node);
+    await addNodeToBackend(node);
   }
 
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
@@ -369,12 +333,12 @@ export const rebuildBackendFromFlow = async (nodes: Node[], edges: Edge[]) => {
       );
       continue;
     }
-    await addEdgeToNeo4j(sourceNode, targetNode);
+    await addEdgeToBackend(sourceNode, targetNode);
   }
 };
 
 export const generatePipelineYaml = async (activeChatbotConfig?: ChatbotConfig) => {
-  const filesRes = await apiFetch(`${NEO4J_API_URL}/neo4j_get_all_files`, {
+  const filesRes = await apiFetch(`${INLUMEN_API_URL}/api/files`, {
     method: "GET",
   });
 
@@ -393,7 +357,7 @@ export const generatePipelineYaml = async (activeChatbotConfig?: ChatbotConfig) 
     : undefined;
 
   const response = await apiFetch(
-    `${LLM_API_URL}/agentic_generate_dockerfiles`,
+    `${INLUMEN_API_URL}/agentic_generate_dockerfiles`,
     {
       method: "POST",
       headers: {
@@ -417,7 +381,7 @@ export const generatePipelineYaml = async (activeChatbotConfig?: ChatbotConfig) 
   console.log("[flowPersistence.ts] Agents generated Dockerfile(s):", dockerfiles_json);
 
   const responseYAML = await apiFetch(
-    `${LLM_API_URL}/agentic_generate_yaml`,
+    `${INLUMEN_API_URL}/agentic_generate_yaml`,
     {
       method: "POST",
       headers: {

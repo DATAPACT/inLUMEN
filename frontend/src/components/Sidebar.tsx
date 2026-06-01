@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { apiFetch } from '@/utils/apiFetch';
-import { NEO4J_API_URL, LLM_API_URL } from '@/config/api';
+import { INLUMEN_API_URL } from '@/config/api';
 import { ChatbotConfig, buildLLMRequestConfig } from '@/services/chatbotService';
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -82,7 +82,7 @@ type DragNodeType = {
   };
 };
 
-type Neo4jFileRef = {
+type BackendFileRef = {
   filename?: string;
   bucket?: string;
   [key: string]: unknown;
@@ -234,8 +234,8 @@ export function Sidebar({
     });
   };
 
-  const fetchNeo4jFiles = async (): Promise<Neo4jFileRef[]> => {
-    const filesRes = await apiFetch(`${NEO4J_API_URL}/neo4j_get_all_files`, { method: "GET" });
+  const fetchBackendFiles = async (): Promise<BackendFileRef[]> => {
+    const filesRes = await apiFetch(`${INLUMEN_API_URL}/api/files`, { method: "GET" });
     if (!filesRes.ok) {
       const errText = await filesRes.text().catch(() => "");
       throw new Error(`Failed to fetch files: ${filesRes.status} ${filesRes.statusText} ${errText}`);
@@ -243,8 +243,8 @@ export function Sidebar({
     return await filesRes.json(); // expected: [{filename,bucket}, ...]
   };
 
-  const generateDockerfiles = async (files: Neo4jFileRef[]): Promise<DockerfileGenerationResponse> => {
-    const genRes = await apiFetch(`${LLM_API_URL}/agentic_generate_dockerfiles`, {
+  const generateDockerfiles = async (files: BackendFileRef[]): Promise<DockerfileGenerationResponse> => {
+    const genRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_dockerfiles`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -263,7 +263,7 @@ export function Sidebar({
 
   // fetch overview properties when opening Overview tab
   const fetchPipelineOverview = async (): Promise<PipelineOverviewResponse> => {
-    const res = await apiFetch(`${NEO4J_API_URL}/neo4j_get_overview_properties`, { method: "GET" });
+    const res = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/overview`, { method: "GET" });
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
       throw new Error(`Failed to fetch overview: ${res.status} ${res.statusText} ${errText}`);
@@ -313,7 +313,7 @@ export function Sidebar({
       clearDockerfileDownloads();
       clearYamlDownload();
 
-      const files = await fetchNeo4jFiles();
+      const files = await fetchBackendFiles();
       const dockerfile_json = await generateDockerfiles(files);
 
       const dockerfiles = dockerfile_json?.dockerfiles ?? [];
@@ -332,7 +332,7 @@ export function Sidebar({
 
       setDockerfileDownloads(links);
 
-      const yamlRes = await apiFetch(`${LLM_API_URL}/agentic_generate_yaml`, {
+      const yamlRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_yaml`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

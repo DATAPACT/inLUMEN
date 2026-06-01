@@ -58,11 +58,11 @@ services:
         aliases:
           - datapact-minio-db
 
-  connection:
+  backend:
     build:
       context: ./connection
-    container_name: datapact_connection
-    hostname: datapact-connection
+    container_name: inlumen_backend
+    hostname: inlumen-backend
     restart: unless-stopped
     depends_on:
       neo4j:
@@ -71,17 +71,15 @@ services:
         condition: service_started
     working_dir: /usr/inlumen
     ports:
-      - "${MINIO_API_PORT:-5003}:${MINIO_API_PORT:-5003}"
-      - "${NEO4J_API_PORT:-5001}:${NEO4J_API_PORT:-5001}"
-      - "${LLM_API_PORT:-5002}:${LLM_API_PORT:-5002}"
+      - "${INLUMEN_API_PORT:-5000}:${INLUMEN_API_PORT:-5000}"
     volumes:
       - ./connection:/usr/inlumen
     environment:
       PYTHONUNBUFFERED: "1"
       FRONTEND_PORT: ${FRONTEND_PORT:-8080}
+      INLUMEN_API_PORT: ${INLUMEN_API_PORT:-5000}
       MINIO_API_PORT: ${MINIO_API_PORT:-5003}
       NEO4J_API_PORT: ${NEO4J_API_PORT:-5001}
-      LLM_API_PORT: ${LLM_API_PORT:-5002}
       LLM_PROVIDER: ${LLM_PROVIDER:-openrouter}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://openrouter.ai/api/v1}
       LLM_API_KEY: ${LLM_API_KEY:-}
@@ -104,11 +102,11 @@ services:
   frontend:
     build:
       context: ./frontend
-    container_name: datapact_frontend
-    hostname: datapact-frontend
+    container_name: inlumen_frontend
+    hostname: inlumen-frontend
     restart: unless-stopped
     depends_on:
-      connection:
+      backend:
         condition: service_started
     ports:
       - "${FRONTEND_PORT:-8080}:${FRONTEND_PORT:-8080}"
@@ -118,9 +116,7 @@ services:
     environment:
       FRONTEND_PORT: ${FRONTEND_PORT:-8080}
       NODE_ENV: development
-      VITE_MINIO_API_PORT: ${MINIO_API_PORT:-5003}
-      VITE_NEO4J_API_PORT: ${NEO4J_API_PORT:-5001}
-      VITE_LLM_API_PORT: ${LLM_API_PORT:-5002}
+      VITE_INLUMEN_API_PORT: ${INLUMEN_API_PORT:-5000}
       VITE_AUTH_ENABLED: ${VITE_AUTH_ENABLED:-${AUTH_ENABLED:-false}}
       VITE_KEYCLOAK_URL: ${VITE_KEYCLOAK_URL:-http://localhost:8081}
       VITE_KEYCLOAK_REALM: ${VITE_KEYCLOAK_REALM:-inlumen}

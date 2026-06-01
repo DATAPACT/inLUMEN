@@ -1,17 +1,17 @@
 import { apiFetch } from '@/utils/apiFetch';
-import { MINIO_API_URL, NEO4J_API_URL } from '@/config/api';
+import { INLUMEN_API_URL } from '@/config/api';
 import {
   getNodeFileBucket,
   getNodeFileName,
   NodeFileReference,
 } from '@/features/nodes/nodeSchema';
 
-export const updateNodePropertiesInNeo4j = async (
+export const updateNodePropertiesInBackend = async (
   nodeId: string,
   properties: Record<string, unknown>,
 ) => {
   try {
-    const response = await apiFetch(`${NEO4J_API_URL}/neo4j_update_node`, {
+    const response = await apiFetch(`${INLUMEN_API_URL}/api/graph/nodes/properties`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -20,11 +20,11 @@ export const updateNodePropertiesInNeo4j = async (
       }),
     });
 
-    if (!response.ok) throw new Error('Failed to update node in Neo4j');
+    if (!response.ok) throw new Error('Failed to update node');
     const result = await response.json();
-    console.log("[nodePersistence.ts] Neo4j update_node:", result);
+    console.log("[nodePersistence.ts] Backend update_node:", result);
   } catch (err) {
-    console.error("[nodePersistence.ts] Neo4j update node error:", err);
+    console.error("[nodePersistence.ts] Backend update node error:", err);
   }
 };
 
@@ -32,42 +32,23 @@ export const uploadNodeFile = async (nodeId: string, file: File) => {
   try {
     const form = new FormData();
     form.append("file", file);
-    form.append("bucket_id", nodeId);
-    const res = await apiFetch(`${MINIO_API_URL}/minio_upload_file`, {
+    const res = await apiFetch(`${INLUMEN_API_URL}/api/nodes/${encodeURIComponent(nodeId)}/files`, {
       method: "POST",
       body: form,
     });
     if (!res.ok) {
       const txt = await res.text().catch(() => "");
-      throw new Error(`MinIO upload failed (${res.status}): ${txt}`);
+      throw new Error(`File upload failed (${res.status}): ${txt}`);
     }
     const json = await res.json().catch(() => null);
-    console.log("[nodePersistence.ts] MinIO upload ok:", {
+    console.log("[nodePersistence.ts] File upload ok:", {
       nodeId,
       fileName: file.name,
       response: json,
     });
-
-    const neoRes = await apiFetch(`${NEO4J_API_URL}/neo4j_add_file`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        properties: {
-          flow_id: nodeId,
-          filename: file.name,
-        },
-      }),
-    });
-
-    if (!neoRes.ok) {
-      const txt = await neoRes.text().catch(() => "");
-      throw new Error(`Neo4j add file failed (${neoRes.status}): ${txt}`);
-    }
-    const neoJson = await neoRes.json().catch(() => null);
-    console.log("[nodePersistence.ts] Neo4j add_file ok:", neoJson);
-    return { minio: json, neo4j: neoJson };
+    return json;
   } catch (err) {
-    console.error("[nodePersistence.ts] MinIO upload error:", err);
+    console.error("[nodePersistence.ts] File upload error:", err);
     throw err;
   }
 };
@@ -79,43 +60,24 @@ export const removeNodeFile = async (nodeId: string, file: NodeFileReference) =>
   }
 
   try {
-    const form = new FormData();
-    form.append("filename", fileName);
-    form.append("bucket_id", nodeId);
-    const res = await apiFetch(`${MINIO_API_URL}/minio_remove_file`, {
+    const res = await apiFetch(`${INLUMEN_API_URL}/api/nodes/${encodeURIComponent(nodeId)}/files`, {
       method: "DELETE",
-      body: form,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: fileName }),
     });
     if (!res.ok) {
       const txt = await res.text().catch(() => "");
-      throw new Error(`MinIO removal failed (${res.status}): ${txt}`);
+      throw new Error(`File removal failed (${res.status}): ${txt}`);
     }
     const json = await res.json().catch(() => null);
-    console.log("[nodePersistence.ts] MinIO removal ok:", {
+    console.log("[nodePersistence.ts] File removal ok:", {
       nodeId,
       fileName,
       response: json,
     });
-
-    const neoRes = await apiFetch(`${NEO4J_API_URL}/neo4j_delete_file`, {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        properties: {
-          flow_id: nodeId,
-          filename: fileName,
-        },
-      }),
-    });
-    if (!neoRes.ok) {
-      const txt = await neoRes.text().catch(() => "");
-      throw new Error(`Neo4j delete file failed (${neoRes.status}): ${txt}`);
-    }
-    const neoJson = await neoRes.json().catch(() => null);
-    console.log("[nodePersistence.ts] Neo4j delete_file ok:", neoJson);
-    return { minio: json, neo4j: neoJson };
+    return json;
   } catch (err) {
-    console.error("[nodePersistence.ts] MinIO removal error:", err);
+    console.error("[nodePersistence.ts] File removal error:", err);
     throw err;
   }
 };
@@ -129,15 +91,15 @@ export const readNodeFile = async (nodeId: string, file: NodeFileReference) => {
   const bucket = getNodeFileBucket(file, nodeId);
   const bucketId = bucket.replace(/^files-step-id-/i, "");
   const params = new URLSearchParams({
-    bucket_id: bucketId,
+    container_id: bucketId,
     filename: fileName,
   });
-  const res = await apiFetch(`${MINIO_API_URL}/minio_read_file?${params.toString()}`, {
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/files/content?${params.toString()}`, {
     method: "GET",
   });
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
-    throw new Error(`MinIO read failed (${res.status}): ${txt}`);
+    throw new Error(`File read failed (${res.status}): ${txt}`);
   }
   return res;
 };
@@ -154,18 +116,18 @@ export const updateNodeTextFile = async (
 
   const bucket = getNodeFileBucket(file, nodeId);
   const bucketId = bucket.replace(/^files-step-id-/i, "");
-  const res = await apiFetch(`${MINIO_API_URL}/minio_update_text_file`, {
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/nodes/${encodeURIComponent(nodeId)}/files/text`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      bucket_id: bucketId,
+      container_id: bucketId,
       filename: fileName,
       content,
     }),
   });
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
-    throw new Error(`MinIO text update failed (${res.status}): ${txt}`);
+    throw new Error(`File text update failed (${res.status}): ${txt}`);
   }
   return res.json().catch(() => null);
 };

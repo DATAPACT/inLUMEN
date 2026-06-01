@@ -75,17 +75,17 @@ Step 2: Navigate to the cloned project directory.
 
 Step 3: Optional but recommended: copy `.env.example` to `.env` and adjust only the values you need.
 
-The Docker setup derives CORS, frontend API URLs, Neo4J URI, and MinIO endpoint from the Compose service names, ports, and credential values, so you do not need separate `CORS_ALLOWED_ORIGIN`, `NEO4J_URI`, `MINIO_ENDPOINT`, `NEO4J_API_BASE_URL`, or `VITE_*_API_URL` entries for normal use.
+The Docker setup derives CORS, frontend API URLs, Neo4J URI, and MinIO endpoint from the Compose service names, ports, and credential values, so you do not need separate `CORS_ALLOWED_ORIGIN`, `NEO4J_URI`, `MINIO_ENDPOINT`, `NEO4J_API_BASE_URL`, `MINIO_API_BASE_URL`, or `VITE_*_API_URL` entries for normal use.
 
 Common values you may change include:
 - `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` for OpenAI-compatible LLM services
-- `FRONTEND_PORT`, `MINIO_API_PORT`, `NEO4J_API_PORT`, `LLM_API_PORT`
+- `FRONTEND_PORT`, `INLUMEN_API_PORT`, `MINIO_API_PORT`, `NEO4J_API_PORT`
 - `NEO4J_HTTP_PORT`, `NEO4J_BOLT_PORT`, `MINIO_S3_PORT`, `MINIO_CONSOLE_PORT`
 - `NEO4J_AUTH`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`
 - `API_AUTH_TOKEN` for the public API and Swagger/OpenAPI documentation when Keycloak auth is disabled
 - `AUTH_ENABLED` plus the Keycloak values when enabling authentication
 
-For Keycloak SSO, set `AUTH_ENABLED=true` and configure `KEYCLOAK_JWKS_URL`, `KEYCLOAK_ISSUER`, and `KEYCLOAK_AUDIENCE` in the root `.env`. For a local Keycloak on port `8081`, the default frontend client values are `VITE_KEYCLOAK_URL=http://localhost:8081`, `VITE_KEYCLOAK_REALM=inlumen`, and `VITE_KEYCLOAK_CLIENT_ID=inlumen-frontend`. The same frontend still supports the embedded toolbox contract: when loaded in an iframe it waits for an `SSO_TOKEN` postMessage and infers the toolbox parent origin, so `VITE_TOOLBOX_ORIGIN` is not normally needed; it remains supported in `frontend/.env` only as a fallback for deployments that hide iframe referrers. Standalone frontend setups can also keep using `VITE_AUTH_ENABLED` and `VITE_*_API_URL` in `frontend/.env`; Docker Compose derives those values from the root `.env` unless explicitly overridden.
+For Keycloak SSO, set `AUTH_ENABLED=true` and configure `KEYCLOAK_JWKS_URL`, `KEYCLOAK_ISSUER`, and `KEYCLOAK_AUDIENCE` in the root `.env`. For a local Keycloak on port `8081`, the default frontend client values are `VITE_KEYCLOAK_URL=http://localhost:8081`, `VITE_KEYCLOAK_REALM=inlumen`, and `VITE_KEYCLOAK_CLIENT_ID=inlumen-frontend`. The same frontend still supports the embedded toolbox contract: when loaded in an iframe it waits for an `SSO_TOKEN` postMessage and infers the toolbox parent origin, so `VITE_TOOLBOX_ORIGIN` is not normally needed; it remains supported in `frontend/.env` only as a fallback for deployments that hide iframe referrers. Standalone frontend setups can also keep using `VITE_AUTH_ENABLED` and `VITE_INLUMEN_API_URL` in `frontend/.env`; Docker Compose derives those values from the root `.env` unless explicitly overridden.
 
 Step 4: Run the following command to build the docker containers:
 ```
@@ -93,10 +93,10 @@ docker compose up --build
 ```
 
 Step 5: Wait for the stack to finish starting. The root compose file now:
-- starts Neo4J, MinIO, frontend, and the Python connection APIs together
-- builds the `connection` image automatically
-- mounts the frontend and connection source folders for development
-- auto-restarts the Python API bundle when files under `connection/` change
+- starts Neo4J, MinIO, frontend, and backend services together
+- builds the `backend` service from the Python source under `connection/`
+- mounts the frontend and backend source folders for development
+- auto-restarts the Python backend bundle when files under `connection/` change
 - connects the LLM agents to an OpenAI-compatible endpoint configured through `.env` or the UI
 - is set up to behave consistently on macOS and Windows through Docker Desktop
 
@@ -120,7 +120,7 @@ For the best macOS/Windows experience:
 
 Note: building the containers may take around 5 minutes, please wait until Neo4J is fully started.  
 
-Note: Once the installation is complete, the default local endpoints are localhost:8080 (frontend), localhost:5003 (MinIO API), localhost:5001 (Neo4J API), localhost:5002 (LLM/agent API), localhost:7474 (Neo4J HTTP), localhost:7687 (Neo4J Bolt), localhost:9000 (MinIO S3 API), and localhost:9099 (MinIO console). These defaults can all be changed through `.env`.
+Note: Once the installation is complete, the default local endpoints are localhost:8080 (frontend), localhost:5000 (inLUMEN backend API), localhost:7474 (Neo4J HTTP), localhost:7687 (Neo4J Bolt), localhost:9000 (MinIO S3 API), and localhost:9099 (MinIO console). The internal graph and object wrapper APIs use ports 5001 and 5003 inside the backend container. These defaults can all be changed through `.env`.
 
 Note: To log into MinIO, use the configured root credentials from `.env`. For security reasons, change these values before using the stack outside local development.
 
@@ -128,14 +128,14 @@ Note: To log into MinIO, use the configured root credentials from `.env`. For se
 
 To open the editor, go to `http://localhost:8080` by default, or the custom value you configured in `FRONTEND_PORT`. This will open the dashboard.
 
-Backend services are currently offered at their configured localhost ports for Neo4J and MinIO. Neo4J uses `NEO4J_AUTH`, and MinIO uses `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` from `.env`.
-The compose setup also exposes the internal APIs at the configured `MINIO_API_PORT`, `NEO4J_API_PORT`, and `LLM_API_PORT` values for the frontend and local debugging.
+The frontend talks to the inLUMEN backend API on `INLUMEN_API_PORT`. That backend owns graph and file orchestration and delegates internally to Neo4J and MinIO, which remain infrastructure services configured through `NEO4J_AUTH` and `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`.
+The internal Neo4J and MinIO wrapper APIs use `NEO4J_API_PORT` and `MINIO_API_PORT` inside the backend container, but they are not published as frontend integration points. The frontend uses only `INLUMEN_API_PORT`.
 
 LLM agents use OpenAI-compatible Chat Completions endpoints. Configure OpenRouter, Ollama Cloud, or a custom on-prem endpoint in the dialog window or through the root `.env` file.
 
 ## **Public API and Swagger**
 
-The public API is served by the connection analytics service on `LLM_API_PORT`, which is `5002` by default.
+The public API is served by the inLUMEN backend API on `INLUMEN_API_PORT`, which is `5000` by default.
 
 Required public API environment variable when `AUTH_ENABLED=false`:
 
@@ -145,12 +145,12 @@ API_AUTH_TOKEN=change-me-local-token
 
 Local URLs:
 
-- Swagger UI: `http://localhost:5002/docs`
-- OpenAPI JSON schema: `http://localhost:5002/openapi.json`
-- Health check: `http://localhost:5002/health`
-- Readiness check: `http://localhost:5002/ready`
+- Swagger UI: `http://localhost:5000/docs`
+- OpenAPI JSON schema: `http://localhost:5000/openapi.json`
+- Health check: `http://localhost:5000/health`
+- Readiness check: `http://localhost:5000/ready`
 
-Swagger UI is enabled by default. Open `http://localhost:5002/docs`, enter a bearer token, then use the Swagger `Authorize` button or the pre-filled bearer auth to run live requests.
+Swagger UI is enabled by default. Open `http://localhost:5000/docs`, enter a bearer token, then use the Swagger `Authorize` button or the pre-filled bearer auth to run live requests.
 
 When `AUTH_ENABLED=false`, authentication uses a static bearer token:
 
@@ -169,27 +169,27 @@ The API validates Keycloak JWTs with `KEYCLOAK_JWKS_URL`, checks `KEYCLOAK_ISSUE
 Example requests:
 
 ```
-curl http://localhost:5002/health
+curl http://localhost:5000/health
 
 curl -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
-  http://localhost:5002/openapi.json
+  http://localhost:5000/openapi.json
 
 curl -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
-  http://localhost:5002/api/v1/pipelines
+  http://localhost:5000/api/v1/pipelines
 
-curl -X POST http://localhost:5002/api/v1/pipelines \
+curl -X POST http://localhost:5000/api/v1/pipelines \
   -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
   -H "Content-Type: application/json" \
   -d '{"name":"Remote patient monitoring","description":"Integration-ready pipeline"}'
 
 curl -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
-  "http://localhost:5002/api/v1/workflows?include_download_urls=true"
+  "http://localhost:5000/api/v1/workflows?include_download_urls=true"
 
 curl -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
-  http://localhost:5002/api/v1/pipelines/pipeline-123/artifacts/dockerfiles
+  http://localhost:5000/api/v1/pipelines/pipeline-123/artifacts/dockerfiles
 
 curl -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
-  http://localhost:5002/api/v1/pipelines/pipeline-123/artifacts/argo-workflow.yaml
+  http://localhost:5000/api/v1/pipelines/pipeline-123/artifacts/argo-workflow.yaml
 ```
 
 Available public endpoint groups:
@@ -207,7 +207,7 @@ inLUMEN is still under development, any current users should expect unstable beh
 
 ## **OpenAPI Specification**
 
-The live OpenAPI 3 schema is available at `http://localhost:5002/openapi.json` with bearer authentication. The schema is the source used by Swagger UI at `http://localhost:5002/docs`.
+The live OpenAPI 3 schema is available at `http://localhost:5000/openapi.json` with bearer authentication. The schema is the source used by Swagger UI at `http://localhost:5000/docs`.
 
 ## **Additional Links**
 

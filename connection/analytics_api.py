@@ -22,12 +22,10 @@ from graph_client import (
 )
 from llm_config import llm_config_from_payload, log_llm_selection
 from pipeline_editor_team import build_pipeline_editing_team
-from public_api import create_public_api_blueprint
 from runtime_config import default_frontend_origin, get_service_port
 
 
 NEO4J_API_PORT = get_service_port("NEO4J_API_PORT", 5001)
-LLM_API_PORT = get_service_port("LLM_API_PORT", 5002)
 NEO4J_API_BASE_URL = (
     os.getenv("NEO4J_API_BASE_URL", "").strip()
     or f"http://127.0.0.1:{NEO4J_API_PORT}"
@@ -38,7 +36,6 @@ CORS_ALLOWED_ORIGIN = (
 )
 
 app = Flask(__name__)
-app.register_blueprint(create_public_api_blueprint(NEO4J_API_BASE_URL))
 
 
 def add_cors_headers(response):
@@ -660,7 +657,3 @@ def agentic_pipeline_editor_reset():
     if session_id:
         clear_state_from_disk(session_id)
     return jsonify({"ok": True}), 200
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=LLM_API_PORT)

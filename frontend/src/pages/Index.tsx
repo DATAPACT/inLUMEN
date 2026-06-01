@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { apiFetch } from '@/utils/apiFetch';
-import { LLM_API_URL } from '@/config/api';
+import { INLUMEN_API_URL } from '@/config/api';
 import { cn } from '@/lib/utils';
 import { Sidebar } from '@/components/Sidebar';
 import { PropertiesPanel, PropertyNodeData } from '@/components/PropertiesPanel';
@@ -442,7 +442,7 @@ const Index = () => {
       const activeCfg = selectedConfig || defaultConfig;
       const canvasGraph = flowCanvasRef.current?.getCurrentGraph() ?? null;
 
-      const res = await apiFetch(`${LLM_API_URL}/simple_chat`, {
+      const res = await apiFetch(`${INLUMEN_API_URL}/simple_chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -526,7 +526,7 @@ const Index = () => {
 
     if (chatSessionId) {
       try {
-        await apiFetch(`${LLM_API_URL}/simple_chat/reset`, {
+        await apiFetch(`${INLUMEN_API_URL}/simple_chat/reset`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ session_id: chatSessionId }),

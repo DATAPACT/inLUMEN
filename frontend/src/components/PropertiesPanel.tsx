@@ -10,7 +10,7 @@ import { FilePreviewDialog, PreviewType } from '@/components/properties/FilePrev
 import { getTypeColor, getTypeIcon } from '@/components/properties/nodeAppearance';
 import {
   normalizeType,
-  pickNeo4jUpdatableProps,
+  pickBackendUpdatableProps,
   StepType,
   STORAGE_DATABASE_OPTIONS,
   StorageDatabaseOption,
@@ -30,7 +30,7 @@ import {
   readNodeFile,
   removeNodeFile,
   updateNodeTextFile,
-  updateNodePropertiesInNeo4j,
+  updateNodePropertiesInBackend,
   uploadNodeFile,
 } from '@/features/nodes/nodePersistence';
 import { Node } from 'reactflow';
@@ -103,18 +103,18 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
   const [editedContent, setEditedContent] = useState('');
   const [previewFileIndex, setPreviewFileIndex] = useState<number>(-1);
 
-  // Debounce Neo4j updates to avoid POST per keystroke
-  const neo4jDebounceRef = useRef<number | null>(null);
-  const debouncedUpdatePropertyToNeo4J = useCallback((nodeId: string, properties: Record<string, unknown>) => {
-    if (neo4jDebounceRef.current) window.clearTimeout(neo4jDebounceRef.current);
-    neo4jDebounceRef.current = window.setTimeout(() => {
-      updateNodePropertiesInNeo4j(nodeId, properties);
+  // Debounce backend updates to avoid POST per keystroke
+  const backendDebounceRef = useRef<number | null>(null);
+  const debouncedUpdatePropertyToBackend = useCallback((nodeId: string, properties: Record<string, unknown>) => {
+    if (backendDebounceRef.current) window.clearTimeout(backendDebounceRef.current);
+    backendDebounceRef.current = window.setTimeout(() => {
+      updateNodePropertiesInBackend(nodeId, properties);
     }, 300);
   }, []);
 
   useEffect(() => {
     return () => {
-      if (neo4jDebounceRef.current) window.clearTimeout(neo4jDebounceRef.current);
+      if (backendDebounceRef.current) window.clearTimeout(backendDebounceRef.current);
     };
   }, []);
 
@@ -169,9 +169,9 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
     // 1) update local reactflow node
     onNodeUpdate(selectedNode.id, next);
 
-    // 2) update Neo4j (only allowed props)
-    const neo4jProps = pickNeo4jUpdatableProps(selectedNode.id, next, nodeType);
-    debouncedUpdatePropertyToNeo4J(selectedNode.id, neo4jProps);
+    // 2) update backend state (only allowed props)
+    const backendProps = pickBackendUpdatableProps(selectedNode.id, next, nodeType);
+    debouncedUpdatePropertyToBackend(selectedNode.id, backendProps);
   };
 
   useEffect(() => {
@@ -249,7 +249,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
     pushNodeUpdate({ database: val });
   };
 
-  // Upload newly added files to MinIO (bucket_id = selectedNode.id). Overwrite behavior in UI: same filename replaces older entry
+  // Upload newly added files through the backend. Same filename replaces older entry.
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!typeHasFiles(nodeType)) return;
     if (!selectedNode) return;
@@ -366,7 +366,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
     }
   };
 
-  // Save edited text file and re-upload to MinIO
+  // Save edited text file through the backend
   const saveFileChanges = async () => {
     if (!selectedNode) return;
     if (previewFileIndex === -1 || previewType !== 'text') return;
@@ -614,7 +614,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
                     ))}
                   </select>
                   <p className="text-xs text-muted-foreground">
-                    Stored in Neo4j as lowercase (e.g. <code>minio</code>, <code>sqlite</code>, <code>chromadb</code>).
+                    Stored as lowercase (e.g. <code>minio</code>, <code>sqlite</code>, <code>chromadb</code>).
                   </p>
                 </div>
               </div>
