@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="680" viewBox="0 0 1160 680" role="img" aria-labelledby="title desc">
+  <title id="title">Current inLUMEN Architecture</title>
+  <desc id="desc">High-level architecture showing user-facing clients calling a single backend gateway, which owns access to platform and AI services.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#334155"/>
+    </marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { fill: #0f172a; font: 700 30px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .subtitle { fill: #475569; font: 500 15px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .label { fill: #0f172a; font: 700 22px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .small { fill: #475569; font: 500 15px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .tiny { fill: #64748b; font: 500 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .client { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.6; rx: 16; filter: url(#shadow); }
+      .backend { fill: #eef6ff; stroke: #2563eb; stroke-width: 2.4; rx: 20; filter: url(#shadow); }
+      .data { fill: #f0fdf4; stroke: #16a34a; stroke-width: 1.8; rx: 16; filter: url(#shadow); }
+      .external { fill: #fff7ed; stroke: #f97316; stroke-width: 1.8; rx: 16; filter: url(#shadow); }
+      .note { fill: #fef2f2; stroke: #ef4444; stroke-width: 1.4; rx: 14; }
+      .line { stroke: #334155; stroke-width: 2.4; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #64748b; stroke-width: 2; stroke-dasharray: 8 7; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1160" height="680"/>
+  <text class="title" x="50" y="58">Current inLUMEN Architecture</text>
+  <text class="subtitle" x="50" y="86">High-level view: every client uses one backend boundary; implementation services stay behind it.</text>
+
+  <rect class="client" x="70" y="190" width="250" height="130"/>
+  <text class="label" x="110" y="240">Frontend UI</text>
+  <text class="small" x="110" y="270">User-facing app</text>
+
+  <rect class="client" x="70" y="380" width="250" height="130"/>
+  <text class="label" x="110" y="430">CLI / API Client</text>
+  <text class="small" x="110" y="460">Automation and integrations</text>
+
+  <rect class="backend" x="450" y="230" width="285" height="220"/>
+  <text class="label" x="492" y="315">Backend Gateway</text>
+  <text class="small" x="492" y="348">Single public API boundary</text>
+
+  <rect class="data" x="870" y="160" width="220" height="145"/>
+  <text class="label" x="917" y="218">Data Services</text>
+  <text class="small" x="917" y="250">Application persistence</text>
+
+  <rect class="external" x="870" y="385" width="220" height="145"/>
+  <text class="label" x="924" y="443">AI Services</text>
+  <text class="small" x="924" y="475">Model inference</text>
+
+  <rect class="note" x="260" y="575" width="640" height="58"/>
+  <text class="small" x="334" y="604">The backend owns service access, integrations, and secret handling.</text>
+
+  <path class="line" d="M320 255 C370 255, 395 292, 450 305"/>
+  <path class="line" d="M320 445 C375 445, 397 405, 450 382"/>
+  <text class="tiny" x="355" y="250">API calls</text>
+  <text class="tiny" x="355" y="440">API calls</text>
+
+  <path class="line" d="M735 310 C790 275, 820 240, 870 232"/>
+  <text class="tiny" x="790" y="262">Data access</text>
+
+  <path class="dash" d="M735 392 C790 420, 820 452, 870 458"/>
+  <text class="tiny" x="805" y="432">Inference</text>
+</svg>

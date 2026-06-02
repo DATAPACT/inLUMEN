@@ -8,7 +8,7 @@ WORK_ROOT = Path(__file__).resolve().parent
 SERVICE_COMMANDS = [
     ["python", "-u", "minio_api.py"],
     ["python", "-u", "neo4j_api.py"],
-    ["python", "-u", "analytics_api.py"],
+    ["python", "-u", "inlumen_api.py"],
 ]
 
 

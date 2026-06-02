@@ -26,7 +26,14 @@ Additionally, it generates deployment artifacts such as containers and workflow 
 
 ## **Architecture**
 The picture below shows the component in the DATAPACT architecture.
-[![Component Diagram](./images/component-image.png)]
+
+![Component Diagram](./images/component-image.png)
+
+
+The current local deployment uses a simple gateway architecture. Frontend and CLI clients call only the backend gateway API; Neo4j, MinIO, and the OpenAI-compatible LLM provider remain behind the backend boundary.
+
+
+![Current inLUMEN Architecture](./images/current-architecture.svg)
 
 ## **Component Definition**
 inLUMEN's core functionality is provided by LLM-powered agents that serve as helpful assistants in pipeline design, translating high-level business-level intents to pure AI/data pipeline design choices. inLUMEN agents reason on user intents and context, draw pipeline steps, and give recommandations according to compliance insights provided by the user or via tool integrations. They can also support deployment artitfact generation, making pipelines deployable. The chat dialog window enables human-machine interactions to co-design pipelines. inLUMEN integrates with external DATAPACT tools through public workflow and artifact APIs.
@@ -75,43 +82,42 @@ Step 2: Navigate to the cloned project directory.
 
 Step 3: Optional but recommended: copy `.env.example` to `.env` and adjust only the values you need.
 
-The Docker setup derives CORS, frontend API URLs, Neo4J URI, and MinIO endpoint from the Compose service names, ports, and credential values, so you do not need separate `CORS_ALLOWED_ORIGIN`, `NEO4J_URI`, `MINIO_ENDPOINT`, `NEO4J_API_BASE_URL`, or `VITE_*_API_URL` entries for normal use.
+The Docker setup derives CORS, frontend API URLs, Neo4J URI, and MinIO endpoint from the Compose service names, ports, and credential values, so you do not need separate `CORS_ALLOWED_ORIGIN`, `NEO4J_URI`, `MINIO_ENDPOINT`, `NEO4J_API_BASE_URL`, `MINIO_API_BASE_URL`, or `VITE_*_API_URL` entries for normal use.
 
 Common values you may change include:
-- `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` for OpenAI-compatible LLM services
-- `FRONTEND_PORT`, `MINIO_API_PORT`, `NEO4J_API_PORT`, `LLM_API_PORT`
-- `NEO4J_HTTP_PORT`, `NEO4J_BOLT_PORT`, `MINIO_S3_PORT`, `MINIO_CONSOLE_PORT`
+- `FRONTEND_PORT`, `INLUMEN_API_PORT`, `MINIO_API_PORT`, `NEO4J_API_PORT`
 - `NEO4J_AUTH`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`
-- `API_AUTH_TOKEN` for the public API and Swagger/OpenAPI documentation when Keycloak auth is disabled
+- `API_AUTH_TOKEN` for the gateway API and Swagger/OpenAPI documentation when Keycloak auth is disabled
 - `AUTH_ENABLED` plus the Keycloak values when enabling authentication
 
-For Keycloak SSO, set `AUTH_ENABLED=true` and configure `KEYCLOAK_JWKS_URL`, `KEYCLOAK_ISSUER`, and `KEYCLOAK_AUDIENCE` in the root `.env`. For a local Keycloak on port `8081`, the default frontend client values are `VITE_KEYCLOAK_URL=http://localhost:8081`, `VITE_KEYCLOAK_REALM=inlumen`, and `VITE_KEYCLOAK_CLIENT_ID=inlumen-frontend`. The same frontend still supports the embedded toolbox contract: when loaded in an iframe it waits for an `SSO_TOKEN` postMessage and infers the toolbox parent origin, so `VITE_TOOLBOX_ORIGIN` is not normally needed; it remains supported in `frontend/.env` only as a fallback for deployments that hide iframe referrers. Standalone frontend setups can also keep using `VITE_AUTH_ENABLED` and `VITE_*_API_URL` in `frontend/.env`; Docker Compose derives those values from the root `.env` unless explicitly overridden.
+For Keycloak SSO, set `AUTH_ENABLED=true` and configure `KEYCLOAK_JWKS_URL`, `KEYCLOAK_ISSUER`, and `KEYCLOAK_AUDIENCE` in the root `.env`. For a local Keycloak on port `8081`, the default frontend client values are `VITE_KEYCLOAK_URL=http://localhost:8081`, `VITE_KEYCLOAK_REALM=inlumen`, and `VITE_KEYCLOAK_CLIENT_ID=inlumen-frontend`. The same frontend still supports the embedded toolbox contract: when loaded in an iframe it waits for an `SSO_TOKEN` postMessage and infers the toolbox parent origin, so `VITE_TOOLBOX_ORIGIN` is not normally needed; it remains supported in `frontend/.env` only as a fallback for deployments that hide iframe referrers. Standalone frontend setups can also keep using `VITE_AUTH_ENABLED` and `VITE_INLUMEN_API_URL` in `frontend/.env`; Docker Compose derives those values from the root `.env` unless explicitly overridden.
 
 Step 4: Run the following command to build the docker containers:
 ```
 docker compose up --build
 ```
 
+The default `docker-compose.yml` is optimized for local development and exposes Neo4J and MinIO inspection ports. Neo4J is available at `localhost:7474` and `localhost:7687`; MinIO is available at `localhost:9000` with console access at `localhost:9099`. You can override those inspection ports with `NEO4J_HTTP_PORT`, `NEO4J_BOLT_PORT`, `MINIO_S3_PORT`, and `MINIO_CONSOLE_PORT`.
+
+For deployment/production-like runs, use the production compose file. It exposes only the frontend and backend gateway on the host; Neo4J and MinIO stay private on the Compose network:
+
+```
+docker compose -f docker-compose-prod.yml up --build
+```
+
 Step 5: Wait for the stack to finish starting. The root compose file now:
-- starts Neo4J, MinIO, frontend, and the Python connection APIs together
-- builds the `connection` image automatically
-- mounts the frontend and connection source folders for development
-- auto-restarts the Python API bundle when files under `connection/` change
-- connects the LLM agents to an OpenAI-compatible endpoint configured through `.env` or the UI
+- starts Neo4J, MinIO, the backend gateway, and the frontend together
+- builds the `backend` service from the Python source under `backend/`
+- mounts the frontend and backend source folders for development
+- keeps graph and object storage adapters inside the backend container instead of exposing them as Compose services
+- connects the LLM agents to the OpenAI-compatible endpoint selected in the UI
 - is set up to behave consistently on macOS and Windows through Docker Desktop
 
-Step 6: Configure an LLM provider. The default provider is OpenRouter:
+Step 6: Configure an LLM provider from the UI. Open `http://localhost:8080`, choose Settings, and create an LLM configuration with provider, base URL, model, and API key. The backend does not read LLM provider, endpoint, model, or API key values from `.env`.
 
-```
-LLM_PROVIDER=openrouter
-LLM_BASE_URL=https://openrouter.ai/api/v1
-LLM_API_KEY=sk-or-xxxx
-LLM_MODEL=gpt-oss-120b
-```
+For OpenRouter, use your OpenRouter API key after adding the provider key in OpenRouter settings. Short model aliases such as `gpt-oss-120b` are accepted by inLUMEN and normalized before the request is sent.
 
-For OpenRouter BYOK, use your OpenRouter API key after adding the provider key in OpenRouter settings. Short model aliases such as `gpt-oss-120b` are accepted by inLUMEN and normalized before the request is sent.
-
-You can also use Ollama Cloud with `LLM_PROVIDER=ollama_cloud`, `LLM_BASE_URL=https://ollama.com/v1`, `LLM_API_KEY=...`, and an Ollama Cloud model such as `gpt-oss:120b`. For a custom on-prem service, set `LLM_PROVIDER=custom`, `LLM_BASE_URL=https://your-host.example/v1`, `LLM_API_KEY=...`, and the model name exposed by that service. The UI configuration dialog supports the same OpenAI-compatible provider, base URL, API key, and model fields.
+You can also use Ollama Cloud with base URL `https://ollama.com/v1` and an Ollama Cloud model such as `gpt-oss:120b`. For a custom on-prem service, select Custom / On premise and enter the OpenAI-compatible base URL, API key, and model name exposed by that service.
 
 For the best macOS/Windows experience:
 - use Docker Desktop with `docker compose`
@@ -120,7 +126,7 @@ For the best macOS/Windows experience:
 
 Note: building the containers may take around 5 minutes, please wait until Neo4J is fully started.  
 
-Note: Once the installation is complete, the default local endpoints are localhost:8080 (frontend), localhost:5003 (MinIO API), localhost:5001 (Neo4J API), localhost:5002 (LLM/agent API), localhost:7474 (Neo4J HTTP), localhost:7687 (Neo4J Bolt), localhost:9000 (MinIO S3 API), and localhost:9099 (MinIO console). These defaults can all be changed through `.env`.
+Note: Once the installation is complete in dev mode, the local endpoints are localhost:8080 (frontend), localhost:5000 (inLUMEN backend gateway API), localhost:7474/7687 (Neo4J), and localhost:9000/9099 (MinIO). In production compose mode, only the frontend and backend gateway are exposed; Neo4J, MinIO, and the backend's internal graph/object adapter ports stay inside the Compose network.
 
 Note: To log into MinIO, use the configured root credentials from `.env`. For security reasons, change these values before using the stack outside local development.
 
@@ -128,16 +134,21 @@ Note: To log into MinIO, use the configured root credentials from `.env`. For se
 
 To open the editor, go to `http://localhost:8080` by default, or the custom value you configured in `FRONTEND_PORT`. This will open the dashboard.
 
-Backend services are currently offered at their configured localhost ports for Neo4J and MinIO. Neo4J uses `NEO4J_AUTH`, and MinIO uses `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` from `.env`.
-The compose setup also exposes the internal APIs at the configured `MINIO_API_PORT`, `NEO4J_API_PORT`, and `LLM_API_PORT` values for the frontend and local debugging.
+The frontend talks only to the inLUMEN backend gateway API on `INLUMEN_API_PORT`. That gateway owns graph and file orchestration through internal backend modules and keeps Neo4J and MinIO implementation details out of the browser and CLI contract. The frontend and CLI should use only `INLUMEN_API_PORT`.
+LLM configuration metadata is also saved through the gateway by default (`VITE_ENABLE_REMOTE_CHATBOT_CONFIG_SYNC=true`); set it to `false` only for browser-local development overrides.
 
-LLM agents use OpenAI-compatible Chat Completions endpoints. Configure OpenRouter, Ollama Cloud, or a custom on-prem endpoint in the dialog window or through the root `.env` file.
+LLM agents use OpenAI-compatible Chat Completions endpoints. Configure OpenRouter, Ollama Cloud, or a custom on-prem endpoint in the Settings dialog. The backend rejects LLM requests that do not include a browser-supplied LLM configuration.
 
-## **Public API and Swagger**
+API key handling:
+- Provider API keys are entered only in the UI, kept in browser session storage only, sent to the backend only inside the specific LLM request payload, and are not saved by the backend `/api/chatbot-configs` endpoints.
+- Do not run this browser-supplied key flow over plain HTTP outside local development; terminate TLS before the backend gateway in shared or production deployments.
+- Backend logs intentionally report provider, model, and base URL but not the provider API key.
 
-The public API is served by the connection analytics service on `LLM_API_PORT`, which is `5002` by default.
+## **Gateway API and Swagger**
 
-Required public API environment variable when `AUTH_ENABLED=false`:
+The gateway API is served by the inLUMEN backend API on `INLUMEN_API_PORT`, which is `5000` by default.
+
+Required gateway API environment variable when `AUTH_ENABLED=false`:
 
 ```
 API_AUTH_TOKEN=change-me-local-token
@@ -145,12 +156,12 @@ API_AUTH_TOKEN=change-me-local-token
 
 Local URLs:
 
-- Swagger UI: `http://localhost:5002/docs`
-- OpenAPI JSON schema: `http://localhost:5002/openapi.json`
-- Health check: `http://localhost:5002/health`
-- Readiness check: `http://localhost:5002/ready`
+- Swagger UI: `http://localhost:5000/docs`
+- OpenAPI JSON schema: `http://localhost:5000/openapi.json`
+- Health check: `http://localhost:5000/health`
+- Readiness check: `http://localhost:5000/ready`
 
-Swagger UI is enabled by default. Open `http://localhost:5002/docs`, enter a bearer token, then use the Swagger `Authorize` button or the pre-filled bearer auth to run live requests.
+Swagger UI is enabled by default. Open `http://localhost:5000/docs`, enter a bearer token, then use the Swagger `Authorize` button or the pre-filled bearer auth to run live requests. The live schema documents both the integration-oriented `/api/v1/*` endpoints and the UI-equivalent gateway endpoints for canvas graph editing, file operations, pipeline version management, chat, and deployment artifact generation.
 
 When `AUTH_ENABLED=false`, authentication uses a static bearer token:
 
@@ -164,42 +175,57 @@ When `AUTH_ENABLED=true`, authentication uses Keycloak access tokens:
 Authorization: Bearer <KEYCLOAK_JWT>
 ```
 
-The API validates Keycloak JWTs with `KEYCLOAK_JWKS_URL`, checks `KEYCLOAK_ISSUER` when configured, and accepts `KEYCLOAK_AUDIENCE` matches from the token `aud`, `azp`, or `client_id` claims. `/health` and `/ready` are public. The OpenAPI JSON and all `/api/v1/*` endpoints require the bearer token. Invalid or missing tokens return `401` or `403`; validation errors return `400` or `422`; missing resources return `404`.
+The API validates Keycloak JWTs with `KEYCLOAK_JWKS_URL`, checks `KEYCLOAK_ISSUER` when configured, and accepts `KEYCLOAK_AUDIENCE` matches from the token `aud`, `azp`, or `client_id` claims. `/health` and `/ready` are public. The OpenAPI JSON and all `/api/v1/*` endpoints require the bearer token in static-token mode; UI-equivalent gateway endpoints require a valid Keycloak bearer token when `AUTH_ENABLED=true` and also accept the same header in local static-token mode. Invalid or missing tokens return `401` or `403`; validation errors return `400` or `422`; missing resources return `404`.
 
 Example requests:
 
 ```
-curl http://localhost:5002/health
+curl http://localhost:5000/health
 
 curl -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
-  http://localhost:5002/openapi.json
+  http://localhost:5000/openapi.json
 
 curl -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
-  http://localhost:5002/api/v1/pipelines
+  http://localhost:5000/api/v1/pipelines
 
-curl -X POST http://localhost:5002/api/v1/pipelines \
+curl -X POST http://localhost:5000/api/v1/pipelines \
   -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
   -H "Content-Type: application/json" \
   -d '{"name":"Remote patient monitoring","description":"Integration-ready pipeline"}'
 
 curl -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
-  "http://localhost:5002/api/v1/workflows?include_download_urls=true"
+  "http://localhost:5000/api/v1/workflows?include_download_urls=true"
 
 curl -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
-  http://localhost:5002/api/v1/pipelines/pipeline-123/artifacts/dockerfiles
+  http://localhost:5000/api/v1/pipelines/pipeline-123/artifacts/dockerfiles
 
 curl -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
-  http://localhost:5002/api/v1/pipelines/pipeline-123/artifacts/argo-workflow.yaml
+  http://localhost:5000/api/v1/pipelines/pipeline-123/artifacts/argo-workflow.yaml
+
+curl -X POST http://localhost:5000/api/graph/nodes \
+  -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"properties":{"flow_id":"retrieve","label":"Retrieve","type":"input","x":100,"y":120}}'
+
+curl -X POST http://localhost:5000/simple_chat \
+  -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"user_message":"Add a retrieval step and connect it to processing","canvas_graph":{"nodes":[],"edges":[]}}'
 ```
 
-Available public endpoint groups:
+Available gateway endpoint groups:
 
 - `Pipelines`: create, list, fetch, and list versions for the current design pipeline
 - `Artifacts`: generate Dockerfiles with the configured LLM, then assemble Argo Workflow YAML deterministically from the pipeline graph and Dockerfile metadata
 - `Workflows`: list available workflow metadata, associated pipeline IDs, version metadata, and temporary MinIO signed access URLs when files are available
+- `Canvas Graph`: replicate UI node and edge creation, deletion, property updates, and position changes through the gateway API
+- `Pipeline State`: fetch the current graph, overview metadata, and saved UI pipeline versions
+- `Files`: upload, remove, read, and update node-attached files without exposing MinIO credentials
+- `Agentic`: call the same chat and artifact-generation operations available in the UI
+- `Settings`: save and manage LLM configuration metadata through the gateway; provider API keys are session-only in the browser and are supplied per request
 - `Health`: public liveness and readiness checks
 
-The public API does not expose MinIO credentials. When file access is available through MinIO, responses contain temporary signed URLs only.
+The gateway API does not expose MinIO credentials. When file access is available through MinIO, responses contain temporary signed URLs only.
 
 ## **Other Information**
 
@@ -207,7 +233,7 @@ inLUMEN is still under development, any current users should expect unstable beh
 
 ## **OpenAPI Specification**
 
-The live OpenAPI 3 schema is available at `http://localhost:5002/openapi.json` with bearer authentication. The schema is the source used by Swagger UI at `http://localhost:5002/docs`.
+The live OpenAPI 3 schema is available at `http://localhost:5000/openapi.json` with bearer authentication. The schema is the source used by Swagger UI at `http://localhost:5000/docs`.
 
 ## **Additional Links**
 

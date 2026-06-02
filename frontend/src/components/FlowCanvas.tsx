@@ -20,10 +20,10 @@ import { toast } from 'sonner';
 import { cn } from "@/lib/utils";
 import { FlowCanvasActionsPanel } from '@/components/flow/FlowCanvasActionsPanel';
 import {
-  addEdgeToNeo4j,
-  addNodeToNeo4j,
-  deleteEdgeToNeo4j,
-  deleteNodeFromNeo4jAndMinIO,
+  addEdgeToBackend,
+  addNodeToBackend,
+  deleteEdgeFromBackend,
+  deleteNodeFromBackend,
   fetchPipelineVersions,
   fetchPipelineGraph,
   fetchPipelineUpdatedAt,
@@ -32,8 +32,8 @@ import {
   type PipelineVersionSummary,
   rebuildBackendFromFlow,
   savePipelineVersion,
-  updateNodePositionInNeo4j,
-  clearNeo4jAndMinIO,
+  updateNodePositionInBackend,
+  clearBackendGraph,
 } from '@/features/flow/flowPersistence';
 import {
   createAgentGraphSnapshot,
@@ -212,7 +212,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         await fetchGraphAndApply();
         markSyncHealthy();
       } catch (e) {
-        scheduleSyncRetry("Initial neo4j_get_graph failed", e);
+        scheduleSyncRetry("Initial pipeline graph fetch failed", e);
       }
     };
     const tick = async () => {
@@ -236,7 +236,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           await fetchGraphAndApply();
         }
       } catch (e) {
-        scheduleSyncRetry("Neo4j poll tick failed", e);
+        scheduleSyncRetry("Backend poll tick failed", e);
       }
     };
     // Load once at mount, then poll
@@ -320,7 +320,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
       removedNodeIds.forEach((id) => {
         markLocalWrite(800);
-        deleteNodeFromNeo4jAndMinIO(id);
+        deleteNodeFromBackend(id);
       });
 
       const newNodes = applyNodeChanges(changes, nodes);
@@ -360,7 +360,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
               return;
             }
             markLocalWrite(800);
-            deleteEdgeToNeo4j(sourceNode, targetNode);
+            deleteEdgeFromBackend(sourceNode, targetNode);
           });
           return applyEdgeChanges(changes, eds);
         });
@@ -398,11 +398,11 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       const sourceNode = nodes.find((n) => n.id === params.source);
       const targetNode = nodes.find((n) => n.id === params.target);
       if (!sourceNode || !targetNode) {
-        console.warn("[FlowCanvas.tsx] Could not find source/target nodes for Neo4j edge creation.");
+        console.warn("[FlowCanvas.tsx] Could not find source/target nodes for edge creation.");
         return;
       }
       markLocalWrite(800);
-      await addEdgeToNeo4j(sourceNode, targetNode);
+      await addEdgeToBackend(sourceNode, targetNode);
     },
     [nodes, markLocalWrite, onCanvasEdited]
   );
@@ -452,7 +452,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       setNodes((nds) => {
         const updated = nds.concat(newNode);
         markLocalWrite(800);
-        addNodeToNeo4j(newNode); // Sync to Neo4j
+        addNodeToBackend(newNode);
         return updated;
       });
     },
@@ -556,7 +556,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       setEdges(importedEdges);
       nodeId = getNextNumericNodeId(importedNodes, 1);
       toast.success('Flow imported successfully', {
-        description: 'Imported flow + backend reconstructed (Neo4j/MinIO)',
+        description: 'Imported flow and backend state reconstructed',
       });
     } catch (error) {
       console.error('Error importing flow:', error);
@@ -580,7 +580,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     localStorage.removeItem('ai-flow-edges');
     nodeId = 1;
     markLocalWrite(1200);
-    await clearNeo4jAndMinIO();
+    await clearBackendGraph();
     toast.success('Canvas cleared', {
       description: 'All nodes and edges have been removed',
     });
@@ -602,7 +602,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         onNodeDragStop={(_, node) => {
           onCanvasEdited?.();
           markLocalWrite(800);
-          updateNodePositionInNeo4j(node);
+          updateNodePositionInBackend(node);
         }}
         nodeTypes={nodeTypes}
         fitView

@@ -46,7 +46,12 @@ class ApiError(Exception):
         self.details = details
 
 
-def create_public_api_blueprint(neo4j_api_base_url: str) -> Blueprint:
+def create_public_api_blueprint(
+    neo4j_api_base_url: str,
+    object_api_base_url: str | None = None,
+    *,
+    check_upstreams: bool = False,
+) -> Blueprint:
     public_api = Blueprint("public_api", __name__)
 
     @public_api.after_request
@@ -84,14 +89,22 @@ def create_public_api_blueprint(neo4j_api_base_url: str) -> Blueprint:
     @public_api.route("/ready", methods=["GET"])
     def readiness():
         auth_checks = _auth_readiness_checks()
-        if not _auth_checks_ready(auth_checks):
+        checks = dict(auth_checks)
+        upstream_checks: dict[str, str] = {}
+        if check_upstreams:
+            upstream_checks = _upstream_readiness_checks(
+                neo4j_api_base_url,
+                object_api_base_url,
+            )
+            checks.update(upstream_checks)
+        if not _auth_checks_ready(auth_checks) or not _upstream_checks_ready(upstream_checks):
             return jsonify({
                 "status": "not_ready",
-                "checks": auth_checks,
+                "checks": checks,
             }), 503
         return jsonify({
             "status": "ready",
-            "checks": auth_checks,
+            "checks": checks,
         }), 200
 
     @public_api.route("/docs", methods=["GET"])
@@ -278,6 +291,30 @@ def _auth_checks_ready(auth_checks: dict[str, str]) -> bool:
     if auth_checks["auth_mode"] == "keycloak":
         return auth_checks.get("keycloak_jwks_url") == "configured"
     return auth_checks.get("api_auth_token") == "configured"
+
+
+def _upstream_readiness_checks(
+    neo4j_api_base_url: str,
+    object_api_base_url: str | None,
+) -> dict[str, str]:
+    checks = {
+        "graph_api": _upstream_health_status(neo4j_api_base_url),
+    }
+    if object_api_base_url:
+        checks["object_api"] = _upstream_health_status(object_api_base_url)
+    return checks
+
+
+def _upstream_health_status(base_url: str) -> str:
+    try:
+        response = requests.get(f"{base_url.rstrip('/')}/health", timeout=3)
+    except requests.RequestException:
+        return "unavailable"
+    return "ready" if response.ok else "unavailable"
+
+
+def _upstream_checks_ready(upstream_checks: dict[str, str]) -> bool:
+    return all(status == "ready" for status in upstream_checks.values())
 
 
 def _keycloak_public_error_code(error_name: str, status_code: int) -> str:
@@ -922,12 +959,12 @@ def build_openapi_schema() -> dict[str, Any]:
         "404": {"$ref": "#/components/responses/NotFound"},
     }
 
-    return {
+    schema = {
         "openapi": "3.0.3",
         "info": {
-            "title": "inLUMEN Public API",
+            "title": "inLUMEN Gateway API",
             "version": API_VERSION,
-            "description": "Public API for pipeline, workflow, and deployment artifact access.",
+            "description": "Gateway API for UI-equivalent pipeline editing, workflow discovery, and deployment artifact access.",
         },
         "servers": [{"url": "/"}],
         "tags": [
@@ -1437,13 +1474,839 @@ def build_openapi_schema() -> dict[str, Any]:
         },
     }
 
+    schema["tags"].extend([
+        {"name": "Canvas Graph", "description": "Node and edge operations used by the inLUMEN canvas."},
+        {"name": "Pipeline State", "description": "Current graph, overview metadata, and saved design versions."},
+        {"name": "Files", "description": "Node file upload, deletion, reading, and text updates."},
+        {"name": "Agentic", "description": "Agent-assisted chat and deployment artifact generation used by the UI."},
+        {"name": "Settings", "description": "LLM configuration metadata used by the UI."},
+    ])
+    schema["paths"].update(_ui_api_openapi_paths(protected_responses, not_found_responses))
+    schema["components"]["parameters"].update(_ui_api_openapi_parameters())
+    schema["components"]["schemas"].update(_ui_api_openapi_schemas())
+    return schema
+
+
+def _json_request(schema_ref: str, *, required: bool = True) -> dict[str, Any]:
+    return {
+        "required": required,
+        "content": {
+            "application/json": {
+                "schema": {"$ref": schema_ref},
+            }
+        },
+    }
+
+
+def _json_response(schema_ref: str, description: str = "Successful response.") -> dict[str, Any]:
+    return {
+        "description": description,
+        "content": {
+            "application/json": {
+                "schema": {"$ref": schema_ref},
+            }
+        },
+    }
+
+
+def _ui_api_openapi_paths(
+    protected_responses: dict[str, Any],
+    not_found_responses: dict[str, Any],
+) -> dict[str, Any]:
+    generic_ok = {
+        "200": _json_response("#/components/schemas/AnyObject"),
+        **protected_responses,
+    }
+    version_response = {
+        "200": _json_response("#/components/schemas/PipelineVersionMutationResponse"),
+        **protected_responses,
+    }
+
+    return {
+        "/api/graph/nodes": {
+            "post": {
+                "tags": ["Canvas Graph"],
+                "summary": "Create a canvas node",
+                "operationId": "createCanvasNode",
+                "requestBody": _json_request("#/components/schemas/NodeCreateRequest"),
+                "responses": generic_ok,
+            },
+            "delete": {
+                "tags": ["Canvas Graph"],
+                "summary": "Clear all canvas nodes and associated node file buckets",
+                "operationId": "clearCanvasGraph",
+                "responses": generic_ok,
+            },
+        },
+        "/api/graph/nodes/{node_id}": {
+            "delete": {
+                "tags": ["Canvas Graph"],
+                "summary": "Delete a canvas node and its file bucket",
+                "operationId": "deleteCanvasNode",
+                "parameters": [{"$ref": "#/components/parameters/NodeId"}],
+                "responses": not_found_responses,
+            },
+        },
+        "/api/graph/nodes/properties": {
+            "post": {
+                "tags": ["Canvas Graph"],
+                "summary": "Update canvas node properties",
+                "operationId": "updateCanvasNodeProperties",
+                "requestBody": _json_request("#/components/schemas/NodeUpdateRequest"),
+                "responses": generic_ok,
+            },
+        },
+        "/api/graph/nodes/position": {
+            "post": {
+                "tags": ["Canvas Graph"],
+                "summary": "Update canvas node position",
+                "operationId": "updateCanvasNodePosition",
+                "requestBody": _json_request("#/components/schemas/NodePositionUpdateRequest"),
+                "responses": generic_ok,
+            },
+        },
+        "/api/graph/edges": {
+            "post": {
+                "tags": ["Canvas Graph"],
+                "summary": "Create a canvas edge",
+                "operationId": "createCanvasEdge",
+                "requestBody": _json_request("#/components/schemas/EdgeMutationRequest"),
+                "responses": generic_ok,
+            },
+            "delete": {
+                "tags": ["Canvas Graph"],
+                "summary": "Delete a canvas edge",
+                "operationId": "deleteCanvasEdge",
+                "requestBody": _json_request("#/components/schemas/EdgeMutationRequest"),
+                "responses": generic_ok,
+            },
+        },
+        "/api/pipeline/graph": {
+            "get": {
+                "tags": ["Pipeline State"],
+                "summary": "Fetch the current UI graph",
+                "operationId": "getCurrentPipelineGraph",
+                "responses": {
+                    "200": _json_response("#/components/schemas/ReactFlowGraph", "Current pipeline graph."),
+                    **protected_responses,
+                },
+            },
+        },
+        "/api/pipeline/updated-at": {
+            "get": {
+                "tags": ["Pipeline State"],
+                "summary": "Fetch the current pipeline update timestamp",
+                "operationId": "getPipelineUpdatedAt",
+                "responses": {
+                    "200": _json_response("#/components/schemas/PipelineUpdatedAtResponse"),
+                    **protected_responses,
+                },
+            },
+        },
+        "/api/pipeline/overview": {
+            "get": {
+                "tags": ["Pipeline State"],
+                "summary": "Fetch pipeline overview metadata",
+                "operationId": "getPipelineOverview",
+                "responses": {
+                    "200": _json_response("#/components/schemas/PipelineOverviewMetadata"),
+                    **protected_responses,
+                },
+            },
+            "post": {
+                "tags": ["Pipeline State"],
+                "summary": "Update pipeline overview metadata",
+                "operationId": "updatePipelineOverview",
+                "requestBody": _json_request("#/components/schemas/PipelineOverviewUpdateRequest"),
+                "responses": {
+                    "200": _json_response("#/components/schemas/PipelineOverviewMetadata"),
+                    **protected_responses,
+                },
+            },
+        },
+        "/api/pipeline/versions": {
+            "get": {
+                "tags": ["Pipeline State"],
+                "summary": "List saved UI pipeline versions",
+                "operationId": "listUiPipelineVersions",
+                "responses": {
+                    "200": _json_response("#/components/schemas/UiPipelineVersionListResponse"),
+                    **protected_responses,
+                },
+            },
+            "post": {
+                "tags": ["Pipeline State"],
+                "summary": "Save a new UI pipeline version",
+                "operationId": "saveUiPipelineVersion",
+                "requestBody": _json_request("#/components/schemas/PipelineVersionSaveRequest"),
+                "responses": version_response,
+            },
+            "delete": {
+                "tags": ["Pipeline State"],
+                "summary": "Delete a UI pipeline version",
+                "operationId": "deleteUiPipelineVersion",
+                "requestBody": _json_request("#/components/schemas/PipelineVersionUidRequest"),
+                "responses": {
+                    "200": _json_response("#/components/schemas/PipelineVersionDeleteResponse"),
+                    **protected_responses,
+                },
+            },
+        },
+        "/api/pipeline/versions/main": {
+            "post": {
+                "tags": ["Pipeline State"],
+                "summary": "Save the Main UI pipeline version",
+                "operationId": "saveMainPipelineVersion",
+                "requestBody": _json_request("#/components/schemas/PipelineGraphSaveRequest"),
+                "responses": version_response,
+            },
+        },
+        "/api/pipeline/versions/active": {
+            "post": {
+                "tags": ["Pipeline State"],
+                "summary": "Save the active UI pipeline version",
+                "operationId": "saveActivePipelineVersion",
+                "requestBody": _json_request("#/components/schemas/PipelineActiveVersionSaveRequest"),
+                "responses": version_response,
+            },
+        },
+        "/api/pipeline/versions/restore": {
+            "post": {
+                "tags": ["Pipeline State"],
+                "summary": "Restore a saved UI pipeline version",
+                "operationId": "restorePipelineVersion",
+                "requestBody": _json_request("#/components/schemas/PipelineVersionUidRequest"),
+                "responses": {
+                    "200": _json_response("#/components/schemas/PipelineVersionRestoreResponse"),
+                    **protected_responses,
+                },
+            },
+        },
+        "/api/pipeline/versions/set-main": {
+            "post": {
+                "tags": ["Pipeline State"],
+                "summary": "Promote a saved UI pipeline version to Main",
+                "operationId": "setPipelineVersionAsMain",
+                "requestBody": _json_request("#/components/schemas/PipelineVersionUidRequest"),
+                "responses": {
+                    "200": _json_response("#/components/schemas/PipelineVersionRestoreResponse"),
+                    **protected_responses,
+                },
+            },
+        },
+        "/api/files": {
+            "get": {
+                "tags": ["Files"],
+                "summary": "List files attached to graph nodes",
+                "operationId": "listNodeFiles",
+                "responses": {
+                    "200": {
+                        "description": "Attached node files.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "array",
+                                    "items": {"$ref": "#/components/schemas/BackendFileReference"},
+                                }
+                            }
+                        },
+                    },
+                    **protected_responses,
+                },
+            },
+        },
+        "/api/files/content": {
+            "get": {
+                "tags": ["Files"],
+                "summary": "Read a node file",
+                "operationId": "readNodeFile",
+                "parameters": [
+                    {"$ref": "#/components/parameters/ContainerId"},
+                    {"$ref": "#/components/parameters/Filename"},
+                ],
+                "responses": {
+                    "200": {
+                        "description": "File content.",
+                        "content": {
+                            "text/plain": {"schema": {"type": "string"}},
+                            "application/octet-stream": {"schema": {"type": "string", "format": "binary"}},
+                        },
+                    },
+                    **protected_responses,
+                },
+            },
+        },
+        "/api/nodes/{node_id}/files": {
+            "post": {
+                "tags": ["Files"],
+                "summary": "Upload a file to a node",
+                "operationId": "uploadNodeFile",
+                "parameters": [{"$ref": "#/components/parameters/NodeId"}],
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "multipart/form-data": {
+                            "schema": {
+                                "type": "object",
+                                "required": ["file"],
+                                "properties": {
+                                    "file": {"type": "string", "format": "binary"},
+                                },
+                            }
+                        }
+                    },
+                },
+                "responses": generic_ok,
+            },
+            "delete": {
+                "tags": ["Files"],
+                "summary": "Remove a file from a node",
+                "operationId": "deleteNodeFile",
+                "parameters": [{"$ref": "#/components/parameters/NodeId"}],
+                "requestBody": _json_request("#/components/schemas/FileDeleteRequest"),
+                "responses": generic_ok,
+            },
+        },
+        "/api/nodes/{node_id}/files/text": {
+            "put": {
+                "tags": ["Files"],
+                "summary": "Update a text file attached to a node",
+                "operationId": "updateNodeTextFile",
+                "parameters": [{"$ref": "#/components/parameters/NodeId"}],
+                "requestBody": _json_request("#/components/schemas/TextFileUpdateRequest"),
+                "responses": generic_ok,
+            },
+        },
+        "/api/chatbot-configs": {
+            "get": {
+                "tags": ["Settings"],
+                "summary": "List saved LLM configuration metadata",
+                "operationId": "listChatbotConfigs",
+                "responses": {
+                    "200": _json_response("#/components/schemas/ChatbotConfigListResponse"),
+                    **protected_responses,
+                },
+            },
+            "post": {
+                "tags": ["Settings"],
+                "summary": "Create saved LLM configuration metadata",
+                "operationId": "createChatbotConfig",
+                "requestBody": _json_request("#/components/schemas/ChatbotConfigUpsertRequest"),
+                "responses": {
+                    "201": _json_response("#/components/schemas/ChatbotConfigResponse", "Configuration created."),
+                    **protected_responses,
+                },
+            },
+        },
+        "/api/chatbot-configs/{config_id}": {
+            "get": {
+                "tags": ["Settings"],
+                "summary": "Fetch saved LLM configuration metadata",
+                "operationId": "getChatbotConfig",
+                "parameters": [{"$ref": "#/components/parameters/ConfigId"}],
+                "responses": {
+                    "200": _json_response("#/components/schemas/ChatbotConfigResponse"),
+                    **not_found_responses,
+                },
+            },
+            "put": {
+                "tags": ["Settings"],
+                "summary": "Update saved LLM configuration metadata",
+                "operationId": "updateChatbotConfig",
+                "parameters": [{"$ref": "#/components/parameters/ConfigId"}],
+                "requestBody": _json_request("#/components/schemas/ChatbotConfigUpsertRequest"),
+                "responses": {
+                    "200": _json_response("#/components/schemas/ChatbotConfigResponse"),
+                    **not_found_responses,
+                },
+            },
+            "delete": {
+                "tags": ["Settings"],
+                "summary": "Delete saved LLM configuration metadata",
+                "operationId": "deleteChatbotConfig",
+                "parameters": [{"$ref": "#/components/parameters/ConfigId"}],
+                "responses": {
+                    "200": _json_response("#/components/schemas/DeleteResponse"),
+                    **not_found_responses,
+                },
+            },
+        },
+        "/agentic_generate_dockerfiles": {
+            "post": {
+                "tags": ["Agentic"],
+                "summary": "Generate Dockerfiles for the current pipeline",
+                "operationId": "agenticGenerateDockerfiles",
+                "requestBody": _json_request("#/components/schemas/AgenticDockerfilesRequest"),
+                "responses": {
+                    "200": _json_response("#/components/schemas/DockerfileArtifactsResponse"),
+                    **protected_responses,
+                },
+            },
+        },
+        "/agentic_generate_yaml": {
+            "post": {
+                "tags": ["Agentic"],
+                "summary": "Generate Argo Workflow YAML from Dockerfile artifacts",
+                "operationId": "agenticGenerateYaml",
+                "requestBody": _json_request("#/components/schemas/AgenticYamlRequest"),
+                "responses": {
+                    "200": {
+                        "description": "Generated Argo Workflow YAML.",
+                        "content": {
+                            "application/x-yaml": {"schema": {"type": "string"}},
+                        },
+                    },
+                    **protected_responses,
+                },
+            },
+        },
+        "/agentic_generate_version_yamls": {
+            "post": {
+                "tags": ["Agentic"],
+                "summary": "Generate Argo Workflow YAML for every saved version with LLM settings",
+                "operationId": "agenticGenerateVersionYamlsWithConfig",
+                "requestBody": _json_request("#/components/schemas/LLMConfigEnvelope"),
+                "responses": {
+                    "200": _json_response("#/components/schemas/VersionYamlListResponse"),
+                    **protected_responses,
+                },
+            },
+        },
+        "/simple_chat": {
+            "post": _chat_operation("sendSimpleChatMessage", "Send a message to the pipeline editing agent"),
+        },
+        "/agentic_pipeline_editor": {
+            "post": _chat_operation("sendPipelineEditorMessage", "Send a message to the pipeline editing agent"),
+        },
+        "/simple_chat/reset": {
+            "post": _chat_reset_operation("resetSimpleChatSession"),
+        },
+        "/agentic_pipeline_editor/reset": {
+            "post": _chat_reset_operation("resetPipelineEditorSession"),
+        },
+    }
+
+
+def _chat_operation(operation_id: str, summary: str) -> dict[str, Any]:
+    return {
+        "tags": ["Agentic"],
+        "summary": summary,
+        "operationId": operation_id,
+        "requestBody": _json_request("#/components/schemas/ChatRequest"),
+        "responses": {
+            "200": _json_response("#/components/schemas/ChatResponse"),
+            "400": {"$ref": "#/components/responses/BadRequest"},
+            "401": {"$ref": "#/components/responses/Unauthorized"},
+            "403": {"$ref": "#/components/responses/Forbidden"},
+            "500": {"$ref": "#/components/responses/InternalError"},
+        },
+    }
+
+
+def _chat_reset_operation(operation_id: str) -> dict[str, Any]:
+    return {
+        "tags": ["Agentic"],
+        "summary": "Reset a pipeline editing chat session",
+        "operationId": operation_id,
+        "requestBody": _json_request("#/components/schemas/ChatResetRequest"),
+        "responses": {
+            "200": _json_response("#/components/schemas/OkResponse"),
+            "400": {"$ref": "#/components/responses/BadRequest"},
+            "401": {"$ref": "#/components/responses/Unauthorized"},
+            "403": {"$ref": "#/components/responses/Forbidden"},
+            "500": {"$ref": "#/components/responses/InternalError"},
+        },
+    }
+
+
+def _ui_api_openapi_parameters() -> dict[str, Any]:
+    return {
+        "NodeId": {
+            "name": "node_id",
+            "in": "path",
+            "required": True,
+            "schema": {"type": "string", "minLength": 1, "maxLength": 160},
+        },
+        "ContainerId": {
+            "name": "container_id",
+            "in": "query",
+            "required": True,
+            "schema": {"type": "string", "minLength": 1, "maxLength": 160},
+            "description": "Node file bucket id without the files-step-id- prefix.",
+        },
+        "Filename": {
+            "name": "filename",
+            "in": "query",
+            "required": True,
+            "schema": {"type": "string", "minLength": 1, "maxLength": 255},
+        },
+        "ConfigId": {
+            "name": "config_id",
+            "in": "path",
+            "required": True,
+            "schema": {"type": "string", "minLength": 1, "maxLength": 160},
+        },
+    }
+
+
+def _ui_api_openapi_schemas() -> dict[str, Any]:
+    return {
+        "AnyObject": {"type": "object", "additionalProperties": True},
+        "LLMConfig": {
+            "type": "object",
+            "required": ["provider", "model", "base_url", "api_key"],
+            "additionalProperties": True,
+            "properties": {
+                "provider": {"type": "string"},
+                "base_url": {"type": "string"},
+                "baseUrl": {"type": "string"},
+                "api_key": {"type": "string"},
+                "apiKey": {"type": "string"},
+                "model": {"type": "string"},
+            },
+        },
+        "LLMConfigEnvelope": {
+            "type": "object",
+            "required": ["llm_config"],
+            "properties": {"llm_config": {"$ref": "#/components/schemas/LLMConfig"}},
+            "additionalProperties": True,
+        },
+        "ChatbotConfig": {
+            "type": "object",
+            "required": ["id", "name", "provider", "model", "baseUrl"],
+            "properties": {
+                "id": {"type": "string"},
+                "name": {"type": "string"},
+                "provider": {"type": "string"},
+                "model": {"type": "string"},
+                "baseUrl": {"type": "string"},
+                "base_url": {"type": "string"},
+                "system_prompt": {"type": "string"},
+                "temperature": {"type": "number"},
+                "created_at": {"type": "string", "nullable": True},
+                "updated_at": {"type": "string", "nullable": True},
+            },
+            "additionalProperties": True,
+        },
+        "ChatbotConfigUpsertRequest": {
+            "type": "object",
+            "required": ["name", "model", "baseUrl"],
+            "properties": {
+                "name": {"type": "string"},
+                "provider": {"type": "string"},
+                "model": {"type": "string"},
+                "baseUrl": {"type": "string"},
+                "base_url": {"type": "string"},
+                "system_prompt": {"type": "string"},
+                "temperature": {"type": "number"},
+            },
+        },
+        "ChatbotConfigResponse": {
+            "type": "object",
+            "required": ["config"],
+            "properties": {"config": {"$ref": "#/components/schemas/ChatbotConfig"}},
+        },
+        "ChatbotConfigListResponse": {
+            "type": "object",
+            "required": ["configs"],
+            "properties": {
+                "configs": {"type": "array", "items": {"$ref": "#/components/schemas/ChatbotConfig"}},
+            },
+        },
+        "DeleteResponse": {
+            "type": "object",
+            "properties": {"deleted_id": {"type": "string"}},
+            "additionalProperties": True,
+        },
+        "ReactFlowNode": {
+            "type": "object",
+            "required": ["id"],
+            "additionalProperties": True,
+            "properties": {
+                "id": {"type": "string"},
+                "type": {"type": "string"},
+                "position": {
+                    "type": "object",
+                    "properties": {"x": {"type": "number"}, "y": {"type": "number"}},
+                    "additionalProperties": True,
+                },
+                "data": {"type": "object", "additionalProperties": True},
+            },
+        },
+        "ReactFlowEdge": {
+            "type": "object",
+            "required": ["source", "target"],
+            "additionalProperties": True,
+            "properties": {
+                "id": {"type": "string"},
+                "source": {"type": "string"},
+                "target": {"type": "string"},
+            },
+        },
+        "ReactFlowGraph": {
+            "type": "object",
+            "properties": {
+                "updated_at": {"type": "string", "nullable": True},
+                "pipeline": {"type": "object", "additionalProperties": True},
+                "nodes": {"type": "array", "items": {"$ref": "#/components/schemas/ReactFlowNode"}},
+                "edges": {"type": "array", "items": {"$ref": "#/components/schemas/ReactFlowEdge"}},
+                "viewport": {"type": "object", "additionalProperties": True},
+            },
+            "additionalProperties": True,
+        },
+        "NodeCreateRequest": {
+            "type": "object",
+            "required": ["properties"],
+            "properties": {
+                "properties": {
+                    "type": "object",
+                    "required": ["flow_id"],
+                    "properties": {
+                        "flow_id": {"type": "string"},
+                        "label": {"type": "string"},
+                        "type": {"type": "string"},
+                        "description": {"type": "string"},
+                        "x": {"type": "number"},
+                        "y": {"type": "number"},
+                    },
+                    "additionalProperties": True,
+                }
+            },
+        },
+        "NodeUpdateRequest": {
+            "type": "object",
+            "required": ["flow_id", "properties"],
+            "properties": {
+                "flow_id": {"type": "string"},
+                "properties": {"type": "object", "additionalProperties": True},
+            },
+        },
+        "NodePositionUpdateRequest": {
+            "type": "object",
+            "required": ["flow_id", "x", "y"],
+            "properties": {
+                "flow_id": {"type": "string"},
+                "x": {"type": "number"},
+                "y": {"type": "number"},
+            },
+        },
+        "EdgeMutationRequest": {
+            "type": "object",
+            "required": ["properties"],
+            "properties": {
+                "properties": {
+                    "type": "object",
+                    "required": ["flow_id_source", "flow_id_target"],
+                    "properties": {
+                        "flow_id_source": {"type": "string"},
+                        "flow_id_target": {"type": "string"},
+                    },
+                }
+            },
+        },
+        "PipelineUpdatedAtResponse": {
+            "type": "object",
+            "properties": {"updated_at": {"type": "string", "nullable": True}},
+            "additionalProperties": True,
+        },
+        "PipelineOverviewMetadata": {
+            "type": "object",
+            "properties": {
+                "version": {"type": "string"},
+                "description": {"type": "string"},
+                "active_version_uid": {"type": "string"},
+                "created_at": {"type": "string", "nullable": True},
+                "updated_at": {"type": "string", "nullable": True},
+            },
+            "additionalProperties": True,
+        },
+        "PipelineOverviewUpdateRequest": {
+            "type": "object",
+            "properties": {
+                "version": {"type": "string"},
+                "description": {"type": "string"},
+                "active_version_uid": {"type": "string"},
+            },
+        },
+        "UiPipelineVersionSummary": {
+            "type": "object",
+            "required": ["uid", "name"],
+            "properties": {
+                "uid": {"type": "string"},
+                "name": {"type": "string"},
+                "version": {"type": "string"},
+                "description": {"type": "string", "nullable": True},
+                "is_main": {"type": "boolean"},
+                "node_count": {"type": "integer"},
+                "edge_count": {"type": "integer"},
+                "file_count": {"type": "integer"},
+                "created_at": {"type": "string", "nullable": True},
+                "updated_at": {"type": "string", "nullable": True},
+            },
+            "additionalProperties": True,
+        },
+        "UiPipelineVersionListResponse": {
+            "type": "object",
+            "required": ["versions"],
+            "properties": {
+                "versions": {"type": "array", "items": {"$ref": "#/components/schemas/UiPipelineVersionSummary"}},
+            },
+        },
+        "PipelineGraphSaveRequest": {
+            "type": "object",
+            "required": ["graph"],
+            "properties": {"graph": {"$ref": "#/components/schemas/ReactFlowGraph"}},
+        },
+        "PipelineVersionSaveRequest": {
+            "type": "object",
+            "required": ["name", "graph"],
+            "properties": {
+                "name": {"type": "string"},
+                "graph": {"$ref": "#/components/schemas/ReactFlowGraph"},
+            },
+        },
+        "PipelineActiveVersionSaveRequest": {
+            "type": "object",
+            "required": ["uid", "graph"],
+            "properties": {
+                "uid": {"type": "string"},
+                "name": {"type": "string"},
+                "graph": {"$ref": "#/components/schemas/ReactFlowGraph"},
+            },
+        },
+        "PipelineVersionUidRequest": {
+            "type": "object",
+            "required": ["uid"],
+            "properties": {"uid": {"type": "string"}},
+        },
+        "PipelineVersionMutationResponse": {
+            "type": "object",
+            "required": ["version"],
+            "properties": {"version": {"$ref": "#/components/schemas/UiPipelineVersionSummary"}},
+            "additionalProperties": True,
+        },
+        "PipelineVersionRestoreResponse": {
+            "type": "object",
+            "required": ["version", "graph"],
+            "properties": {
+                "version": {"$ref": "#/components/schemas/UiPipelineVersionSummary"},
+                "graph": {"$ref": "#/components/schemas/ReactFlowGraph"},
+                "file_restore": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            },
+            "additionalProperties": True,
+        },
+        "PipelineVersionDeleteResponse": {
+            "type": "object",
+            "properties": {
+                "deleted_uid": {"type": "string"},
+                "remaining_count": {"type": "integer"},
+                "pipeline_updated_at": {"type": "string", "nullable": True},
+            },
+            "additionalProperties": True,
+        },
+        "BackendFileReference": {
+            "type": "object",
+            "required": ["filename", "bucket"],
+            "properties": {
+                "filename": {"type": "string"},
+                "bucket": {"type": "string"},
+                "step_id": {"type": "string"},
+            },
+            "additionalProperties": True,
+        },
+        "FileDeleteRequest": {
+            "type": "object",
+            "required": ["filename"],
+            "properties": {"filename": {"type": "string"}},
+        },
+        "TextFileUpdateRequest": {
+            "type": "object",
+            "required": ["filename", "content"],
+            "properties": {
+                "container_id": {"type": "string"},
+                "filename": {"type": "string"},
+                "content": {"type": "string"},
+            },
+        },
+        "AgenticDockerfilesRequest": {
+            "type": "object",
+            "required": ["llm_config"],
+            "properties": {
+                "files": {"type": "array", "items": {"$ref": "#/components/schemas/BackendFileReference"}},
+                "pipeline_graph": {"$ref": "#/components/schemas/ReactFlowGraph"},
+                "llm_config": {"$ref": "#/components/schemas/LLMConfig"},
+            },
+        },
+        "AgenticYamlRequest": {
+            "type": "object",
+            "required": ["dockerfile_json"],
+            "properties": {
+                "dockerfile_json": {"type": "object", "additionalProperties": True},
+                "dockerfiles_json": {"type": "object", "additionalProperties": True},
+                "pipeline_graph": {"$ref": "#/components/schemas/ReactFlowGraph"},
+                "llm_config": {"$ref": "#/components/schemas/LLMConfig"},
+            },
+        },
+        "VersionYamlListResponse": {
+            "type": "object",
+            "required": ["versions"],
+            "properties": {
+                "versions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "uid": {"type": "string"},
+                            "name": {"type": "string"},
+                            "version": {"type": "string"},
+                            "yaml": {"type": "string"},
+                        },
+                        "additionalProperties": True,
+                    },
+                }
+            },
+        },
+        "ChatRequest": {
+            "type": "object",
+            "required": ["user_message", "llm_config"],
+            "properties": {
+                "session_id": {"type": "string", "nullable": True},
+                "user_message": {"type": "string"},
+                "canvas_graph": {"$ref": "#/components/schemas/ReactFlowGraph"},
+                "active_version_uid": {"type": "string"},
+                "active_version_name": {"type": "string"},
+                "model": {"type": "string"},
+                "llm_config": {"$ref": "#/components/schemas/LLMConfig"},
+            },
+        },
+        "ChatResponse": {
+            "type": "object",
+            "required": ["session_id", "assistant_message", "graph", "sync"],
+            "properties": {
+                "session_id": {"type": "string"},
+                "assistant_message": {"type": "string"},
+                "graph": {"$ref": "#/components/schemas/ReactFlowGraph"},
+                "sync": {"type": "object", "additionalProperties": True},
+            },
+        },
+        "ChatResetRequest": {
+            "type": "object",
+            "properties": {"session_id": {"type": "string"}},
+        },
+        "OkResponse": {
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "additionalProperties": True,
+        },
+    }
+
 
 SWAGGER_UI_HTML = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>inLUMEN Public API Docs</title>
+  <title>inLUMEN Gateway API Docs</title>
   <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
   <style>
     body { margin: 0; background: #f7f7f7; color: #1f2933; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
@@ -1459,7 +2322,7 @@ SWAGGER_UI_HTML = """<!doctype html>
 </head>
 <body>
   <section id="auth-panel" class="auth-panel">
-    <h1>inLUMEN Public API</h1>
+    <h1>inLUMEN Gateway API</h1>
     <p>Enter a bearer token to load the live Swagger documentation. With Keycloak enabled, use a Keycloak access token; otherwise use API_AUTH_TOKEN.</p>
     <form id="auth-form" class="auth-row">
       <input id="auth-token" type="password" autocomplete="current-password" placeholder="Bearer token" aria-label="Bearer token">

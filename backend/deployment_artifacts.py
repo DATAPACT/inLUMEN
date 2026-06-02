@@ -773,8 +773,6 @@ def _dump_yaml_lines(value: Any, indent: int = 0) -> List[str]:
 
 
 def dump_yaml(data: dict) -> str:
-    if yaml is not None:
-        return yaml.safe_dump(data, sort_keys=False)
     return "\n".join(_dump_yaml_lines(data)) + "\n"
 
 

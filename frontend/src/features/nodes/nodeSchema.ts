@@ -130,7 +130,7 @@ export const typeHasEndpoint = (type: StepType) =>
 export const toDatabaseValue = (uiValue: unknown) =>
   String(uiValue ?? "").toLowerCase().trim();
 
-export const pickNeo4jUpdatableProps = (
+export const pickBackendUpdatableProps = (
   nodeId: string,
   nodeData: Record<string, unknown>,
   nodeType: StepType,

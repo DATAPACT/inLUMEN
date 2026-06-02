@@ -1,4 +1,3 @@
-import os
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
@@ -17,15 +16,8 @@ LLM_PROVIDER_PRESETS = {
     "custom": {
         "base_url": "",
     },
-    # Kept for backward compatibility with existing OPENAI_* deployments.
-    "openai": {
-        "base_url": "https://api.openai.com/v1",
-    },
 }
 
-DEFAULT_LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openrouter").strip() or "openrouter"
-DEFAULT_CHAT_MODEL = os.getenv("LLM_MODEL", "").strip() or "gpt-oss-120b"
-DEFAULT_LLM_BASE_URL = os.getenv("LLM_BASE_URL", "").strip()
 DEFAULT_LLM_MODEL_FAMILY = "unknown"
 
 OPENROUTER_MODEL_ALIASES = {
@@ -54,7 +46,7 @@ class LLMConfig:
 
 
 def _normalize_provider(provider: str | None) -> str:
-    normalized = (provider or DEFAULT_LLM_PROVIDER).strip().lower().replace("-", "_")
+    normalized = (provider or "").strip().lower().replace("-", "_")
     aliases = {
         "open_router": "openrouter",
         "ollama": "ollama_cloud",
@@ -64,13 +56,11 @@ def _normalize_provider(provider: str | None) -> str:
         "self_hosted": "custom",
     }
     normalized = aliases.get(normalized, normalized)
+    if not normalized:
+        raise ValueError("LLM provider is required.")
     if normalized not in LLM_PROVIDER_PRESETS:
         return "custom"
     return normalized
-
-
-def _api_key_from_env() -> str:
-    return os.getenv("LLM_API_KEY", "").strip()
 
 
 def _bool_config(value: Any, default: bool) -> bool:
@@ -113,21 +103,11 @@ def resolve_llm_config(raw_config: Optional[Mapping[str, Any]] = None) -> LLMCon
         or raw.get("llm_provider")
         or raw.get("providerName")
     )
-    preset = LLM_PROVIDER_PRESETS[provider]
-    model = str(raw.get("model") or "").strip() or DEFAULT_CHAT_MODEL
-    if provider == "openrouter" and model.lower() in {"llama3.1", "llama3.1:8b"}:
-        model = DEFAULT_CHAT_MODEL
+    model = str(raw.get("model") or "").strip()
     if provider == "openrouter":
         model = OPENROUTER_MODEL_ALIASES.get(model.lower(), model)
-    base_url = (
-        str(raw.get("base_url") or raw.get("baseUrl") or "").strip()
-        or DEFAULT_LLM_BASE_URL
-        or preset["base_url"]
-    )
-    api_key = (
-        str(raw.get("api_key") or raw.get("apiKey") or "").strip()
-        or _api_key_from_env()
-    )
+    base_url = str(raw.get("base_url") or raw.get("baseUrl") or "").strip()
+    api_key = str(raw.get("api_key") or raw.get("apiKey") or "").strip()
     model_family = (
         str(raw.get("model_family") or raw.get("modelFamily") or "").strip()
         or DEFAULT_LLM_MODEL_FAMILY
@@ -150,11 +130,11 @@ def resolve_llm_config(raw_config: Optional[Mapping[str, Any]] = None) -> LLMCon
     if not model:
         raise ValueError("LLM model is required.")
     if not base_url:
-        raise ValueError("LLM base URL is required for OpenAI-compatible endpoints.")
+        raise ValueError("LLM base URL is required. Configure it in the UI LLM settings.")
     if not api_key:
         raise ValueError(
             f"LLM API key is required for provider '{provider}'. "
-            "Provide it in the configuration or set LLM_API_KEY."
+            "Enter it in the UI LLM settings for this browser session."
         )
 
     return LLMConfig(

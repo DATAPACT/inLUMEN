@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { apiFetch } from '@/utils/apiFetch';
-import { LLM_API_URL } from '@/config/api';
+import { INLUMEN_API_URL } from '@/config/api';
 import { cn } from '@/lib/utils';
 import { Sidebar } from '@/components/Sidebar';
 import { PropertiesPanel, PropertyNodeData } from '@/components/PropertiesPanel';
@@ -174,7 +174,6 @@ const Index = () => {
   const [activeTab, setActiveTab] = useState('lab'); // 'lab', 'overview', or 'simulate'
   const [userInput, setUserInput] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
-  const [githubToken, setGithubToken] = useState('');
   const [flowNodes, setFlowNodes] = useState<FlowNode[]>([]);
   const [conversation, setConversation] = useState<ChatMessage[]>(readSavedConversation);
   const [canvasSyncStatus, setCanvasSyncStatus] = useState<CanvasSyncStatus>({
@@ -283,11 +282,6 @@ const Index = () => {
   }, [activePipelineDescription, activeVersionName, flowNodes, pipelineLastUpdate, pipelineCreatedAt]);
 
   useEffect(() => {
-    const savedToken = localStorage.getItem('github_token');
-    if (savedToken) {
-      setGithubToken(savedToken);
-    }
-
     // Load saved pipeline timestamp (last update)
     const savedTimestamp = localStorage.getItem('saved-pipeline-timestamp');
     if (savedTimestamp) {
@@ -302,12 +296,6 @@ const Index = () => {
 
     loadConfigurations();
   }, [loadConfigurations]);
-
-  useEffect(() => {
-    if (githubToken) {
-      localStorage.setItem('github_token', githubToken);
-    }
-  }, [githubToken]);
 
   useEffect(() => {
     conversationEndRef.current?.scrollIntoView({
@@ -442,7 +430,7 @@ const Index = () => {
       const activeCfg = selectedConfig || defaultConfig;
       const canvasGraph = flowCanvasRef.current?.getCurrentGraph() ?? null;
 
-      const res = await apiFetch(`${LLM_API_URL}/simple_chat`, {
+      const res = await apiFetch(`${INLUMEN_API_URL}/simple_chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -526,7 +514,7 @@ const Index = () => {
 
     if (chatSessionId) {
       try {
-        await apiFetch(`${LLM_API_URL}/simple_chat/reset`, {
+        await apiFetch(`${INLUMEN_API_URL}/simple_chat/reset`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ session_id: chatSessionId }),
@@ -918,8 +906,6 @@ const Index = () => {
             onDragStart={onDragStart}
             activeTab={activeTab}
             onTabChange={handleTabChange}
-            githubToken={githubToken}
-            setGithubToken={setGithubToken}
             onBlankPipeline={handleBlankPipeline}
             onSavePipeline={handleSavePipeline}
             pipelineOverview={pipelineOverview}
