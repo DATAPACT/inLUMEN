@@ -26,6 +26,15 @@ MAIN_VERSION_NAME = "Main"
 VERSION_FILE_SNAPSHOT_BUCKET = "pipeline-version-file-snapshots"
 
 
+@app.route('/health', methods=['GET'])
+def health():
+    try:
+        driver.verify_connectivity()
+    except Exception as exc:
+        return jsonify({'status': 'unavailable', 'details': str(exc)}), 503
+    return jsonify({'status': 'ok'}), 200
+
+
 def _label_exists(session, label_name: str) -> bool:
     result = session.run("CALL db.labels() YIELD label RETURN collect(label) AS labels").single()
     labels = result["labels"] if result and result["labels"] else []

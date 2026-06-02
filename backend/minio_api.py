@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, Response
 from minio_access import remove_bucket, remove_object, download_last_object, get_url_last_object, list_objects, upload_object, create_bucket, get_object, print_info_object, download_inlumen_object, read_object_bytes
 from auth_middleware import require_auth
+from minio_gateway import get_minio_client
 import os
 import datetime
 import mimetypes
@@ -24,6 +25,15 @@ def add_cors_headers(response):
 @app.after_request
 def apply_cors(response):
     return add_cors_headers(response)
+
+
+@app.route('/health', methods=['GET'])
+def health():
+    try:
+        get_minio_client().list_buckets()
+    except Exception as exc:
+        return jsonify({'status': 'unavailable', 'details': str(exc)}), 503
+    return jsonify({'status': 'ok'}), 200
 
 # Add file to MinIO
 @app.route('/minio_upload_file', methods=['POST'])

@@ -138,9 +138,38 @@ class PublicApiTest(unittest.TestCase):
         )
         self.assertIn("/api/v1/pipelines/{pipeline_id}/artifacts/dockerfiles", schema["paths"])
         self.assertIn("/api/v1/pipelines/{pipeline_id}/artifacts/argo-workflow.yaml", schema["paths"])
+        self.assertIn("/api/graph/nodes", schema["paths"])
+        self.assertIn("/api/chatbot-configs", schema["paths"])
+        self.assertIn("/api/nodes/{node_id}/files", schema["paths"])
+        self.assertIn("/agentic_generate_yaml", schema["paths"])
+        self.assertIn("/simple_chat", schema["paths"])
         self.assertFalse(any("sim-pipe" in path for path in schema["paths"]))
         self.assertIn("/openapi.json", schema["paths"])
         self.assertEqual(["Health"], schema["paths"]["/health"]["get"]["tags"])
+        self.assertEqual(["Canvas Graph"], schema["paths"]["/api/graph/nodes"]["post"]["tags"])
+
+    @patch("public_api.requests.get")
+    def test_ready_can_check_internal_gateway_dependencies(self, requests_get_mock):
+        ok_response = Mock()
+        ok_response.ok = True
+        requests_get_mock.return_value = ok_response
+
+        app = Flask(__name__)
+        app.register_blueprint(
+            create_public_api_blueprint(
+                "http://graph-api:5001",
+                "http://object-api:5003",
+                check_upstreams=True,
+            )
+        )
+        client = app.test_client()
+
+        response = client.get("/ready")
+
+        self.assertEqual(200, response.status_code)
+        checks = response.get_json()["checks"]
+        self.assertEqual("ready", checks["graph_api"])
+        self.assertEqual("ready", checks["object_api"])
 
     def test_protected_endpoints_reject_missing_or_invalid_token_without_echoing_secret(self):
         missing = self.client.get("/api/v1/pipelines")
@@ -242,7 +271,7 @@ class PublicApiTest(unittest.TestCase):
     ):
         fetch_pipeline_graph_mock.side_effect = _async_return(_sample_graph())
 
-        async def _versions(_base_url, include_graph=False):
+        async def _versions(_base_url, include_graph=False, **_kwargs):
             return _sample_versions(include_graph=include_graph)
 
         fetch_pipeline_versions_mock.side_effect = _versions

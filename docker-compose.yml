@@ -60,7 +60,7 @@ services:
 
   backend:
     build:
-      context: ./connection
+      context: ./backend
     container_name: inlumen_backend
     hostname: inlumen-backend
     restart: unless-stopped
@@ -73,13 +73,13 @@ services:
     ports:
       - "${INLUMEN_API_PORT:-5000}:${INLUMEN_API_PORT:-5000}"
     volumes:
-      - ./connection:/usr/inlumen
+      - ./backend:/usr/inlumen
     environment:
       PYTHONUNBUFFERED: "1"
       FRONTEND_PORT: ${FRONTEND_PORT:-8080}
       INLUMEN_API_PORT: ${INLUMEN_API_PORT:-5000}
-      MINIO_API_PORT: ${MINIO_API_PORT:-5003}
       NEO4J_API_PORT: ${NEO4J_API_PORT:-5001}
+      MINIO_API_PORT: ${MINIO_API_PORT:-5003}
       LLM_PROVIDER: ${LLM_PROVIDER:-openrouter}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://openrouter.ai/api/v1}
       LLM_API_KEY: ${LLM_API_KEY:-}
@@ -96,6 +96,15 @@ services:
     command:
       - python
       - dev_runner.py
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.getenv(\"INLUMEN_API_PORT\", \"5000\")}/health', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
     networks:
       - datapact_network
 
@@ -107,7 +116,7 @@ services:
     restart: unless-stopped
     depends_on:
       backend:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "${FRONTEND_PORT:-8080}:${FRONTEND_PORT:-8080}"
     volumes:
@@ -121,6 +130,7 @@ services:
       VITE_KEYCLOAK_URL: ${VITE_KEYCLOAK_URL:-http://localhost:8081}
       VITE_KEYCLOAK_REALM: ${VITE_KEYCLOAK_REALM:-inlumen}
       VITE_KEYCLOAK_CLIENT_ID: ${VITE_KEYCLOAK_CLIENT_ID:-inlumen-frontend}
+      VITE_ENABLE_REMOTE_CHATBOT_CONFIG_SYNC: ${VITE_ENABLE_REMOTE_CHATBOT_CONFIG_SYNC:-true}
     command: npm run dev -- --host 0.0.0.0
     networks:
       - datapact_network

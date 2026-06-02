@@ -1,4 +1,5 @@
-import { supabase } from "@/integrations/supabase/client";
+import { INLUMEN_API_URL } from "@/config/api";
+import { apiFetch } from "@/utils/apiFetch";
 import { toast } from "sonner";
 
 export type LLMProvider = "openrouter" | "ollama_cloud" | "custom";
@@ -53,20 +54,38 @@ export const LLM_PROVIDER_DETAILS: Record<
 const LOCAL_CONFIG_KEY = "inlumen-chatbot-config-overrides";
 const LOCAL_ONLY_CONFIGS_KEY = "inlumen-chatbot-local-configs";
 const REMOTE_CONFIG_CACHE_KEY = "inlumen-chatbot-remote-config-cache";
+const SESSION_API_KEYS_KEY = "inlumen-chatbot-session-api-keys";
 const REMOTE_CONFIG_SYNC_ENABLED =
-  String(import.meta.env.VITE_ENABLE_REMOTE_CHATBOT_CONFIG_SYNC || "").trim().toLowerCase() ===
-  "true";
+  String(import.meta.env.VITE_ENABLE_REMOTE_CHATBOT_CONFIG_SYNC ?? "true").trim().toLowerCase() !==
+  "false";
 
 type StoredConfigValues = Partial<
-  Pick<ChatbotConfig, "provider" | "baseUrl" | "apiKey">
+  Pick<ChatbotConfig, "provider" | "baseUrl">
 >;
 
 const canUseLocalStorage = () => typeof window !== "undefined" && Boolean(window.localStorage);
+const canUseSessionStorage = () => typeof window !== "undefined" && Boolean(window.sessionStorage);
 
 const readStoredConfigValues = (): Record<string, StoredConfigValues> => {
   if (!canUseLocalStorage()) return {};
   try {
-    return JSON.parse(localStorage.getItem(LOCAL_CONFIG_KEY) || "{}");
+    const raw = JSON.parse(localStorage.getItem(LOCAL_CONFIG_KEY) || "{}");
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    return Object.fromEntries(
+      Object.entries(raw as Record<string, unknown>).map(([key, value]) => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          return [key, {}];
+        }
+        const item = value as Record<string, unknown>;
+        return [
+          key,
+          {
+            provider: typeof item.provider === "string" ? item.provider as LLMProvider : undefined,
+            baseUrl: typeof item.baseUrl === "string" ? item.baseUrl : undefined,
+          },
+        ];
+      }),
+    );
   } catch {
     return {};
   }
@@ -77,12 +96,46 @@ const writeStoredConfigValues = (values: Record<string, StoredConfigValues>) => 
   localStorage.setItem(LOCAL_CONFIG_KEY, JSON.stringify(values));
 };
 
+const readSessionApiKeys = (): Record<string, string> => {
+  if (!canUseSessionStorage()) return {};
+  try {
+    return JSON.parse(sessionStorage.getItem(SESSION_API_KEYS_KEY) || "{}");
+  } catch {
+    return {};
+  }
+};
+
+const writeSessionApiKey = (storageKey: string, apiKey: string) => {
+  if (!canUseSessionStorage()) return;
+  const values = readSessionApiKeys();
+  if (apiKey) {
+    values[storageKey] = apiKey;
+  } else {
+    delete values[storageKey];
+  }
+  sessionStorage.setItem(SESSION_API_KEYS_KEY, JSON.stringify(values));
+};
+
+const deleteSessionApiKey = (storageKey: string) => {
+  writeSessionApiKey(storageKey, "");
+};
+
+const stripConfigSecret = (config: ChatbotConfig) => {
+  const { apiKey: _apiKey, ...safeConfig } = config;
+  return safeConfig;
+};
+
+const stripRawConfigSecret = (item: Record<string, unknown>) => {
+  const { apiKey: _apiKey, api_key: _apiKeySnake, ...safeConfig } = item;
+  return safeConfig;
+};
+
 const readLocalOnlyConfigs = (): ChatbotConfig[] => {
   if (!canUseLocalStorage()) return [];
   try {
     const raw = JSON.parse(localStorage.getItem(LOCAL_ONLY_CONFIGS_KEY) || "[]");
     if (!Array.isArray(raw)) return [];
-    return raw.map((item) => normalizeConfig(item as Record<string, unknown>));
+    return raw.map((item) => normalizeConfig(stripRawConfigSecret(item as Record<string, unknown>)));
   } catch {
     return [];
   }
@@ -90,7 +143,7 @@ const readLocalOnlyConfigs = (): ChatbotConfig[] => {
 
 const writeLocalOnlyConfigs = (configs: ChatbotConfig[]) => {
   if (!canUseLocalStorage()) return;
-  localStorage.setItem(LOCAL_ONLY_CONFIGS_KEY, JSON.stringify(configs));
+  localStorage.setItem(LOCAL_ONLY_CONFIGS_KEY, JSON.stringify(configs.map(stripConfigSecret)));
 };
 
 const readCachedRemoteConfigs = (): ChatbotConfig[] => {
@@ -98,7 +151,7 @@ const readCachedRemoteConfigs = (): ChatbotConfig[] => {
   try {
     const raw = JSON.parse(localStorage.getItem(REMOTE_CONFIG_CACHE_KEY) || "[]");
     if (!Array.isArray(raw)) return [];
-    return raw.map((item) => normalizeConfig(item as Record<string, unknown>));
+    return raw.map((item) => normalizeConfig(stripRawConfigSecret(item as Record<string, unknown>)));
   } catch {
     return [];
   }
@@ -106,7 +159,7 @@ const readCachedRemoteConfigs = (): ChatbotConfig[] => {
 
 const writeCachedRemoteConfigs = (configs: ChatbotConfig[]) => {
   if (!canUseLocalStorage()) return;
-  localStorage.setItem(REMOTE_CONFIG_CACHE_KEY, JSON.stringify(configs));
+  localStorage.setItem(REMOTE_CONFIG_CACHE_KEY, JSON.stringify(configs.map(stripConfigSecret)));
 };
 
 const makeLocalConfigId = () => {
@@ -157,11 +210,13 @@ export const getDefaultChatbotConfig = (): ChatbotConfig => ({
 });
 
 const normalizeConfig = (config: Partial<ChatbotConfig> & Record<string, unknown>): ChatbotConfig => {
-  const stored = readStoredConfigValues()[configStorageKey({
+  const storageKey = configStorageKey({
     id: typeof config.id === "string" ? config.id : undefined,
     name: String(config.name || "OpenRouter"),
     model: String(config.model || LLM_PROVIDER_DETAILS.openrouter.defaultModel),
-  })] || {};
+  });
+  const stored = readStoredConfigValues()[storageKey] || {};
+  const sessionApiKey = readSessionApiKeys()[storageKey] || "";
 
   const provider = normalizeProvider(
     (config.provider as string | undefined) || stored.provider || "openrouter"
@@ -187,7 +242,7 @@ const normalizeConfig = (config: Partial<ChatbotConfig> & Record<string, unknown
     provider,
     model,
     baseUrl,
-    apiKey: String((config.apiKey as string | undefined) || stored.apiKey || ""),
+    apiKey: String((config.apiKey as string | undefined) || sessionApiKey || ""),
     system_prompt: typeof config.system_prompt === "string" ? config.system_prompt : "",
     temperature: typeof config.temperature === "number" ? config.temperature : 0.7,
   };
@@ -195,18 +250,20 @@ const normalizeConfig = (config: Partial<ChatbotConfig> & Record<string, unknown
 
 const persistLocalConfigValues = (config: ChatbotConfig) => {
   const values = readStoredConfigValues();
-  values[configStorageKey(config)] = {
+  const storageKey = configStorageKey(config);
+  values[storageKey] = {
     provider: config.provider,
     baseUrl: config.baseUrl,
-    apiKey: config.apiKey || "",
   };
   writeStoredConfigValues(values);
+  writeSessionApiKey(storageKey, config.apiKey || "");
 };
 
 const deleteLocalConfigValues = (id: string) => {
   const values = readStoredConfigValues();
   delete values[`id:${id}`];
   writeStoredConfigValues(values);
+  deleteSessionApiKey(`id:${id}`);
 };
 
 const createLocalOnlyConfig = (config: ChatbotConfig): ChatbotConfig => {
@@ -251,6 +308,87 @@ const deleteCachedRemoteConfig = (id: string) => {
   deleteLocalConfigValues(id);
 };
 
+const chatbotConfigUrl = (id?: string) =>
+  id
+    ? `${INLUMEN_API_URL}/api/chatbot-configs/${encodeURIComponent(id)}`
+    : `${INLUMEN_API_URL}/api/chatbot-configs`;
+
+const backendConfigPayload = (config: ChatbotConfig) => ({
+  name: config.name,
+  provider: config.provider,
+  model: config.model,
+  baseUrl: config.baseUrl,
+  system_prompt: config.system_prompt || "",
+  temperature: config.temperature ?? 0.7,
+});
+
+const readBackendError = async (response: Response) => {
+  const text = await response.text().catch(() => "");
+  if (!text) return `${response.status} ${response.statusText}`;
+  try {
+    const payload = JSON.parse(text);
+    return payload?.error?.message || payload?.error || text;
+  } catch {
+    return text;
+  }
+};
+
+const configFromBackendPayload = (
+  payload: unknown,
+  localValues?: Pick<ChatbotConfig, "apiKey" | "baseUrl" | "provider">,
+): ChatbotConfig => {
+  const raw = (payload && typeof payload === "object" && "config" in payload)
+    ? (payload as { config?: unknown }).config
+    : payload;
+  const config = normalizeConfig((raw || {}) as Partial<ChatbotConfig> & Record<string, unknown>);
+  return {
+    ...config,
+    provider: localValues?.provider || config.provider,
+    baseUrl: localValues?.baseUrl || config.baseUrl,
+    apiKey: localValues?.apiKey || config.apiKey || "",
+  };
+};
+
+const fetchBackendConfigs = async (): Promise<ChatbotConfig[]> => {
+  const response = await apiFetch(chatbotConfigUrl(), { method: "GET" });
+  if (!response.ok) throw new Error(await readBackendError(response));
+  const payload = await response.json().catch(() => ({}));
+  const configs = Array.isArray(payload?.configs) ? payload.configs : [];
+  return configs.map((item: Record<string, unknown>) => normalizeConfig(item));
+};
+
+const fetchBackendConfig = async (id: string): Promise<ChatbotConfig> => {
+  const response = await apiFetch(chatbotConfigUrl(id), { method: "GET" });
+  if (!response.ok) throw new Error(await readBackendError(response));
+  return configFromBackendPayload(await response.json().catch(() => ({})));
+};
+
+const createBackendConfig = async (config: ChatbotConfig): Promise<ChatbotConfig> => {
+  const response = await apiFetch(chatbotConfigUrl(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(backendConfigPayload(config)),
+  });
+  if (!response.ok) throw new Error(await readBackendError(response));
+  return configFromBackendPayload(await response.json().catch(() => ({})), config);
+};
+
+const updateBackendConfig = async (config: ChatbotConfig): Promise<ChatbotConfig> => {
+  if (!config.id) throw new Error("Missing configuration id");
+  const response = await apiFetch(chatbotConfigUrl(config.id), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(backendConfigPayload(config)),
+  });
+  if (!response.ok) throw new Error(await readBackendError(response));
+  return configFromBackendPayload(await response.json().catch(() => ({})), config);
+};
+
+const deleteBackendConfig = async (id: string): Promise<void> => {
+  const response = await apiFetch(chatbotConfigUrl(id), { method: "DELETE" });
+  if (!response.ok) throw new Error(await readBackendError(response));
+};
+
 const getAvailableConfigs = (remoteConfigs: ChatbotConfig[] = readCachedRemoteConfigs()) => [
   ...readLocalOnlyConfigs(),
   ...remoteConfigs,
@@ -280,13 +418,7 @@ export const fetchChatbotConfigs = async (): Promise<ChatbotConfig[]> => {
   }
 
   try {
-    const { data, error } = await supabase
-      .from("chatbot_configurations")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (error) throw error;
-    const remoteConfigs = ((data || []) as Array<Record<string, unknown>>).map(normalizeConfig);
+    const remoteConfigs = await fetchBackendConfigs();
     writeCachedRemoteConfigs(remoteConfigs);
     return getAvailableConfigs(remoteConfigs);
   } catch (error) {
@@ -306,14 +438,7 @@ export const fetchChatbotConfig = async (id: string): Promise<ChatbotConfig | nu
   }
 
   try {
-    const { data, error } = await supabase
-      .from("chatbot_configurations")
-      .select("*")
-      .eq("id", id)
-      .single();
-
-    if (error) throw error;
-    const savedConfig = upsertCachedRemoteConfig(normalizeConfig(data as Record<string, unknown>));
+    const savedConfig = upsertCachedRemoteConfig(await fetchBackendConfig(id));
     return savedConfig;
   } catch (error) {
     console.error("Error fetching chatbot configuration:", error);
@@ -333,25 +458,9 @@ export const createChatbotConfig = async (config: ChatbotConfig): Promise<Chatbo
   }
 
   try {
-    const payload = {
-      name: config.name,
-      model: config.model,
-    };
-
-    const { data, error } = await supabase
-      .from("chatbot_configurations")
-      .insert(payload)
-      .select()
-      .single();
-
-    if (error) throw error;
-    const savedConfig = normalizeConfig({
-      ...(data as Record<string, unknown>),
-      provider: config.provider,
-      baseUrl: config.baseUrl,
-      apiKey: config.apiKey || "",
-    });
+    const savedConfig = await createBackendConfig(config);
     upsertCachedRemoteConfig(savedConfig);
+    persistLocalConfigValues(savedConfig);
     toast.success("Configuration saved successfully");
     return savedConfig;
   } catch (error) {
@@ -383,25 +492,9 @@ export const updateChatbotConfig = async (config: ChatbotConfig): Promise<Chatbo
   }
 
   try {
-    const { data, error } = await supabase
-      .from("chatbot_configurations")
-      .update({
-        name: config.name,
-        model: config.model,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", config.id)
-      .select()
-      .single();
-
-    if (error) throw error;
-    const savedConfig = normalizeConfig({
-      ...(data as Record<string, unknown>),
-      provider: config.provider,
-      baseUrl: config.baseUrl,
-      apiKey: config.apiKey || "",
-    });
+    const savedConfig = await updateBackendConfig(config);
     upsertCachedRemoteConfig(savedConfig);
+    persistLocalConfigValues(savedConfig);
     toast.success("Configuration updated successfully");
     return savedConfig;
   } catch (error) {
@@ -428,12 +521,7 @@ export const deleteChatbotConfig = async (id: string): Promise<boolean> => {
   }
 
   try {
-    const { error } = await supabase
-      .from("chatbot_configurations")
-      .delete()
-      .eq("id", id);
-
-    if (error) throw error;
+    await deleteBackendConfig(id);
     deleteCachedRemoteConfig(id);
     toast.success("Configuration deleted successfully");
     return true;

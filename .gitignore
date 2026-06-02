@@ -59,10 +59,8 @@ neo4j_plugins_volume/
 minio_data/
 neo4j_import_volume/
 ollama-volume/
-connection/openaiapi.ini
-connection/minio_config.ini
-connection/neo4j_config.ini
-connection/state/
+backend/openaiapi.ini
+backend/state/
 .env
 docker-compose.override.yml
 frontend/.env

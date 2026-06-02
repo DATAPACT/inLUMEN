@@ -174,7 +174,6 @@ const Index = () => {
   const [activeTab, setActiveTab] = useState('lab'); // 'lab', 'overview', or 'simulate'
   const [userInput, setUserInput] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
-  const [githubToken, setGithubToken] = useState('');
   const [flowNodes, setFlowNodes] = useState<FlowNode[]>([]);
   const [conversation, setConversation] = useState<ChatMessage[]>(readSavedConversation);
   const [canvasSyncStatus, setCanvasSyncStatus] = useState<CanvasSyncStatus>({
@@ -283,11 +282,6 @@ const Index = () => {
   }, [activePipelineDescription, activeVersionName, flowNodes, pipelineLastUpdate, pipelineCreatedAt]);
 
   useEffect(() => {
-    const savedToken = localStorage.getItem('github_token');
-    if (savedToken) {
-      setGithubToken(savedToken);
-    }
-
     // Load saved pipeline timestamp (last update)
     const savedTimestamp = localStorage.getItem('saved-pipeline-timestamp');
     if (savedTimestamp) {
@@ -302,12 +296,6 @@ const Index = () => {
 
     loadConfigurations();
   }, [loadConfigurations]);
-
-  useEffect(() => {
-    if (githubToken) {
-      localStorage.setItem('github_token', githubToken);
-    }
-  }, [githubToken]);
 
   useEffect(() => {
     conversationEndRef.current?.scrollIntoView({
@@ -918,8 +906,6 @@ const Index = () => {
             onDragStart={onDragStart}
             activeTab={activeTab}
             onTabChange={handleTabChange}
-            githubToken={githubToken}
-            setGithubToken={setGithubToken}
             onBlankPipeline={handleBlankPipeline}
             onSavePipeline={handleSavePipeline}
             pipelineOverview={pipelineOverview}

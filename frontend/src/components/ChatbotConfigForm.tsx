@@ -140,7 +140,7 @@ export function ChatbotConfigForm({
             {initialConfig ? "Edit LLM Configuration" : "New LLM Configuration"}
           </DialogTitle>
           <DialogDescription>
-            Configure an OpenAI-compatible endpoint. API keys are kept in this browser only.
+            Configure an OpenAI-compatible endpoint. API keys are kept for this browser session only.
           </DialogDescription>
         </DialogHeader>
 

@@ -21,9 +21,9 @@ RUN find . \( -name "*.sh" -o -name "*.py" \) -exec sed -i 's/\r$//' {} +
 # Install Python dependencies from requirements.txt
 # RUN pip3 install -r requirements.txt
 
-# Expose the necessary ports
+# Expose the gateway and internal wrapper ports used by compose commands.
+EXPOSE 5000
 EXPOSE 5001
-EXPOSE 5002
 EXPOSE 5003
 
 # Give execute permission to shell scripts

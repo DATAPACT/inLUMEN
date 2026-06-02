@@ -1,4 +1,8 @@
+import json
 import os
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -33,6 +37,9 @@ CORS_ALLOWED_ORIGIN = (
     or default_frontend_origin()
 )
 UPSTREAM_TIMEOUT_SECONDS = float(os.getenv("INLUMEN_UPSTREAM_TIMEOUT_SECONDS", "120"))
+CHATBOT_CONFIGS_PATH = Path(
+    os.getenv("CHATBOT_CONFIGS_PATH", "state/chatbot_configurations.json")
+)
 
 app = Flask(__name__)
 app.register_blueprint(create_public_api_blueprint(GRAPH_API_BASE_URL))
@@ -186,6 +193,81 @@ def _filename_from_request() -> str:
     ).strip()
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _load_chatbot_configs() -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(CHATBOT_CONFIGS_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except json.JSONDecodeError:
+        return []
+    configs = payload.get("configs") if isinstance(payload, dict) else payload
+    return configs if isinstance(configs, list) else []
+
+
+def _save_chatbot_configs(configs: list[dict[str, Any]]) -> None:
+    CHATBOT_CONFIGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CHATBOT_CONFIGS_PATH.write_text(
+        json.dumps({"configs": configs}, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _chatbot_config_response(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(config.get("id") or ""),
+        "name": str(config.get("name") or ""),
+        "provider": str(config.get("provider") or "custom"),
+        "model": str(config.get("model") or ""),
+        "baseUrl": str(config.get("baseUrl") or config.get("base_url") or ""),
+        "base_url": str(config.get("baseUrl") or config.get("base_url") or ""),
+        "system_prompt": str(config.get("system_prompt") or ""),
+        "temperature": config.get("temperature", 0.7),
+        "created_at": config.get("created_at"),
+        "updated_at": config.get("updated_at"),
+    }
+
+
+def _validate_chatbot_config_payload(
+    payload: dict[str, Any],
+    *,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any] | tuple[Response, int]:
+    existing = existing or {}
+    name = str(payload.get("name") or existing.get("name") or "").strip()
+    provider = str(payload.get("provider") or existing.get("provider") or "custom").strip()
+    model = str(payload.get("model") or existing.get("model") or "").strip()
+    base_url = str(
+        payload.get("baseUrl")
+        or payload.get("base_url")
+        or existing.get("baseUrl")
+        or existing.get("base_url")
+        or ""
+    ).strip()
+    if not name:
+        return _json_error(400, "name is required")
+    if not model:
+        return _json_error(400, "model is required")
+    if not base_url:
+        return _json_error(400, "baseUrl is required")
+    now = _utc_now_iso()
+    return {
+        "id": str(existing.get("id") or payload.get("id") or uuid.uuid4()),
+        "name": name,
+        "provider": provider or "custom",
+        "model": model,
+        "baseUrl": base_url,
+        "base_url": base_url,
+        "system_prompt": str(payload.get("system_prompt") or existing.get("system_prompt") or ""),
+        "temperature": payload.get("temperature", existing.get("temperature", 0.7)),
+        "created_at": existing.get("created_at") or now,
+        "updated_at": now,
+    }
+
+
 @app.route("/api/graph/nodes", methods=["POST", "DELETE", "OPTIONS"])
 @require_auth
 def graph_nodes():
@@ -219,6 +301,55 @@ def graph_nodes():
         graph_payload["storage_cleanup"] = storage_cleanup
         return jsonify(graph_payload), graph_response.status_code
     return jsonify({"graph": graph_payload, "storage_cleanup": storage_cleanup}), graph_response.status_code
+
+
+@app.route("/api/chatbot-configs", methods=["GET", "POST", "OPTIONS"])
+@require_auth
+def chatbot_configs():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+
+    configs = _load_chatbot_configs()
+    if request.method == "GET":
+        return jsonify({"configs": [_chatbot_config_response(config) for config in configs]}), 200
+
+    payload = _request_json()
+    config = _validate_chatbot_config_payload(payload)
+    if isinstance(config, tuple):
+        return config
+    configs.insert(0, config)
+    _save_chatbot_configs(configs)
+    return jsonify({"config": _chatbot_config_response(config)}), 201
+
+
+@app.route("/api/chatbot-configs/<config_id>", methods=["GET", "PUT", "DELETE", "OPTIONS"])
+@require_auth
+def chatbot_config(config_id: str):
+    if request.method == "OPTIONS":
+        return _preflight_response()
+
+    configs = _load_chatbot_configs()
+    index = next(
+        (idx for idx, config in enumerate(configs) if str(config.get("id")) == config_id),
+        None,
+    )
+    if index is None:
+        return _json_error(404, "chatbot config not found")
+
+    if request.method == "GET":
+        return jsonify({"config": _chatbot_config_response(configs[index])}), 200
+
+    if request.method == "DELETE":
+        deleted = configs.pop(index)
+        _save_chatbot_configs(configs)
+        return jsonify({"deleted_id": str(deleted.get("id") or config_id)}), 200
+
+    config = _validate_chatbot_config_payload(_request_json(), existing=configs[index])
+    if isinstance(config, tuple):
+        return config
+    configs[index] = config
+    _save_chatbot_configs(configs)
+    return jsonify({"config": _chatbot_config_response(config)}), 200
 
 
 @app.route("/api/graph/nodes/<node_id>", methods=["DELETE", "OPTIONS"])

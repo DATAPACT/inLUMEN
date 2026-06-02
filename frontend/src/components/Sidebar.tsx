@@ -55,8 +55,6 @@ interface SidebarProps {
   onDragStart: (event: React.DragEvent, nodeType: DragNodeType) => void;
   activeTab: string;
   onTabChange: (value: string) => void;
-  githubToken: string;
-  setGithubToken: (token: string) => void;
   onBlankPipeline?: () => void;
   onSavePipeline?: () => void;
   pipelineOverview?: PipelineOverview;
@@ -187,8 +185,6 @@ export function Sidebar({
   onDragStart,
   activeTab,
   onTabChange,
-  githubToken,
-  setGithubToken,
   onBlankPipeline,
   onSavePipeline,
   pipelineOverview,
