@@ -6,12 +6,11 @@ import json
 import os
 import tempfile
 from urllib.parse import quote
-from runtime_config import default_frontend_origin, get_neo4j_settings, get_service_port
+from runtime_config import default_frontend_origin, get_neo4j_settings
 from step_types import normalize_step_type
 from minio_access import create_bucket, list_objects, read_object_bytes, remove_object, upload_object
 
 CORS_ALLOWED_ORIGIN = os.getenv("CORS_ALLOWED_ORIGIN", "").strip() or default_frontend_origin()
-NEO4J_API_PORT = get_service_port("NEO4J_API_PORT", 5001)
 NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD = get_neo4j_settings()
 
 # Global graph data
@@ -2027,7 +2026,3 @@ def neo4j_update_description():
     except Exception as e:
         print("[neo4j_api.py] Error executing Neo4j query:", e)
         return jsonify({"error": str(e)}), 500
-
-
-if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=NEO4J_API_PORT)

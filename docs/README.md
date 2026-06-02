@@ -82,10 +82,10 @@ Step 2: Navigate to the cloned project directory.
 
 Step 3: Optional but recommended: copy `.env.example` to `.env` and adjust only the values you need.
 
-The Docker setup derives CORS, frontend API URLs, Neo4J URI, and MinIO endpoint from the Compose service names, ports, and credential values, so you do not need separate `CORS_ALLOWED_ORIGIN`, `NEO4J_URI`, `MINIO_ENDPOINT`, `NEO4J_API_BASE_URL`, `MINIO_API_BASE_URL`, or `VITE_*_API_URL` entries for normal use.
+The Docker setup derives CORS, frontend API URLs, Neo4J URI, and MinIO endpoint from the Compose service names, ports, and credential values, so you do not need separate `CORS_ALLOWED_ORIGIN`, `NEO4J_URI`, `MINIO_ENDPOINT`, or `VITE_*_API_URL` entries for normal use.
 
 Common values you may change include:
-- `FRONTEND_PORT`, `INLUMEN_API_PORT`, `MINIO_API_PORT`, `NEO4J_API_PORT`
+- `FRONTEND_PORT`, `INLUMEN_API_PORT`
 - `NEO4J_AUTH`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`
 - `API_AUTH_TOKEN` for the gateway API and Swagger/OpenAPI documentation when Keycloak auth is disabled
 - `AUTH_ENABLED` plus the Keycloak values when enabling authentication
@@ -109,7 +109,7 @@ Step 5: Wait for the stack to finish starting. The root compose file now:
 - starts Neo4J, MinIO, the backend gateway, and the frontend together
 - builds the `backend` service from the Python source under `backend/`
 - mounts the frontend and backend source folders for development
-- keeps graph and object storage adapters inside the backend container instead of exposing them as Compose services
+- keeps graph and object storage logic inside the backend gateway instead of exposing adapter services
 - connects the LLM agents to the OpenAI-compatible endpoint selected in the UI
 - is set up to behave consistently on macOS and Windows through Docker Desktop
 
@@ -126,7 +126,7 @@ For the best macOS/Windows experience:
 
 Note: building the containers may take around 5 minutes, please wait until Neo4J is fully started.  
 
-Note: Once the installation is complete in dev mode, the local endpoints are localhost:8080 (frontend), localhost:5000 (inLUMEN backend gateway API), localhost:7474/7687 (Neo4J), and localhost:9000/9099 (MinIO). In production compose mode, only the frontend and backend gateway are exposed; Neo4J, MinIO, and the backend's internal graph/object adapter ports stay inside the Compose network.
+Note: Once the installation is complete in dev mode, the local endpoints are localhost:8080 (frontend), localhost:5000 (inLUMEN backend gateway API), localhost:7474/7687 (Neo4J), and localhost:9000/9099 (MinIO). In production compose mode, only the frontend and backend gateway are exposed; Neo4J and MinIO stay private on the Compose network.
 
 Note: To log into MinIO, use the configured root credentials from `.env`. For security reasons, change these values before using the stack outside local development.
 

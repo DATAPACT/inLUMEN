@@ -21,12 +21,10 @@ RUN find . \( -name "*.sh" -o -name "*.py" \) -exec sed -i 's/\r$//' {} +
 # Install Python dependencies from requirements.txt
 # RUN pip3 install -r requirements.txt
 
-# Expose the gateway and internal wrapper ports used by compose commands.
+# Expose the backend gateway API.
 EXPOSE 5000
-EXPOSE 5001
-EXPOSE 5003
 
 # Give execute permission to shell scripts
 RUN chmod +x run_inlumen.sh
 
-CMD ["python", "service_runner.py"]
+CMD ["python", "inlumen_api.py"]

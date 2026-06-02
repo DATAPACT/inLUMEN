@@ -148,18 +148,20 @@ class PublicApiTest(unittest.TestCase):
         self.assertEqual(["Health"], schema["paths"]["/health"]["get"]["tags"])
         self.assertEqual(["Canvas Graph"], schema["paths"]["/api/graph/nodes"]["post"]["tags"])
 
-    @patch("public_api.requests.get")
-    def test_ready_can_check_internal_gateway_dependencies(self, requests_get_mock):
-        ok_response = Mock()
-        ok_response.ok = True
-        requests_get_mock.return_value = ok_response
-
+    @patch("public_api.check_object_health")
+    @patch("public_api.check_graph_health")
+    def test_ready_can_check_internal_gateway_dependencies(
+        self,
+        check_graph_health_mock,
+        check_object_health_mock,
+    ):
+        check_graph_health_mock.return_value = True
+        check_object_health_mock.return_value = True
         app = Flask(__name__)
         app.register_blueprint(
             create_public_api_blueprint(
-                "http://graph-api:5001",
-                "http://object-api:5003",
                 check_upstreams=True,
+                object_api_base_url="enabled",
             )
         )
         client = app.test_client()
