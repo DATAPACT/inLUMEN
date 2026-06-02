@@ -396,11 +396,17 @@ const getAvailableConfigs = (remoteConfigs: ChatbotConfig[] = readCachedRemoteCo
 
 export const buildLLMRequestConfig = (config: ChatbotConfig): LLMRequestConfig => {
   const normalizedConfig = normalizeConfig(config as Partial<ChatbotConfig> & Record<string, unknown>);
+  if (!normalizedConfig.provider || !normalizedConfig.model || !normalizedConfig.baseUrl) {
+    throw new Error("Complete the LLM provider, model, and base URL in Settings before using LLM features.");
+  }
+  if (!normalizedConfig.apiKey) {
+    throw new Error("Enter an LLM API key in Settings before using chat or artifact generation.");
+  }
   return {
     provider: normalizedConfig.provider,
     model: normalizedConfig.model,
     base_url: normalizedConfig.baseUrl,
-    api_key: normalizedConfig.apiKey || undefined,
+    api_key: normalizedConfig.apiKey,
     model_family: "unknown",
     supports_function_calling: true,
     supports_json_output: true,

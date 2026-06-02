@@ -1861,20 +1861,11 @@ def _ui_api_openapi_paths(
             },
         },
         "/agentic_generate_version_yamls": {
-            "get": {
-                "tags": ["Agentic"],
-                "summary": "Generate Argo Workflow YAML for every saved version",
-                "operationId": "agenticGenerateVersionYamls",
-                "responses": {
-                    "200": _json_response("#/components/schemas/VersionYamlListResponse"),
-                    **protected_responses,
-                },
-            },
             "post": {
                 "tags": ["Agentic"],
                 "summary": "Generate Argo Workflow YAML for every saved version with LLM settings",
                 "operationId": "agenticGenerateVersionYamlsWithConfig",
-                "requestBody": _json_request("#/components/schemas/LLMConfigEnvelope", required=False),
+                "requestBody": _json_request("#/components/schemas/LLMConfigEnvelope"),
                 "responses": {
                     "200": _json_response("#/components/schemas/VersionYamlListResponse"),
                     **protected_responses,
@@ -1963,16 +1954,20 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
         "AnyObject": {"type": "object", "additionalProperties": True},
         "LLMConfig": {
             "type": "object",
+            "required": ["provider", "model", "base_url", "api_key"],
             "additionalProperties": True,
             "properties": {
                 "provider": {"type": "string"},
                 "base_url": {"type": "string"},
+                "baseUrl": {"type": "string"},
                 "api_key": {"type": "string"},
+                "apiKey": {"type": "string"},
                 "model": {"type": "string"},
             },
         },
         "LLMConfigEnvelope": {
             "type": "object",
+            "required": ["llm_config"],
             "properties": {"llm_config": {"$ref": "#/components/schemas/LLMConfig"}},
             "additionalProperties": True,
         },
@@ -2235,6 +2230,7 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
         },
         "AgenticDockerfilesRequest": {
             "type": "object",
+            "required": ["llm_config"],
             "properties": {
                 "files": {"type": "array", "items": {"$ref": "#/components/schemas/BackendFileReference"}},
                 "pipeline_graph": {"$ref": "#/components/schemas/ReactFlowGraph"},
@@ -2272,7 +2268,7 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
         },
         "ChatRequest": {
             "type": "object",
-            "required": ["user_message"],
+            "required": ["user_message", "llm_config"],
             "properties": {
                 "session_id": {"type": "string", "nullable": True},
                 "user_message": {"type": "string"},

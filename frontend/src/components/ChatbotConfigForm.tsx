@@ -47,7 +47,7 @@ const formSchema = z.object({
     .string()
     .min(1, "Base URL is required")
     .refine((value) => /^https?:\/\/.+/i.test(value), "Use an http(s) OpenAI-compatible base URL"),
-  apiKey: z.string().optional(),
+  apiKey: z.string().trim().min(1, "API key is required for LLM calls"),
 });
 
 interface ChatbotConfigFormProps {
@@ -232,7 +232,7 @@ export function ChatbotConfigForm({
                     <Input type="password" placeholder="Provider API key" autoComplete="off" {...field} />
                   </FormControl>
                   <p className="text-xs text-muted-foreground">
-                    Optional. Leave empty to use the backend `LLM_API_KEY` instead.
+                    Required for LLM calls. Stored for this browser session only.
                   </p>
                   <FormMessage />
                 </FormItem>

@@ -465,7 +465,7 @@ def agentic_generate_yaml():
         return jsonify({"error": str(exc)}), 500
 
 
-@app.route("/agentic_generate_version_yamls", methods=["GET", "POST", "OPTIONS"])
+@app.route("/agentic_generate_version_yamls", methods=["POST", "OPTIONS"])
 @require_auth
 def agentic_generate_version_yamls():
     if request.method == "OPTIONS":

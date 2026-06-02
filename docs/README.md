@@ -85,7 +85,6 @@ Step 3: Optional but recommended: copy `.env.example` to `.env` and adjust only 
 The Docker setup derives CORS, frontend API URLs, Neo4J URI, and MinIO endpoint from the Compose service names, ports, and credential values, so you do not need separate `CORS_ALLOWED_ORIGIN`, `NEO4J_URI`, `MINIO_ENDPOINT`, `NEO4J_API_BASE_URL`, `MINIO_API_BASE_URL`, or `VITE_*_API_URL` entries for normal use.
 
 Common values you may change include:
-- `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` for OpenAI-compatible LLM services
 - `FRONTEND_PORT`, `INLUMEN_API_PORT`, `MINIO_API_PORT`, `NEO4J_API_PORT`
 - `NEO4J_HTTP_PORT`, `NEO4J_BOLT_PORT`, `MINIO_S3_PORT`, `MINIO_CONSOLE_PORT`
 - `NEO4J_AUTH`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`
@@ -104,21 +103,14 @@ Step 5: Wait for the stack to finish starting. The root compose file now:
 - builds the `backend` service from the Python source under `backend/`
 - mounts the frontend and backend source folders for development
 - keeps graph and object storage adapters inside the backend container instead of exposing them as Compose services
-- connects the LLM agents to an OpenAI-compatible endpoint configured through `.env` or the UI
+- connects the LLM agents to the OpenAI-compatible endpoint selected in the UI
 - is set up to behave consistently on macOS and Windows through Docker Desktop
 
-Step 6: Configure an LLM provider. The default provider is OpenRouter:
+Step 6: Configure an LLM provider from the UI. Open `http://localhost:8080`, choose Settings, and create an LLM configuration with provider, base URL, model, and API key. The backend does not read LLM provider, endpoint, model, or API key values from `.env`.
 
-```
-LLM_PROVIDER=openrouter
-LLM_BASE_URL=https://openrouter.ai/api/v1
-LLM_API_KEY=sk-or-xxxx
-LLM_MODEL=gpt-oss-120b
-```
+For OpenRouter, use your OpenRouter API key after adding the provider key in OpenRouter settings. Short model aliases such as `gpt-oss-120b` are accepted by inLUMEN and normalized before the request is sent.
 
-For OpenRouter BYOK, use your OpenRouter API key after adding the provider key in OpenRouter settings. Short model aliases such as `gpt-oss-120b` are accepted by inLUMEN and normalized before the request is sent.
-
-You can also use Ollama Cloud with `LLM_PROVIDER=ollama_cloud`, `LLM_BASE_URL=https://ollama.com/v1`, `LLM_API_KEY=...`, and an Ollama Cloud model such as `gpt-oss:120b`. For a custom on-prem service, set `LLM_PROVIDER=custom`, `LLM_BASE_URL=https://your-host.example/v1`, `LLM_API_KEY=...`, and the model name exposed by that service. The UI configuration dialog supports the same OpenAI-compatible provider, base URL, API key, and model fields.
+You can also use Ollama Cloud with base URL `https://ollama.com/v1` and an Ollama Cloud model such as `gpt-oss:120b`. For a custom on-prem service, select Custom / On premise and enter the OpenAI-compatible base URL, API key, and model name exposed by that service.
 
 For the best macOS/Windows experience:
 - use Docker Desktop with `docker compose`
@@ -138,12 +130,11 @@ To open the editor, go to `http://localhost:8080` by default, or the custom valu
 The frontend talks only to the inLUMEN backend gateway API on `INLUMEN_API_PORT`. That gateway owns graph and file orchestration through internal backend modules and keeps Neo4J and MinIO implementation details out of the browser and CLI contract. The frontend and CLI should use only `INLUMEN_API_PORT`.
 LLM configuration metadata is also saved through the gateway by default (`VITE_ENABLE_REMOTE_CHATBOT_CONFIG_SYNC=true`); set it to `false` only for browser-local development overrides.
 
-LLM agents use OpenAI-compatible Chat Completions endpoints. Configure OpenRouter, Ollama Cloud, or a custom on-prem endpoint in the dialog window or through the root `.env` file.
+LLM agents use OpenAI-compatible Chat Completions endpoints. Configure OpenRouter, Ollama Cloud, or a custom on-prem endpoint in the Settings dialog. The backend rejects LLM requests that do not include a browser-supplied LLM configuration.
 
 API key handling:
-- Preferred deployment model: set `LLM_API_KEY` on the backend and do not enter provider keys in the browser.
-- Optional BYOK model: a provider API key entered in the UI is kept in browser session storage only, sent to the backend only inside the specific LLM request payload, and is not saved by the backend `/api/chatbot-configs` endpoints.
-- Do not run BYOK over plain HTTP outside local development; terminate TLS before the backend gateway in shared or production deployments.
+- Provider API keys are entered only in the UI, kept in browser session storage only, sent to the backend only inside the specific LLM request payload, and are not saved by the backend `/api/chatbot-configs` endpoints.
+- Do not run this browser-supplied key flow over plain HTTP outside local development; terminate TLS before the backend gateway in shared or production deployments.
 - Backend logs intentionally report provider, model, and base URL but not the provider API key.
 
 ## **Gateway API and Swagger**

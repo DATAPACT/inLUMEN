@@ -24,16 +24,13 @@ services:
       - ./neo4j_plugins_volume:/plugins
     environment:
       NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/password}
-      NEO4J_PLUGINS: '["apoc","graph-data-science"]'
-      NEO4J_dbms.security.procedures.allowlist: apoc.*,gds.*
-      NEO4J_apoc.import.file.enabled: "true"
     healthcheck:
       test:
         - CMD-SHELL
         - 'AUTH_USER="$${NEO4J_AUTH%%/*}"; AUTH_PASS="$${NEO4J_AUTH#*/}"; cypher-shell -u "$$AUTH_USER" -p "$$AUTH_PASS" "RETURN 1;"'
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 24
     networks:
       datapact_network:
         aliases:
@@ -80,10 +77,6 @@ services:
       INLUMEN_API_PORT: ${INLUMEN_API_PORT:-5000}
       NEO4J_API_PORT: ${NEO4J_API_PORT:-5001}
       MINIO_API_PORT: ${MINIO_API_PORT:-5003}
-      LLM_PROVIDER: ${LLM_PROVIDER:-openrouter}
-      LLM_BASE_URL: ${LLM_BASE_URL:-https://openrouter.ai/api/v1}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_MODEL: ${LLM_MODEL:-gpt-oss-120b}
       NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/password}
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio-datapact}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio-datapact}
@@ -102,7 +95,7 @@ services:
         - python
         - -c
         - "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.getenv(\"INLUMEN_API_PORT\", \"5000\")}/health', timeout=5)"
-      interval: 10s
+      interval: 5s
       timeout: 5s
       retries: 12
     networks:
