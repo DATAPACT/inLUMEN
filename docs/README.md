@@ -112,7 +112,7 @@ For a deployment where the browser frontend calls a separately deployed backend 
 INLUMEN_API_PUBLIC_URL=https://api.inlumen.example.com
 ```
 
-`INLUMEN_API_PUBLIC_URL` is passed to the Vite frontend as `VITE_INLUMEN_API_URL`, so browser requests go to the deployed backend instead of guessing from the frontend hostname.
+`INLUMEN_API_PUBLIC_URL` is passed to the Vite frontend as `VITE_INLUMEN_API_URL`, so browser requests go to the deployed backend instead of guessing from the frontend hostname. Use a full URL such as `https://api.inlumen.example.com`; for local testing, shorthand values such as `localhost:5001` are normalized with the current browser protocol.
 
 You can verify the backend CORS preflight before opening the frontend:
 
