@@ -140,7 +140,7 @@ export function ChatbotConfigForm({
             {initialConfig ? "Edit LLM Configuration" : "New LLM Configuration"}
           </DialogTitle>
           <DialogDescription>
-            Configure an OpenAI-compatible endpoint. API keys are kept for this browser session only.
+            Configure an OpenAI-compatible endpoint. API keys are stored only in this browser.
           </DialogDescription>
         </DialogHeader>
 
@@ -232,7 +232,7 @@ export function ChatbotConfigForm({
                     <Input type="password" placeholder="Provider API key" autoComplete="off" {...field} />
                   </FormControl>
                   <p className="text-xs text-muted-foreground">
-                    Required for LLM calls. Stored for this browser session only.
+                    Required for LLM calls. Stored only in this browser and restored on startup.
                   </p>
                   <FormMessage />
                 </FormItem>

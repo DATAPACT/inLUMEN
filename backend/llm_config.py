@@ -134,7 +134,7 @@ def resolve_llm_config(raw_config: Optional[Mapping[str, Any]] = None) -> LLMCon
     if not api_key:
         raise ValueError(
             f"LLM API key is required for provider '{provider}'. "
-            "Enter it in the UI LLM settings for this browser session."
+            "Enter it in the UI LLM settings for this browser."
         )
 
     return LLMConfig(

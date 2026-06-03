@@ -73,7 +73,6 @@ class ForcedAssistantAgent(AssistantAgent):
 
 def build_pipeline_editing_team(
     llm_config: LLMConfig,
-    neo4j_api_base_url: str,
     authorization: str | None = None,
 ) -> RoundRobinGroupChat:
     log_llm_selection("Building pipeline editing team", llm_config)
@@ -115,7 +114,7 @@ def build_pipeline_editing_team(
 
     async def run_query(query: str, query_type: str) -> str:
         """Run a Cypher query against Neo4j and return results."""
-        return await run_neo4j_query(neo4j_api_base_url, query, query_type, authorization=authorization)
+        return await run_neo4j_query(query, query_type, authorization=authorization)
 
     async def list_pipelines() -> str:
         """Lists all pipelines and the number of steps they have."""

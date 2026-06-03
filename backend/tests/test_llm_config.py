@@ -13,10 +13,15 @@ class LLMConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "LLM provider is required"):
             resolve_llm_config({})
 
-    def test_ignores_backend_environment_fallbacks(self):
+    def test_ignores_backend_environment_llm_configuration(self):
         previous_values = {
             key: os.environ.get(key)
-            for key in ("LLM_PROVIDER", "LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL")
+            for key in (
+                "LLM_PROVIDER",
+                "LLM_BASE_URL",
+                "LLM_API_KEY",
+                "LLM_MODEL",
+            )
         }
         try:
             os.environ["LLM_PROVIDER"] = "openrouter"
@@ -26,19 +31,20 @@ class LLMConfigTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "LLM provider is required"):
                 resolve_llm_config({})
-
-            with self.assertRaisesRegex(ValueError, "LLM API key is required"):
-                resolve_llm_config({
-                    "provider": "openrouter",
-                    "model": "gpt-oss-120b",
-                    "base_url": "https://openrouter.ai/api/v1",
-                })
         finally:
             for key, value in previous_values.items():
                 if value is None:
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
+
+    def test_requires_browser_supplied_api_key(self):
+        with self.assertRaisesRegex(ValueError, "LLM API key is required"):
+            resolve_llm_config({
+                "provider": "openrouter",
+                "model": "gpt-oss-120b",
+                "base_url": "https://openrouter.ai/api/v1",
+            })
 
     def test_accepts_browser_supplied_configuration(self):
         config = resolve_llm_config({

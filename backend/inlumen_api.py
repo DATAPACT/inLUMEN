@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import requests
 from flask import Flask, Response, jsonify, make_response, request
 
 from analytics_api import (
@@ -16,33 +15,24 @@ from analytics_api import (
     agentic_pipeline_editor_reset,
 )
 from auth_middleware import require_auth
+from graph_client import dispatch_graph_request
+from local_api_client import LocalApiResponse
+from object_client import dispatch_object_request
 from public_api import create_public_api_blueprint
 from runtime_config import default_frontend_origin, get_service_port
 
 
 INLUMEN_API_PORT = get_service_port("INLUMEN_API_PORT", 5000)
-NEO4J_API_PORT = get_service_port("NEO4J_API_PORT", 5001)
-MINIO_API_PORT = get_service_port("MINIO_API_PORT", 5003)
-
-GRAPH_API_BASE_URL = (
-    os.getenv("NEO4J_API_BASE_URL", "").strip()
-    or f"http://127.0.0.1:{NEO4J_API_PORT}"
-)
-OBJECT_API_BASE_URL = (
-    os.getenv("MINIO_API_BASE_URL", "").strip()
-    or f"http://127.0.0.1:{MINIO_API_PORT}"
-)
 CORS_ALLOWED_ORIGIN = (
     os.getenv("CORS_ALLOWED_ORIGIN", "").strip()
     or default_frontend_origin()
 )
-UPSTREAM_TIMEOUT_SECONDS = float(os.getenv("INLUMEN_UPSTREAM_TIMEOUT_SECONDS", "120"))
 CHATBOT_CONFIGS_PATH = Path(
     os.getenv("CHATBOT_CONFIGS_PATH", "state/chatbot_configurations.json")
 )
 
 app = Flask(__name__)
-app.register_blueprint(create_public_api_blueprint(GRAPH_API_BASE_URL))
+app.register_blueprint(create_public_api_blueprint())
 app.add_url_rule(
     "/agentic_generate_dockerfiles",
     endpoint="agentic_generate_dockerfiles",
@@ -117,7 +107,7 @@ def _forward_headers(include_content_type: bool = True) -> dict[str, str]:
     return headers
 
 
-def _response_from_upstream(upstream: requests.Response) -> Response:
+def _response_from_upstream(upstream: LocalApiResponse) -> Response:
     excluded_headers = {
         "connection",
         "content-encoding",
@@ -133,7 +123,7 @@ def _response_from_upstream(upstream: requests.Response) -> Response:
 
 
 def _proxy(
-    base_url: str,
+    adapter_request,
     backend_path: str,
     *,
     method: str | None = None,
@@ -142,26 +132,25 @@ def _proxy(
     json_payload: Any = None,
     files: Any = None,
     form: dict[str, Any] | None = None,
-) -> requests.Response:
-    url = f"{base_url.rstrip('/')}/{backend_path.lstrip('/')}"
+) -> LocalApiResponse:
     include_content_type = files is None and form is None and json_payload is None
     body = None if json_payload is not None else data if data is not None else request.get_data()
-    return requests.request(
+    return adapter_request(
+        backend_path,
         method=method or request.method,
-        url=url,
         params=params if params is not None else request.args,
-        data=form if form is not None else body,
-        json=json_payload,
+        data=body,
+        json_payload=json_payload,
         files=files,
+        form=form,
         headers=_forward_headers(include_content_type=include_content_type),
-        timeout=UPSTREAM_TIMEOUT_SECONDS,
     )
 
 
-def _proxy_response(base_url: str, backend_path: str) -> Response:
+def _proxy_response(adapter_request, backend_path: str) -> Response:
     if request.method == "OPTIONS":
         return _preflight_response()
-    return _response_from_upstream(_proxy(base_url, backend_path))
+    return _response_from_upstream(_proxy(adapter_request, backend_path))
 
 
 def _json_error(status_code: int, message: str, details: Any = None):
@@ -171,7 +160,7 @@ def _json_error(status_code: int, message: str, details: Any = None):
     return jsonify(payload), status_code
 
 
-def _upstream_json(upstream: requests.Response) -> Any:
+def _upstream_json(upstream: LocalApiResponse) -> Any:
     try:
         return upstream.json()
     except ValueError:
@@ -217,7 +206,7 @@ def _save_chatbot_configs(configs: list[dict[str, Any]]) -> None:
 
 
 def _chatbot_config_response(config: dict[str, Any]) -> dict[str, Any]:
-    return {
+    response = {
         "id": str(config.get("id") or ""),
         "name": str(config.get("name") or ""),
         "provider": str(config.get("provider") or "custom"),
@@ -229,6 +218,10 @@ def _chatbot_config_response(config: dict[str, Any]) -> dict[str, Any]:
         "created_at": config.get("created_at"),
         "updated_at": config.get("updated_at"),
     }
+    if config.get("readOnly") or config.get("read_only"):
+        response["readOnly"] = True
+        response["read_only"] = True
+    return response
 
 
 def _validate_chatbot_config_payload(
@@ -274,9 +267,9 @@ def graph_nodes():
     if request.method == "OPTIONS":
         return _preflight_response()
     if request.method == "POST":
-        return _response_from_upstream(_proxy(GRAPH_API_BASE_URL, "neo4j_add_node"))
+        return _response_from_upstream(_proxy(dispatch_graph_request, "neo4j_add_node"))
 
-    graph_response = _proxy(GRAPH_API_BASE_URL, "neo4j_clear_nodes")
+    graph_response = _proxy(dispatch_graph_request, "neo4j_clear_nodes")
     if not graph_response.ok:
         return _response_from_upstream(graph_response)
 
@@ -285,7 +278,7 @@ def graph_nodes():
     storage_cleanup = []
     for flow_id in deleted_ids or []:
         storage_response = _proxy(
-            OBJECT_API_BASE_URL,
+            dispatch_object_request,
             "minio_clear_bucket",
             method="DELETE",
             params={"bucket_id": flow_id},
@@ -311,7 +304,12 @@ def chatbot_configs():
 
     configs = _load_chatbot_configs()
     if request.method == "GET":
-        return jsonify({"configs": [_chatbot_config_response(config) for config in configs]}), 200
+        return jsonify({
+            "configs": [
+                _chatbot_config_response(config)
+                for config in configs
+            ]
+        }), 200
 
     payload = _request_json()
     config = _validate_chatbot_config_payload(payload)
@@ -358,12 +356,12 @@ def graph_node(node_id: str):
     if request.method == "OPTIONS":
         return _preflight_response()
 
-    graph_response = _proxy(GRAPH_API_BASE_URL, f"neo4j_delete_node/{node_id}", data=b"")
+    graph_response = _proxy(dispatch_graph_request, f"neo4j_delete_node/{node_id}", data=b"")
     if not graph_response.ok:
         return _response_from_upstream(graph_response)
 
     storage_response = _proxy(
-        OBJECT_API_BASE_URL,
+        dispatch_object_request,
         "minio_clear_bucket",
         method="DELETE",
         params={"bucket_id": node_id},
@@ -383,81 +381,81 @@ def graph_node(node_id: str):
 @app.route("/api/graph/nodes/properties", methods=["POST", "OPTIONS"])
 @require_auth
 def graph_node_properties():
-    return _proxy_response(GRAPH_API_BASE_URL, "neo4j_update_node")
+    return _proxy_response(dispatch_graph_request, "neo4j_update_node")
 
 
 @app.route("/api/graph/nodes/position", methods=["POST", "OPTIONS"])
 @require_auth
 def graph_node_position():
-    return _proxy_response(GRAPH_API_BASE_URL, "neo4j_update_node_position")
+    return _proxy_response(dispatch_graph_request, "neo4j_update_node_position")
 
 
 @app.route("/api/graph/edges", methods=["POST", "DELETE", "OPTIONS"])
 @require_auth
 def graph_edges():
     if request.method == "POST":
-        return _proxy_response(GRAPH_API_BASE_URL, "neo4j_add_edge")
-    return _proxy_response(GRAPH_API_BASE_URL, "neo4j_delete_edge")
+        return _proxy_response(dispatch_graph_request, "neo4j_add_edge")
+    return _proxy_response(dispatch_graph_request, "neo4j_delete_edge")
 
 
 @app.route("/api/pipeline/graph", methods=["GET", "OPTIONS"])
 @require_auth
 def pipeline_graph():
-    return _proxy_response(GRAPH_API_BASE_URL, "neo4j_get_graph")
+    return _proxy_response(dispatch_graph_request, "neo4j_get_graph")
 
 
 @app.route("/api/pipeline/updated-at", methods=["GET", "OPTIONS"])
 @require_auth
 def pipeline_updated_at():
-    return _proxy_response(GRAPH_API_BASE_URL, "neo4j_get_pipeline_updated_at")
+    return _proxy_response(dispatch_graph_request, "neo4j_get_pipeline_updated_at")
 
 
 @app.route("/api/pipeline/overview", methods=["GET", "POST", "OPTIONS"])
 @require_auth
 def pipeline_overview():
     if request.method == "GET":
-        return _proxy_response(GRAPH_API_BASE_URL, "neo4j_get_overview_properties")
-    return _proxy_response(GRAPH_API_BASE_URL, "neo4j_update_pipeline_overview")
+        return _proxy_response(dispatch_graph_request, "neo4j_get_overview_properties")
+    return _proxy_response(dispatch_graph_request, "neo4j_update_pipeline_overview")
 
 
 @app.route("/api/pipeline/versions", methods=["GET", "POST", "DELETE", "OPTIONS"])
 @require_auth
 def pipeline_versions():
     if request.method == "GET":
-        return _proxy_response(GRAPH_API_BASE_URL, "neo4j_list_pipeline_versions")
+        return _proxy_response(dispatch_graph_request, "neo4j_list_pipeline_versions")
     if request.method == "POST":
-        return _proxy_response(GRAPH_API_BASE_URL, "neo4j_save_pipeline_version")
-    return _proxy_response(GRAPH_API_BASE_URL, "neo4j_delete_pipeline_version")
+        return _proxy_response(dispatch_graph_request, "neo4j_save_pipeline_version")
+    return _proxy_response(dispatch_graph_request, "neo4j_delete_pipeline_version")
 
 
 @app.route("/api/pipeline/versions/main", methods=["POST", "OPTIONS"])
 @require_auth
 def pipeline_version_main():
-    return _proxy_response(GRAPH_API_BASE_URL, "neo4j_save_pipeline_main")
+    return _proxy_response(dispatch_graph_request, "neo4j_save_pipeline_main")
 
 
 @app.route("/api/pipeline/versions/active", methods=["POST", "OPTIONS"])
 @require_auth
 def pipeline_version_active():
-    return _proxy_response(GRAPH_API_BASE_URL, "neo4j_save_pipeline_active_version")
+    return _proxy_response(dispatch_graph_request, "neo4j_save_pipeline_active_version")
 
 
 @app.route("/api/pipeline/versions/restore", methods=["POST", "OPTIONS"])
 @require_auth
 def pipeline_version_restore():
-    return _proxy_response(GRAPH_API_BASE_URL, "neo4j_restore_pipeline_version")
+    return _proxy_response(dispatch_graph_request, "neo4j_restore_pipeline_version")
 
 
 @app.route("/api/pipeline/versions/set-main", methods=["POST", "OPTIONS"])
 @require_auth
 def pipeline_version_set_main():
-    return _proxy_response(GRAPH_API_BASE_URL, "neo4j_set_pipeline_version_as_main")
+    return _proxy_response(dispatch_graph_request, "neo4j_set_pipeline_version_as_main")
 
 
 @app.route("/api/files", methods=["GET", "OPTIONS"])
 @require_auth
 def files_metadata():
-    return _proxy_response(GRAPH_API_BASE_URL, "neo4j_get_all_files")
+    return _proxy_response(dispatch_graph_request, "neo4j_get_all_files")
 
 
 @app.route("/api/files/content", methods=["GET", "OPTIONS"])
@@ -470,7 +468,7 @@ def file_content():
     if not container_id or not filename:
         return _json_error(400, "container_id and filename are required")
     storage_response = _proxy(
-        OBJECT_API_BASE_URL,
+        dispatch_object_request,
         "minio_read_file",
         method="GET",
         params={"bucket_id": container_id, "filename": filename},
@@ -490,7 +488,7 @@ def node_files(node_id: str):
         if uploaded is None:
             return _json_error(400, "file is required")
         storage_response = _proxy(
-            OBJECT_API_BASE_URL,
+            dispatch_object_request,
             "minio_upload_file",
             method="POST",
             params={},
@@ -508,7 +506,7 @@ def node_files(node_id: str):
             return _response_from_upstream(storage_response)
 
         graph_response = _proxy(
-            GRAPH_API_BASE_URL,
+            dispatch_graph_request,
             "neo4j_add_file",
             method="POST",
             params={},
@@ -532,7 +530,7 @@ def node_files(node_id: str):
     if not filename:
         return _json_error(400, "filename is required")
     storage_response = _proxy(
-        OBJECT_API_BASE_URL,
+        dispatch_object_request,
         "minio_remove_file",
         method="DELETE",
         params={},
@@ -543,7 +541,7 @@ def node_files(node_id: str):
         return _response_from_upstream(storage_response)
 
     graph_response = _proxy(
-        GRAPH_API_BASE_URL,
+        dispatch_graph_request,
         "neo4j_delete_file",
         method="DELETE",
         params={},
@@ -578,7 +576,7 @@ def node_text_file(node_id: str):
     if not isinstance(content, str):
         return _json_error(400, "content must be a string")
     storage_response = _proxy(
-        OBJECT_API_BASE_URL,
+        dispatch_object_request,
         "minio_update_text_file",
         method="PUT",
         params={},

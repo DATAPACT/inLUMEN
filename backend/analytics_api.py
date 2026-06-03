@@ -22,14 +22,9 @@ from graph_client import (
 )
 from llm_config import llm_config_from_payload, log_llm_selection
 from pipeline_editor_team import build_pipeline_editing_team
-from runtime_config import default_frontend_origin, get_service_port
+from runtime_config import default_frontend_origin
 
 
-NEO4J_API_PORT = get_service_port("NEO4J_API_PORT", 5001)
-NEO4J_API_BASE_URL = (
-    os.getenv("NEO4J_API_BASE_URL", "").strip()
-    or f"http://127.0.0.1:{NEO4J_API_PORT}"
-)
 CORS_ALLOWED_ORIGIN = (
     os.getenv("CORS_ALLOWED_ORIGIN", "").strip()
     or default_frontend_origin()
@@ -292,7 +287,6 @@ def _build_agent_task(
 async def _safe_fetch_pipeline_graph() -> tuple[dict | None, str | None]:
     try:
         return await fetch_pipeline_graph(
-            NEO4J_API_BASE_URL,
             authorization=_request_authorization_header(),
         ), None
     except Exception as exc:
@@ -313,7 +307,6 @@ def _pipeline_graph_from_payload_or_backend(data: dict) -> dict:
         return payload_graph
     return run_async(
         fetch_pipeline_graph(
-            NEO4J_API_BASE_URL,
             authorization=_request_authorization_header(),
         )
     )
@@ -477,7 +470,6 @@ def agentic_generate_version_yamls():
         llm_config = llm_config_from_payload(data)
         log_llm_selection("Generating Dockerfiles for all pipeline versions", llm_config)
         versions = run_async(fetch_pipeline_versions(
-            NEO4J_API_BASE_URL,
             include_graph=True,
             authorization=_request_authorization_header(),
         ))
@@ -556,7 +548,6 @@ def agentic_pipeline_editor():
         if canvas_graph is not None:
             try:
                 await sync_backend_to_canvas_graph(
-                    NEO4J_API_BASE_URL,
                     canvas_graph,
                     active_version_uid,
                     active_version_name,
@@ -570,7 +561,6 @@ def agentic_pipeline_editor():
         visible_before_graph = canvas_graph or before_graph
         team = build_pipeline_editing_team(
             llm_config=llm_config,
-            neo4j_api_base_url=NEO4J_API_BASE_URL,
             authorization=authorization,
         )
         team_state = load_state_from_disk(session_id)
@@ -615,7 +605,6 @@ def agentic_pipeline_editor():
                 version_name_to_save = "Main"
             try:
                 await save_active_pipeline_version(
-                    NEO4J_API_BASE_URL,
                     after_graph,
                     version_uid_to_save,
                     version_name_to_save,

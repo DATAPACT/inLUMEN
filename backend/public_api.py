@@ -9,7 +9,6 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import requests
 from flask import Blueprint, jsonify, make_response, request
 
 from auth_middleware import is_auth_enabled, validate_keycloak_bearer_token
@@ -19,8 +18,14 @@ from deployment_artifacts import (
     build_argo_workflow_yaml,
     extract_pipeline_steps,
 )
-from graph_client import fetch_pipeline_graph, fetch_pipeline_versions
+from graph_client import (
+    check_graph_health,
+    fetch_pipeline_graph,
+    fetch_pipeline_versions,
+    update_pipeline_overview,
+)
 from minio_gateway import get_minio_client
+from object_client import check_object_health
 
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -47,7 +52,7 @@ class ApiError(Exception):
 
 
 def create_public_api_blueprint(
-    neo4j_api_base_url: str,
+    neo4j_api_base_url: str | None = None,
     object_api_base_url: str | None = None,
     *,
     check_upstreams: bool = False,
@@ -294,23 +299,22 @@ def _auth_checks_ready(auth_checks: dict[str, str]) -> bool:
 
 
 def _upstream_readiness_checks(
-    neo4j_api_base_url: str,
+    _neo4j_api_base_url: str | None,
     object_api_base_url: str | None,
 ) -> dict[str, str]:
     checks = {
-        "graph_api": _upstream_health_status(neo4j_api_base_url),
+        "graph_api": _health_status(check_graph_health),
     }
     if object_api_base_url:
-        checks["object_api"] = _upstream_health_status(object_api_base_url)
+        checks["object_api"] = _health_status(check_object_health)
     return checks
 
 
-def _upstream_health_status(base_url: str) -> str:
+def _health_status(check_health) -> str:
     try:
-        response = requests.get(f"{base_url.rstrip('/')}/health", timeout=3)
-    except requests.RequestException:
+        return "ready" if check_health() else "unavailable"
+    except Exception:
         return "unavailable"
-    return "ready" if response.ok else "unavailable"
 
 
 def _upstream_checks_ready(upstream_checks: dict[str, str]) -> bool:
@@ -471,7 +475,7 @@ def _bool_query(name: str, *, default: bool) -> bool:
     raise ApiError(400, "invalid_query_parameter", f"Invalid boolean query parameter: {name}")
 
 
-def _load_pipeline_graph(neo4j_api_base_url: str) -> dict[str, Any]:
+def _load_pipeline_graph(neo4j_api_base_url: str | None) -> dict[str, Any]:
     try:
         graph = run_async(
             fetch_pipeline_graph(
@@ -486,7 +490,7 @@ def _load_pipeline_graph(neo4j_api_base_url: str) -> dict[str, Any]:
 
 
 def _load_pipeline_versions(
-    neo4j_api_base_url: str,
+    neo4j_api_base_url: str | None,
     *,
     include_graph: bool,
 ) -> list[dict[str, Any]]:
@@ -505,17 +509,16 @@ def _load_pipeline_versions(
 
 
 def _create_pipeline(
-    neo4j_api_base_url: str,
+    neo4j_api_base_url: str | None,
     payload: dict[str, str],
 ) -> dict[str, Any]:
-    api_url = f"{neo4j_api_base_url.rstrip('/')}/neo4j_update_pipeline_overview"
     try:
-        headers = {}
-        authorization = _request_authorization_header()
-        if authorization:
-            headers["Authorization"] = authorization
-        response = requests.post(api_url, json=payload, headers=headers, timeout=30)
-    except requests.RequestException as error:
+        response = update_pipeline_overview(
+            neo4j_api_base_url,
+            payload,
+            authorization=_request_authorization_header(),
+        )
+    except Exception as error:
         _log_event("pipeline_create_failed", error_type=type(error).__name__)
         raise ApiError(500, "backend_unavailable", "Pipeline backend unavailable") from error
 
@@ -606,7 +609,7 @@ def _pipeline_id_matches(pipeline: dict[str, Any], requested_id: str) -> bool:
 
 
 def _pipeline_graph_or_404(
-    neo4j_api_base_url: str,
+    neo4j_api_base_url: str | None,
     pipeline_id: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     requested_id = _validate_id("pipeline_id", pipeline_id)
@@ -618,7 +621,7 @@ def _pipeline_graph_or_404(
 
 
 def _pipeline_version_graph_or_404(
-    neo4j_api_base_url: str,
+    neo4j_api_base_url: str | None,
     pipeline_id: str,
     version_id: str,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -734,7 +737,7 @@ def _active_graph_version(
 
 
 def _list_workflows(
-    neo4j_api_base_url: str,
+    neo4j_api_base_url: str | None,
     *,
     include_download_urls: bool,
 ) -> list[dict[str, Any]]:

@@ -6,10 +6,9 @@ import os
 import datetime
 import mimetypes
 import tempfile
-from runtime_config import default_frontend_origin, get_service_port
+from runtime_config import default_frontend_origin
 
 CORS_ALLOWED_ORIGIN = os.getenv("CORS_ALLOWED_ORIGIN", "").strip() or default_frontend_origin()
-MINIO_API_PORT = get_service_port("MINIO_API_PORT", 5003)
 
 app = Flask(__name__)
 
@@ -204,6 +203,3 @@ def minio_get_object():
     object_response = get_object(bucket_name=bucket_name, object_name = object_name, prefix=prefix)
     print("[minio_api.py] Object returned.")
     return jsonify({'object': object_response})
-
-if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=MINIO_API_PORT)

@@ -11,6 +11,7 @@ export interface ChatbotConfig {
   model: string;
   baseUrl: string;
   apiKey?: string;
+  readOnly?: boolean;
   system_prompt?: string;
   temperature?: number;
 }
@@ -54,22 +55,39 @@ export const LLM_PROVIDER_DETAILS: Record<
 const LOCAL_CONFIG_KEY = "inlumen-chatbot-config-overrides";
 const LOCAL_ONLY_CONFIGS_KEY = "inlumen-chatbot-local-configs";
 const REMOTE_CONFIG_CACHE_KEY = "inlumen-chatbot-remote-config-cache";
-const SESSION_API_KEYS_KEY = "inlumen-chatbot-session-api-keys";
+const LEGACY_SESSION_API_KEYS_KEY = "inlumen-chatbot-session-api-keys";
+const SELECTED_CONFIG_KEY = "inlumen-selected-chatbot-config-id";
 const REMOTE_CONFIG_SYNC_ENABLED =
   String(import.meta.env.VITE_ENABLE_REMOTE_CHATBOT_CONFIG_SYNC ?? "true").trim().toLowerCase() !==
   "false";
 
 type StoredConfigValues = Partial<
-  Pick<ChatbotConfig, "provider" | "baseUrl">
+  Pick<ChatbotConfig, "provider" | "baseUrl" | "apiKey">
 >;
 
-const canUseLocalStorage = () => typeof window !== "undefined" && Boolean(window.localStorage);
-const canUseSessionStorage = () => typeof window !== "undefined" && Boolean(window.sessionStorage);
+const getLocalStorage = (): Storage | null => {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+};
+
+const getSessionStorage = (): Storage | null => {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+};
 
 const readStoredConfigValues = (): Record<string, StoredConfigValues> => {
-  if (!canUseLocalStorage()) return {};
+  const storage = getLocalStorage();
+  if (!storage) return {};
   try {
-    const raw = JSON.parse(localStorage.getItem(LOCAL_CONFIG_KEY) || "{}");
+    const raw = JSON.parse(storage.getItem(LOCAL_CONFIG_KEY) || "{}");
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
     return Object.fromEntries(
       Object.entries(raw as Record<string, unknown>).map(([key, value]) => {
@@ -82,6 +100,11 @@ const readStoredConfigValues = (): Record<string, StoredConfigValues> => {
           {
             provider: typeof item.provider === "string" ? item.provider as LLMProvider : undefined,
             baseUrl: typeof item.baseUrl === "string" ? item.baseUrl : undefined,
+            apiKey: typeof item.apiKey === "string"
+              ? item.apiKey
+              : typeof item.api_key === "string"
+                ? item.api_key
+                : undefined,
           },
         ];
       }),
@@ -92,74 +115,91 @@ const readStoredConfigValues = (): Record<string, StoredConfigValues> => {
 };
 
 const writeStoredConfigValues = (values: Record<string, StoredConfigValues>) => {
-  if (!canUseLocalStorage()) return;
-  localStorage.setItem(LOCAL_CONFIG_KEY, JSON.stringify(values));
+  const storage = getLocalStorage();
+  if (!storage) return;
+  try {
+    storage.setItem(LOCAL_CONFIG_KEY, JSON.stringify(values));
+  } catch {
+    // Ignore storage write failures so invalid or unavailable browser storage does not break the app.
+  }
 };
 
-const readSessionApiKeys = (): Record<string, string> => {
-  if (!canUseSessionStorage()) return {};
+const readLegacySessionApiKeys = (): Record<string, string> => {
+  const storage = getSessionStorage();
+  if (!storage) return {};
   try {
-    return JSON.parse(sessionStorage.getItem(SESSION_API_KEYS_KEY) || "{}");
+    const raw = JSON.parse(storage.getItem(LEGACY_SESSION_API_KEYS_KEY) || "{}");
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    return Object.fromEntries(
+      Object.entries(raw as Record<string, unknown>).flatMap(([key, value]) =>
+        typeof value === "string" ? [[key, value]] : []
+      ),
+    );
   } catch {
     return {};
   }
 };
 
-const writeSessionApiKey = (storageKey: string, apiKey: string) => {
-  if (!canUseSessionStorage()) return;
-  const values = readSessionApiKeys();
-  if (apiKey) {
-    values[storageKey] = apiKey;
-  } else {
+const deleteLegacySessionApiKey = (storageKey: string) => {
+  const storage = getSessionStorage();
+  if (!storage) return;
+  try {
+    const values = readLegacySessionApiKeys();
     delete values[storageKey];
+    storage.setItem(LEGACY_SESSION_API_KEYS_KEY, JSON.stringify(values));
+  } catch {
+    // Ignore legacy cleanup failures.
   }
-  sessionStorage.setItem(SESSION_API_KEYS_KEY, JSON.stringify(values));
-};
-
-const deleteSessionApiKey = (storageKey: string) => {
-  writeSessionApiKey(storageKey, "");
-};
-
-const stripConfigSecret = (config: ChatbotConfig) => {
-  const { apiKey: _apiKey, ...safeConfig } = config;
-  return safeConfig;
-};
-
-const stripRawConfigSecret = (item: Record<string, unknown>) => {
-  const { apiKey: _apiKey, api_key: _apiKeySnake, ...safeConfig } = item;
-  return safeConfig;
 };
 
 const readLocalOnlyConfigs = (): ChatbotConfig[] => {
-  if (!canUseLocalStorage()) return [];
+  const storage = getLocalStorage();
+  if (!storage) return [];
   try {
-    const raw = JSON.parse(localStorage.getItem(LOCAL_ONLY_CONFIGS_KEY) || "[]");
+    const raw = JSON.parse(storage.getItem(LOCAL_ONLY_CONFIGS_KEY) || "[]");
     if (!Array.isArray(raw)) return [];
-    return raw.map((item) => normalizeConfig(stripRawConfigSecret(item as Record<string, unknown>)));
+    return raw.flatMap((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+      return [normalizeConfig(item as Partial<ChatbotConfig> & Record<string, unknown>)];
+    });
   } catch {
     return [];
   }
 };
 
 const writeLocalOnlyConfigs = (configs: ChatbotConfig[]) => {
-  if (!canUseLocalStorage()) return;
-  localStorage.setItem(LOCAL_ONLY_CONFIGS_KEY, JSON.stringify(configs.map(stripConfigSecret)));
+  const storage = getLocalStorage();
+  if (!storage) return;
+  try {
+    storage.setItem(LOCAL_ONLY_CONFIGS_KEY, JSON.stringify(configs));
+  } catch {
+    // Ignore storage write failures so callers can continue using in-memory state.
+  }
 };
 
 const readCachedRemoteConfigs = (): ChatbotConfig[] => {
-  if (!canUseLocalStorage()) return [];
+  const storage = getLocalStorage();
+  if (!storage) return [];
   try {
-    const raw = JSON.parse(localStorage.getItem(REMOTE_CONFIG_CACHE_KEY) || "[]");
+    const raw = JSON.parse(storage.getItem(REMOTE_CONFIG_CACHE_KEY) || "[]");
     if (!Array.isArray(raw)) return [];
-    return raw.map((item) => normalizeConfig(stripRawConfigSecret(item as Record<string, unknown>)));
+    return raw.flatMap((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+      return [normalizeConfig(item as Partial<ChatbotConfig> & Record<string, unknown>)];
+    });
   } catch {
     return [];
   }
 };
 
 const writeCachedRemoteConfigs = (configs: ChatbotConfig[]) => {
-  if (!canUseLocalStorage()) return;
-  localStorage.setItem(REMOTE_CONFIG_CACHE_KEY, JSON.stringify(configs.map(stripConfigSecret)));
+  const storage = getLocalStorage();
+  if (!storage) return;
+  try {
+    storage.setItem(REMOTE_CONFIG_CACHE_KEY, JSON.stringify(configs));
+  } catch {
+    // Ignore storage write failures so callers can continue using in-memory state.
+  }
 };
 
 const makeLocalConfigId = () => {
@@ -216,7 +256,7 @@ const normalizeConfig = (config: Partial<ChatbotConfig> & Record<string, unknown
     model: String(config.model || LLM_PROVIDER_DETAILS.openrouter.defaultModel),
   });
   const stored = readStoredConfigValues()[storageKey] || {};
-  const sessionApiKey = readSessionApiKeys()[storageKey] || "";
+  const legacySessionApiKey = readLegacySessionApiKeys()[storageKey] || "";
 
   const provider = normalizeProvider(
     (config.provider as string | undefined) || stored.provider || "openrouter"
@@ -242,7 +282,14 @@ const normalizeConfig = (config: Partial<ChatbotConfig> & Record<string, unknown
     provider,
     model,
     baseUrl,
-    apiKey: String((config.apiKey as string | undefined) || sessionApiKey || ""),
+    apiKey: String(
+      (config.apiKey as string | undefined) ||
+        (config.api_key as string | undefined) ||
+        stored.apiKey ||
+        legacySessionApiKey ||
+        ""
+    ),
+    readOnly: Boolean(config.readOnly || config.read_only),
     system_prompt: typeof config.system_prompt === "string" ? config.system_prompt : "",
     temperature: typeof config.temperature === "number" ? config.temperature : 0.7,
   };
@@ -254,16 +301,17 @@ const persistLocalConfigValues = (config: ChatbotConfig) => {
   values[storageKey] = {
     provider: config.provider,
     baseUrl: config.baseUrl,
+    apiKey: config.apiKey || "",
   };
   writeStoredConfigValues(values);
-  writeSessionApiKey(storageKey, config.apiKey || "");
+  deleteLegacySessionApiKey(storageKey);
 };
 
 const deleteLocalConfigValues = (id: string) => {
   const values = readStoredConfigValues();
   delete values[`id:${id}`];
   writeStoredConfigValues(values);
-  deleteSessionApiKey(`id:${id}`);
+  deleteLegacySessionApiKey(`id:${id}`);
 };
 
 const createLocalOnlyConfig = (config: ChatbotConfig): ChatbotConfig => {
@@ -306,6 +354,31 @@ const upsertCachedRemoteConfig = (config: ChatbotConfig): ChatbotConfig => {
 const deleteCachedRemoteConfig = (id: string) => {
   writeCachedRemoteConfigs(readCachedRemoteConfigs().filter((config) => config.id !== id));
   deleteLocalConfigValues(id);
+};
+
+export const readSelectedChatbotConfigId = (): string | null => {
+  const storage = getLocalStorage();
+  if (!storage) return null;
+  try {
+    const value = storage.getItem(SELECTED_CONFIG_KEY);
+    return value && value.trim() ? value : null;
+  } catch {
+    return null;
+  }
+};
+
+export const writeSelectedChatbotConfigId = (id?: string | null) => {
+  const storage = getLocalStorage();
+  if (!storage) return;
+  try {
+    if (id) {
+      storage.setItem(SELECTED_CONFIG_KEY, id);
+    } else {
+      storage.removeItem(SELECTED_CONFIG_KEY);
+    }
+  } catch {
+    // Ignore storage write failures so selection changes do not break the app.
+  }
 };
 
 const chatbotConfigUrl = (id?: string) =>
@@ -389,10 +462,14 @@ const deleteBackendConfig = async (id: string): Promise<void> => {
   if (!response.ok) throw new Error(await readBackendError(response));
 };
 
-const getAvailableConfigs = (remoteConfigs: ChatbotConfig[] = readCachedRemoteConfigs()) => [
-  ...readLocalOnlyConfigs(),
-  ...remoteConfigs,
-];
+const getAvailableConfigs = (remoteConfigs: ChatbotConfig[] = readCachedRemoteConfigs()) => {
+  const configs = [
+    ...readLocalOnlyConfigs(),
+    ...remoteConfigs,
+  ];
+  configs.forEach(persistLocalConfigValues);
+  return configs;
+};
 
 export const buildLLMRequestConfig = (config: ChatbotConfig): LLMRequestConfig => {
   const normalizedConfig = normalizeConfig(config as Partial<ChatbotConfig> & Record<string, unknown>);
@@ -402,17 +479,20 @@ export const buildLLMRequestConfig = (config: ChatbotConfig): LLMRequestConfig =
   if (!normalizedConfig.apiKey) {
     throw new Error("Enter an LLM API key in Settings before using chat or artifact generation.");
   }
-  return {
+  const requestConfig: LLMRequestConfig = {
     provider: normalizedConfig.provider,
     model: normalizedConfig.model,
     base_url: normalizedConfig.baseUrl,
-    api_key: normalizedConfig.apiKey,
     model_family: "unknown",
     supports_function_calling: true,
     supports_json_output: true,
     supports_structured_output: true,
     supports_vision: false,
   };
+  if (normalizedConfig.apiKey) {
+    requestConfig.api_key = normalizedConfig.apiKey;
+  }
+  return requestConfig;
 };
 
 export const formatProviderLabel = (provider: LLMProvider) => LLM_PROVIDER_DETAILS[provider].label;
