@@ -57,7 +57,9 @@ import {
   fetchChatbotConfigs,
   deleteChatbotConfig,
   formatProviderLabel,
-  getDefaultChatbotConfig
+  getDefaultChatbotConfig,
+  readSelectedChatbotConfigId,
+  writeSelectedChatbotConfigId
 } from '@/services/chatbotService';
 import { ChatbotConfigForm } from '@/components/ChatbotConfigForm';
 
@@ -202,6 +204,7 @@ const Index = () => {
   const activeVersionDirtyRef = useRef(false);
   const activeVersionUidRef = useRef(MAIN_PIPELINE_VERSION_UID);
   const activeVersionNameRef = useRef('Main');
+  const hasLoadedConfigsRef = useRef(false);
   const defaultConfig = React.useMemo(() => getDefaultChatbotConfig(), []);
   const isLibraryOpen = panelPreferences.libraryOpen;
   const rightPanel = panelPreferences.rightPanel;
@@ -239,11 +242,16 @@ const Index = () => {
   }, [chatSessionId, conversation]);
 
   const formatConfigDescription = (config: ChatbotConfig) =>
-    `${formatProviderLabel(config.provider)} / ${config.model}`;
+    `${formatProviderLabel(config.provider)} / ${config.model}${config.serverManagedKey ? " / server key" : ""}`;
 
   const pickPreferredConfig = useCallback(
-    (configsList: ChatbotConfig[]) =>
-      configsList.find((config) => config.provider === "openrouter") || configsList[0] || defaultConfig,
+    (configsList: ChatbotConfig[]) => {
+      const savedConfigId = readSelectedChatbotConfigId();
+      const savedConfig = savedConfigId
+        ? configsList.find((config) => config.id === savedConfigId)
+        : null;
+      return savedConfig || configsList.find((config) => config.provider === "openrouter") || configsList[0] || defaultConfig;
+    },
     [defaultConfig]
   );
 
@@ -253,7 +261,8 @@ const Index = () => {
       setConfigs(configsList);
       setSelectedConfig((currentSelection) => {
         if (currentSelection?.id) {
-          return configsList.find((config) => config.id === currentSelection.id) || currentSelection;
+          const refreshedConfig = configsList.find((config) => config.id === currentSelection.id);
+          if (refreshedConfig) return refreshedConfig;
         }
         return pickPreferredConfig(configsList);
       });
@@ -261,8 +270,15 @@ const Index = () => {
       console.error("Error loading configurations:", error);
       setConfigs([]);
       setSelectedConfig((currentSelection) => currentSelection || defaultConfig);
+    } finally {
+      hasLoadedConfigsRef.current = true;
     }
   }, [defaultConfig, pickPreferredConfig]);
+
+  useEffect(() => {
+    if (!hasLoadedConfigsRef.current) return;
+    writeSelectedChatbotConfigId(selectedConfig?.id ?? null);
+  }, [selectedConfig?.id]);
 
   // Compute pipeline overview from flowNodes
   const pipelineOverview = React.useMemo(() => {
@@ -647,6 +663,7 @@ const Index = () => {
   };
 
   const handleEditConfig = (config: ChatbotConfig) => {
+    if (config.readOnly) return;
     setConfigToEdit(config);
     setIsConfigFormOpen(true);
   };
@@ -1157,30 +1174,32 @@ const Index = () => {
                             {formatConfigDescription(config)}
                           </div>
                         </div>
-                        <div className="flex items-center gap-1">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7 rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleEditConfig(config);
-                            }}
-                          >
-                            <Edit className="h-3.5 w-3.5" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7 rounded-full text-rose-500 hover:bg-rose-500/10"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (config.id) handleDeleteConfig(config.id);
-                            }}
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
-                        </div>
+                        {!config.readOnly && (
+                          <div className="flex items-center gap-1">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7 rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleEditConfig(config);
+                              }}
+                            >
+                              <Edit className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7 rounded-full text-rose-500 hover:bg-rose-500/10"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (config.id) handleDeleteConfig(config.id);
+                              }}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        )}
                       </DropdownMenuItem>
                     ))
                   ) : (

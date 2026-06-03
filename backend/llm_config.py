@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
@@ -19,6 +20,7 @@ LLM_PROVIDER_PRESETS = {
 }
 
 DEFAULT_LLM_MODEL_FAMILY = "unknown"
+DEV_SERVER_CONFIG_ID = "dev-env"
 
 OPENROUTER_MODEL_ALIASES = {
     "gpt-4o": "openai/gpt-4o",
@@ -96,29 +98,79 @@ def _raw_config_value(raw: Mapping[str, Any], *keys: str) -> Any:
     return None
 
 
-def resolve_llm_config(raw_config: Optional[Mapping[str, Any]] = None) -> LLMConfig:
-    raw = raw_config or {}
-    provider = _normalize_provider(
-        raw.get("provider")
-        or raw.get("llm_provider")
-        or raw.get("providerName")
-    )
-    model = str(raw.get("model") or "").strip()
+def is_dev_llm_config_enabled() -> bool:
+    return _bool_config(os.getenv("INLUMEN_DEV_LLM_CONFIG_ENABLED"), False)
+
+
+def _env_llm_config() -> dict[str, Any]:
+    return {
+        "provider": os.getenv("LLM_PROVIDER", "").strip(),
+        "model": os.getenv("LLM_MODEL", "").strip(),
+        "base_url": os.getenv("LLM_BASE_URL", "").strip(),
+        "api_key": os.getenv("LLM_API_KEY", "").strip(),
+        "model_family": os.getenv("LLM_MODEL_FAMILY", "").strip(),
+        "max_tokens": os.getenv("LLM_MAX_TOKENS", "").strip(),
+        "openrouter_provider_only": os.getenv("LLM_OPENROUTER_PROVIDER_ONLY", "").strip(),
+    }
+
+
+def server_managed_llm_config_metadata() -> dict[str, Any] | None:
+    if not is_dev_llm_config_enabled():
+        return None
+
+    env_config = _env_llm_config()
+    if not all(env_config.get(key) for key in ("provider", "model", "base_url", "api_key")):
+        return None
+
+    provider = _normalize_provider(str(env_config["provider"]))
+    model = str(env_config["model"])
     if provider == "openrouter":
         model = OPENROUTER_MODEL_ALIASES.get(model.lower(), model)
-    base_url = str(raw.get("base_url") or raw.get("baseUrl") or "").strip()
-    api_key = str(raw.get("api_key") or raw.get("apiKey") or "").strip()
+
+    return {
+        "id": DEV_SERVER_CONFIG_ID,
+        "name": os.getenv("LLM_CONFIG_NAME", "").strip() or "Development LLM (.env)",
+        "provider": provider,
+        "model": model,
+        "baseUrl": str(env_config["base_url"]),
+        "base_url": str(env_config["base_url"]),
+        "serverManagedKey": True,
+        "server_managed_key": True,
+        "readOnly": True,
+        "read_only": True,
+    }
+
+
+def resolve_llm_config(raw_config: Optional[Mapping[str, Any]] = None) -> LLMConfig:
+    raw = raw_config or {}
+    server_managed_requested = _bool_config(
+        _raw_config_value(raw, "server_managed_key", "serverManagedKey"),
+        False,
+    )
+    use_env_config = is_dev_llm_config_enabled() and (not raw or server_managed_requested)
+    env_config = _env_llm_config() if use_env_config else {}
+    config_source = env_config if use_env_config else raw
+    provider = _normalize_provider(
+        config_source.get("provider")
+        or config_source.get("llm_provider")
+        or config_source.get("providerName")
+    )
+    model = str(config_source.get("model") or "").strip()
+    if provider == "openrouter":
+        model = OPENROUTER_MODEL_ALIASES.get(model.lower(), model)
+    base_url = str(config_source.get("base_url") or config_source.get("baseUrl") or "").strip()
+    api_key = str(config_source.get("api_key") or config_source.get("apiKey") or "").strip()
     model_family = (
-        str(raw.get("model_family") or raw.get("modelFamily") or "").strip()
+        str(config_source.get("model_family") or config_source.get("modelFamily") or "").strip()
         or DEFAULT_LLM_MODEL_FAMILY
     )
     max_tokens = _positive_int_config(
-        _raw_config_value(raw, "max_tokens", "maxTokens"),
+        _raw_config_value(config_source, "max_tokens", "maxTokens"),
         None,
     )
     openrouter_provider_only = _string_tuple_config(
         _raw_config_value(
-            raw,
+            config_source,
             "openrouter_provider_only",
             "openRouterProviderOnly",
             "openrouterProviderOnly",

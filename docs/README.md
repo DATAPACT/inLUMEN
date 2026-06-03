@@ -135,12 +135,13 @@ Note: To log into MinIO, use the configured root credentials from `.env`. For se
 To open the editor, go to `http://localhost:8080` by default, or the custom value you configured in `FRONTEND_PORT`. This will open the dashboard.
 
 The frontend talks only to the inLUMEN backend gateway API on `INLUMEN_API_PORT`. That gateway owns graph and file orchestration through internal backend modules and keeps Neo4J and MinIO implementation details out of the browser and CLI contract. The frontend and CLI should use only `INLUMEN_API_PORT`.
-LLM configuration metadata is also saved through the gateway by default (`VITE_ENABLE_REMOTE_CHATBOT_CONFIG_SYNC=true`); set it to `false` only for browser-local development overrides.
+LLM configuration metadata is also saved through the gateway by default (`VITE_ENABLE_REMOTE_CHATBOT_CONFIG_SYNC=true`); user-provided API keys remain browser-local and are never stored by the backend.
 
 LLM agents use OpenAI-compatible Chat Completions endpoints. Configure OpenRouter, Ollama Cloud, or a custom on-prem endpoint in the Settings dialog. The backend rejects LLM requests that do not include a browser-supplied LLM configuration.
 
 API key handling:
-- Provider API keys are entered only in the UI, kept in browser session storage only, sent to the backend only inside the specific LLM request payload, and are not saved by the backend `/api/chatbot-configs` endpoints.
+- Provider API keys are entered only in the UI, kept in browser localStorage so they survive refreshes, browser restarts, and container restarts, sent to the backend only inside the specific LLM request payload, and are not saved by the backend `/api/chatbot-configs` endpoints.
+- For local development with the normal `docker-compose.yml`, you may set `INLUMEN_DEV_LLM_CONFIG_ENABLED=true` plus `LLM_PROVIDER`, `LLM_MODEL`, `LLM_BASE_URL`, and `LLM_API_KEY` in the root `.env`. The UI will show this as a read-only server-key config without exposing the key to the browser. `docker-compose-prod.yml` does not pass these values; deployed users are expected to bring their own browser-local keys.
 - Do not run this browser-supplied key flow over plain HTTP outside local development; terminate TLS before the backend gateway in shared or production deployments.
 - Backend logs intentionally report provider, model, and base URL but not the provider API key.
 
@@ -222,7 +223,7 @@ Available gateway endpoint groups:
 - `Pipeline State`: fetch the current graph, overview metadata, and saved UI pipeline versions
 - `Files`: upload, remove, read, and update node-attached files without exposing MinIO credentials
 - `Agentic`: call the same chat and artifact-generation operations available in the UI
-- `Settings`: save and manage LLM configuration metadata through the gateway; provider API keys are session-only in the browser and are supplied per request
+- `Settings`: save and manage LLM configurations; provider API keys are browser-local and are supplied per request
 - `Health`: public liveness and readiness checks
 
 The gateway API does not expose MinIO credentials. When file access is available through MinIO, responses contain temporary signed URLs only.
