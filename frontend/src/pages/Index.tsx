@@ -242,7 +242,7 @@ const Index = () => {
   }, [chatSessionId, conversation]);
 
   const formatConfigDescription = (config: ChatbotConfig) =>
-    `${formatProviderLabel(config.provider)} / ${config.model}${config.serverManagedKey ? " / server key" : ""}`;
+    `${formatProviderLabel(config.provider)} / ${config.model}`;
 
   const pickPreferredConfig = useCallback(
     (configsList: ChatbotConfig[]) => {

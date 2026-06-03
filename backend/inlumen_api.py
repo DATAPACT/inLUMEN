@@ -17,7 +17,6 @@ from analytics_api import (
 from auth_middleware import require_auth
 from graph_client import dispatch_graph_request
 from local_api_client import LocalApiResponse
-from llm_config import DEV_SERVER_CONFIG_ID, server_managed_llm_config_metadata
 from object_client import dispatch_object_request
 from public_api import create_public_api_blueprint
 from runtime_config import default_frontend_origin, get_service_port
@@ -219,23 +218,10 @@ def _chatbot_config_response(config: dict[str, Any]) -> dict[str, Any]:
         "created_at": config.get("created_at"),
         "updated_at": config.get("updated_at"),
     }
-    if config.get("serverManagedKey") or config.get("server_managed_key"):
-        response["serverManagedKey"] = True
-        response["server_managed_key"] = True
     if config.get("readOnly") or config.get("read_only"):
         response["readOnly"] = True
         response["read_only"] = True
     return response
-
-
-def _chatbot_configs_with_server_managed(configs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    server_config = server_managed_llm_config_metadata()
-    if not server_config:
-        return configs
-    return [
-        server_config,
-        *[config for config in configs if str(config.get("id") or "") != DEV_SERVER_CONFIG_ID],
-    ]
 
 
 def _validate_chatbot_config_payload(
@@ -321,7 +307,7 @@ def chatbot_configs():
         return jsonify({
             "configs": [
                 _chatbot_config_response(config)
-                for config in _chatbot_configs_with_server_managed(configs)
+                for config in configs
             ]
         }), 200
 
@@ -341,14 +327,6 @@ def chatbot_config(config_id: str):
         return _preflight_response()
 
     configs = _load_chatbot_configs()
-    if config_id == DEV_SERVER_CONFIG_ID:
-        server_config = server_managed_llm_config_metadata()
-        if server_config is None:
-            return _json_error(404, "chatbot config not found")
-        if request.method == "GET":
-            return jsonify({"config": _chatbot_config_response(server_config)}), 200
-        return _json_error(403, "server-managed config cannot be modified")
-
     index = next(
         (idx for idx, config in enumerate(configs) if str(config.get("id")) == config_id),
         None,

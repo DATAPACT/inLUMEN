@@ -11,7 +11,6 @@ export interface ChatbotConfig {
   model: string;
   baseUrl: string;
   apiKey?: string;
-  serverManagedKey?: boolean;
   readOnly?: boolean;
   system_prompt?: string;
   temperature?: number;
@@ -22,7 +21,6 @@ export interface LLMRequestConfig {
   model: string;
   base_url: string;
   api_key?: string;
-  server_managed_key?: boolean;
   model_family: string;
   supports_function_calling: boolean;
   supports_json_output: boolean;
@@ -291,7 +289,6 @@ const normalizeConfig = (config: Partial<ChatbotConfig> & Record<string, unknown
         legacySessionApiKey ||
         ""
     ),
-    serverManagedKey: Boolean(config.serverManagedKey || config.server_managed_key),
     readOnly: Boolean(config.readOnly || config.read_only),
     system_prompt: typeof config.system_prompt === "string" ? config.system_prompt : "",
     temperature: typeof config.temperature === "number" ? config.temperature : 0.7,
@@ -480,9 +477,7 @@ export const buildLLMRequestConfig = (config: ChatbotConfig): LLMRequestConfig =
     throw new Error("Complete the LLM provider, model, and base URL in Settings before using LLM features.");
   }
   if (!normalizedConfig.apiKey) {
-    if (!normalizedConfig.serverManagedKey) {
-      throw new Error("Enter an LLM API key in Settings before using chat or artifact generation.");
-    }
+    throw new Error("Enter an LLM API key in Settings before using chat or artifact generation.");
   }
   const requestConfig: LLMRequestConfig = {
     provider: normalizedConfig.provider,
@@ -496,9 +491,6 @@ export const buildLLMRequestConfig = (config: ChatbotConfig): LLMRequestConfig =
   };
   if (normalizedConfig.apiKey) {
     requestConfig.api_key = normalizedConfig.apiKey;
-  }
-  if (normalizedConfig.serverManagedKey) {
-    requestConfig.server_managed_key = true;
   }
   return requestConfig;
 };

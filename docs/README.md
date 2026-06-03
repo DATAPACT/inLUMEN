@@ -141,7 +141,6 @@ LLM agents use OpenAI-compatible Chat Completions endpoints. Configure OpenRoute
 
 API key handling:
 - Provider API keys are entered only in the UI, kept in browser localStorage so they survive refreshes, browser restarts, and container restarts, sent to the backend only inside the specific LLM request payload, and are not saved by the backend `/api/chatbot-configs` endpoints.
-- For local development with the normal `docker-compose.yml`, you may set `INLUMEN_DEV_LLM_CONFIG_ENABLED=true` plus `LLM_PROVIDER`, `LLM_MODEL`, `LLM_BASE_URL`, and `LLM_API_KEY` in the root `.env`. The UI will show this as a read-only server-key config without exposing the key to the browser. `docker-compose-prod.yml` does not pass these values; deployed users are expected to bring their own browser-local keys.
 - Do not run this browser-supplied key flow over plain HTTP outside local development; terminate TLS before the backend gateway in shared or production deployments.
 - Backend logs intentionally report provider, model, and base URL but not the provider API key.
 
