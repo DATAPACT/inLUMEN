@@ -44,8 +44,12 @@ def env_bool_or_config(
     return default
 
 
-def default_frontend_origin() -> str:
-    return f"http://localhost:{os.getenv('FRONTEND_PORT', '8080').strip() or '8080'}"
+def add_cors_headers(response, request_origin: str | None = None):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    response.headers.add("Vary", "Origin")
+    return response
 
 
 def get_service_port(env_name: str, default: int) -> int:

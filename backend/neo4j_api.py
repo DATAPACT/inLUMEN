@@ -6,11 +6,10 @@ import json
 import os
 import tempfile
 from urllib.parse import quote
-from runtime_config import default_frontend_origin, get_neo4j_settings
+from runtime_config import add_cors_headers, get_neo4j_settings
 from step_types import normalize_step_type
 from minio_access import create_bucket, list_objects, read_object_bytes, remove_object, upload_object
 
-CORS_ALLOWED_ORIGIN = os.getenv("CORS_ALLOWED_ORIGIN", "").strip() or default_frontend_origin()
 NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD = get_neo4j_settings()
 
 # Global graph data
@@ -701,17 +700,10 @@ def _upsert_pipeline_version_snapshot(
         )
     return record.data() if record else None
 
-# Define a function to set the CORS headers
-def add_cors_headers(response):
-    response.headers['Access-Control-Allow-Origin'] = CORS_ALLOWED_ORIGIN
-    response.headers['Access-Control-Allow-Methods'] = 'OPTIONS, GET, POST, DELETE'  # Adjust as needed
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-    return response
-
 # Apply the CORS function to all routes using the after_request decorator
 @app.after_request
 def apply_cors(response):
-    return add_cors_headers(response)
+    return add_cors_headers(response, request.headers.get("Origin"))
 
 # Adds a pipeline step into Neo4J:
 @app.route('/neo4j_add_node', methods=['POST'])

@@ -19,14 +19,10 @@ from graph_client import dispatch_graph_request
 from local_api_client import LocalApiResponse
 from object_client import dispatch_object_request
 from public_api import create_public_api_blueprint
-from runtime_config import default_frontend_origin, get_service_port
+from runtime_config import add_cors_headers, get_service_port
 
 
 INLUMEN_API_PORT = get_service_port("INLUMEN_API_PORT", 5000)
-CORS_ALLOWED_ORIGIN = (
-    os.getenv("CORS_ALLOWED_ORIGIN", "").strip()
-    or default_frontend_origin()
-)
 CHATBOT_CONFIGS_PATH = Path(
     os.getenv("CHATBOT_CONFIGS_PATH", "state/chatbot_configurations.json")
 )
@@ -77,17 +73,9 @@ app.add_url_rule(
 )
 
 
-def add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"] = CORS_ALLOWED_ORIGIN
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-    response.headers.add("Vary", "Origin")
-    return response
-
-
 @app.after_request
 def apply_cors(response):
-    return add_cors_headers(response)
+    return add_cors_headers(response, request.headers.get("Origin"))
 
 
 def _preflight_response():

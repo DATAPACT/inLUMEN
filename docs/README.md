@@ -82,10 +82,11 @@ Step 2: Navigate to the cloned project directory.
 
 Step 3: Optional but recommended: copy `.env.example` to `.env` and adjust only the values you need.
 
-The Docker setup derives CORS, frontend API URLs, Neo4J URI, and MinIO endpoint from the Compose service names, ports, and credential values, so you do not need separate `CORS_ALLOWED_ORIGIN`, `NEO4J_URI`, `MINIO_ENDPOINT`, or `VITE_*_API_URL` entries for normal use.
+The Docker setup derives frontend API URLs, Neo4J URI, and MinIO endpoint from the Compose service names, ports, and credential values, so you do not need separate `NEO4J_URI`, `MINIO_ENDPOINT`, or `VITE_*_API_URL` entries for normal local use. The backend sends permissive CORS headers by default.
 
 Common values you may change include:
 - `FRONTEND_PORT`, `INLUMEN_API_PORT`
+- `INLUMEN_API_PUBLIC_URL` when the browser frontend needs to call a separate deployed backend URL
 - `NEO4J_AUTH`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`
 - `API_AUTH_TOKEN` for the gateway API and Swagger/OpenAPI documentation when Keycloak auth is disabled
 - `AUTH_ENABLED` plus the Keycloak values when enabling authentication
@@ -104,6 +105,24 @@ For deployment/production-like runs, use the production compose file. It exposes
 ```
 docker compose -f docker-compose-prod.yml up --build
 ```
+
+For a deployment where the browser frontend calls a separately deployed backend URL, configure the root `.env` before building:
+
+```
+INLUMEN_API_PUBLIC_URL=https://api.inlumen.example.com
+```
+
+`INLUMEN_API_PUBLIC_URL` is passed to the Vite frontend as `VITE_INLUMEN_API_URL`, so browser requests go to the deployed backend instead of guessing from the frontend hostname.
+
+You can verify the backend CORS preflight before opening the frontend:
+
+```
+curl -i -X OPTIONS "$INLUMEN_API_PUBLIC_URL/health" \
+  -H "Origin: https://inlumen.example.com" \
+  -H "Access-Control-Request-Method: GET"
+```
+
+The response should include `Access-Control-Allow-Origin: *`.
 
 Step 5: Wait for the stack to finish starting. The root compose file now:
 - starts Neo4J, MinIO, the backend gateway, and the frontend together
