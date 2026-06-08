@@ -8,6 +8,7 @@ const frontendPort = Number(process.env.FRONTEND_PORT || 8080);
 export default defineConfig(({ mode }) => ({
   server: {
     host: "0.0.0.0",
+    allowedHosts: true,
     port: frontendPort,
     strictPort: true,
     watch: {

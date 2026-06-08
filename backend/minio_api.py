@@ -6,24 +6,15 @@ import os
 import datetime
 import mimetypes
 import tempfile
-from runtime_config import default_frontend_origin
-
-CORS_ALLOWED_ORIGIN = os.getenv("CORS_ALLOWED_ORIGIN", "").strip() or default_frontend_origin()
+from runtime_config import add_cors_headers
 
 app = Flask(__name__)
 
 
-# Define a function to set the CORS headers
-def add_cors_headers(response):
-    response.headers['Access-Control-Allow-Origin'] = CORS_ALLOWED_ORIGIN
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE'  # Adjust as needed
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-    return response
-
 # Apply the CORS function to all routes using the after_request decorator
 @app.after_request
 def apply_cors(response):
-    return add_cors_headers(response)
+    return add_cors_headers(response, request.headers.get("Origin"))
 
 
 @app.route('/health', methods=['GET'])
