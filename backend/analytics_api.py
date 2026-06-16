@@ -9,7 +9,7 @@ from flask import Flask, jsonify, has_request_context, make_response, request
 from async_runtime import run_async
 from auth_middleware import require_auth
 from chat_state import clear_state_from_disk, load_state_from_disk, save_state_to_disk
-from deployment_artifacts import build_argo_workflow_yaml
+from deployment_artifacts import build_argo_workflow_yaml, build_dagster_definitions_py
 from deployment_agents import (
     generate_argo_yaml_from_graph,
     generate_dockerfiles_with_agent,
@@ -441,6 +441,28 @@ def agentic_generate_yaml():
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:
         print("[analytics_api.py] Error generating YAML:", exc)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/agentic_generate_dagster_definitions", methods=["POST", "OPTIONS"])
+@require_auth
+def agentic_generate_dagster_definitions():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+
+    data = request.get_json() or {}
+
+    try:
+        print("[analytics_api.py] Generating Dagster definitions.py with deterministic artifact builder.")
+        pipeline_graph = _pipeline_graph_from_payload_or_backend(data)
+        python_text = build_dagster_definitions_py(pipeline_graph)
+        resp = make_response(python_text, 200)
+        resp.headers["Content-Type"] = "text/x-python; charset=utf-8"
+        return resp
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        print("[analytics_api.py] Error generating Dagster definitions.py:", exc)
         return jsonify({"error": str(exc)}), 500
 
 

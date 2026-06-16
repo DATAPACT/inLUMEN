@@ -138,10 +138,12 @@ class PublicApiTest(unittest.TestCase):
         )
         self.assertIn("/api/v1/pipelines/{pipeline_id}/artifacts/dockerfiles", schema["paths"])
         self.assertIn("/api/v1/pipelines/{pipeline_id}/artifacts/argo-workflow.yaml", schema["paths"])
+        self.assertIn("/api/v1/pipelines/{pipeline_id}/artifacts/dagster/definitions.py", schema["paths"])
         self.assertIn("/api/graph/nodes", schema["paths"])
         self.assertIn("/api/chatbot-configs", schema["paths"])
         self.assertIn("/api/nodes/{node_id}/files", schema["paths"])
         self.assertIn("/agentic_generate_yaml", schema["paths"])
+        self.assertIn("/agentic_generate_dagster_definitions", schema["paths"])
         self.assertIn("/simple_chat", schema["paths"])
         self.assertFalse(any("sim-pipe" in path for path in schema["paths"]))
         self.assertIn("/openapi.json", schema["paths"])
@@ -295,7 +297,7 @@ class PublicApiTest(unittest.TestCase):
 
     @patch("public_api._build_dockerfile_artifacts_or_error")
     @patch("public_api.fetch_pipeline_graph")
-    def test_pipeline_artifact_endpoints_return_dockerfiles_and_yaml(
+    def test_pipeline_artifact_endpoints_return_dockerfiles_yaml_and_dagster(
         self,
         fetch_pipeline_graph_mock,
         build_dockerfile_artifacts_mock,
@@ -311,6 +313,10 @@ class PublicApiTest(unittest.TestCase):
             "/api/v1/pipelines/pipeline-123/artifacts/argo-workflow.yaml",
             headers=_auth_headers(),
         )
+        dagster_response = self.client.get(
+            "/api/v1/pipelines/pipeline-123/artifacts/dagster/definitions.py",
+            headers=_auth_headers(),
+        )
 
         self.assertEqual(200, dockerfiles.status_code)
         dockerfile_payload = dockerfiles.get_json()
@@ -324,6 +330,12 @@ class PublicApiTest(unittest.TestCase):
         yaml_text = yaml_response.get_data(as_text=True)
         self.assertIn('apiVersion: "argoproj.io/v1alpha1"', yaml_text)
         self.assertIn('kind: "Workflow"', yaml_text)
+
+        self.assertEqual(200, dagster_response.status_code)
+        self.assertIn("text/x-python", dagster_response.headers["Content-Type"])
+        dagster_text = dagster_response.get_data(as_text=True)
+        self.assertIn("from dagster import Definitions, job, op", dagster_text)
+        self.assertIn("defs = Definitions(jobs=[inlumen_pipeline])", dagster_text)
 
     @patch("public_api._build_dockerfile_artifacts_or_error")
     @patch("public_api.fetch_pipeline_versions")

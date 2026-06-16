@@ -179,6 +179,7 @@ const nodeTypes: NodeTypeItem[] = [
 
 type DockerfileDownload = { name: string; url: string };
 type YamlDownload = { name: string; url: string };
+type DagsterDownload = { name: string; url: string };
 
 export function Sidebar({
   className,
@@ -205,6 +206,7 @@ export function Sidebar({
   const [isGeneratingDeployment, setIsGeneratingDeployment] = useState(false);
   const [dockerfileDownloads, setDockerfileDownloads] = useState<DockerfileDownload[]>([]);
   const [yamlDownload, setYamlDownload] = useState<YamlDownload | null>(null);
+  const [dagsterDownload, setDagsterDownload] = useState<DagsterDownload | null>(null);
   const [deploymentError, setDeploymentError] = useState<string>("");
 
   // Cleanup blob URLs on unmount
@@ -212,6 +214,7 @@ export function Sidebar({
     return () => {
       dockerfileDownloads.forEach((d) => URL.revokeObjectURL(d.url));
       if (yamlDownload?.url) URL.revokeObjectURL(yamlDownload.url);
+      if (dagsterDownload?.url) URL.revokeObjectURL(dagsterDownload.url);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -225,6 +228,13 @@ export function Sidebar({
 
   const clearYamlDownload = () => {
     setYamlDownload((prev) => {
+      if (prev?.url) URL.revokeObjectURL(prev.url);
+      return null;
+    });
+  };
+
+  const clearDagsterDownload = () => {
+    setDagsterDownload((prev) => {
       if (prev?.url) URL.revokeObjectURL(prev.url);
       return null;
     });
@@ -308,6 +318,7 @@ export function Sidebar({
       setIsGeneratingDeployment(true);
       clearDockerfileDownloads();
       clearYamlDownload();
+      clearDagsterDownload();
 
       const files = await fetchBackendFiles();
       const dockerfile_json = await generateDockerfiles(files);
@@ -347,6 +358,25 @@ export function Sidebar({
       const url = URL.createObjectURL(blob);
 
       setYamlDownload({ name: `ai-pipeline-${Date.now()}.yaml`, url });
+
+      const dagsterRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_dagster_definitions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          llm_config: activeChatbotConfig ? buildLLMRequestConfig(activeChatbotConfig) : undefined,
+        }),
+      });
+
+      if (!dagsterRes.ok) {
+        const errText = await dagsterRes.text().catch(() => "");
+        throw new Error(`Failed to generate Dagster definitions: ${dagsterRes.status} ${dagsterRes.statusText} ${errText}`);
+      }
+
+      const dagsterText = await dagsterRes.text();
+      const dagsterBlob = new Blob([dagsterText], { type: "text/x-python;charset=utf-8" });
+      const dagsterUrl = URL.createObjectURL(dagsterBlob);
+
+      setDagsterDownload({ name: "definitions.py", url: dagsterUrl });
     } catch (e: unknown) {
       console.error("[Sidebar.tsx] Generate deployment artifacts error:", e);
       setDeploymentError(errorToMessage(e, "Failed to generate deployment artifacts."));
@@ -572,7 +602,7 @@ export function Sidebar({
             <div className="p-4 border rounded-lg border-border">
               <h3 className="text-sm font-medium mb-2">Generate Deployment Artifacts</h3>
               <p className="text-xs text-muted-foreground mb-3">
-                Produces the Dockerfiles for each step and then builds the Argo Workflow YAML using those artifacts.
+                Produces Dockerfiles for each step, Argo Workflow YAML, and Dagster definitions.py.
               </p>
 
               <Button
@@ -634,6 +664,28 @@ export function Sidebar({
                     onClick={clearYamlDownload}
                   >
                     Clear YAML Link
+                  </Button>
+                </div>
+              )}
+
+              {dagsterDownload && (
+                <div className="mt-4">
+                  <div className="text-xs font-medium mb-2">Dagster Download</div>
+                  <a
+                    href={dagsterDownload.url}
+                    download={dagsterDownload.name}
+                    className="flex items-center gap-2 text-xs underline"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span className="truncate">{dagsterDownload.name}</span>
+                  </a>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-3 w-full"
+                    onClick={clearDagsterDownload}
+                  >
+                    Clear Dagster Link
                   </Button>
                 </div>
               )}

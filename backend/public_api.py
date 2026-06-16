@@ -16,6 +16,7 @@ from async_runtime import run_async
 from deployment_artifacts import (
     DeploymentArtifactValidationError,
     build_argo_workflow_yaml,
+    build_dagster_definitions_py,
     extract_pipeline_steps,
 )
 from graph_client import (
@@ -200,6 +201,17 @@ def create_public_api_blueprint(
         response.headers["Content-Type"] = "application/x-yaml; charset=utf-8"
         return response
 
+    @public_api.route("/api/v1/pipelines/<pipeline_id>/artifacts/dagster/definitions.py", methods=["GET", "OPTIONS"])
+    @api_auth_required
+    def get_pipeline_dagster_definitions_py(pipeline_id: str):
+        if request.method == "OPTIONS":
+            return _preflight_response()
+        graph, _pipeline = _pipeline_graph_or_404(neo4j_api_base_url, pipeline_id)
+        python_text = _build_dagster_definitions_py_or_error(graph)
+        response = make_response(python_text, 200)
+        response.headers["Content-Type"] = "text/x-python; charset=utf-8"
+        return response
+
     @public_api.route(
         "/api/v1/pipelines/<pipeline_id>/versions/<version_id>/artifacts/dockerfiles",
         methods=["GET", "OPTIONS"],
@@ -239,6 +251,24 @@ def create_public_api_blueprint(
         yaml_text = _build_argo_workflow_yaml_or_error(graph)
         response = make_response(yaml_text, 200)
         response.headers["Content-Type"] = "application/x-yaml; charset=utf-8"
+        return response
+
+    @public_api.route(
+        "/api/v1/pipelines/<pipeline_id>/versions/<version_id>/artifacts/dagster/definitions.py",
+        methods=["GET", "OPTIONS"],
+    )
+    @api_auth_required
+    def get_pipeline_version_dagster_definitions_py(pipeline_id: str, version_id: str):
+        if request.method == "OPTIONS":
+            return _preflight_response()
+        graph, _pipeline, _version = _pipeline_version_graph_or_404(
+            neo4j_api_base_url,
+            pipeline_id,
+            version_id,
+        )
+        python_text = _build_dagster_definitions_py_or_error(graph)
+        response = make_response(python_text, 200)
+        response.headers["Content-Type"] = "text/x-python; charset=utf-8"
         return response
 
     @public_api.route("/api/v1/workflows", methods=["GET", "OPTIONS"])
@@ -701,6 +731,17 @@ def _build_argo_workflow_yaml_or_error(graph: dict[str, Any]) -> str:
         ) from error
 
 
+def _build_dagster_definitions_py_or_error(graph: dict[str, Any]) -> str:
+    try:
+        return build_dagster_definitions_py(graph)
+    except (ValueError, DeploymentArtifactValidationError) as error:
+        raise ApiError(
+            422,
+            "artifact_generation_failed",
+            str(error),
+        ) from error
+
+
 def _public_version(version: dict[str, Any]) -> dict[str, Any]:
     modified_at = version.get("updated_at") or version.get("created_at")
     version_name = str(version.get("name") or version.get("version") or "Main")
@@ -972,7 +1013,7 @@ def build_openapi_schema() -> dict[str, Any]:
         "servers": [{"url": "/"}],
         "tags": [
             {"name": "Pipelines", "description": "Pipeline creation, lookup, listing, and versions."},
-            {"name": "Artifacts", "description": "Generated Dockerfiles and Argo Workflow YAML for pipelines."},
+            {"name": "Artifacts", "description": "Generated Dockerfiles, Argo Workflow YAML, and Dagster definitions for pipelines."},
             {"name": "Workflows", "description": "Argo Workflow metadata and version discovery."},
             {"name": "Health", "description": "Public service health and readiness checks."},
         ],
@@ -1153,6 +1194,25 @@ def build_openapi_schema() -> dict[str, Any]:
                     },
                 }
             },
+            "/api/v1/pipelines/{pipeline_id}/artifacts/dagster/definitions.py": {
+                "get": {
+                    "tags": ["Artifacts"],
+                    "summary": "Generate Dagster definitions.py for a pipeline",
+                    "operationId": "getPipelineDagsterDefinitionsPy",
+                    "parameters": [{"$ref": "#/components/parameters/PipelineId"}],
+                    "responses": {
+                        "200": {
+                            "description": "Generated Dagster definitions.py for the active pipeline graph.",
+                            "content": {
+                                "text/x-python": {
+                                    "schema": {"type": "string"}
+                                }
+                            },
+                        },
+                        **not_found_responses,
+                    },
+                }
+            },
             "/api/v1/pipelines/{pipeline_id}/versions/{version_id}/artifacts/dockerfiles": {
                 "get": {
                     "tags": ["Artifacts"],
@@ -1189,6 +1249,28 @@ def build_openapi_schema() -> dict[str, Any]:
                             "description": "Generated Argo Workflow YAML for the selected pipeline version.",
                             "content": {
                                 "application/x-yaml": {
+                                    "schema": {"type": "string"}
+                                }
+                            },
+                        },
+                        **not_found_responses,
+                    },
+                }
+            },
+            "/api/v1/pipelines/{pipeline_id}/versions/{version_id}/artifacts/dagster/definitions.py": {
+                "get": {
+                    "tags": ["Artifacts"],
+                    "summary": "Generate Dagster definitions.py for a pipeline version",
+                    "operationId": "getPipelineVersionDagsterDefinitionsPy",
+                    "parameters": [
+                        {"$ref": "#/components/parameters/PipelineId"},
+                        {"$ref": "#/components/parameters/VersionId"},
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Generated Dagster definitions.py for the selected pipeline version.",
+                            "content": {
+                                "text/x-python": {
                                     "schema": {"type": "string"}
                                 }
                             },
@@ -1857,6 +1939,23 @@ def _ui_api_openapi_paths(
                         "description": "Generated Argo Workflow YAML.",
                         "content": {
                             "application/x-yaml": {"schema": {"type": "string"}},
+                        },
+                    },
+                    **protected_responses,
+                },
+            },
+        },
+        "/agentic_generate_dagster_definitions": {
+            "post": {
+                "tags": ["Agentic"],
+                "summary": "Generate Dagster definitions.py for the current pipeline",
+                "operationId": "agenticGenerateDagsterDefinitions",
+                "requestBody": _json_request("#/components/schemas/AgenticYamlRequest"),
+                "responses": {
+                    "200": {
+                        "description": "Generated Dagster definitions.py.",
+                        "content": {
+                            "text/x-python": {"schema": {"type": "string"}},
                         },
                     },
                     **protected_responses,

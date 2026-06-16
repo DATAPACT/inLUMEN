@@ -9,8 +9,10 @@ from deployment_artifacts import (  # noqa: E402
     DeploymentArtifactValidationError,
     build_argo_workflow_object,
     build_argo_workflow_yaml,
+    build_dagster_definitions_py,
     build_dockerfile_artifacts,
     validate_argo_workflow_object,
+    validate_dagster_definitions_py,
     validate_dockerfile_artifacts,
 )
 
@@ -120,6 +122,30 @@ class DeploymentArtifactsTest(unittest.TestCase):
 
         with self.assertRaises(DeploymentArtifactValidationError) as ctx:
             build_argo_workflow_object(graph, dockerfiles)
+
+        self.assertIn("pipeline graph contains a cycle", str(ctx.exception))
+
+    def test_builds_valid_dagster_definitions_from_graph_edges(self):
+        python_text = build_dagster_definitions_py(self.graph)
+
+        validate_dagster_definitions_py(python_text, expected_step_ids=["1", "2", "3"])
+        self.assertIn("from dagster import Definitions, job, op", python_text)
+        self.assertIn('@job(name="inlumen_pipeline")', python_text)
+        self.assertIn("step_2_result = step_2(upstream_step_1=step_1_result)", python_text)
+        self.assertIn("defs = Definitions(jobs=[inlumen_pipeline])", python_text)
+        self.assertNotIn("```", python_text)
+
+    def test_dagster_guardrail_rejects_cyclic_pipeline(self):
+        graph = {
+            "nodes": self.graph["nodes"][:2],
+            "edges": [
+                {"source": "1", "target": "2"},
+                {"source": "2", "target": "1"},
+            ],
+        }
+
+        with self.assertRaises(DeploymentArtifactValidationError) as ctx:
+            build_dagster_definitions_py(graph)
 
         self.assertIn("pipeline graph contains a cycle", str(ctx.exception))
 
