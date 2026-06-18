@@ -618,7 +618,7 @@ def build_pipeline_editing_team(
                         Use overview to find the relevant flow_id values before calling insert_step unless the flow_id values are already provided by the user.
                         Use the label/description fields for domain-specific names such as ingestion, preprocessing, model training, or alerting.
                         """,
-        max_tool_iterations=10,
+        max_tool_iterations=30,
         reflect_on_tool_use=True,
     )
 
