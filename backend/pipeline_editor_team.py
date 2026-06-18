@@ -200,13 +200,21 @@ def build_pipeline_editing_team(
             return repr({"Error in graph_operator": str(exc)})
 
     async def create_pipeline(params: str) -> str:
-        """Creates a PIPELINE node."""
+        """Creates or updates the current design PIPELINE and its active PIPELINE_VERSION.
+
+        params JSON:
+        {
+          "name": "pipeline name",
+          "description": "1-2 sentence pipeline description",
+          "version": "optional version name"
+        }
+        """
         try:
             query_type = "create_pipeline"
             data = json.loads(params)
             name = data.get("name", "").replace("'", "\\'")
             description = data.get("description", "").replace("'", "\\'")
-            version = str(data.get("version", "1.0")).replace("'", "\\'")
+            version = str(data.get("version", "")).replace("'", "\\'")
             query = f"""
             OPTIONAL MATCH (candidate:PIPELINE {{status:'design'}})
             OPTIONAL MATCH (candidate)-[:HAS_STEP]->(candidateStep:STEP)
@@ -221,7 +229,8 @@ def build_pipeline_editing_team(
                 name:       '{name}',
                 label:      '{name}',
                 description:'{description}',
-                version:    '{version}',
+                version:    CASE WHEN '{version}' <> '' THEN '{version}' ELSE 'Main' END,
+                active_version_uid: 'main',
                 created_at: datetime(),
                 updated_at: datetime(),
                 status:     'design'
@@ -235,16 +244,36 @@ def build_pipeline_editing_team(
               SET existing.name = CASE WHEN '{name}' <> '' THEN '{name}' ELSE coalesce(existing.name, existing.label, '') END,
                   existing.label = CASE WHEN '{name}' <> '' THEN '{name}' ELSE coalesce(existing.label, existing.name, '') END,
                   existing.description = CASE WHEN '{description}' <> '' THEN '{description}' ELSE coalesce(existing.description, '') END,
-                  existing.version = CASE WHEN '{version}' <> '' THEN '{version}' ELSE coalesce(existing.version, '1.0') END,
+                  existing.version = CASE WHEN '{version}' <> '' THEN '{version}' ELSE coalesce(existing.version, 'Main') END,
                   existing.updated_at = datetime()
               RETURN existing AS p, false AS created
             }}
+            WITH p, created, design_pipeline_count,
+                coalesce(p.active_version_uid, 'main') AS activeVersionUid
+            WITH p, created, design_pipeline_count, activeVersionUid,
+                CASE WHEN activeVersionUid = 'main' THEN 'Main' ELSE coalesce(p.version, 'Main') END AS activeVersionName
+            MERGE (v:PIPELINE_VERSION {{uid: activeVersionUid}})
+            ON CREATE SET v.created_at = datetime(),
+                          v.version_index = CASE WHEN activeVersionUid = 'main' THEN 0 ELSE null END,
+                          v.is_main = CASE WHEN activeVersionUid = 'main' THEN true ELSE false END
+            SET v.name = activeVersionName,
+                v.version = activeVersionName,
+                v.description = coalesce(p.description, ''),
+                v.updated_at = datetime()
+            MERGE (p)-[:HAS_VERSION]->(v)
+            SET p.active_version_uid = activeVersionUid,
+                p.version = activeVersionName,
+                p.description = v.description,
+                p.updated_at = datetime()
             RETURN {{
             uid: p.uid,
             name: p.name,
             label: p.label,
             description: p.description,
             version: p.version,
+            active_version_uid: p.active_version_uid,
+            active_version_name: v.name,
+            active_version_description: v.description,
             status: p.status,
             created: created,
             design_pipeline_count: design_pipeline_count,
@@ -257,38 +286,42 @@ def build_pipeline_editing_team(
         except Exception as exc:
             return repr({"Error in graph_operator": str(exc)})
 
+    def _step_props_lines(step_type: str, label: str, description: str) -> List[str]:
+        """Builds shared STEP properties for create and insert tools."""
+        props_lines = [
+            "uid:        randomUUID()",
+            f"type:       '{step_type}'",
+            f"label:      '{label}'",
+            f"description:'{description}'",
+        ]
+        if step_type == "input":
+            props_lines.append("content: ''")
+            props_lines.append("has_files: 'no'")
+        elif step_type == "config":
+            props_lines.append("param_json: '{}'")
+        elif step_type == "action":
+            props_lines.append("has_files: 'no'")
+        elif step_type == "storage":
+            props_lines.append("endpoint: ''")
+            props_lines.append("database: 'minio'")
+        elif step_type == "api":
+            props_lines.append("endpoint: ''")
+        elif step_type == "output":
+            props_lines.append("content: ''")
+            props_lines.append("has_files: 'no'")
+        elif step_type == "custom":
+            props_lines.append("has_files: 'no'")
+        return props_lines
+
     async def create_step(params: str) -> str:
         """Creates new STEP and connects it after the last STEP, if present."""
         try:
             query_type = "create_step"
             data = json.loads(params)
             step_type = normalize_step_type(data.get("type"))
-            step_type_lower = step_type
             label = str(data.get("label", "")).replace("'", "\\'")
             description = str(data.get("description", "")).replace("'", "\\'")
-            props_lines = [
-                "uid:        randomUUID()",
-                f"type:       '{step_type}'",
-                f"label:      '{label}'",
-                f"description:'{description}'",
-            ]
-            if step_type_lower == "input":
-                props_lines.append("content: ''")
-                props_lines.append("has_files: 'no'")
-            elif step_type_lower == "config":
-                props_lines.append("param_json: '{}'")
-            elif step_type_lower == "action":
-                props_lines.append("has_files: 'no'")
-            elif step_type_lower == "storage":
-                props_lines.append("endpoint: ''")
-                props_lines.append("database: 'minio'")
-            elif step_type_lower == "api":
-                props_lines.append("endpoint: ''")
-            elif step_type_lower == "output":
-                props_lines.append("content: ''")
-                props_lines.append("has_files: 'no'")
-            elif step_type_lower == "custom":
-                props_lines.append("has_files: 'no'")
+            props_lines = _step_props_lines(step_type, label, description)
             props_str = ",\n            ".join(props_lines)
             query = f"""
             OPTIONAL MATCH (candidate:PIPELINE {{status:'design'}})
@@ -359,6 +392,136 @@ def build_pipeline_editing_team(
         except Exception as exc:
             return repr({"Error in graph_operator": str(exc)})
 
+    async def insert_step(params: str) -> str:
+        """Inserts a STEP before an existing STEP.
+
+        params JSON:
+        {
+          "type": "input|action|output|config|storage|api|custom",
+          "label": "step label",
+          "description": "step description",
+          "before_flow_id": "required target flow_id",
+          "after_flow_id": "optional source flow_id for between-step insertion"
+        }
+
+        Modes:
+        - Between directly connected steps: pass after_flow_id and before_flow_id.
+          Rewires after -> before into after -> new -> before.
+        - Initial step insertion: pass only before_flow_id. The target must have
+          no incoming FLOWS_TO edge, then the tool creates new -> before.
+        The target step and every downstream step are shifted 300px right before
+        the new step is placed at the target's previous canvas position.
+        """
+        try:
+            data = json.loads(params)
+            step_type = normalize_step_type(data.get("type"))
+            label = str(data.get("label", "")).replace("'", "\\'")
+            description = str(data.get("description", "")).replace("'", "\\'")
+            before_flow_id = str(data["before_flow_id"]).replace("'", "\\'")
+            raw_after_flow_id = data.get("after_flow_id")
+            after_flow_id = (
+                str(raw_after_flow_id).replace("'", "\\'")
+                if raw_after_flow_id is not None and str(raw_after_flow_id).strip() != ""
+                else None
+            )
+            props_str = ",\n            ".join(_step_props_lines(step_type, label, description))
+
+            if after_flow_id is None:
+                query_type = "insert_initial_step"
+                query = f"""
+                MATCH (p:PIPELINE)-[:HAS_STEP]->(before:STEP {{flow_id: '{before_flow_id}'}})
+                OPTIONAL MATCH (:STEP)-[incoming:FLOWS_TO]->(before)
+                WITH p, before, count(incoming) AS incoming_count,
+                    coalesce(before.x, 0.0) AS insertX,
+                    coalesce(before.y, 0.0) AS insertY
+                WHERE incoming_count = 0
+                OPTIONAL MATCH (before)-[:FLOWS_TO*0..]->(downstream:STEP)
+                WITH p, before, insertX, insertY, collect(DISTINCT downstream) AS downstreamSteps
+                FOREACH (node IN downstreamSteps |
+                    SET node.x = coalesce(node.x, 0.0) + 300.0
+                )
+                WITH p, before, insertX, insertY, downstreamSteps
+                OPTIONAL MATCH (sAll:STEP)
+                WHERE sAll.flow_id IS NOT NULL AND toString(sAll.flow_id) =~ '^[0-9]+$'
+                WITH p, before, insertX, insertY, downstreamSteps,
+                    coalesce(max(toInteger(sAll.flow_id)), 0) + 1 AS nextFlowId
+                CREATE (s:STEP {{
+                uid: randomUUID(),
+                {props_str},
+                flow_id: toString(nextFlowId),
+                x: insertX,
+                y: insertY
+                }})
+                MERGE (p)-[:HAS_STEP]->(s)
+                MERGE (s)-[:FLOWS_TO]->(before)
+                SET p.updated_at = datetime()
+                RETURN {{
+                mode: 'initial',
+                flow_id: s.flow_id,
+                uid: s.uid,
+                type: s.type,
+                label: s.label,
+                description: s.description,
+                x: s.x,
+                y: s.y,
+                before_flow_id: before.flow_id,
+                shifted_flow_ids: [node IN downstreamSteps | node.flow_id],
+                pipeline_updated_at: toString(p.updated_at)
+                }} AS step;
+                """
+            else:
+                query_type = "insert_between_steps"
+                query = f"""
+                MATCH (p:PIPELINE)-[:HAS_STEP]->(before:STEP {{flow_id: '{before_flow_id}'}})
+                MATCH (p)-[:HAS_STEP]->(after:STEP {{flow_id: '{after_flow_id}'}})
+                MATCH (after)-[oldFlow:FLOWS_TO]->(before)
+                WITH p, after, before, oldFlow,
+                    coalesce(before.x, 0.0) AS insertX,
+                    coalesce(before.y, 0.0) AS insertY
+                OPTIONAL MATCH (before)-[:FLOWS_TO*0..]->(downstream:STEP)
+                WITH p, after, before, oldFlow, insertX, insertY, collect(DISTINCT downstream) AS downstreamSteps
+                FOREACH (node IN downstreamSteps |
+                    SET node.x = coalesce(node.x, 0.0) + 300.0
+                )
+                WITH p, after, before, oldFlow, insertX, insertY, downstreamSteps
+                OPTIONAL MATCH (sAll:STEP)
+                WHERE sAll.flow_id IS NOT NULL AND toString(sAll.flow_id) =~ '^[0-9]+$'
+                WITH p, after, before, oldFlow, insertX, insertY, downstreamSteps,
+                    coalesce(max(toInteger(sAll.flow_id)), 0) + 1 AS nextFlowId
+                DELETE oldFlow
+                CREATE (s:STEP {{
+                uid: randomUUID(),
+                {props_str},
+                flow_id: toString(nextFlowId),
+                x: insertX,
+                y: insertY
+                }})
+                MERGE (p)-[:HAS_STEP]->(s)
+                MERGE (after)-[:FLOWS_TO]->(s)
+                MERGE (s)-[:FLOWS_TO]->(before)
+                SET p.updated_at = datetime()
+                RETURN {{
+                mode: 'between',
+                flow_id: s.flow_id,
+                uid: s.uid,
+                type: s.type,
+                label: s.label,
+                description: s.description,
+                x: s.x,
+                y: s.y,
+                after_flow_id: after.flow_id,
+                before_flow_id: before.flow_id,
+                shifted_flow_ids: [node IN downstreamSteps | node.flow_id],
+                pipeline_updated_at: toString(p.updated_at)
+                }} AS step;
+                """
+            result = await run_query(query, query_type)
+            return repr(result)
+        except KeyError:
+            return repr({"Error in graph_operator": "insert_step requires before_flow_id"})
+        except Exception as exc:
+            return repr({"Error in graph_operator": str(exc)})
+
     async def delete_step(params: str) -> str:
         """Deletes a STEP."""
         try:
@@ -395,22 +558,64 @@ def build_pipeline_editing_team(
         except Exception as exc:
             return repr({"Error in graph_operator": str(exc)})
 
+    async def delete_all_steps(params: str) -> str:
+        """Deletes all STEPs from the current design pipeline while keeping the PIPELINE node.
+
+        params JSON: {}
+        """
+        try:
+            query_type = "delete_all_steps"
+            _ = json.loads(params) if params else {}
+
+            query = """
+            OPTIONAL MATCH (candidate:PIPELINE {status:'design'})
+            OPTIONAL MATCH (candidate)-[:HAS_STEP]->(candidateStep:STEP)
+            WITH candidate, count(candidateStep) AS step_count
+            ORDER BY step_count DESC, candidate.updated_at DESC
+            WITH collect(candidate)[0] AS p
+            WHERE p IS NOT NULL
+            OPTIONAL MATCH (p)-[:HAS_STEP]->(s:STEP)
+            WITH p, collect(DISTINCT s) AS steps
+            WITH p, steps, size(steps) AS deleted_step_count
+            CALL {
+              WITH steps
+              UNWIND steps AS step
+              DETACH DELETE step
+              RETURN count(*) AS deleted_rows
+            }
+            SET p.updated_at = datetime()
+            RETURN {
+            pipeline_uid: p.uid,
+            pipeline_label: coalesce(p.label, p.name, ''),
+            deleted_step_count: deleted_step_count,
+            pipeline_updated_at: toString(p.updated_at)
+            } AS pipeline;
+            """
+            result = await run_query(query, query_type)
+            return repr(result)
+        except Exception as exc:
+            return repr({"Error in graph_operator": str(exc)})
+
     user_proxy = UserProxyAgent("user_proxy")
     _ = user_proxy
 
     pipeline_editor = AssistantAgent(
         name="pipeline_editor",
         model_client=model_client,
-        tools=[create_pipeline, create_step, delete_step, overview],
+        tools=[create_pipeline, create_step, insert_step, delete_step, delete_all_steps, overview],
         description="An agent that designs AI/data pipelines given a user request.",
         system_message=""" You design AI/data pipelines using your registered tools. Call one or multiple tools to create or modify a pipeline as requested by the user.
                           A PIPELINE is composed of one or several STEPs. Use overview to check if there are any pipelines. If the user request is unclear or incomplete, ask for more details.
                         - [overview]: calling this tool will give you an overview of the current pipeline content, if any.
                         - [create_pipeline]: calling this tool will create a pipeline.
                         - [create_step]: calling this tool will create a new step in a pipeline (will always place it last).
+                        - [insert_step]: calling this tool will insert a new step before an existing step. Use it instead of create_step when the user asks to add a step between existing steps (for example, "add preprocessing between ingestion and training") or as a new initial step (for example, "add an initial validation step"). For between-step insertion, pass after_flow_id and before_flow_id for directly connected steps. For initial insertion, pass only before_flow_id; the target must currently have no incoming FLOWS_TO edge.
                         - [delete_step]: calling this tool will delete a step in a pipeline.
+                        - [delete_all_steps]: calling this tool will remove every step from the current design pipeline while keeping the pipeline itself. Use it only when the user asks to clear, empty, reset, delete all steps, remove everything from, or remove all nodes/steps in the pipeline.
                         Tool calls MUST use a single string argument named params. The value of params MUST be a JSON-encoded string matching the "params JSON" schema in the docstring.
-                        The create_step type MUST be one of: input, action, output, config, storage, api, custom.
+                        When creating, designing, regenerating, or rebuilding a pipeline, call create_pipeline first with a concise generated name and a fresh 1-2 sentence description that summarizes the full intended pipeline. Do this before creating steps so the UI pipeline description is updated.
+                        The create_step and insert_step type MUST be one of: input, action, output, config, storage, api, custom.
+                        Use overview to find the relevant flow_id values before calling insert_step unless the flow_id values are already provided by the user.
                         Use the label/description fields for domain-specific names such as ingestion, preprocessing, model training, or alerting.
                         """,
         max_tool_iterations=10,

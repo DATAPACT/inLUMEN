@@ -252,13 +252,37 @@ def _graph_for_agent_context(graph: dict | None) -> dict:
     }
 
 
+def _pipeline_metadata_for_agent_context(graph: dict | None) -> dict:
+    if not isinstance(graph, dict):
+        return {}
+    pipeline = graph.get("pipeline") if isinstance(graph.get("pipeline"), dict) else {}
+    if not pipeline:
+        return {}
+    return {
+        "uid": _clip_text(pipeline.get("uid", ""), 120),
+        "name": _clip_text(pipeline.get("name", "")),
+        "label": _clip_text(pipeline.get("label", "")),
+        "description": _clip_text(pipeline.get("description", ""), 1200),
+        "version": _clip_text(pipeline.get("version", "")),
+        "active_version_uid": _clip_text(pipeline.get("active_version_uid", ""), 120),
+        "active_version_name": _clip_text(pipeline.get("active_version_name", "")),
+        "step_count": pipeline.get("step_count"),
+    }
+
+
 def _build_agent_task(
     user_message: str,
     canvas_graph: dict | None,
     backend_graph: dict | None,
 ) -> str:
+    pipeline_metadata = (
+        _pipeline_metadata_for_agent_context(backend_graph)
+        or _pipeline_metadata_for_agent_context(canvas_graph)
+    )
     return (
         f"{user_message}\n\n"
+        "CURRENT PIPELINE METADATA (name, active version, and description):\n"
+        f"{json.dumps(pipeline_metadata, ensure_ascii=False)}\n\n"
         "CURRENT VISIBLE CANVAS SNAPSHOT (authoritative UI state):\n"
         f"{json.dumps(_graph_for_agent_context(canvas_graph), ensure_ascii=False)}\n\n"
         "CURRENT BACKEND GRAPH SNAPSHOT (Neo4j state after canvas reconciliation):\n"

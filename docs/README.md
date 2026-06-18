@@ -88,6 +88,7 @@ Common values you may change include:
 - `FRONTEND_PORT`, `INLUMEN_API_PORT`
 - `INLUMEN_API_PUBLIC_URL` when the browser frontend needs to call a separate deployed backend URL
 - `NEO4J_AUTH`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`
+- `NEO4J_MEM_LIMIT`, `NEO4J_HEAP_INITIAL_SIZE`, `NEO4J_HEAP_MAX_SIZE`, and `NEO4J_PAGECACHE_SIZE` if Docker Desktop has limited memory available
 - `API_AUTH_TOKEN` for the gateway API and Swagger/OpenAPI documentation when Keycloak auth is disabled
 - `AUTH_ENABLED` plus the Keycloak values when enabling authentication
 
