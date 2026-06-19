@@ -16,6 +16,7 @@ from async_runtime import run_async
 from deployment_artifacts import (
     DeploymentArtifactValidationError,
     build_argo_workflow_yaml,
+    build_dagster_bundle_zip,
     build_dagster_definitions_py,
     extract_pipeline_steps,
 )
@@ -212,6 +213,18 @@ def create_public_api_blueprint(
         response.headers["Content-Type"] = "text/x-python; charset=utf-8"
         return response
 
+    @public_api.route("/api/v1/pipelines/<pipeline_id>/artifacts/dagster.zip", methods=["GET", "OPTIONS"])
+    @api_auth_required
+    def get_pipeline_dagster_bundle(pipeline_id: str):
+        if request.method == "OPTIONS":
+            return _preflight_response()
+        graph, _pipeline = _pipeline_graph_or_404(neo4j_api_base_url, pipeline_id)
+        zip_bytes = _build_dagster_bundle_or_error(graph)
+        response = make_response(zip_bytes, 200)
+        response.headers["Content-Type"] = "application/zip"
+        response.headers["Content-Disposition"] = 'attachment; filename="inlumen-dagster.zip"'
+        return response
+
     @public_api.route(
         "/api/v1/pipelines/<pipeline_id>/versions/<version_id>/artifacts/dockerfiles",
         methods=["GET", "OPTIONS"],
@@ -269,6 +282,25 @@ def create_public_api_blueprint(
         python_text = _build_dagster_definitions_py_or_error(graph)
         response = make_response(python_text, 200)
         response.headers["Content-Type"] = "text/x-python; charset=utf-8"
+        return response
+
+    @public_api.route(
+        "/api/v1/pipelines/<pipeline_id>/versions/<version_id>/artifacts/dagster.zip",
+        methods=["GET", "OPTIONS"],
+    )
+    @api_auth_required
+    def get_pipeline_version_dagster_bundle(pipeline_id: str, version_id: str):
+        if request.method == "OPTIONS":
+            return _preflight_response()
+        graph, _pipeline, _version = _pipeline_version_graph_or_404(
+            neo4j_api_base_url,
+            pipeline_id,
+            version_id,
+        )
+        zip_bytes = _build_dagster_bundle_or_error(graph)
+        response = make_response(zip_bytes, 200)
+        response.headers["Content-Type"] = "application/zip"
+        response.headers["Content-Disposition"] = 'attachment; filename="inlumen-dagster.zip"'
         return response
 
     @public_api.route("/api/v1/workflows", methods=["GET", "OPTIONS"])
@@ -739,6 +771,37 @@ def _build_dagster_definitions_py_or_error(graph: dict[str, Any]) -> str:
             422,
             "artifact_generation_failed",
             str(error),
+        ) from error
+
+
+def _build_dagster_bundle_or_error(graph: dict[str, Any]) -> bytes:
+    attached_files = []
+    client = get_minio_client()
+    try:
+        for ref in _file_refs_from_graph(graph):
+            response = client.get_object(ref["bucket"], ref["object_name"])
+            try:
+                content = response.read()
+            finally:
+                response.close()
+                response.release_conn()
+            attached_files.append({
+                "step_id": ref["step_id"],
+                "filename": ref["filename"],
+                "content": content,
+            })
+        return build_dagster_bundle_zip(graph, attached_files)
+    except (ValueError, DeploymentArtifactValidationError) as error:
+        raise ApiError(
+            422,
+            "artifact_generation_failed",
+            str(error),
+        ) from error
+    except Exception as error:
+        raise ApiError(
+            502,
+            "artifact_file_read_failed",
+            f"Could not read an attached file for the Dagster bundle: {error}",
         ) from error
 
 
@@ -1213,6 +1276,25 @@ def build_openapi_schema() -> dict[str, Any]:
                     },
                 }
             },
+            "/api/v1/pipelines/{pipeline_id}/artifacts/dagster.zip": {
+                "get": {
+                    "tags": ["Artifacts"],
+                    "summary": "Generate a runnable Dagster ZIP bundle for a pipeline",
+                    "operationId": "getPipelineDagsterBundle",
+                    "parameters": [{"$ref": "#/components/parameters/PipelineId"}],
+                    "responses": {
+                        "200": {
+                            "description": "Dagster project with definitions, scripts, requirements, and data.",
+                            "content": {
+                                "application/zip": {
+                                    "schema": {"type": "string", "format": "binary"}
+                                }
+                            },
+                        },
+                        **not_found_responses,
+                    },
+                }
+            },
             "/api/v1/pipelines/{pipeline_id}/versions/{version_id}/artifacts/dockerfiles": {
                 "get": {
                     "tags": ["Artifacts"],
@@ -1272,6 +1354,28 @@ def build_openapi_schema() -> dict[str, Any]:
                             "content": {
                                 "text/x-python": {
                                     "schema": {"type": "string"}
+                                }
+                            },
+                        },
+                        **not_found_responses,
+                    },
+                }
+            },
+            "/api/v1/pipelines/{pipeline_id}/versions/{version_id}/artifacts/dagster.zip": {
+                "get": {
+                    "tags": ["Artifacts"],
+                    "summary": "Generate a runnable Dagster ZIP bundle for a pipeline version",
+                    "operationId": "getPipelineVersionDagsterBundle",
+                    "parameters": [
+                        {"$ref": "#/components/parameters/PipelineId"},
+                        {"$ref": "#/components/parameters/VersionId"},
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Versioned Dagster project bundle.",
+                            "content": {
+                                "application/zip": {
+                                    "schema": {"type": "string", "format": "binary"}
                                 }
                             },
                         },
@@ -1956,6 +2060,25 @@ def _ui_api_openapi_paths(
                         "description": "Generated Dagster definitions.py.",
                         "content": {
                             "text/x-python": {"schema": {"type": "string"}},
+                        },
+                    },
+                    **protected_responses,
+                },
+            },
+        },
+        "/agentic_generate_dagster_bundle": {
+            "post": {
+                "tags": ["Agentic"],
+                "summary": "Generate a runnable Dagster ZIP bundle for the current pipeline",
+                "operationId": "agenticGenerateDagsterBundle",
+                "requestBody": _json_request("#/components/schemas/AgenticYamlRequest"),
+                "responses": {
+                    "200": {
+                        "description": "Dagster project ZIP.",
+                        "content": {
+                            "application/zip": {
+                                "schema": {"type": "string", "format": "binary"}
+                            },
                         },
                     },
                     **protected_responses,

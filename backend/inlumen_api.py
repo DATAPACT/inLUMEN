@@ -8,6 +8,7 @@ from typing import Any
 from flask import Flask, Response, jsonify, make_response, request
 
 from analytics_api import (
+    agentic_generate_dagster_bundle,
     agentic_generate_dagster_definitions,
     agentic_generate_dockerfiles,
     agentic_generate_version_yamls,
@@ -40,6 +41,12 @@ app.add_url_rule(
     "/agentic_generate_yaml",
     endpoint="agentic_generate_yaml",
     view_func=agentic_generate_yaml,
+    methods=["POST", "OPTIONS"],
+)
+app.add_url_rule(
+    "/agentic_generate_dagster_bundle",
+    endpoint="agentic_generate_dagster_bundle",
+    view_func=agentic_generate_dagster_bundle,
     methods=["POST", "OPTIONS"],
 )
 app.add_url_rule(

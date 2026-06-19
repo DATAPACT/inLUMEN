@@ -38,3 +38,18 @@ async def read_minio_object(bucket_name: str, object_name: str) -> str:
 
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _sync_read)
+
+
+async def read_minio_object_bytes(bucket_name: str, object_name: str) -> bytes:
+    """Return the raw content of a MinIO object."""
+    def _sync_read() -> bytes:
+        client = get_minio_client()
+        response = client.get_object(bucket_name, object_name)
+        try:
+            return response.read()
+        finally:
+            response.close()
+            response.release_conn()
+
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _sync_read)

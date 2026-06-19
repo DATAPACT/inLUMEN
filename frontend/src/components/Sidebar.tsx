@@ -359,7 +359,7 @@ export function Sidebar({
 
       setYamlDownload({ name: `ai-pipeline-${Date.now()}.yaml`, url });
 
-      const dagsterRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_dagster_definitions`, {
+      const dagsterRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_dagster_bundle`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -369,14 +369,13 @@ export function Sidebar({
 
       if (!dagsterRes.ok) {
         const errText = await dagsterRes.text().catch(() => "");
-        throw new Error(`Failed to generate Dagster definitions: ${dagsterRes.status} ${dagsterRes.statusText} ${errText}`);
+        throw new Error(`Failed to generate Dagster bundle: ${dagsterRes.status} ${dagsterRes.statusText} ${errText}`);
       }
 
-      const dagsterText = await dagsterRes.text();
-      const dagsterBlob = new Blob([dagsterText], { type: "text/x-python;charset=utf-8" });
+      const dagsterBlob = await dagsterRes.blob();
       const dagsterUrl = URL.createObjectURL(dagsterBlob);
 
-      setDagsterDownload({ name: "definitions.py", url: dagsterUrl });
+      setDagsterDownload({ name: "inlumen-dagster.zip", url: dagsterUrl });
     } catch (e: unknown) {
       console.error("[Sidebar.tsx] Generate deployment artifacts error:", e);
       setDeploymentError(errorToMessage(e, "Failed to generate deployment artifacts."));
@@ -602,7 +601,7 @@ export function Sidebar({
             <div className="p-4 border rounded-lg border-border">
               <h3 className="text-sm font-medium mb-2">Generate Deployment Artifacts</h3>
               <p className="text-xs text-muted-foreground mb-3">
-                Produces Dockerfiles for each step, Argo Workflow YAML, and Dagster definitions.py.
+                Produces Dockerfiles, Argo Workflow YAML, and a runnable Dagster ZIP bundle.
               </p>
 
               <Button

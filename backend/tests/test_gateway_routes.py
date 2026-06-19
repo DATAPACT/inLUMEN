@@ -27,6 +27,7 @@ class GatewayRoutesTest(unittest.TestCase):
             registered_routes.append(node.args[0].value)
 
         self.assertIn("/agentic_generate_dagster_definitions", registered_routes)
+        self.assertIn("/agentic_generate_dagster_bundle", registered_routes)
 
 
 if __name__ == "__main__":

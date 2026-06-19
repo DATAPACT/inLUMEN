@@ -1,6 +1,8 @@
+import io
 import os
 import sys
 import unittest
+import zipfile
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -139,11 +141,13 @@ class PublicApiTest(unittest.TestCase):
         self.assertIn("/api/v1/pipelines/{pipeline_id}/artifacts/dockerfiles", schema["paths"])
         self.assertIn("/api/v1/pipelines/{pipeline_id}/artifacts/argo-workflow.yaml", schema["paths"])
         self.assertIn("/api/v1/pipelines/{pipeline_id}/artifacts/dagster/definitions.py", schema["paths"])
+        self.assertIn("/api/v1/pipelines/{pipeline_id}/artifacts/dagster.zip", schema["paths"])
         self.assertIn("/api/graph/nodes", schema["paths"])
         self.assertIn("/api/chatbot-configs", schema["paths"])
         self.assertIn("/api/nodes/{node_id}/files", schema["paths"])
         self.assertIn("/agentic_generate_yaml", schema["paths"])
         self.assertIn("/agentic_generate_dagster_definitions", schema["paths"])
+        self.assertIn("/agentic_generate_dagster_bundle", schema["paths"])
         self.assertIn("/simple_chat", schema["paths"])
         self.assertFalse(any("sim-pipe" in path for path in schema["paths"]))
         self.assertIn("/openapi.json", schema["paths"])
@@ -336,6 +340,41 @@ class PublicApiTest(unittest.TestCase):
         dagster_text = dagster_response.get_data(as_text=True)
         self.assertIn("from dagster import Definitions, job, op", dagster_text)
         self.assertIn("defs = Definitions(jobs=[inlumen_pipeline])", dagster_text)
+
+    @patch("public_api.get_minio_client")
+    @patch("public_api.fetch_pipeline_graph")
+    def test_pipeline_dagster_bundle_contains_attached_files(
+        self,
+        fetch_pipeline_graph_mock,
+        get_minio_client_mock,
+    ):
+        graph = _sample_graph()
+        graph["nodes"][0]["data"]["label"] = "Retrieve patients"
+        graph["nodes"][0]["data"]["file_buckets"] = [
+            {"filename": "retrieve.py", "bucket": "files-step-id-1"},
+            {"filename": "patients.csv", "bucket": "files-step-id-1"},
+        ]
+        fetch_pipeline_graph_mock.side_effect = _async_return(graph)
+
+        responses = []
+        for content in (b"print('retrieve')\n", b"id,name\n1,Ada\n"):
+            response = Mock()
+            response.read.return_value = content
+            responses.append(response)
+        get_minio_client_mock.return_value.get_object.side_effect = responses
+
+        response = self.client.get(
+            "/api/v1/pipelines/pipeline-123/artifacts/dagster.zip",
+            headers=_auth_headers(),
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn("application/zip", response.headers["Content-Type"])
+        with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+            self.assertIn("scripts/retrieve.py", archive.namelist())
+            self.assertIn("data/retrieve_patients/patients.csv", archive.namelist())
+            definitions = archive.read("definitions.py").decode()
+            self.assertIn('@op(name="retrieve_patients"', definitions)
 
     @patch("public_api._build_dockerfile_artifacts_or_error")
     @patch("public_api.fetch_pipeline_versions")

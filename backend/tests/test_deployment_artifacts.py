@@ -1,5 +1,10 @@
+import io
+import os
+import subprocess
 import sys
+import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 
@@ -9,6 +14,7 @@ from deployment_artifacts import (  # noqa: E402
     DeploymentArtifactValidationError,
     build_argo_workflow_object,
     build_argo_workflow_yaml,
+    build_dagster_bundle_zip,
     build_dagster_definitions_py,
     build_dockerfile_artifacts,
     validate_argo_workflow_object,
@@ -131,9 +137,159 @@ class DeploymentArtifactsTest(unittest.TestCase):
         validate_dagster_definitions_py(python_text, expected_step_ids=["1", "2", "3"])
         self.assertIn("from dagster import Definitions, job, op", python_text)
         self.assertIn('@job(name="inlumen_pipeline")', python_text)
-        self.assertIn("step_2_result = step_2(upstream_step_1=step_1_result)", python_text)
+        self.assertIn(
+            "process_data_result = process_data(upstream_retrieve_data=retrieve_data_result)",
+            python_text,
+        )
+        self.assertIn('@op(name="retrieve_data"', python_text)
+        self.assertIn('scripts = ["process.py"]', python_text)
+        self.assertIn("[sys.executable, str(script_path)]", python_text)
+        self.assertIn("python -m pip install -r requirements.txt", python_text)
         self.assertIn("defs = Definitions(jobs=[inlumen_pipeline])", python_text)
         self.assertNotIn("```", python_text)
+
+    def test_dagster_step_names_are_unique_when_labels_repeat(self):
+        graph = {
+            "nodes": [
+                {"id": "one", "data": {"label": "Process data", "files": ["first.py"]}},
+                {"id": "two", "data": {"label": "Process data", "files": ["second.py"]}},
+            ],
+            "edges": [{"source": "one", "target": "two"}],
+        }
+
+        python_text = build_dagster_definitions_py(graph)
+
+        self.assertIn('@op(name="process_data"', python_text)
+        self.assertIn('@op(name="process_data_2"', python_text)
+        self.assertIn(
+            "process_data_2_result = process_data_2("
+            "upstream_process_data=process_data_result)",
+            python_text,
+        )
+
+    def test_dagster_prefers_step_name_and_script_name_over_generic_label(self):
+        graph = {
+            "nodes": [
+                {
+                    "id": "1",
+                    "data": {
+                        "name": "Load patient records",
+                        "label": "step_1",
+                        "files": ["load.py"],
+                    },
+                },
+                {
+                    "id": "2",
+                    "data": {
+                        "label": "step_2",
+                        "files": ["calculate_risk.py"],
+                    },
+                },
+            ],
+            "edges": [{"source": "1", "target": "2"}],
+        }
+
+        python_text = build_dagster_definitions_py(graph)
+
+        self.assertIn('@op(name="load_patient_records"', python_text)
+        self.assertIn('@op(name="calculate_risk"', python_text)
+        self.assertNotIn('@op(name="step_1"', python_text)
+        self.assertNotIn('@op(name="step_2"', python_text)
+
+    def test_builds_runnable_dagster_zip_with_scripts_data_and_requirements(self):
+        attached_files = [
+            {"step_id": "1", "filename": "retrieve.py", "content": b"print('retrieve')\n"},
+            {"step_id": "1", "filename": "patients.csv", "content": b"id,name\n1,Ada\n"},
+            {"step_id": "2", "filename": "process.py", "content": b"print('process')\n"},
+            {"step_id": "2", "filename": "requirements.txt", "content": b"pandas==2.3.0\n"},
+        ]
+
+        bundle = build_dagster_bundle_zip(self.graph, attached_files)
+
+        with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+            self.assertEqual(
+                {
+                    ".dockerignore",
+                    "_dagster_script_runner.py",
+                    "Dockerfile",
+                    "README.md",
+                    "data/",
+                    "data/patients.csv",
+                    "data/retrieve_data/patients.csv",
+                    "definitions.py",
+                    "docker-compose.yml",
+                    "output/",
+                    "output/.gitkeep",
+                    "requirements.txt",
+                    "scripts/",
+                    "scripts/process.py",
+                    "scripts/retrieve.py",
+                },
+                set(archive.namelist()),
+            )
+            definitions = archive.read("definitions.py").decode()
+            requirements = archive.read("requirements.txt").decode()
+            compose = archive.read("docker-compose.yml").decode()
+            dockerfile = archive.read("Dockerfile").decode()
+            self.assertIn('@op(name="retrieve_data"', definitions)
+            self.assertIn('scripts = ["retrieve.py"]', definitions)
+            self.assertIn('SCRIPTS_DIR = BASE_DIR / "scripts"', definitions)
+            self.assertIn('OUTPUT_DIR = Path(os.getenv("INLUMEN_OUTPUT_DIR"', definitions)
+            self.assertIn("step_output_dir = OUTPUT_DIR / context.op.name", definitions)
+            self.assertIn('script_env["INLUMEN_DATA_DIR"]', definitions)
+            self.assertIn('BASE_DIR / "_dagster_script_runner.py"', definitions)
+            self.assertIn('legacy_output_dir = DATA_DIR / "output"', definitions)
+            self.assertIn("pandas==2.3.0", requirements)
+            self.assertIn("dagster\n", requirements)
+            self.assertIn("dagster-webserver\n", requirements)
+            self.assertIn("./output:/app/output", compose)
+            self.assertIn("./data:/app/data", compose)
+            self.assertIn("INLUMEN_OUTPUT_DIR=/app/output", dockerfile)
+
+    def test_bundle_runner_calls_run_function_without_main_block(self):
+        graph = {
+            "nodes": [
+                {
+                    "id": "1",
+                    "data": {
+                        "label": "step_1",
+                        "description": "Create a standalone result.",
+                        "files": ["step_1_writer.py", "input.txt"],
+                    },
+                },
+            ],
+            "edges": [],
+        }
+        script = b"""from pathlib import Path
+
+def run():
+    value = Path("data/input.txt").read_text()
+    target = Path("data/output/result.txt")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(value.upper())
+"""
+        bundle = build_dagster_bundle_zip(
+            graph,
+            [
+                {"step_id": "1", "filename": "step_1_writer.py", "content": script},
+                {"step_id": "1", "filename": "input.txt", "content": b"standalone"},
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+                archive.extractall(directory)
+            subprocess.run(
+                [
+                    sys.executable,
+                    os.path.join(directory, "_dagster_script_runner.py"),
+                    os.path.join(directory, "scripts", "step_1_writer.py"),
+                ],
+                cwd=directory,
+                check=True,
+            )
+            result = Path(directory, "data", "output", "result.txt").read_text()
+            self.assertEqual("STANDALONE", result)
 
     def test_dagster_guardrail_rejects_cyclic_pipeline(self):
         graph = {

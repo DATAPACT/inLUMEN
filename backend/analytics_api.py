@@ -9,7 +9,11 @@ from flask import Flask, jsonify, has_request_context, make_response, request
 from async_runtime import run_async
 from auth_middleware import require_auth
 from chat_state import clear_state_from_disk, load_state_from_disk, save_state_to_disk
-from deployment_artifacts import build_argo_workflow_yaml, build_dagster_definitions_py
+from deployment_artifacts import (
+    build_argo_workflow_yaml,
+    build_dagster_bundle_zip,
+    build_dagster_definitions_py,
+)
 from deployment_agents import (
     generate_argo_yaml_from_graph,
     generate_dockerfiles_with_agent,
@@ -21,6 +25,7 @@ from graph_client import (
     sync_backend_to_canvas_graph,
 )
 from llm_config import llm_config_from_payload, log_llm_selection
+from minio_gateway import read_minio_object_bytes
 from pipeline_editor_team import build_pipeline_editing_team
 from runtime_config import add_cors_headers
 
@@ -99,6 +104,20 @@ def _file_refs_from_version_graph(graph: dict) -> list[dict]:
                 ref["snapshot_object"] = snapshot_object
             refs.append(ref)
     return refs
+
+
+async def _dagster_bundle_files(graph: dict) -> list[dict]:
+    files = []
+    for ref in _file_refs_from_version_graph(graph):
+        bucket = str(ref.get("snapshot_bucket") or ref.get("bucket") or "").lower()
+        object_name = str(ref.get("snapshot_object") or ref.get("filename") or "")
+        content = await read_minio_object_bytes(bucket, object_name)
+        files.append({
+            "step_id": ref["step_id"],
+            "filename": ref["filename"],
+            "content": content,
+        })
+    return files
 
 
 def _assistant_message_from_result(result) -> str:
@@ -463,6 +482,30 @@ def agentic_generate_dagster_definitions():
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:
         print("[analytics_api.py] Error generating Dagster definitions.py:", exc)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/agentic_generate_dagster_bundle", methods=["POST", "OPTIONS"])
+@require_auth
+def agentic_generate_dagster_bundle():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+
+    data = request.get_json() or {}
+
+    try:
+        print("[analytics_api.py] Generating runnable Dagster ZIP bundle.")
+        pipeline_graph = _pipeline_graph_from_payload_or_backend(data)
+        attached_files = run_async(_dagster_bundle_files(pipeline_graph))
+        zip_bytes = build_dagster_bundle_zip(pipeline_graph, attached_files)
+        resp = make_response(zip_bytes, 200)
+        resp.headers["Content-Type"] = "application/zip"
+        resp.headers["Content-Disposition"] = 'attachment; filename="inlumen-dagster.zip"'
+        return resp
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        print("[analytics_api.py] Error generating Dagster ZIP bundle:", exc)
         return jsonify({"error": str(exc)}), 500
 
 
