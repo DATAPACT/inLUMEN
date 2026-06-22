@@ -11,6 +11,7 @@ import { VersionsPanel } from '@/components/versions/VersionsPanel';
 import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
 import {
   MAIN_PIPELINE_VERSION_UID,
+  clearPipelineWorkspace,
   restorePipelineVersion,
   savePipelineActiveVersion,
   setPipelineVersionAsMain,
@@ -197,6 +198,7 @@ const Index = () => {
   const [versionsRefreshKey, setVersionsRefreshKey] = useState(0);
   const [isRestoringVersion, setIsRestoringVersion] = useState(false);
   const [isSettingMainVersion, setIsSettingMainVersion] = useState(false);
+  const [isClearingAll, setIsClearingAll] = useState(false);
   const [activeVersionUid, setActiveVersionUid] = useState(MAIN_PIPELINE_VERSION_UID);
   const [activeVersionName, setActiveVersionName] = useState('Main');
   const [activePipelineDescription, setActivePipelineDescription] = useState('');
@@ -522,8 +524,20 @@ const Index = () => {
     }
   };
 
-  const handleClearConversation = async () => {
+  const resetLocalConversation = useCallback(() => {
     setConversation([]);
+    setChatSessionId("");
+    localStorage.removeItem(CHAT_SESSION_KEY);
+    localStorage.removeItem(CHAT_HISTORY_KEY);
+    localStorage.removeItem(CHAT_TRANSCRIPT_KEY);
+    setCanvasSyncStatus({
+      state: 'idle',
+      message: 'Canvas is ready',
+    });
+  }, []);
+
+  const handleClearConversation = async () => {
+    resetLocalConversation();
     toast.success("Conversation cleared", {
       description: "Your conversation history has been reset",
     });
@@ -539,15 +553,6 @@ const Index = () => {
         console.warn("Failed to reset backend chat session:", e);
       }
     }
-
-    setChatSessionId("");
-    localStorage.removeItem(CHAT_SESSION_KEY);
-    localStorage.removeItem(CHAT_HISTORY_KEY);
-    localStorage.removeItem(CHAT_TRANSCRIPT_KEY);
-    setCanvasSyncStatus({
-      state: 'idle',
-      message: 'Canvas is ready',
-    });
   };
 
   const handleToggleLibrary = () => {
@@ -884,6 +889,57 @@ const Index = () => {
     }
   };
 
+  const handleClearAll = async () => {
+    const confirmed = window.confirm(
+      "Clear the entire workspace? This will empty Main, delete all saved versions except Main, and clear the chat session."
+    );
+    if (!confirmed) return;
+
+    if (activeVersionSaveTimeoutRef.current) {
+      window.clearTimeout(activeVersionSaveTimeoutRef.current);
+      activeVersionSaveTimeoutRef.current = null;
+    }
+    activeVersionDirtyRef.current = false;
+
+    try {
+      setIsClearingAll(true);
+      setIsRestoringVersion(true);
+      const result = await clearPipelineWorkspace(chatSessionId || null);
+      const syncedGraph = flowCanvasRef.current
+        ? await flowCanvasRef.current.syncFromBackend(result.graph)
+        : null;
+
+      updateActiveVersion(MAIN_PIPELINE_VERSION_UID, 'Main');
+      setActivePipelineDescription(result.version.description ?? '');
+      applyActiveVersionTimestamps(result.version);
+      setFlowNodes([]);
+      setSelectedNode(null);
+      resetLocalConversation();
+      localStorage.removeItem('ai-flow');
+      localStorage.removeItem('ai-flow-nodes');
+      localStorage.removeItem('ai-flow-edges');
+      setVersionsRefreshKey((key) => key + 1);
+
+      const updatedAt = result.version.updated_at ?? syncedGraph?.updated_at ?? null;
+      setCanvasSyncStatus({
+        state: 'idle',
+        message: '',
+        updatedAt,
+      });
+      toast.success("Workspace cleared", {
+        description: "Main is empty, saved versions are deleted, and chat is reset.",
+      });
+    } catch (error) {
+      console.error("Error clearing workspace:", error);
+      toast.error("Failed to clear workspace", {
+        description: error instanceof Error ? error.message : "Unknown error occurred",
+      });
+    } finally {
+      setIsRestoringVersion(false);
+      setIsClearingAll(false);
+    }
+  };
+
   const handleRemoveNode = (nodeId: string) => {
     setFlowNodes(prev => prev.filter(node => node.id !== nodeId));
     if (selectedNode?.id === nodeId) {
@@ -912,8 +968,10 @@ const Index = () => {
         onToggleInspector={() => handleToggleRightPanel('inspector')}
         onToggleChat={() => handleToggleRightPanel('chat')}
         onToggleVersions={() => { void handleToggleVersionsPanel(); }}
+        onClearAll={() => { void handleClearAll(); }}
         onOpenHelp={() => setIsHelpOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
+        isClearingAll={isClearingAll}
       />
 
       <div className="flex min-h-0 flex-1 overflow-hidden">

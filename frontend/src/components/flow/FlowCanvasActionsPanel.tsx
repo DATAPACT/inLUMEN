@@ -26,7 +26,7 @@ export const FlowCanvasActionsPanel = ({
     <div className="bg-card/90 backdrop-blur-sm border border-border rounded-lg py-1.5 px-3 text-xs flex flex-wrap items-center justify-center gap-2">
       <Button size="sm" variant="outline" onClick={onSave} className="flex items-center gap-1 h-7">
         <Save className="h-3.5 w-3.5" />
-        Save
+        Save Version
       </Button>
       <Button size="sm" variant="outline" onClick={onExportJson} className="flex items-center gap-1 h-7">
         <Download className="h-3.5 w-3.5" />

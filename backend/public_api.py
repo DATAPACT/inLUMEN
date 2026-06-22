@@ -1697,6 +1697,18 @@ def _ui_api_openapi_paths(
                 },
             },
         },
+        "/api/workspace/clear-all": {
+            "post": {
+                "tags": ["Pipeline State"],
+                "summary": "Clear Main, delete non-main versions, and reset the chat session",
+                "operationId": "clearPipelineWorkspace",
+                "requestBody": _json_request("#/components/schemas/WorkspaceClearAllRequest"),
+                "responses": {
+                    "200": _json_response("#/components/schemas/WorkspaceClearAllResponse"),
+                    **protected_responses,
+                },
+            },
+        },
         "/api/files": {
             "get": {
                 "tags": ["Files"],
@@ -2204,6 +2216,28 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                 "deleted_uid": {"type": "string"},
                 "remaining_count": {"type": "integer"},
                 "pipeline_updated_at": {"type": "string", "nullable": True},
+            },
+            "additionalProperties": True,
+        },
+        "WorkspaceClearAllRequest": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "nullable": True},
+            },
+        },
+        "WorkspaceClearAllResponse": {
+            "type": "object",
+            "required": ["version", "graph"],
+            "properties": {
+                "status": {"type": "string"},
+                "message": {"type": "string"},
+                "deleted_step_flow_ids": {"type": "array", "items": {"type": "string"}},
+                "deleted_version_uids": {"type": "array", "items": {"type": "string"}},
+                "deleted_version_count": {"type": "integer"},
+                "version": {"$ref": "#/components/schemas/UiPipelineVersionSummary"},
+                "graph": {"$ref": "#/components/schemas/ReactFlowGraph"},
+                "chat_reset": {"type": "boolean"},
+                "storage_cleanup": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
             },
             "additionalProperties": True,
         },
