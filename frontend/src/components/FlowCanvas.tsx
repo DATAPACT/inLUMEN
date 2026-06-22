@@ -98,6 +98,114 @@ const getSnapshotFileRef = (file: unknown, nodeIdValue: string) => {
   return null;
 };
 
+const GRAPH_HISTORY_LIMIT = 25;
+const GRAPH_HISTORY_COALESCE_MS = 1200;
+
+type GraphViewport = { x: number; y: number; zoom: number };
+
+type GraphHistorySnapshot = {
+  nodes: Node[];
+  edges: Edge[];
+  viewport: GraphViewport;
+  updated_at: string | null;
+  signature: string;
+  coalesceKey?: string;
+  timestamp: number;
+};
+
+const cloneGraphValue = <T,>(value: T): T => {
+  if (typeof globalThis.structuredClone === "function") {
+    return globalThis.structuredClone(value);
+  }
+  return JSON.parse(JSON.stringify(value)) as T;
+};
+
+const normalizeViewport = (viewport: unknown): GraphViewport => {
+  const candidate = viewport && typeof viewport === "object"
+    ? viewport as Partial<GraphViewport>
+    : {};
+  return {
+    x: Number.isFinite(Number(candidate.x)) ? Number(candidate.x) : 0,
+    y: Number.isFinite(Number(candidate.y)) ? Number(candidate.y) : 0,
+    zoom: Number.isFinite(Number(candidate.zoom)) ? Number(candidate.zoom) : 1,
+  };
+};
+
+const normalizeForHistorySignature = (value: unknown): unknown => {
+  if (typeof File !== "undefined" && value instanceof File) {
+    return {
+      name: value.name,
+      size: value.size,
+      type: value.type,
+      lastModified: value.lastModified,
+    };
+  }
+  if (Array.isArray(value)) {
+    return value.map(normalizeForHistorySignature);
+  }
+  if (value && typeof value === "object") {
+    return Object.keys(value as Record<string, unknown>)
+      .sort()
+      .reduce<Record<string, unknown>>((acc, key) => {
+        acc[key] = normalizeForHistorySignature((value as Record<string, unknown>)[key]);
+        return acc;
+      }, {});
+  }
+  return value ?? null;
+};
+
+const cleanHistoryNodes = (nodes: Node[]): Node[] =>
+  cloneGraphValue(nodes).map((node) => ({
+    ...node,
+    selected: false,
+    dragging: false,
+  }));
+
+const cleanHistoryEdges = (edges: Edge[]): Edge[] =>
+  cloneGraphValue(edges).map((edge) => ({
+    ...edge,
+    selected: false,
+  }));
+
+const graphHistorySignature = (nodes: Node[], edges: Edge[]) => JSON.stringify({
+  nodes: nodes.map((node) => ({
+    id: String(node.id),
+    type: node.type ?? null,
+    position: {
+      x: Number.isFinite(Number(node.position?.x)) ? Number(node.position?.x) : 0,
+      y: Number.isFinite(Number(node.position?.y)) ? Number(node.position?.y) : 0,
+    },
+    data: normalizeForHistorySignature(node.data || {}),
+  })),
+  edges: edges.map((edge) => ({
+    id: edge.id ?? "",
+    source: String(edge.source || ""),
+    target: String(edge.target || ""),
+    sourceHandle: edge.sourceHandle ?? null,
+    targetHandle: edge.targetHandle ?? null,
+    type: edge.type ?? null,
+    data: normalizeForHistorySignature(edge.data || {}),
+  })),
+});
+
+const buildGraphHistorySnapshot = (
+  nodes: Node[],
+  edges: Edge[],
+  viewport: unknown,
+  updatedAt: string | null,
+): GraphHistorySnapshot => {
+  const cleanNodes = cleanHistoryNodes(nodes);
+  const cleanEdges = cleanHistoryEdges(edges);
+  return {
+    nodes: cleanNodes,
+    edges: cleanEdges,
+    viewport: normalizeViewport(viewport),
+    updated_at: updatedAt,
+    signature: graphHistorySignature(cleanNodes, cleanEdges),
+    timestamp: Date.now(),
+  };
+};
+
 export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   onNodeSelect,
   onNodesChange,
@@ -131,6 +239,14 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const [isSaveVersionOpen, setIsSaveVersionOpen] = useState(false);
   const [versionName, setVersionName] = useState("");
   const [isSavingVersion, setIsSavingVersion] = useState(false);
+  const undoStackRef = useRef<GraphHistorySnapshot[]>([]);
+  const redoStackRef = useRef<GraphHistorySnapshot[]>([]);
+  const dragStartSnapshotRef = useRef<GraphHistorySnapshot | null>(null);
+  const [historyAvailability, setHistoryAvailability] = useState({
+    canUndo: false,
+    canRedo: false,
+  });
+  const [isHistoryRestoring, setIsHistoryRestoring] = useState(false);
 
   const markLocalWrite = useCallback((ms = 800) => {
     refreshCooldownUntilRef.current = Date.now() + ms;
@@ -149,8 +265,65 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     syncBackoffUntilRef.current = 0;
   }, []);
 
-  const applyGraph = useCallback((data: unknown) => {
-    const g = normalizeGraph(data);
+  const syncHistoryAvailability = useCallback(() => {
+    setHistoryAvailability({
+      canUndo: undoStackRef.current.length > 0,
+      canRedo: redoStackRef.current.length > 0,
+    });
+  }, []);
+
+  const currentViewport = useCallback(
+    () => normalizeViewport(reactFlowInstance?.toObject().viewport),
+    [reactFlowInstance],
+  );
+
+  const createHistorySnapshot = useCallback(
+    () => buildGraphHistorySnapshot(
+      nodes,
+      edges,
+      currentViewport(),
+      lastSeenUpdatedAtRef.current,
+    ),
+    [currentViewport, edges, nodes],
+  );
+
+  const pushHistorySnapshot = useCallback((
+    snapshot?: GraphHistorySnapshot,
+    options?: { coalesceKey?: string },
+  ) => {
+    const now = Date.now();
+    const entry = {
+      ...(snapshot ?? createHistorySnapshot()),
+      coalesceKey: options?.coalesceKey,
+      timestamp: now,
+    };
+    const last = undoStackRef.current[undoStackRef.current.length - 1];
+
+    if (last?.signature === entry.signature) {
+      last.timestamp = now;
+      syncHistoryAvailability();
+      return;
+    }
+
+    if (
+      options?.coalesceKey
+      && last?.coalesceKey === options.coalesceKey
+      && now - last.timestamp < GRAPH_HISTORY_COALESCE_MS
+    ) {
+      last.timestamp = now;
+      return;
+    }
+
+    undoStackRef.current = [
+      ...undoStackRef.current,
+      entry,
+    ].slice(-GRAPH_HISTORY_LIMIT);
+    redoStackRef.current = [];
+    syncHistoryAvailability();
+  }, [createHistorySnapshot, syncHistoryAvailability]);
+
+  const applyGraph = useCallback((data: unknown, normalizedGraph?: NormalizedGraph) => {
+    const g = normalizedGraph ?? normalizeGraph(data);
     const pipeline = data && typeof data === "object"
       ? (data as { pipeline?: { active_version_uid?: unknown; active_version_name?: unknown; description?: unknown } }).pipeline
       : null;
@@ -186,16 +359,32 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
   const syncFromBackend = useCallback(async (graphData?: unknown) => {
     try {
-      const graph = graphData == null
-        ? await fetchGraphAndApply()
-        : applyGraph(graphData);
+      let graph: NormalizedGraph;
+      if (graphData == null) {
+        graph = await fetchGraphAndApply();
+      } else {
+        const normalizedGraph = normalizeGraph(graphData);
+        const incomingSignature = graphHistorySignature(normalizedGraph.nodes, normalizedGraph.edges);
+        const currentSnapshot = createHistorySnapshot();
+        if (incomingSignature !== currentSnapshot.signature) {
+          pushHistorySnapshot(currentSnapshot);
+        }
+        graph = applyGraph(graphData, normalizedGraph);
+      }
       markSyncHealthy();
       return graph;
     } catch (error) {
       scheduleSyncRetry("Explicit graph sync failed", error);
       throw error;
     }
-  }, [applyGraph, fetchGraphAndApply, markSyncHealthy, scheduleSyncRetry]);
+  }, [
+    applyGraph,
+    createHistorySnapshot,
+    fetchGraphAndApply,
+    markSyncHealthy,
+    pushHistorySnapshot,
+    scheduleSyncRetry,
+  ]);
 
   const getCurrentGraph = useCallback(() => {
     return createAgentGraphSnapshot(normalizeGraph({
@@ -251,6 +440,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
   // Expose updateNode 
   const updateNode = useCallback((id: string, data: Record<string, unknown>) => {
+    pushHistorySnapshot(undefined, { coalesceKey: `node:${id}:properties` });
     onCanvasEdited?.();
     setNodes((nds) =>
       nds.map((node) => {
@@ -268,7 +458,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       }
       return prev;
     });
-  }, [onCanvasEdited]);
+  }, [onCanvasEdited, pushHistorySnapshot]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const triggerImport = () => fileInputRef.current?.click();
 
@@ -293,6 +483,86 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     };
   }, [edges, nodes, reactFlowInstance]);
 
+  const applyHistorySnapshot = useCallback(async (snapshot: GraphHistorySnapshot) => {
+    const nextNodes = cleanHistoryNodes(snapshot.nodes);
+    const nextEdges = cleanHistoryEdges(snapshot.edges);
+
+    markLocalWrite(1500);
+    setNodes(nextNodes);
+    setEdges(nextEdges);
+    lastSeenUpdatedAtRef.current = snapshot.updated_at;
+    nodeId = getNextNumericNodeId(nextNodes, 1);
+
+    const selectedNodeId = selectedNodeIdRef.current;
+    const refreshedSelection = selectedNodeId
+      ? nextNodes.find((node) => node.id === selectedNodeId) || null
+      : null;
+    selectedNodeIdRef.current = refreshedSelection?.id ?? null;
+    setSelectedNode(refreshedSelection);
+    onNodeSelect(refreshedSelection, { openInspector: false });
+
+    if (reactFlowInstance) {
+      reactFlowInstance.setViewport(snapshot.viewport);
+    }
+
+    await rebuildBackendFromFlow(nextNodes, nextEdges);
+    onCanvasEdited?.();
+  }, [markLocalWrite, onCanvasEdited, onNodeSelect, reactFlowInstance]);
+
+  const undoGraphChange = useCallback(async () => {
+    const snapshot = undoStackRef.current.pop();
+    if (!snapshot) return;
+
+    redoStackRef.current = [
+      ...redoStackRef.current,
+      createHistorySnapshot(),
+    ].slice(-GRAPH_HISTORY_LIMIT);
+    syncHistoryAvailability();
+
+    try {
+      setIsHistoryRestoring(true);
+      await applyHistorySnapshot(snapshot);
+      toast.success("Undo applied", {
+        description: "The previous graph snapshot has been restored.",
+      });
+    } catch (error) {
+      console.error("[FlowCanvas.tsx] Undo failed:", error);
+      toast.error("Undo failed", {
+        description: error instanceof Error ? error.message : "Could not restore the previous graph.",
+      });
+    } finally {
+      setIsHistoryRestoring(false);
+      syncHistoryAvailability();
+    }
+  }, [applyHistorySnapshot, createHistorySnapshot, syncHistoryAvailability]);
+
+  const redoGraphChange = useCallback(async () => {
+    const snapshot = redoStackRef.current.pop();
+    if (!snapshot) return;
+
+    undoStackRef.current = [
+      ...undoStackRef.current,
+      createHistorySnapshot(),
+    ].slice(-GRAPH_HISTORY_LIMIT);
+    syncHistoryAvailability();
+
+    try {
+      setIsHistoryRestoring(true);
+      await applyHistorySnapshot(snapshot);
+      toast.success("Redo applied", {
+        description: "The next graph snapshot has been restored.",
+      });
+    } catch (error) {
+      console.error("[FlowCanvas.tsx] Redo failed:", error);
+      toast.error("Redo failed", {
+        description: error instanceof Error ? error.message : "Could not restore the next graph.",
+      });
+    } finally {
+      setIsHistoryRestoring(false);
+      syncHistoryAvailability();
+    }
+  }, [applyHistorySnapshot, createHistorySnapshot, syncHistoryAvailability]);
+
   useImperativeHandle(ref, () => ({
     updateNode,
     syncFromBackend,
@@ -311,6 +581,14 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
   const onNodesChangeInternal = useCallback(
     (changes: NodeChange[]) => {
+      const hasGraphEdit = changes.some((change) => (
+        change.type !== 'select'
+        && change.type !== 'dimensions'
+        && change.type !== 'position'
+      ));
+      if (hasGraphEdit) {
+        pushHistorySnapshot();
+      }
       if (changes.some((change) => change.type !== 'select' && change.type !== 'dimensions')) {
         onCanvasEdited?.();
       }
@@ -335,7 +613,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         }
       }
     },
-    [nodes, selectedNode, onNodeSelect, markLocalWrite, onCanvasEdited]
+    [nodes, selectedNode, onNodeSelect, markLocalWrite, onCanvasEdited, pushHistorySnapshot]
   );
 
   const onEdgesChange = useCallback(
@@ -347,6 +625,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         .filter((c) => c.type === "remove")
         .map((c) => c.id);
       if (removedEdgeIds.length > 0) {
+        pushHistorySnapshot();
         setEdges((eds) => {
           const removedEdges = eds.filter((e) => removedEdgeIds.includes(e.id));
           removedEdges.forEach((edge) => {
@@ -368,7 +647,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       }
       setEdges((eds) => applyEdgeChanges(changes, eds));
     },
-    [nodes, markLocalWrite, onCanvasEdited]
+    [nodes, markLocalWrite, onCanvasEdited, pushHistorySnapshot]
   );
 
   const onConnect = useCallback(
@@ -380,18 +659,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         return;
       }
 
-      // prevent duplicates 
-      let duplicate = false;
-      setEdges((eds) => {
-        duplicate = eds.some((e) => e.source === params.source && e.target === params.target);
-        if (duplicate) return eds;
-        return addEdge(params, eds);
-      });
-
+      const duplicate = edges.some((edge) => edge.source === params.source && edge.target === params.target);
       if (duplicate) {
         toast("Connection already exists", { description: "This connection is already in place" });
         return;
       }
+      pushHistorySnapshot();
+      setEdges((eds) => addEdge(params, eds));
       onCanvasEdited?.();
 
       // Find the actual Node objects
@@ -404,7 +678,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       markLocalWrite(800);
       await addEdgeToBackend(sourceNode, targetNode);
     },
-    [nodes, markLocalWrite, onCanvasEdited]
+    [edges, nodes, markLocalWrite, onCanvasEdited, pushHistorySnapshot]
   );
 
   const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
@@ -448,6 +722,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         },
       };
 
+      pushHistorySnapshot();
       onCanvasEdited?.();
       setNodes((nds) => {
         const updated = nds.concat(newNode);
@@ -456,7 +731,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         return updated;
       });
     },
-    [reactFlowInstance, markLocalWrite, onCanvasEdited]
+    [reactFlowInstance, markLocalWrite, onCanvasEdited, pushHistorySnapshot]
   );
 
   const openSaveVersionDialog = async () => {
@@ -549,6 +824,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       }
       const importedNodes = flowData.nodes;
       const importedEdges = flowData.edges;
+      pushHistorySnapshot();
       onCanvasEdited?.();
       markLocalWrite(1200); // avoid immediate poll-refresh
       await rebuildBackendFromFlow(importedNodes, importedEdges);
@@ -569,6 +845,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   };
 
   const clearCanvas = async () => {
+    pushHistorySnapshot();
     onCanvasEdited?.();
     setNodes([]);
     setEdges([]);
@@ -599,7 +876,22 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         onInit={setReactFlowInstance}
         onDrop={onDrop}
         onDragOver={onDragOver}
+        onNodeDragStart={() => {
+          dragStartSnapshotRef.current = createHistorySnapshot();
+        }}
         onNodeDragStop={(_, node) => {
+          const dragStartSnapshot = dragStartSnapshotRef.current;
+          dragStartSnapshotRef.current = null;
+          if (dragStartSnapshot) {
+            const finalNodes = nodes.map((currentNode) => (
+              currentNode.id === node.id
+                ? { ...currentNode, position: node.position }
+                : currentNode
+            ));
+            if (dragStartSnapshot.signature !== graphHistorySignature(finalNodes, edges)) {
+              pushHistorySnapshot(dragStartSnapshot);
+            }
+          }
           onCanvasEdited?.();
           markLocalWrite(800);
           updateNodePositionInBackend(node);
@@ -633,11 +925,16 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         <FlowCanvasActionsPanel
           fileInputRef={fileInputRef}
           onSave={openSaveVersionDialog}
+          onUndo={() => { void undoGraphChange(); }}
+          onRedo={() => { void redoGraphChange(); }}
           onExportJson={exportFlow}
           onExportYaml={exportFlowYAML}
           onImportClick={triggerImport}
           onImport={importFlow}
           onClear={clearCanvas}
+          canUndo={historyAvailability.canUndo}
+          canRedo={historyAvailability.canRedo}
+          isHistoryRestoring={isHistoryRestoring}
         />
       </ReactFlow>
 
