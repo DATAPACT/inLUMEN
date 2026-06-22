@@ -700,6 +700,17 @@ def _upsert_pipeline_version_snapshot(
         )
     return record.data() if record else None
 
+
+def _empty_pipeline_graph(updated_at: str | None = None) -> dict:
+    graph = {
+        "nodes": [],
+        "edges": [],
+        "viewport": {"x": 0, "y": 0, "zoom": 1},
+    }
+    if updated_at is not None:
+        graph["updated_at"] = updated_at
+    return graph
+
 # Apply the CORS function to all routes using the after_request decorator
 @app.after_request
 def apply_cors(response):
@@ -955,6 +966,67 @@ def neo4j_clear_nodes():
         }), 200
     except Exception as e:
         print("[neo4j_api.py] Error clearing Neo4j:", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/neo4j_clear_pipeline_workspace', methods=['POST', 'OPTIONS'])
+@require_auth
+def neo4j_clear_pipeline_workspace():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    print("[neo4j_api.py] Clearing pipeline workspace, preserving Main.")
+    try:
+        with driver.session() as session:
+            pipeline_uid = _ensure_design_pipeline(session)
+            deleted_step_flow_ids = _clear_active_steps(session)
+
+            deleted_version_record = session.run("""
+            MATCH (p:PIPELINE {uid: $pipeline_uid})-[:HAS_VERSION]->(v:PIPELINE_VERSION)
+            WHERE coalesce(v.is_main, false) = false AND v.uid <> $main_uid
+            RETURN collect(toString(v.uid)) AS uids
+            """, pipeline_uid=pipeline_uid, main_uid=MAIN_VERSION_UID).single()
+            deleted_version_uids = (
+                deleted_version_record["uids"]
+                if deleted_version_record and deleted_version_record["uids"]
+                else []
+            )
+            for version_uid in deleted_version_uids:
+                _delete_version_file_snapshots(version_uid)
+
+            session.run("""
+            MATCH (p:PIPELINE {uid: $pipeline_uid})-[:HAS_VERSION]->(v:PIPELINE_VERSION)
+            WHERE coalesce(v.is_main, false) = false AND v.uid <> $main_uid
+            DETACH DELETE v
+            """, pipeline_uid=pipeline_uid, main_uid=MAIN_VERSION_UID).single()
+
+            sync_result = _sync_graph_to_session(
+                session,
+                _empty_pipeline_graph(),
+                version_name=MAIN_VERSION_NAME,
+                active_version_uid=MAIN_VERSION_UID,
+            )
+            main_version = _upsert_main_pipeline_version(
+                session,
+                pipeline_uid,
+                _empty_pipeline_graph(),
+                sync_result.get("updated_at"),
+                description="",
+            )
+            graph = _empty_pipeline_graph(
+                main_version.get("updated_at") if isinstance(main_version, dict) else sync_result.get("updated_at")
+            )
+
+        return jsonify({
+            "status": "ok",
+            "message": "Pipeline workspace cleared",
+            "deleted_step_flow_ids": deleted_step_flow_ids,
+            "deleted_version_uids": deleted_version_uids,
+            "deleted_version_count": len(deleted_version_uids),
+            "version": main_version,
+            "graph": graph,
+        }), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error clearing pipeline workspace:", e)
         return jsonify({"error": str(e)}), 500
 
 # Deletes one STEP node and edges:

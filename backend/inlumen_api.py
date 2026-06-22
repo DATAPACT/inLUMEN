@@ -15,6 +15,7 @@ from analytics_api import (
     agentic_pipeline_editor_reset,
 )
 from auth_middleware import require_auth
+from chat_state import clear_state_from_disk
 from graph_client import dispatch_graph_request
 from local_api_client import LocalApiResponse
 from object_client import dispatch_object_request
@@ -438,6 +439,56 @@ def pipeline_version_restore():
 @require_auth
 def pipeline_version_set_main():
     return _proxy_response(dispatch_graph_request, "neo4j_set_pipeline_version_as_main")
+
+
+@app.route("/api/workspace/clear-all", methods=["POST", "OPTIONS"])
+@require_auth
+def workspace_clear_all():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+
+    payload = _request_json()
+    session_id = str(payload.get("session_id") or "").strip()
+    graph_response = _proxy(
+        dispatch_graph_request,
+        "neo4j_clear_pipeline_workspace",
+        method="POST",
+        json_payload={},
+    )
+    if not graph_response.ok:
+        return _response_from_upstream(graph_response)
+
+    graph_payload = _upstream_json(graph_response)
+    deleted_ids = graph_payload.get("deleted_step_flow_ids") if isinstance(graph_payload, dict) else []
+    storage_cleanup = []
+    for flow_id in deleted_ids or []:
+        storage_response = _proxy(
+            dispatch_object_request,
+            "minio_clear_bucket",
+            method="DELETE",
+            params={"bucket_id": flow_id},
+            data=b"",
+        )
+        storage_cleanup.append({
+            "flow_id": flow_id,
+            "status": storage_response.status_code,
+            "ok": storage_response.ok,
+        })
+
+    chat_reset = False
+    if session_id:
+        clear_state_from_disk(session_id)
+        chat_reset = True
+
+    if isinstance(graph_payload, dict):
+        graph_payload["storage_cleanup"] = storage_cleanup
+        graph_payload["chat_reset"] = chat_reset
+        return jsonify(graph_payload), graph_response.status_code
+    return jsonify({
+        "graph": graph_payload,
+        "storage_cleanup": storage_cleanup,
+        "chat_reset": chat_reset,
+    }), graph_response.status_code
 
 
 @app.route("/api/files", methods=["GET", "OPTIONS"])

@@ -38,6 +38,18 @@ export type PipelineVersionSetMainResult = PipelineVersionRestore & {
   source_version?: PipelineVersionSummary;
 };
 
+export type PipelineWorkspaceClearResult = {
+  status?: string;
+  message?: string;
+  deleted_step_flow_ids?: string[];
+  deleted_version_uids?: string[];
+  deleted_version_count?: number;
+  version: PipelineVersionSummary;
+  graph: PipelineVersionGraph;
+  chat_reset?: boolean;
+  storage_cleanup?: Array<Record<string, unknown>>;
+};
+
 export type PipelineOverviewMetadata = {
   version?: string;
   description?: string;
@@ -313,6 +325,25 @@ export const deletePipelineVersion = async (
     throw new Error(`Failed to delete pipeline version (${res.status}): ${txt}`);
   }
   return res.json().catch(() => ({}));
+};
+
+export const clearPipelineWorkspace = async (
+  chatSessionId?: string | null,
+): Promise<PipelineWorkspaceClearResult> => {
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/workspace/clear-all`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: chatSessionId || null }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Failed to clear workspace (${res.status}): ${txt}`);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!data?.version?.uid || !data?.graph) {
+    throw new Error("Clear all response did not include the Main graph.");
+  }
+  return data as PipelineWorkspaceClearResult;
 };
 
 export const rebuildBackendFromFlow = async (nodes: Node[], edges: Edge[]) => {

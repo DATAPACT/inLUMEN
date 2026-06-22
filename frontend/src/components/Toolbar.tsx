@@ -8,7 +8,8 @@ import {
   PanelLeft,
   SlidersHorizontal,
   MessageSquare,
-  History
+  History,
+  Trash2
 } from 'lucide-react';
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
@@ -27,8 +28,10 @@ interface ToolbarProps {
   onToggleInspector: () => void;
   onToggleChat: () => void;
   onToggleVersions: () => void;
+  onClearAll: () => void;
   onOpenHelp: () => void;
   onOpenSettings: () => void;
+  isClearingAll?: boolean;
 }
 
 export function Toolbar({
@@ -44,8 +47,10 @@ export function Toolbar({
   onToggleInspector,
   onToggleChat,
   onToggleVersions,
+  onClearAll,
   onOpenHelp,
-  onOpenSettings
+  onOpenSettings,
+  isClearingAll = false
 }: ToolbarProps) {
   const panelButtonClass = (isActive: boolean) =>
     cn(
@@ -127,6 +132,18 @@ export function Toolbar({
       </div>
       
       <div className="ml-auto flex shrink-0 items-center gap-1">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-8 text-xs text-destructive hover:text-destructive"
+          onClick={onClearAll}
+          disabled={isClearingAll}
+          title="Clear canvas, chat, and saved versions"
+        >
+          <Trash2 className="h-3.5 w-3.5 mr-1" />
+          <span className="hidden sm:inline">{isClearingAll ? "Clearing..." : "Clear all"}</span>
+        </Button>
+
         <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={onOpenHelp}>
           <HelpCircle className="h-3.5 w-3.5 mr-1" />
           <span className="hidden sm:inline">Help</span>

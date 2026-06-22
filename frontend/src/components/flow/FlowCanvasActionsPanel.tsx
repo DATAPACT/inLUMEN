@@ -1,32 +1,64 @@
 import React from 'react';
 import { Panel } from 'reactflow';
-import { Download, Save, Trash2, Upload } from 'lucide-react';
+import { Download, Redo2, Save, Trash2, Undo2, Upload } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 type FlowCanvasActionsPanelProps = {
   fileInputRef: React.RefObject<HTMLInputElement>;
   onSave: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
   onExportJson: () => void;
   onExportYaml: () => void;
   onImportClick: () => void;
   onImport: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onClear: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
+  isHistoryRestoring?: boolean;
 };
 
 export const FlowCanvasActionsPanel = ({
   fileInputRef,
   onSave,
+  onUndo,
+  onRedo,
   onExportJson,
   onExportYaml,
   onImportClick,
   onImport,
   onClear,
+  canUndo,
+  canRedo,
+  isHistoryRestoring = false,
 }: FlowCanvasActionsPanelProps) => (
   <Panel position="top-center" className="mt-2 max-w-[calc(100vw-2rem)]">
     <div className="bg-card/90 backdrop-blur-sm border border-border rounded-lg py-1.5 px-3 text-xs flex flex-wrap items-center justify-center gap-2">
       <Button size="sm" variant="outline" onClick={onSave} className="flex items-center gap-1 h-7">
         <Save className="h-3.5 w-3.5" />
-        Save
+        Save Version
+      </Button>
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={onUndo}
+        disabled={!canUndo || isHistoryRestoring}
+        title="Undo graph change"
+        className="flex items-center gap-1 h-7"
+      >
+        <Undo2 className="h-3.5 w-3.5" />
+        Undo
+      </Button>
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={onRedo}
+        disabled={!canRedo || isHistoryRestoring}
+        title="Redo graph change"
+        className="flex items-center gap-1 h-7"
+      >
+        <Redo2 className="h-3.5 w-3.5" />
+        Redo
       </Button>
       <Button size="sm" variant="outline" onClick={onExportJson} className="flex items-center gap-1 h-7">
         <Download className="h-3.5 w-3.5" />
