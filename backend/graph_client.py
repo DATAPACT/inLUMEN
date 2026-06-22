@@ -182,11 +182,14 @@ async def run_neo4j_query(
     query: str,
     query_type: str,
     authorization: str | None = None,
+    provenance_context: dict | None = None,
 ) -> str:
     """Run a Cypher query through the Neo4j API and return a string payload."""
     try:
         print("[graph_client.py] Executing Neo4J query of type: " + query_type)
-        payload = {"query": query}
+        payload = {"query": query, "query_type": query_type}
+        if provenance_context:
+            payload["provenance_context"] = provenance_context
         headers = _json_headers(authorization)
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
