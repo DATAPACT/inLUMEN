@@ -140,6 +140,7 @@ class PublicApiTest(unittest.TestCase):
         self.assertIn("/api/v1/pipelines/{pipeline_id}/artifacts/argo-workflow.yaml", schema["paths"])
         self.assertIn("/api/graph/nodes", schema["paths"])
         self.assertIn("/api/workspace/clear-all", schema["paths"])
+        self.assertIn("/api/provenance/report", schema["paths"])
         self.assertIn("/api/chatbot-configs", schema["paths"])
         self.assertIn("/api/nodes/{node_id}/files", schema["paths"])
         self.assertIn("/agentic_generate_yaml", schema["paths"])

@@ -12,6 +12,7 @@ import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
 import {
   MAIN_PIPELINE_VERSION_UID,
   clearPipelineWorkspace,
+  fetchProvenanceReport,
   restorePipelineVersion,
   savePipelineActiveVersion,
   setPipelineVersionAsMain,
@@ -199,6 +200,7 @@ const Index = () => {
   const [isRestoringVersion, setIsRestoringVersion] = useState(false);
   const [isSettingMainVersion, setIsSettingMainVersion] = useState(false);
   const [isClearingAll, setIsClearingAll] = useState(false);
+  const [isGeneratingProvenanceReport, setIsGeneratingProvenanceReport] = useState(false);
   const [activeVersionUid, setActiveVersionUid] = useState(MAIN_PIPELINE_VERSION_UID);
   const [activeVersionName, setActiveVersionName] = useState('Main');
   const [activePipelineDescription, setActivePipelineDescription] = useState('');
@@ -891,7 +893,7 @@ const Index = () => {
 
   const handleClearAll = async () => {
     const confirmed = window.confirm(
-      "Clear the entire workspace? This will empty Main, delete all saved versions except Main, and clear the chat session."
+      "Clear the entire workspace? This will empty Main, delete all saved versions except Main, clear the chat session, and clean the provenance report."
     );
     if (!confirmed) return;
 
@@ -927,7 +929,7 @@ const Index = () => {
         updatedAt,
       });
       toast.success("Workspace cleared", {
-        description: "Main is empty, saved versions are deleted, and chat is reset.",
+        description: "Main is empty, saved versions are deleted, chat is reset, and provenance is clean.",
       });
     } catch (error) {
       console.error("Error clearing workspace:", error);
@@ -937,6 +939,38 @@ const Index = () => {
     } finally {
       setIsRestoringVersion(false);
       setIsClearingAll(false);
+    }
+  };
+
+  const handleGenerateProvenanceReport = async () => {
+    try {
+      setIsGeneratingProvenanceReport(true);
+      await flushActiveVersionSnapshot().catch((error) => {
+        console.warn("Failed to save active version before provenance report:", error);
+      });
+      const blob = await fetchProvenanceReport(activeVersionUidRef.current);
+      const url = URL.createObjectURL(blob);
+      const safeVersionName = (activeVersionNameRef.current || 'main')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "") || "main";
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `inlumen-provenance-${safeVersionName}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      toast.success("Provenance report generated", {
+        description: `${activeVersionNameRef.current || 'Main'} report downloaded as PDF.`,
+      });
+    } catch (error) {
+      console.error("Error generating provenance report:", error);
+      toast.error("Failed to generate provenance report", {
+        description: error instanceof Error ? error.message : "Unknown error occurred",
+      });
+    } finally {
+      setIsGeneratingProvenanceReport(false);
     }
   };
 
@@ -969,9 +1003,11 @@ const Index = () => {
         onToggleChat={() => handleToggleRightPanel('chat')}
         onToggleVersions={() => { void handleToggleVersionsPanel(); }}
         onClearAll={() => { void handleClearAll(); }}
+        onGenerateProvenanceReport={() => { void handleGenerateProvenanceReport(); }}
         onOpenHelp={() => setIsHelpOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
         isClearingAll={isClearingAll}
+        isGeneratingProvenanceReport={isGeneratingProvenanceReport}
       />
 
       <div className="flex min-h-0 flex-1 overflow-hidden">

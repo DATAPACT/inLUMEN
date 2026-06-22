@@ -44,6 +44,8 @@ export type PipelineWorkspaceClearResult = {
   deleted_step_flow_ids?: string[];
   deleted_version_uids?: string[];
   deleted_version_count?: number;
+  deleted_provenance_event_count?: number;
+  provenance_cleared?: boolean;
   version: PipelineVersionSummary;
   graph: PipelineVersionGraph;
   chat_reset?: boolean;
@@ -344,6 +346,22 @@ export const clearPipelineWorkspace = async (
     throw new Error("Clear all response did not include the Main graph.");
   }
   return data as PipelineWorkspaceClearResult;
+};
+
+export const fetchProvenanceReport = async (
+  versionUid?: string | null,
+): Promise<Blob> => {
+  const params = new URLSearchParams();
+  if (versionUid) params.set("version_uid", versionUid);
+  const query = params.toString();
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/provenance/report${query ? `?${query}` : ""}`, {
+    method: "GET",
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Failed to generate provenance report (${res.status}): ${txt}`);
+  }
+  return res.blob();
 };
 
 export const rebuildBackendFromFlow = async (nodes: Node[], edges: Edge[]) => {

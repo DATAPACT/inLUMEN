@@ -1700,11 +1700,38 @@ def _ui_api_openapi_paths(
         "/api/workspace/clear-all": {
             "post": {
                 "tags": ["Pipeline State"],
-                "summary": "Clear Main, delete non-main versions, and reset the chat session",
+                "summary": "Clear Main, delete non-main versions, reset the chat session, and clean provenance",
                 "operationId": "clearPipelineWorkspace",
                 "requestBody": _json_request("#/components/schemas/WorkspaceClearAllRequest"),
                 "responses": {
                     "200": _json_response("#/components/schemas/WorkspaceClearAllResponse"),
+                    **protected_responses,
+                },
+            },
+        },
+        "/api/provenance/report": {
+            "get": {
+                "tags": ["Pipeline State"],
+                "summary": "Download a PDF provenance report for a pipeline version",
+                "operationId": "downloadProvenanceReport",
+                "parameters": [
+                    {
+                        "name": "version_uid",
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "string"},
+                        "description": "Pipeline version uid. Defaults to the active version.",
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "PDF provenance report.",
+                        "content": {
+                            "application/pdf": {
+                                "schema": {"type": "string", "format": "binary"}
+                            }
+                        },
+                    },
                     **protected_responses,
                 },
             },
@@ -2234,6 +2261,8 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                 "deleted_step_flow_ids": {"type": "array", "items": {"type": "string"}},
                 "deleted_version_uids": {"type": "array", "items": {"type": "string"}},
                 "deleted_version_count": {"type": "integer"},
+                "deleted_provenance_event_count": {"type": "integer"},
+                "provenance_cleared": {"type": "boolean"},
                 "version": {"$ref": "#/components/schemas/UiPipelineVersionSummary"},
                 "graph": {"$ref": "#/components/schemas/ReactFlowGraph"},
                 "chat_reset": {"type": "boolean"},

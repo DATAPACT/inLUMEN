@@ -9,7 +9,8 @@ import {
   SlidersHorizontal,
   MessageSquare,
   History,
-  Trash2
+  Trash2,
+  FileText
 } from 'lucide-react';
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
@@ -29,9 +30,11 @@ interface ToolbarProps {
   onToggleChat: () => void;
   onToggleVersions: () => void;
   onClearAll: () => void;
+  onGenerateProvenanceReport: () => void;
   onOpenHelp: () => void;
   onOpenSettings: () => void;
   isClearingAll?: boolean;
+  isGeneratingProvenanceReport?: boolean;
 }
 
 export function Toolbar({
@@ -48,9 +51,11 @@ export function Toolbar({
   onToggleChat,
   onToggleVersions,
   onClearAll,
+  onGenerateProvenanceReport,
   onOpenHelp,
   onOpenSettings,
-  isClearingAll = false
+  isClearingAll = false,
+  isGeneratingProvenanceReport = false
 }: ToolbarProps) {
   const panelButtonClass = (isActive: boolean) =>
     cn(
@@ -147,6 +152,20 @@ export function Toolbar({
         <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={onOpenHelp}>
           <HelpCircle className="h-3.5 w-3.5 mr-1" />
           <span className="hidden sm:inline">Help</span>
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-8 text-xs"
+          onClick={onGenerateProvenanceReport}
+          disabled={isGeneratingProvenanceReport}
+          title="Generate Provenance Report"
+        >
+          <FileText className="h-3.5 w-3.5 mr-1" />
+          <span className="hidden sm:inline">
+            {isGeneratingProvenanceReport ? "Generating..." : "Provenance"}
+          </span>
         </Button>
 
         <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={onOpenSettings}>

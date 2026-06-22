@@ -19,6 +19,7 @@ from chat_state import clear_state_from_disk
 from graph_client import dispatch_graph_request
 from local_api_client import LocalApiResponse
 from object_client import dispatch_object_request
+from provenance_report import build_provenance_pdf, provenance_report_filename
 from public_api import create_public_api_blueprint
 from runtime_config import add_cors_headers, get_service_port
 
@@ -491,6 +492,36 @@ def workspace_clear_all():
     }), graph_response.status_code
 
 
+@app.route("/api/provenance/report", methods=["GET", "OPTIONS"])
+@require_auth
+def provenance_report():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+
+    version_uid = str(request.args.get("version_uid") or "").strip()
+    params = {"version_uid": version_uid} if version_uid else {}
+    graph_response = _proxy(
+        dispatch_graph_request,
+        "neo4j_get_provenance_events",
+        method="GET",
+        params=params,
+        data=b"",
+    )
+    if not graph_response.ok:
+        return _response_from_upstream(graph_response)
+
+    payload = _upstream_json(graph_response)
+    if not isinstance(payload, dict):
+        payload = {"events": []}
+    version = payload.get("version") if isinstance(payload.get("version"), dict) else {}
+    pdf_bytes = build_provenance_pdf(payload)
+    filename = provenance_report_filename(version.get("name"), version.get("uid"))
+    response = Response(pdf_bytes, status=200, mimetype="application/pdf")
+    response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.route("/api/files", methods=["GET", "OPTIONS"])
 @require_auth
 def files_metadata():
@@ -626,6 +657,22 @@ def node_text_file(node_id: str):
             "content": content,
         },
     )
+    if storage_response.ok:
+        _proxy(
+            dispatch_graph_request,
+            "neo4j_record_provenance_event",
+            method="POST",
+            json_payload={
+                "actor": "manual",
+                "action": "file_updated",
+                "summary": f"Updated text file '{filename}' for step {node_id}.",
+                "details": {
+                    "flow_id": node_id,
+                    "filename": filename,
+                    "container_id": container_id,
+                },
+            },
+        )
     return _response_from_upstream(storage_response)
 
 

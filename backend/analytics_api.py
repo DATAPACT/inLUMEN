@@ -572,6 +572,10 @@ def agentic_pipeline_editor():
         team = build_pipeline_editing_team(
             llm_config=llm_config,
             authorization=authorization,
+            provenance_context={
+                "user_query": user_message,
+                "session_id": session_id,
+            },
         )
         team_state = load_state_from_disk(session_id)
         if team_state:
