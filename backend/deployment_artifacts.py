@@ -1021,6 +1021,7 @@ def build_dagster_definitions_py(
     pipeline_graph: Optional[dict],
     files: Any = None,
     script_names_by_step: Optional[Dict[str, List[str]]] = None,
+    script_invocations_by_step: Optional[Dict[str, List[dict]]] = None,
     scripts_subdirectory: str = "",
     script_runner_filename: str = "",
 ) -> str:
@@ -1065,7 +1066,7 @@ def build_dagster_definitions_py(
         "import sys",
         "from pathlib import Path",
         "",
-        "from dagster import Definitions, job, op",
+        "from dagster import Definitions, in_process_executor, job, op",
         "",
         "",
         "BASE_DIR = Path(__file__).resolve().parent",
@@ -1076,31 +1077,87 @@ def build_dagster_definitions_py(
         ),
         "DATA_DIR = Path(os.getenv(\"INLUMEN_DATA_DIR\", BASE_DIR / \"data\"))",
         "OUTPUT_DIR = Path(os.getenv(\"INLUMEN_OUTPUT_DIR\", BASE_DIR / \"output\"))",
+        "SOURCE_FILES = {",
+        "    \".dockerignore\",",
+        "    \"Dockerfile\",",
+        "    \"README.md\",",
+        "    \"_dagster_script_runner.py\",",
+        "    \"definitions.py\",",
+        "    \"docker-compose.yml\",",
+        "    \"requirements.txt\",",
+        "}",
         "",
         "",
-        "def run_step_scripts(context, script_names):",
+        "def project_file_state():",
+        "    state = {}",
+        "    for path in BASE_DIR.rglob(\"*\"):",
+        "        try:",
+        "            relative_path = path.relative_to(BASE_DIR)",
+        "            if not path.is_file():",
+        "                continue",
+        "        except OSError:",
+        "            continue",
+        "        top_level = relative_path.parts[0]",
+        "        if top_level in {\"output\", \"scripts\", \".git\", \".dagster\", \"__pycache__\"}:",
+        "            continue",
+        "        if top_level.startswith(\".tmp_dagster_home_\"):",
+        "            continue",
+        "        if len(relative_path.parts) == 1 and relative_path.name in SOURCE_FILES:",
+        "            continue",
+        "        try:",
+        "            stat = path.stat()",
+        "        except OSError:",
+        "            continue",
+        "        state[str(relative_path)] = (stat.st_mtime_ns, stat.st_size)",
+        "    return state",
+        "",
+        "",
+        "def collect_project_outputs(before_state, step_output_dir):",
+        "    produced_files = []",
+        "    after_state = project_file_state()",
+        "    for relative_name, fingerprint in sorted(after_state.items()):",
+        "        if before_state.get(relative_name) == fingerprint:",
+        "            continue",
+        "        source = BASE_DIR / relative_name",
+        "        destination = step_output_dir / \"files\" / relative_name",
+        "        destination.parent.mkdir(parents=True, exist_ok=True)",
+        "        try:",
+        "            shutil.copy2(source, destination)",
+        "        except OSError:",
+        "            continue",
+        "        produced_files.append(relative_name)",
+        "    return produced_files",
+        "",
+        "",
+        "def run_step_scripts(context, script_invocations):",
         "    results = []",
         "    step_output_dir = OUTPUT_DIR / context.op.name",
         "    step_output_dir.mkdir(parents=True, exist_ok=True)",
         "    script_env = os.environ.copy()",
         "    script_env[\"INLUMEN_DATA_DIR\"] = str(DATA_DIR)",
         "    script_env[\"INLUMEN_OUTPUT_DIR\"] = str(step_output_dir)",
-        "    for script_name in script_names:",
+        "    for invocation in script_invocations:",
+        "        if isinstance(invocation, str):",
+        "            invocation = {\"script\": invocation, \"interpreter\": \"python\", \"args\": []}",
+        "        script_name = invocation[\"script\"]",
+        "        interpreter = invocation.get(\"interpreter\", \"python\")",
+        "        script_args = [str(value) for value in invocation.get(\"args\", [])]",
         "        script_path = SCRIPTS_DIR / script_name",
         "        if not script_path.is_file():",
         "            raise FileNotFoundError(f\"Step script not found: {script_path}\")",
         "        context.log.info(\"Running %s\", script_path.name)",
-        "        command = [sys.executable, str(script_path)]",
+        "        command = [sys.executable, str(script_path), *script_args]",
         (
-            f"        command = [sys.executable, str(BASE_DIR / {json.dumps(script_runner_filename)}), str(script_path)]"
+            f"        command = ([sys.executable, str(BASE_DIR / {json.dumps(script_runner_filename)}), str(script_path), *script_args] if interpreter == \"python\" else [interpreter, str(script_path), *script_args])"
             if script_runner_filename
-            else "        command = [sys.executable, str(script_path)]"
+            else "        command = ([sys.executable, str(script_path), *script_args] if interpreter == \"python\" else [interpreter, str(script_path), *script_args])"
         ),
+        "        before_state = project_file_state()",
         "        completed = subprocess.run(",
         "            command,",
         "            cwd=BASE_DIR,",
         "            env=script_env,",
-        "            check=True,",
+        "            check=False,",
         "            capture_output=True,",
         "            text=True,",
         "        )",
@@ -1112,6 +1169,7 @@ def build_dagster_definitions_py(
         "        stderr_path = step_output_dir / f\"{script_path.stem}.stderr.log\"",
         "        stdout_path.write_text(completed.stdout, encoding=\"utf-8\")",
         "        stderr_path.write_text(completed.stderr, encoding=\"utf-8\")",
+        "        produced_files = collect_project_outputs(before_state, step_output_dir)",
         "        legacy_output_dir = DATA_DIR / \"output\"",
         "        if legacy_output_dir.is_dir():",
         "            for produced_path in legacy_output_dir.iterdir():",
@@ -1120,12 +1178,32 @@ def build_dagster_definitions_py(
         "                    shutil.copytree(produced_path, destination, dirs_exist_ok=True)",
         "                else:",
         "                    shutil.copy2(produced_path, destination)",
+        "        manifest_path = step_output_dir / f\"{script_path.stem}.outputs.json\"",
+        "        persisted_files = sorted(",
+        "            str(path.relative_to(step_output_dir))",
+        "            for path in step_output_dir.rglob(\"*\")",
+        "            if path.is_file() and path != manifest_path",
+        "        )",
+        "        manifest_path.write_text(",
+        "            json.dumps({",
+        "                \"script\": script_path.name,",
+        "                \"returncode\": completed.returncode,",
+        "                \"files\": persisted_files,",
+        "                \"project_files\": produced_files,",
+        "            }, indent=2, sort_keys=True) + \"\\n\",",
+        "            encoding=\"utf-8\",",
+        "        )",
         "        results.append({",
         "            \"script\": script_path.name,",
         "            \"returncode\": completed.returncode,",
         "            \"stdout\": completed.stdout,",
         "            \"output_dir\": str(step_output_dir),",
+        "            \"files\": persisted_files,",
         "        })",
+        "        if completed.returncode != 0:",
+        "            raise subprocess.CalledProcessError(",
+        "                completed.returncode, command, completed.stdout, completed.stderr",
+        "            )",
         "    return results",
         "",
     ]
@@ -1147,17 +1225,24 @@ def build_dagster_definitions_py(
         if step.get("label"):
             tags["inlumen/label"] = step["label"]
         metadata_json = json.dumps(_dagster_step_metadata(step), sort_keys=True)
-        python_scripts = (
-            script_names_by_step.get(step_id, [])
-            if script_names_by_step is not None
-            else [
-                PurePosixPath(entry["filename"]).name
-                for entry in step.get("files") or []
-                if entry.get("filename")
-                and PurePosixPath(entry["filename"]).suffix.lower() == ".py"
-                and PurePosixPath(entry["filename"]).name != "definitions.py"
+        if script_invocations_by_step is not None:
+            script_invocations = script_invocations_by_step.get(step_id, [])
+        else:
+            python_scripts = (
+                script_names_by_step.get(step_id, [])
+                if script_names_by_step is not None
+                else [
+                    PurePosixPath(entry["filename"]).name
+                    for entry in step.get("files") or []
+                    if entry.get("filename")
+                    and PurePosixPath(entry["filename"]).suffix.lower() == ".py"
+                    and PurePosixPath(entry["filename"]).name != "definitions.py"
+                ]
+            )
+            script_invocations = [
+                {"script": script_name, "interpreter": "python", "args": []}
+                for script_name in python_scripts
             ]
-        )
 
         lines.extend([
             f"@op(name={json.dumps(op_name)}, tags={json.dumps(tags, sort_keys=True)})",
@@ -1175,15 +1260,15 @@ def build_dagster_definitions_py(
             "        metadata.get(\"name\", metadata.get(\"label\", metadata.get(\"flow_id\"))),",
             "        len(_upstream_results),",
             "    )",
-            f"    scripts = {json.dumps(python_scripts)}",
-            "    script_results = run_step_scripts(context, scripts)",
+            f"    script_invocations = {json.dumps(script_invocations)}",
+            "    script_results = run_step_scripts(context, script_invocations)",
             "    return {\"metadata\": metadata, \"scripts\": script_results}",
             "",
             "",
         ])
 
     lines.extend([
-        "@job(name=\"inlumen_pipeline\")",
+        "@job(name=\"inlumen_pipeline\", executor_def=in_process_executor)",
         "def inlumen_pipeline():",
     ])
     for step_id in ordered_ids:
@@ -1209,6 +1294,7 @@ def build_dagster_definitions_py(
 def build_dagster_bundle_zip(
     pipeline_graph: Optional[dict],
     attached_files: Sequence[dict],
+    packaging_manifest: Optional[dict] = None,
 ) -> bytes:
     """Build a runnable Dagster project containing definitions, scripts, and input data."""
     steps = extract_pipeline_steps(pipeline_graph)
@@ -1217,41 +1303,87 @@ def build_dagster_bundle_zip(
 
     step_names = _unique_python_identifiers(steps)
     scripts_by_step: Dict[str, List[str]] = defaultdict(list)
+    script_invocations_by_step: Dict[str, List[dict]] = defaultdict(list)
     archive_files: Dict[str, bytes] = {}
     used_script_names: set[str] = set()
     requirements_parts: List[str] = []
     input_filename_counts: Dict[str, int] = defaultdict(int)
-    for entry in attached_files:
+    attached_lookup = {
+        (
+            _clean_string(entry.get("step_id")),
+            PurePosixPath(_clean_string(entry.get("filename"))).name,
+        ): entry
+        for entry in attached_files
+        if isinstance(entry, dict)
+    }
+    manifest_files = (
+        packaging_manifest.get("files")
+        if isinstance(packaging_manifest, dict)
+        and isinstance(packaging_manifest.get("files"), list)
+        else None
+    )
+    source_entries = manifest_files if manifest_files is not None else attached_files
+
+    for entry in source_entries:
         if not isinstance(entry, dict):
             continue
-        filename = PurePosixPath(_clean_string(entry.get("filename"))).name
+        filename = PurePosixPath(
+            _clean_string(entry.get("source_filename") or entry.get("filename"))
+        ).name
         suffix = PurePosixPath(filename).suffix.lower()
-        if filename and filename.lower() != "requirements.txt" and suffix != ".py":
+        role = _clean_string(entry.get("role")).lower()
+        if (
+            filename
+            and role not in {"script", "requirements"}
+            and filename.lower() != "requirements.txt"
+            and suffix != ".py"
+        ):
             input_filename_counts[filename] += 1
 
-    for entry in attached_files:
+    for entry in source_entries:
         if not isinstance(entry, dict):
             continue
         step_id = _clean_string(entry.get("step_id"))
-        filename = PurePosixPath(_clean_string(entry.get("filename"))).name
-        content = entry.get("content")
+        filename = PurePosixPath(
+            _clean_string(entry.get("source_filename") or entry.get("filename"))
+        ).name
+        source_entry = attached_lookup.get((step_id, filename), entry)
+        content = source_entry.get("content") if isinstance(source_entry, dict) else None
         if not step_id or not filename or not isinstance(content, (bytes, bytearray)):
             continue
 
         suffix = PurePosixPath(filename).suffix.lower()
-        if filename.lower() == "requirements.txt":
+        role = _clean_string(entry.get("role")).lower()
+        destination = _clean_string(entry.get("destination"))
+        if destination:
+            destination = _safe_docker_source(destination)
+        if role == "requirements" or filename.lower() == "requirements.txt":
             requirements_parts.append(bytes(content).decode("utf-8", errors="replace"))
-        elif suffix == ".py" and filename != "definitions.py":
-            archive_name = filename
+        elif role == "script" or (not role and suffix == ".py" and filename != "definitions.py"):
+            archive_name = destination or filename
+            if archive_name.startswith("scripts/"):
+                archive_name = archive_name[len("scripts/"):]
             if archive_name in used_script_names:
-                archive_name = f"{step_names.get(step_id, 'step')}_{filename}"
+                archive_name = f"{step_names.get(step_id, 'step')}_{PurePosixPath(archive_name).name}"
             used_script_names.add(archive_name)
             scripts_by_step[step_id].append(archive_name)
+            script_invocations_by_step[step_id].append({
+                "script": archive_name,
+                "interpreter": _clean_string(entry.get("interpreter")) or (
+                    "bash" if suffix == ".sh" else "python"
+                ),
+                "args": [
+                    str(argument)
+                    for argument in entry.get("args", [])
+                    if isinstance(argument, (str, int, float))
+                ],
+            })
             archive_files[f"scripts/{archive_name}"] = bytes(content)
         else:
             step_folder = step_names.get(step_id, _python_identifier(step_id))
-            archive_files[f"data/{step_folder}/{filename}"] = bytes(content)
-            if input_filename_counts[filename] == 1:
+            archive_path = destination or f"data/{step_folder}/{filename}"
+            archive_files[archive_path] = bytes(content)
+            if manifest_files is None and input_filename_counts[filename] == 1:
                 archive_files[f"data/{filename}"] = bytes(content)
 
     requirements = "\n".join(part.rstrip() for part in requirements_parts if part.strip()).strip()
@@ -1270,6 +1402,7 @@ def build_dagster_bundle_zip(
     definitions = build_dagster_definitions_py(
         pipeline_graph,
         script_names_by_step=scripts_by_step,
+        script_invocations_by_step=script_invocations_by_step,
         scripts_subdirectory="scripts",
         script_runner_filename="_dagster_script_runner.py",
     )
@@ -1278,10 +1411,13 @@ import sys
 
 
 def main():
-    namespace = runpy.run_path(sys.argv[1], run_name="__dagster_script__")
-    run_function = namespace.get("run")
-    if callable(run_function):
-        run_function()
+    script_path = sys.argv[1]
+    script_args = sys.argv[2:]
+    sys.argv = [script_path, *script_args]
+    namespace = runpy.run_path(script_path, run_name="__dagster_script__")
+    entrypoint = namespace.get("run") or namespace.get("main")
+    if callable(entrypoint):
+        entrypoint()
 
 
 if __name__ == "__main__":
@@ -1292,6 +1428,7 @@ if __name__ == "__main__":
 WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \
+    DAGSTER_HOME=/app/.dagster \
     INLUMEN_DATA_DIR=/app/data \
     INLUMEN_OUTPUT_DIR=/app/output
 
@@ -1303,25 +1440,33 @@ COPY _dagster_script_runner.py .
 COPY scripts/ ./scripts/
 COPY data/ ./data/
 
-RUN mkdir -p /app/output
+RUN mkdir -p /app/.dagster /app/output
 
 EXPOSE 3000
 
 CMD ["dagster", "dev", "-h", "0.0.0.0", "-p", "3000", "-f", "definitions.py"]
 """
-    compose = """services:
+    compose = """name: inlumen-dagster
+
+volumes:
+  dagster_home:
+
+services:
   dagster:
+    container_name: inlumen-dagster
     build:
       context: .
       dockerfile: Dockerfile
+    working_dir: /app
     ports:
       - "3000:3000"
     environment:
+      DAGSTER_HOME: /app/.dagster
       INLUMEN_DATA_DIR: /app/data
       INLUMEN_OUTPUT_DIR: /app/output
     volumes:
-      - ./data:/app/data
-      - ./output:/app/output
+      - .:/app
+      - dagster_home:/app/.dagster
     restart: unless-stopped
 """
     dockerignore = """__pycache__/
@@ -1340,12 +1485,28 @@ docker compose up --build
 
 Open http://localhost:3000.
 
-Python step files are in `scripts/`. Input files are grouped by step under
-`data/`. Results should be written to `output/`, which is mounted into the
-container and remains available on the host.
+The complete extracted project directory is mounted at `/app`, and the
+container is named `inlumen-dagster`. Dagster's SQLite metadata is stored in
+the Docker-managed `dagster_home` volume to avoid database corruption or
+`SIGBUS` crashes on host bind mounts. Python step files are in `scripts/`.
+All input files are under `data/`, grouped by step where needed.
 
-The generated runner automatically calls a script's `run()` function when
-present. Scripts do not need an `if __name__ == "__main__"` block.
+Each step receives its own directory under `output/`. Standard output,
+standard error, an output manifest, files written through
+`INLUMEN_OUTPUT_DIR`, and new or modified project/data files are persisted
+there. Because the complete project is mounted, any other files created by a
+script also remain visible on the host.
+
+Dagster run history is stored under `.dagster/`. Empty `*.stdout.log` and
+`*.stderr.log` files are normal when a script does not print anything or write
+diagnostics to standard error.
+
+When present, `packaging_manifest.json` records the validated LLM decisions
+for file placement and script arguments. The LLM does not generate or modify
+the supplied scripts.
+
+The generated runner automatically calls a script's `run()` or `main()`
+function. Scripts do not need an `if __name__ == "__main__"` block.
 
 Scripts can use these environment variables:
 
@@ -1369,6 +1530,13 @@ dagster dev -f definitions.py
         archive.writestr("Dockerfile", dockerfile)
         archive.writestr("docker-compose.yml", compose)
         archive.writestr(".dockerignore", dockerignore)
+        if packaging_manifest is not None:
+            archive.writestr(
+                "packaging_manifest.json",
+                json.dumps(packaging_manifest, indent=2, sort_keys=True) + "\n",
+            )
+        archive.writestr(".dagster/", b"")
+        archive.writestr(".dagster/.gitkeep", b"")
         archive.writestr("scripts/", b"")
         archive.writestr("data/", b"")
         archive.writestr("output/", b"")

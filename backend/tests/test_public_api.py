@@ -338,7 +338,10 @@ class PublicApiTest(unittest.TestCase):
         self.assertEqual(200, dagster_response.status_code)
         self.assertIn("text/x-python", dagster_response.headers["Content-Type"])
         dagster_text = dagster_response.get_data(as_text=True)
-        self.assertIn("from dagster import Definitions, job, op", dagster_text)
+        self.assertIn(
+            "from dagster import Definitions, in_process_executor, job, op",
+            dagster_text,
+        )
         self.assertIn("defs = Definitions(jobs=[inlumen_pipeline])", dagster_text)
 
     @patch("public_api.get_minio_client")

@@ -1,11 +1,15 @@
 import io
+import json
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -135,17 +139,30 @@ class DeploymentArtifactsTest(unittest.TestCase):
         python_text = build_dagster_definitions_py(self.graph)
 
         validate_dagster_definitions_py(python_text, expected_step_ids=["1", "2", "3"])
-        self.assertIn("from dagster import Definitions, job, op", python_text)
-        self.assertIn('@job(name="inlumen_pipeline")', python_text)
+        self.assertIn(
+            "from dagster import Definitions, in_process_executor, job, op",
+            python_text,
+        )
+        self.assertIn(
+            '@job(name="inlumen_pipeline", executor_def=in_process_executor)',
+            python_text,
+        )
         self.assertIn(
             "process_data_result = process_data(upstream_retrieve_data=retrieve_data_result)",
             python_text,
         )
         self.assertIn('@op(name="retrieve_data"', python_text)
-        self.assertIn('scripts = ["process.py"]', python_text)
-        self.assertIn("[sys.executable, str(script_path)]", python_text)
+        self.assertIn(
+            'script_invocations = [{"script": "process.py", "interpreter": "python", "args": []}]',
+            python_text,
+        )
+        self.assertIn(
+            "[sys.executable, str(script_path), *script_args]",
+            python_text,
+        )
         self.assertIn("python -m pip install -r requirements.txt", python_text)
         self.assertIn("defs = Definitions(jobs=[inlumen_pipeline])", python_text)
+        self.assertIn("executor_def=in_process_executor", python_text)
         self.assertNotIn("```", python_text)
 
     def test_dagster_step_names_are_unique_when_labels_repeat(self):
@@ -209,6 +226,8 @@ class DeploymentArtifactsTest(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
             self.assertEqual(
                 {
+                    ".dagster/",
+                    ".dagster/.gitkeep",
                     ".dockerignore",
                     "_dagster_script_runner.py",
                     "Dockerfile",
@@ -232,18 +251,30 @@ class DeploymentArtifactsTest(unittest.TestCase):
             compose = archive.read("docker-compose.yml").decode()
             dockerfile = archive.read("Dockerfile").decode()
             self.assertIn('@op(name="retrieve_data"', definitions)
-            self.assertIn('scripts = ["retrieve.py"]', definitions)
+            self.assertIn(
+                'script_invocations = [{"script": "retrieve.py", "interpreter": "python", "args": []}]',
+                definitions,
+            )
             self.assertIn('SCRIPTS_DIR = BASE_DIR / "scripts"', definitions)
             self.assertIn('OUTPUT_DIR = Path(os.getenv("INLUMEN_OUTPUT_DIR"', definitions)
             self.assertIn("step_output_dir = OUTPUT_DIR / context.op.name", definitions)
             self.assertIn('script_env["INLUMEN_DATA_DIR"]', definitions)
             self.assertIn('BASE_DIR / "_dagster_script_runner.py"', definitions)
             self.assertIn('legacy_output_dir = DATA_DIR / "output"', definitions)
+            self.assertIn("produced_files = collect_project_outputs", definitions)
+            self.assertIn('f"{script_path.stem}.outputs.json"', definitions)
             self.assertIn("pandas==2.3.0", requirements)
             self.assertIn("dagster\n", requirements)
             self.assertIn("dagster-webserver\n", requirements)
-            self.assertIn("./output:/app/output", compose)
-            self.assertIn("./data:/app/data", compose)
+            self.assertIn("name: inlumen-dagster", compose)
+            self.assertIn("container_name: inlumen-dagster", compose)
+            self.assertIn("- .:/app", compose)
+            self.assertIn("dagster_home:", compose)
+            self.assertIn("- dagster_home:/app/.dagster", compose)
+            self.assertIn("DAGSTER_HOME: /app/.dagster", compose)
+            self.assertNotIn("./output:/app/output", compose)
+            self.assertNotIn("./data:/app/data", compose)
+            self.assertIn("DAGSTER_HOME=/app/.dagster", dockerfile)
             self.assertIn("INLUMEN_OUTPUT_DIR=/app/output", dockerfile)
 
     def test_bundle_runner_calls_run_function_without_main_block(self):
@@ -290,6 +321,243 @@ def run():
             )
             result = Path(directory, "data", "output", "result.txt").read_text()
             self.assertEqual("STANDALONE", result)
+
+    def test_bundle_runner_calls_main_function_with_clean_argv(self):
+        graph = {
+            "nodes": [
+                {
+                    "id": "1",
+                    "data": {
+                        "label": "Writer",
+                        "files": ["writer.py"],
+                    },
+                },
+            ],
+            "edges": [],
+        }
+        script = b"""import argparse
+from pathlib import Path
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", default="data/main-result.txt")
+    args = parser.parse_args()
+    Path(args.output).write_text("MAIN")
+"""
+        bundle = build_dagster_bundle_zip(
+            graph,
+            [{"step_id": "1", "filename": "writer.py", "content": script}],
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+                archive.extractall(directory)
+            subprocess.run(
+                [
+                    sys.executable,
+                    os.path.join(directory, "_dagster_script_runner.py"),
+                    os.path.join(directory, "scripts", "writer.py"),
+                ],
+                cwd=directory,
+                check=True,
+            )
+            self.assertEqual(
+                "MAIN",
+                Path(directory, "data", "main-result.txt").read_text(),
+            )
+
+    def test_manifest_controls_file_placement_and_script_arguments(self):
+        graph = {
+            "nodes": [
+                {
+                    "id": "1",
+                    "data": {
+                        "label": "Ingestion",
+                        "files": ["ingest.py", "patients.csv", "requirements.txt"],
+                    },
+                },
+            ],
+            "edges": [],
+        }
+        attached_files = [
+            {
+                "step_id": "1",
+                "filename": "ingest.py",
+                "content": b"print('ingest')\n",
+            },
+            {
+                "step_id": "1",
+                "filename": "patients.csv",
+                "content": b"id\n1\n",
+            },
+            {
+                "step_id": "1",
+                "filename": "requirements.txt",
+                "content": b"pandas\n",
+            },
+        ]
+        manifest = {
+            "files": [
+                {
+                    "step_id": "1",
+                    "source_filename": "ingest.py",
+                    "role": "script",
+                    "destination": "scripts/ingest.py",
+                    "args": ["--input", "data/patients.csv"],
+                },
+                {
+                    "step_id": "1",
+                    "source_filename": "patients.csv",
+                    "role": "input",
+                    "destination": "data/patients.csv",
+                    "args": [],
+                },
+                {
+                    "step_id": "1",
+                    "source_filename": "requirements.txt",
+                    "role": "requirements",
+                    "destination": "requirements.txt",
+                    "args": [],
+                },
+            ],
+            "checks": ["Script input path matches packaged data path"],
+        }
+
+        bundle = build_dagster_bundle_zip(
+            graph,
+            attached_files,
+            packaging_manifest=manifest,
+        )
+
+        with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+            self.assertIn("data/patients.csv", archive.namelist())
+            self.assertNotIn("data/ingestion/patients.csv", archive.namelist())
+            self.assertEqual(
+                manifest,
+                json.loads(archive.read("packaging_manifest.json")),
+            )
+            definitions = archive.read("definitions.py").decode()
+            self.assertIn(
+                '"args": ["--input", "data/patients.csv"]',
+                definitions,
+            )
+
+    def test_generated_definitions_persist_direct_and_legacy_outputs(self):
+        graph = {
+            "nodes": [
+                {
+                    "id": "1",
+                    "data": {
+                        "label": "Writer",
+                        "files": ["writer.py"],
+                    },
+                },
+            ],
+            "edges": [],
+        }
+        script = b"""import os
+from pathlib import Path
+
+Path(os.environ["INLUMEN_OUTPUT_DIR"], "direct.txt").write_text("direct")
+Path("result.txt").write_text("root")
+Path("data", "changed.txt").write_text("data")
+"""
+        bundle = build_dagster_bundle_zip(
+            graph,
+            [{"step_id": "1", "filename": "writer.py", "content": script}],
+        )
+
+        fake_dagster = types.ModuleType("dagster")
+        fake_dagster.op = lambda **_kwargs: lambda function: function
+        fake_dagster.job = lambda **_kwargs: lambda function: function
+        fake_dagster.Definitions = lambda **kwargs: kwargs
+        fake_dagster.in_process_executor = object()
+        previous_dagster = sys.modules.get("dagster")
+        sys.modules["dagster"] = fake_dagster
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+                    archive.extractall(directory)
+                namespace = runpy.run_path(os.path.join(directory, "definitions.py"))
+                logger = types.SimpleNamespace(
+                    info=lambda *_args: None,
+                    warning=lambda *_args: None,
+                )
+                context = types.SimpleNamespace(
+                    op=types.SimpleNamespace(name="writer"),
+                    log=logger,
+                )
+
+                namespace["run_step_scripts"](context, ["writer.py"])
+
+                output_dir = Path(directory, "output", "writer")
+                self.assertEqual("direct", (output_dir / "direct.txt").read_text())
+                self.assertEqual(
+                    "root",
+                    (output_dir / "files" / "result.txt").read_text(),
+                )
+                self.assertEqual(
+                    "data",
+                    (output_dir / "files" / "data" / "changed.txt").read_text(),
+                )
+                manifest = json.loads(
+                    (output_dir / "writer.outputs.json").read_text()
+                )
+                self.assertIn("direct.txt", manifest["files"])
+                self.assertIn("result.txt", manifest["project_files"])
+                self.assertIn("data/changed.txt", manifest["project_files"])
+        finally:
+            if previous_dagster is None:
+                sys.modules.pop("dagster", None)
+            else:
+                sys.modules["dagster"] = previous_dagster
+
+    def test_generated_file_scanner_ignores_disappearing_dagster_runtime_files(self):
+        graph = {
+            "nodes": [{"id": "1", "data": {"label": "Writer"}}],
+            "edges": [],
+        }
+        bundle = build_dagster_bundle_zip(graph, [])
+        fake_dagster = types.ModuleType("dagster")
+        fake_dagster.op = lambda **_kwargs: lambda function: function
+        fake_dagster.job = lambda **_kwargs: lambda function: function
+        fake_dagster.Definitions = lambda **kwargs: kwargs
+        fake_dagster.in_process_executor = object()
+        previous_dagster = sys.modules.get("dagster")
+        sys.modules["dagster"] = fake_dagster
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+                    archive.extractall(directory)
+                transient_dir = Path(
+                    directory,
+                    ".tmp_dagster_home_test",
+                    "history",
+                    "runs",
+                )
+                transient_dir.mkdir(parents=True)
+                transient_file = transient_dir / "run.db-wal"
+                transient_file.write_text("temporary")
+                namespace = runpy.run_path(os.path.join(directory, "definitions.py"))
+                original_stat = Path.stat
+
+                def racing_stat(path, *args, **kwargs):
+                    if path == transient_file:
+                        raise FileNotFoundError(path)
+                    return original_stat(path, *args, **kwargs)
+
+                with patch.object(Path, "stat", racing_stat):
+                    state = namespace["project_file_state"]()
+
+                self.assertNotIn(
+                    ".tmp_dagster_home_test/history/runs/run.db-wal",
+                    state,
+                )
+        finally:
+            if previous_dagster is None:
+                sys.modules.pop("dagster", None)
+            else:
+                sys.modules["dagster"] = previous_dagster
 
     def test_dagster_guardrail_rejects_cyclic_pipeline(self):
         graph = {

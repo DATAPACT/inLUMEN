@@ -16,6 +16,7 @@ from deployment_artifacts import (
 )
 from deployment_agents import (
     generate_argo_yaml_from_graph,
+    generate_dagster_packaging_manifest,
     generate_dockerfiles_with_agent,
 )
 from graph_client import (
@@ -494,10 +495,28 @@ def agentic_generate_dagster_bundle():
     data = request.get_json() or {}
 
     try:
-        print("[analytics_api.py] Generating runnable Dagster ZIP bundle.")
+        llm_config = llm_config_from_payload(data)
+        log_llm_selection("Packaging supplied files for Dagster", llm_config)
+        print("[analytics_api.py] Generating LLM-planned runnable Dagster ZIP bundle.")
         pipeline_graph = _pipeline_graph_from_payload_or_backend(data)
         attached_files = run_async(_dagster_bundle_files(pipeline_graph))
-        zip_bytes = build_dagster_bundle_zip(pipeline_graph, attached_files)
+        packaging_manifest_model = run_async(
+            generate_dagster_packaging_manifest(
+                pipeline_graph,
+                attached_files,
+                llm_config,
+            )
+        )
+        packaging_manifest = (
+            packaging_manifest_model.model_dump()
+            if hasattr(packaging_manifest_model, "model_dump")
+            else packaging_manifest_model.dict()
+        )
+        zip_bytes = build_dagster_bundle_zip(
+            pipeline_graph,
+            attached_files,
+            packaging_manifest=packaging_manifest,
+        )
         resp = make_response(zip_bytes, 200)
         resp.headers["Content-Type"] = "application/zip"
         resp.headers["Content-Disposition"] = 'attachment; filename="inlumen-dagster.zip"'

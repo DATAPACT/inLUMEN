@@ -1,6 +1,9 @@
+import hashlib
 import inspect
 import json
+import mimetypes
 import re
+from pathlib import PurePosixPath
 from typing import Any, Optional
 
 from autogen_core.models import SystemMessage, UserMessage
@@ -10,6 +13,7 @@ from async_runtime import run_async
 from deployment_artifacts import (
     DeploymentArtifactValidationError,
     _argo_name,
+    _safe_docker_source,
     _sanitize_fragment,
     build_argo_workflow_yaml,
     extract_pipeline_steps,
@@ -34,6 +38,339 @@ class ListDockerfilesResponse(BaseModel):
 
     dockerfiles: list[DockerfileItem]
     guardrails: Optional[GuardrailReport] = None
+
+
+class DagsterPackagingManifest(BaseModel):
+    class FilePlacement(BaseModel):
+        step_id: str
+        source_filename: str
+        role: str
+        destination: str
+        interpreter: str = ""
+        args: list[str] = Field(default_factory=list)
+        rationale: str = ""
+
+    files: list[FilePlacement]
+    checks: list[str] = Field(default_factory=list)
+
+
+async def generate_dagster_packaging_manifest(
+    pipeline_graph: dict,
+    attached_files: list[dict],
+    llm_config: Optional[LLMConfig] = None,
+) -> DagsterPackagingManifest:
+    """Use an LLM to arrange existing files without generating or rewriting code."""
+    resolved_config = llm_config or resolve_llm_config()
+    steps = extract_pipeline_steps(pipeline_graph)
+    if not steps:
+        raise ValueError("No pipeline steps were found for Dagster packaging.")
+
+    prompt_files = _dagster_attachment_context(attached_files)
+
+    validation_errors: list[str] = []
+    normalized: dict[str, Any] | None = None
+    for attempt in range(2):
+        try:
+            raw_payload = await _generate_dagster_manifest_payload_with_llm(
+                steps=steps,
+                pipeline_graph=pipeline_graph,
+                file_contents=prompt_files,
+                llm_config=resolved_config,
+                validation_errors=validation_errors,
+            )
+            normalized = _normalize_dagster_packaging_manifest(
+                raw_payload,
+                steps,
+                attached_files,
+            )
+            break
+        except (ValueError, DeploymentArtifactValidationError) as exc:
+            validation_errors = (
+                exc.errors
+                if isinstance(exc, DeploymentArtifactValidationError)
+                else [str(exc)]
+            )
+        if validation_errors:
+            print(
+                "[deployment_agents.py] Dagster packaging manifest validation failed "
+                f"on attempt {attempt + 1}: {validation_errors}"
+            )
+    else:
+        raise DeploymentArtifactValidationError(
+            "Dagster packaging manifest validation failed",
+            validation_errors,
+        )
+
+    if hasattr(DagsterPackagingManifest, "model_validate"):
+        return DagsterPackagingManifest.model_validate(normalized)
+    return DagsterPackagingManifest.parse_obj(normalized)
+
+
+def _dagster_attachment_context(attached_files: list[dict]) -> list[dict[str, Any]]:
+    inspected = []
+    errors = []
+    for index, entry in enumerate(attached_files):
+        if not isinstance(entry, dict):
+            errors.append(f"attachment[{index}] must be an object")
+            continue
+        step_id = str(entry.get("step_id") or "").strip()
+        filename = str(entry.get("filename") or "").strip()
+        content = entry.get("content")
+        if not step_id or not filename:
+            errors.append(f"attachment[{index}] is missing step_id or filename")
+            continue
+        if not isinstance(content, (bytes, bytearray)):
+            errors.append(f"attachment {step_id}/{filename} has no readable content")
+            continue
+
+        raw = bytes(content)
+        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        decoded = raw.decode("utf-8", errors="replace")
+        replacement_ratio = decoded.count("\ufffd") / max(1, len(decoded))
+        is_text = replacement_ratio < 0.02 and "\x00" not in decoded
+        inspected.append({
+            "step_id": step_id,
+            "filename": filename,
+            "extension": PurePosixPath(filename).suffix.lower(),
+            "mime_type": mime_type,
+            "size_bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "content_mode": "text" if is_text else "binary",
+            "content": (
+                _truncate_for_prompt(decoded)
+                if is_text
+                else f"[binary attachment; first 32 bytes: {raw[:32].hex()}]"
+            ),
+        })
+    if errors:
+        raise DeploymentArtifactValidationError(
+            "Dagster attachment inspection failed",
+            errors,
+        )
+    return inspected
+
+
+async def _generate_dagster_manifest_payload_with_llm(
+    *,
+    steps: list[dict],
+    pipeline_graph: dict,
+    file_contents: list[dict[str, Any]],
+    llm_config: LLMConfig,
+    validation_errors: list[str],
+) -> dict[str, Any]:
+    model_client = select_model_client(llm_config, parallel_tool_calls=False)
+    context = {
+        "steps": [
+            {
+                "flow_id": step["flow_id"],
+                "name": step.get("name", ""),
+                "label": step.get("label", ""),
+                "description": step.get("description", ""),
+                "type": step.get("type", ""),
+                "param": step.get("param", {}),
+                "attached_files": [
+                    entry.get("filename")
+                    for entry in step.get("files", [])
+                ],
+            }
+            for step in steps
+        ],
+        "edges": pipeline_graph.get("edges", []),
+        "files": file_contents,
+    }
+    repair = ""
+    if validation_errors:
+        repair = (
+            "\nThe previous manifest failed validation. Correct these issues:\n"
+            + json.dumps(validation_errors, indent=2)
+        )
+    prompt = f"""Package the supplied files as a runnable Dagster project.
+
+You are planning file placement and invocation only. Never generate, rewrite,
+patch, or replace source code. Every manifest entry must reference one supplied
+file exactly once.
+
+Return exactly:
+{{"files":[{{"step_id":"1","source_filename":"script.py","role":"script|requirements|input|support","destination":"scripts/script.py","interpreter":"python|bash|sh","args":["--input","data/input.csv"],"rationale":"..."}}],"checks":["..."]}}
+
+Rules:
+- Inspect the actual attachment content included in Context.files before deciding anything.
+- Use script imports, argparse/defaults, path literals, README examples, shell commands,
+  requirements, manifests, config references, and input-data columns/schema to determine
+  how the supplied files work together.
+- Infer CLI arguments from argparse, sys.argv, examples, manifests, shell scripts, and file dependencies.
+- Preserve pipeline edge order and associate each executable script with its owning step.
+- Python scripts go under scripts/. Input datasets normally go under data/.
+- Set interpreter for executable scripts. Use python for .py, bash or sh for shell scripts.
+- Put files at paths expected by script defaults or pass explicit arguments that point to their packaged paths.
+- requirements files use role requirements and destination requirements.txt.
+- Support/config/model files may use other safe relative paths when scripts require them.
+- Do not place anything under output/ or .dagster/.
+- Do not invent filenames, commands, dependencies, or file contents.
+{repair}
+
+Context:
+{json.dumps(context, indent=2)}
+"""
+    create_kwargs: dict[str, Any] = {}
+    if llm_config.supports_structured_output:
+        create_kwargs["json_output"] = DagsterPackagingManifest
+    elif llm_config.supports_json_output:
+        create_kwargs["json_output"] = True
+    try:
+        result = await model_client.create(
+            [
+                SystemMessage(
+                    content=(
+                        "You package existing pipeline files for Dagster. "
+                        "Return strict JSON only and never generate source code."
+                    )
+                ),
+                UserMessage(content=prompt, source="user"),
+            ],
+            **create_kwargs,
+        )
+    finally:
+        close = getattr(model_client, "close", None)
+        if close:
+            close_result = close()
+            if inspect.isawaitable(close_result):
+                await close_result
+    return _coerce_structured_payload(result.content, DagsterPackagingManifest, "Dagster manifest")
+
+
+def _coerce_structured_payload(content: Any, model_type: type[BaseModel], label: str) -> dict[str, Any]:
+    if isinstance(content, model_type):
+        return content.model_dump() if hasattr(content, "model_dump") else content.dict()
+    if isinstance(content, dict):
+        return content
+    if not isinstance(content, str):
+        raise ValueError(f"LLM returned unsupported {label} type: {type(content).__name__}")
+    text = content.strip()
+    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, flags=re.DOTALL | re.IGNORECASE)
+    if fence:
+        text = fence.group(1).strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"LLM returned invalid {label} JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"LLM {label} JSON must be an object.")
+    return parsed
+
+
+def _normalize_dagster_packaging_manifest(
+    payload: dict[str, Any],
+    steps: list[dict],
+    attached_files: list[dict],
+) -> dict[str, Any]:
+    raw_files = payload.get("files")
+    if not isinstance(raw_files, list):
+        raise ValueError("Dagster packaging manifest must contain a files array.")
+
+    expected = {
+        (
+            str(entry.get("step_id") or "").strip(),
+            str(entry.get("filename") or "").strip(),
+        )
+        for entry in attached_files
+        if isinstance(entry, dict)
+    }
+    step_ids = {str(step["flow_id"]) for step in steps}
+    seen: set[tuple[str, str]] = set()
+    destinations: set[str] = set()
+    normalized_files = []
+    errors: list[str] = []
+    valid_roles = {"script", "requirements", "input", "support"}
+
+    for index, raw in enumerate(raw_files):
+        if hasattr(raw, "model_dump"):
+            raw = raw.model_dump()
+        elif hasattr(raw, "dict"):
+            raw = raw.dict()
+        if not isinstance(raw, dict):
+            errors.append(f"files[{index}] must be an object")
+            continue
+        step_id = str(raw.get("step_id") or "").strip()
+        source_filename = str(raw.get("source_filename") or "").strip()
+        role = str(raw.get("role") or "").strip().lower()
+        destination = str(raw.get("destination") or "").strip()
+        key = (step_id, source_filename)
+        if key not in expected:
+            errors.append(
+                f"files[{index}] references unavailable file {step_id}/{source_filename}"
+            )
+        if key in seen:
+            errors.append(f"file {step_id}/{source_filename} is listed more than once")
+        seen.add(key)
+        if step_id not in step_ids:
+            errors.append(f"files[{index}] references unknown step '{step_id}'")
+        if role not in valid_roles:
+            errors.append(f"files[{index}] has unsupported role '{role}'")
+        if not destination:
+            errors.append(f"files[{index}] is missing destination")
+        else:
+            try:
+                destination = _safe_docker_source(destination)
+            except ValueError as exc:
+                errors.append(str(exc))
+        if destination in destinations and role != "requirements":
+            errors.append(f"destination '{destination}' is used more than once")
+        destinations.add(destination)
+        if destination == "output" or destination.startswith("output/"):
+            errors.append(f"files[{index}] may not be placed under output/")
+        if destination == ".dagster" or destination.startswith(".dagster/"):
+            errors.append(f"files[{index}] may not be placed under .dagster/")
+        if role == "script" and not destination.startswith("scripts/"):
+            errors.append(f"script '{source_filename}' must be placed under scripts/")
+        if role == "requirements" and destination != "requirements.txt":
+            errors.append("requirements files must use destination requirements.txt")
+        interpreter = str(raw.get("interpreter") or "").strip().lower()
+        if role == "script":
+            inferred_interpreter = {
+                ".py": "python",
+                ".sh": "bash",
+            }.get(PurePosixPath(source_filename).suffix.lower(), "")
+            interpreter = interpreter or inferred_interpreter
+            if interpreter not in {"python", "bash", "sh"}:
+                errors.append(
+                    f"script '{source_filename}' requires interpreter python, bash, or sh"
+                )
+        elif interpreter:
+            errors.append(f"only script entries may define interpreter: {source_filename}")
+        args = raw.get("args")
+        if not isinstance(args, list) or not all(
+            isinstance(argument, (str, int, float)) for argument in args
+        ):
+            errors.append(f"files[{index}].args must be an array of scalar values")
+            args = []
+        if role != "script" and args:
+            errors.append(f"only script entries may define args: {source_filename}")
+        normalized_files.append({
+            "step_id": step_id,
+            "source_filename": source_filename,
+            "role": role,
+            "destination": destination,
+            "interpreter": interpreter,
+            "args": [str(argument) for argument in args],
+            "rationale": str(raw.get("rationale") or "").strip(),
+        })
+
+    for step_id, filename in sorted(expected - seen):
+        errors.append(f"manifest is missing supplied file {step_id}/{filename}")
+    if errors:
+        raise DeploymentArtifactValidationError(
+            "Dagster packaging manifest validation failed",
+            errors,
+        )
+    return {
+        "files": normalized_files,
+        "checks": [
+            str(check)
+            for check in payload.get("checks", [])
+            if isinstance(check, str)
+        ],
+    }
 
 
 async def generate_dockerfiles_with_agent(
