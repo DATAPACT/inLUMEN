@@ -1606,6 +1606,18 @@ def _ui_api_openapi_paths(
                 },
             },
         },
+        "/api/pipeline/history/restore": {
+            "post": {
+                "tags": ["Pipeline State"],
+                "summary": "Restore an Undo or Redo snapshot and record one provenance event",
+                "operationId": "restorePipelineGraphHistory",
+                "requestBody": _json_request("#/components/schemas/PipelineHistoryRestoreRequest"),
+                "responses": {
+                    "200": _json_response("#/components/schemas/AnyObject"),
+                    **protected_responses,
+                },
+            },
+        },
         "/api/pipeline/overview": {
             "get": {
                 "tags": ["Pipeline State"],
@@ -1729,6 +1741,33 @@ def _ui_api_openapi_paths(
                         "content": {
                             "application/pdf": {
                                 "schema": {"type": "string", "format": "binary"}
+                            }
+                        },
+                    },
+                    **protected_responses,
+                },
+            },
+        },
+        "/api/provenance/prov-o": {
+            "get": {
+                "tags": ["Pipeline State"],
+                "summary": "Download PROV-O provenance as JSON-LD for a pipeline version",
+                "operationId": "downloadProvOProvenance",
+                "parameters": [
+                    {
+                        "name": "version_uid",
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "string"},
+                        "description": "Pipeline version uid. Defaults to the active version.",
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "PROV-O JSON-LD provenance document.",
+                        "content": {
+                            "application/ld+json": {
+                                "schema": {"type": "object", "additionalProperties": True}
                             }
                         },
                     },
@@ -2169,6 +2208,16 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                 "description": {"type": "string"},
                 "active_version_uid": {"type": "string"},
             },
+        },
+        "PipelineHistoryRestoreRequest": {
+            "type": "object",
+            "required": ["graph", "direction"],
+            "properties": {
+                "graph": {"$ref": "#/components/schemas/ReactFlowGraph"},
+                "direction": {"type": "string", "enum": ["undo", "redo"]},
+                "details": {"type": "object", "additionalProperties": True},
+            },
+            "additionalProperties": False,
         },
         "UiPipelineVersionSummary": {
             "type": "object",

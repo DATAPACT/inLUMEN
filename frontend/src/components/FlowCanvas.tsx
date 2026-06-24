@@ -28,6 +28,7 @@ import {
   fetchPipelineGraph,
   fetchPipelineUpdatedAt,
   generatePipelineYaml,
+  restoreBackendGraphHistory,
   type PipelineVersionGraph,
   type PipelineVersionSummary,
   rebuildBackendFromFlow,
@@ -187,6 +188,15 @@ const graphHistorySignature = (nodes: Node[], edges: Edge[]) => JSON.stringify({
     data: normalizeForHistorySignature(edge.data || {}),
   })),
 });
+
+const graphHistoryFingerprint = (signature: string) => {
+  let hash = 2166136261;
+  for (let index = 0; index < signature.length; index += 1) {
+    hash ^= signature.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `fnv1a-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+};
 
 const buildGraphHistorySnapshot = (
   nodes: Node[],
@@ -483,7 +493,11 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     };
   }, [edges, nodes, reactFlowInstance]);
 
-  const applyHistorySnapshot = useCallback(async (snapshot: GraphHistorySnapshot) => {
+  const applyHistorySnapshot = useCallback(async (
+    snapshot: GraphHistorySnapshot,
+    direction: "undo" | "redo",
+    sourceSnapshot: GraphHistorySnapshot,
+  ) => {
     const nextNodes = cleanHistoryNodes(snapshot.nodes);
     const nextEdges = cleanHistoryEdges(snapshot.edges);
 
@@ -505,7 +519,24 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       reactFlowInstance.setViewport(snapshot.viewport);
     }
 
-    await rebuildBackendFromFlow(nextNodes, nextEdges);
+    await restoreBackendGraphHistory(
+      {
+        nodes: nextNodes,
+        edges: nextEdges,
+        viewport: snapshot.viewport,
+      },
+      direction,
+      {
+        source_snapshot_fingerprint: graphHistoryFingerprint(sourceSnapshot.signature),
+        target_snapshot_fingerprint: graphHistoryFingerprint(snapshot.signature),
+        source_node_count: sourceSnapshot.nodes.length,
+        source_edge_count: sourceSnapshot.edges.length,
+        target_node_count: nextNodes.length,
+        target_edge_count: nextEdges.length,
+        source_snapshot_timestamp: new Date(sourceSnapshot.timestamp).toISOString(),
+        target_snapshot_timestamp: new Date(snapshot.timestamp).toISOString(),
+      },
+    );
     onCanvasEdited?.();
   }, [markLocalWrite, onCanvasEdited, onNodeSelect, reactFlowInstance]);
 
@@ -513,15 +544,16 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     const snapshot = undoStackRef.current.pop();
     if (!snapshot) return;
 
+    const sourceSnapshot = createHistorySnapshot();
     redoStackRef.current = [
       ...redoStackRef.current,
-      createHistorySnapshot(),
+      sourceSnapshot,
     ].slice(-GRAPH_HISTORY_LIMIT);
     syncHistoryAvailability();
 
     try {
       setIsHistoryRestoring(true);
-      await applyHistorySnapshot(snapshot);
+      await applyHistorySnapshot(snapshot, "undo", sourceSnapshot);
       toast.success("Undo applied", {
         description: "The previous graph snapshot has been restored.",
       });
@@ -540,15 +572,16 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     const snapshot = redoStackRef.current.pop();
     if (!snapshot) return;
 
+    const sourceSnapshot = createHistorySnapshot();
     undoStackRef.current = [
       ...undoStackRef.current,
-      createHistorySnapshot(),
+      sourceSnapshot,
     ].slice(-GRAPH_HISTORY_LIMIT);
     syncHistoryAvailability();
 
     try {
       setIsHistoryRestoring(true);
-      await applyHistorySnapshot(snapshot);
+      await applyHistorySnapshot(snapshot, "redo", sourceSnapshot);
       toast.success("Redo applied", {
         description: "The next graph snapshot has been restored.",
       });
