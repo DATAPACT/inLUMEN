@@ -19,6 +19,7 @@ from chat_state import clear_state_from_disk
 from graph_client import dispatch_graph_request
 from local_api_client import LocalApiResponse
 from object_client import dispatch_object_request
+from provenance_provo import build_prov_o_jsonld, provenance_prov_o_filename
 from provenance_report import build_provenance_pdf, provenance_report_filename
 from public_api import create_public_api_blueprint
 from runtime_config import add_cors_headers, get_service_port
@@ -400,6 +401,12 @@ def pipeline_updated_at():
     return _proxy_response(dispatch_graph_request, "neo4j_get_pipeline_updated_at")
 
 
+@app.route("/api/pipeline/history/restore", methods=["POST", "OPTIONS"])
+@require_auth
+def pipeline_history_restore():
+    return _proxy_response(dispatch_graph_request, "neo4j_restore_graph_history")
+
+
 @app.route("/api/pipeline/overview", methods=["GET", "POST", "OPTIONS"])
 @require_auth
 def pipeline_overview():
@@ -517,6 +524,40 @@ def provenance_report():
     pdf_bytes = build_provenance_pdf(payload)
     filename = provenance_report_filename(version.get("name"), version.get("uid"))
     response = Response(pdf_bytes, status=200, mimetype="application/pdf")
+    response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/api/provenance/prov-o", methods=["GET", "OPTIONS"])
+@require_auth
+def provenance_prov_o():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+
+    version_uid = str(request.args.get("version_uid") or "").strip()
+    params = {"version_uid": version_uid} if version_uid else {}
+    graph_response = _proxy(
+        dispatch_graph_request,
+        "neo4j_get_provenance_events",
+        method="GET",
+        params=params,
+        data=b"",
+    )
+    if not graph_response.ok:
+        return _response_from_upstream(graph_response)
+
+    payload = _upstream_json(graph_response)
+    if not isinstance(payload, dict):
+        payload = {"events": []}
+    version = payload.get("version") if isinstance(payload.get("version"), dict) else {}
+    document = build_prov_o_jsonld(payload)
+    filename = provenance_prov_o_filename(version.get("name"), version.get("uid"))
+    response = Response(
+        json.dumps(document, ensure_ascii=False, indent=2),
+        status=200,
+        mimetype="application/ld+json",
+    )
     response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
     response.headers["Cache-Control"] = "no-store"
     return response

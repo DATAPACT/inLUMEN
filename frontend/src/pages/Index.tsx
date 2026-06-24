@@ -12,6 +12,7 @@ import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
 import {
   MAIN_PIPELINE_VERSION_UID,
   clearPipelineWorkspace,
+  fetchProvenanceProvO,
   fetchProvenanceReport,
   restorePipelineVersion,
   savePipelineActiveVersion,
@@ -119,6 +120,23 @@ const readSavedTheme = () => {
 const createDownloadTimestamp = () =>
   new Date().toISOString().replace(/[:.]/g, "-");
 
+const safeDownloadLabel = (value: string) =>
+  value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "main";
+
+const downloadBlob = (blob: Blob, filename: string) => {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+};
+
 const normalizeSavedConversation = (value: unknown): ChatMessage[] => {
   const messages = Array.isArray(value)
     ? value
@@ -201,6 +219,7 @@ const Index = () => {
   const [isSettingMainVersion, setIsSettingMainVersion] = useState(false);
   const [isClearingAll, setIsClearingAll] = useState(false);
   const [isGeneratingProvenanceReport, setIsGeneratingProvenanceReport] = useState(false);
+  const [isDownloadingProvO, setIsDownloadingProvO] = useState(false);
   const [activeVersionUid, setActiveVersionUid] = useState(MAIN_PIPELINE_VERSION_UID);
   const [activeVersionName, setActiveVersionName] = useState('Main');
   const [activePipelineDescription, setActivePipelineDescription] = useState('');
@@ -949,18 +968,8 @@ const Index = () => {
         console.warn("Failed to save active version before provenance report:", error);
       });
       const blob = await fetchProvenanceReport(activeVersionUidRef.current);
-      const url = URL.createObjectURL(blob);
-      const safeVersionName = (activeVersionNameRef.current || 'main')
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-+|-+$/g, "") || "main";
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `inlumen-provenance-${safeVersionName}.pdf`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
+      const safeVersionName = safeDownloadLabel(activeVersionNameRef.current || "main");
+      downloadBlob(blob, `inlumen-provenance-${safeVersionName}.pdf`);
       toast.success("Provenance report generated", {
         description: `${activeVersionNameRef.current || 'Main'} report downloaded as PDF.`,
       });
@@ -971,6 +980,28 @@ const Index = () => {
       });
     } finally {
       setIsGeneratingProvenanceReport(false);
+    }
+  };
+
+  const handleDownloadProvO = async () => {
+    try {
+      setIsDownloadingProvO(true);
+      await flushActiveVersionSnapshot().catch((error) => {
+        console.warn("Failed to save active version before PROV-O export:", error);
+      });
+      const blob = await fetchProvenanceProvO(activeVersionUidRef.current);
+      const safeVersionName = safeDownloadLabel(activeVersionNameRef.current || "main");
+      downloadBlob(blob, `inlumen-provenance-${safeVersionName}.jsonld`);
+      toast.success("PROV-O provenance exported", {
+        description: `${activeVersionNameRef.current || 'Main'} downloaded as JSON-LD.`,
+      });
+    } catch (error) {
+      console.error("Error exporting PROV-O provenance:", error);
+      toast.error("Failed to export PROV-O provenance", {
+        description: error instanceof Error ? error.message : "Unknown error occurred",
+      });
+    } finally {
+      setIsDownloadingProvO(false);
     }
   };
 
@@ -1004,10 +1035,12 @@ const Index = () => {
         onToggleVersions={() => { void handleToggleVersionsPanel(); }}
         onClearAll={() => { void handleClearAll(); }}
         onGenerateProvenanceReport={() => { void handleGenerateProvenanceReport(); }}
+        onDownloadProvO={() => { void handleDownloadProvO(); }}
         onOpenHelp={() => setIsHelpOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
         isClearingAll={isClearingAll}
         isGeneratingProvenanceReport={isGeneratingProvenanceReport}
+        isDownloadingProvO={isDownloadingProvO}
       />
 
       <div className="flex min-h-0 flex-1 overflow-hidden">

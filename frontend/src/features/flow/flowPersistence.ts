@@ -364,6 +364,39 @@ export const fetchProvenanceReport = async (
   return res.blob();
 };
 
+export const fetchProvenanceProvO = async (
+  versionUid?: string | null,
+): Promise<Blob> => {
+  const params = new URLSearchParams();
+  if (versionUid) params.set("version_uid", versionUid);
+  const query = params.toString();
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/provenance/prov-o${query ? `?${query}` : ""}`, {
+    method: "GET",
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Failed to generate PROV-O provenance (${res.status}): ${txt}`);
+  }
+  return res.blob();
+};
+
+export const restoreBackendGraphHistory = async (
+  graph: PipelineVersionGraph,
+  direction: "undo" | "redo",
+  details: Record<string, unknown>,
+) => {
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/history/restore`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ graph, direction, details }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Failed to restore graph history (${res.status}): ${txt}`);
+  }
+  return res.json().catch(() => ({}));
+};
+
 export const rebuildBackendFromFlow = async (nodes: Node[], edges: Edge[]) => {
   await clearBackendGraph();
 

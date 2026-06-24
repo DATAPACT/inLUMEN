@@ -2277,7 +2277,55 @@ def neo4j_sync_graph():
     except Exception as e:
         print("[neo4j_api.py] Error syncing visible graph:", e)
         return jsonify({"error": str(e)}), 500
-    
+
+
+@app.route('/neo4j_restore_graph_history', methods=['POST', 'OPTIONS'])
+@require_auth
+def neo4j_restore_graph_history():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    payload = request.get_json(force=True) or {}
+    graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+    direction = str(payload.get("direction") or "").strip().lower()
+    if direction not in {"undo", "redo"}:
+        return jsonify({"error": "direction must be 'undo' or 'redo'"}), 400
+    details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+
+    try:
+        with driver.session() as session:
+            def restore_history(tx):
+                result = _sync_graph_to_session(tx, graph)
+                action = f"{direction}_applied"
+                summary = (
+                    "Restored the previous graph snapshot with Undo."
+                    if direction == "undo"
+                    else "Restored the next graph snapshot with Redo."
+                )
+                _record_provenance_event(
+                    tx,
+                    action,
+                    "manual",
+                    summary,
+                    {
+                        **details,
+                        "direction": direction,
+                        "restored_node_count": result.get("node_count", 0),
+                        "restored_edge_count": result.get("edge_count", 0),
+                    },
+                )
+                return result, action
+
+            result, action = session.execute_write(restore_history)
+        return jsonify({
+            **result,
+            "provenance_action": action,
+        }), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error restoring graph history:", e)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/neo4j_get_graph', methods=['GET'])
 @require_auth
 def neo4j_get_graph():
