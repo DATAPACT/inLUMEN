@@ -725,6 +725,80 @@ def _short_text(value: Any, limit: int = 4000) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
+def _provenance_graph_snapshot(session, pipeline_uid: str) -> dict:
+    node_records = list(session.run("""
+    MATCH (p:PIPELINE {uid: $pipeline_uid})-[:HAS_STEP]->(step:STEP)
+    RETURN
+      toString(step.flow_id) AS id,
+      coalesce(step.label, '') AS label,
+      coalesce(step.type, 'custom') AS type,
+      coalesce(step.x, 0.0) AS x,
+      coalesce(step.y, 0.0) AS y
+    ORDER BY
+      CASE WHEN toString(step.flow_id) =~ '^[0-9]+$' THEN toInteger(step.flow_id) ELSE 2147483647 END,
+      toString(step.flow_id)
+    """, pipeline_uid=pipeline_uid))
+    edge_records = list(session.run("""
+    MATCH (p:PIPELINE {uid: $pipeline_uid})-[:HAS_STEP]->(source:STEP)-[:FLOWS_TO]->(target:STEP)
+    WHERE (p)-[:HAS_STEP]->(target)
+    RETURN toString(source.flow_id) AS source, toString(target.flow_id) AS target
+    ORDER BY source, target
+    """, pipeline_uid=pipeline_uid))
+
+    node_limit = 60
+    edge_limit = 120
+    return {
+        "node_count": len(node_records),
+        "edge_count": len(edge_records),
+        "nodes": [
+            {
+                "id": record["id"],
+                "label": _short_text(record["label"], 80),
+                "type": record["type"],
+                "x": float(record["x"] or 0.0),
+                "y": float(record["y"] or 0.0),
+            }
+            for record in node_records[:node_limit]
+        ],
+        "edges": [
+            {
+                "source": record["source"],
+                "target": record["target"],
+            }
+            for record in edge_records[:edge_limit]
+        ],
+        "truncated": len(node_records) > node_limit or len(edge_records) > edge_limit,
+    }
+
+
+def _provenance_graph_snapshot_from_graph(graph: dict) -> dict:
+    nodes, edges = _parse_visible_graph(graph)
+    node_limit = 60
+    edge_limit = 120
+    return {
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "nodes": [
+            {
+                "id": node["props"]["flow_id"],
+                "label": _short_text(node["props"].get("label"), 80),
+                "type": node["props"].get("type", "custom"),
+                "x": float(node["props"].get("x") or 0.0),
+                "y": float(node["props"].get("y") or 0.0),
+            }
+            for node in nodes[:node_limit]
+        ],
+        "edges": [
+            {
+                "source": edge["source"],
+                "target": edge["target"],
+            }
+            for edge in edges[:edge_limit]
+        ],
+        "truncated": len(nodes) > node_limit or len(edges) > edge_limit,
+    }
+
+
 def _active_pipeline_version(session, version_uid: str | None = None, version_name: str | None = None) -> dict:
     pipeline_uid = _ensure_design_pipeline(session)
     record = session.run("""
@@ -768,7 +842,17 @@ def _record_provenance_event(
     version_name: str | None = None,
 ) -> None:
     context = _active_pipeline_version(session, version_uid, version_name)
-    details_json = _json_details(details)
+    if isinstance(details, dict):
+        event_details = dict(details)
+    elif details is None:
+        event_details = {}
+    else:
+        event_details = {"details": details}
+    event_details["graph_snapshot"] = _provenance_graph_snapshot(
+        session,
+        context["pipeline_uid"],
+    )
+    details_json = _json_details(event_details)
     session.run("""
     MATCH (p:PIPELINE {uid: $pipeline_uid})
     MERGE (v:PIPELINE_VERSION {uid: $version_uid})
@@ -2106,11 +2190,31 @@ def neo4j_get_provenance_events():
               CASE WHEN coalesce(v.uid, $version_uid) = $main_uid THEN $main_name ELSE coalesce(v.name, $main_name) END AS name,
               coalesce(v.description, '') AS description,
               toString(v.created_at) AS created_at,
-              toString(v.updated_at) AS updated_at
+              toString(v.updated_at) AS updated_at,
+              v.graph_json AS graph_json
             """, pipeline_uid=pipeline_record["uid"],
                  version_uid=version_uid,
                  main_uid=MAIN_VERSION_UID,
                  main_name=MAIN_VERSION_NAME).single()
+
+            version_payload = version_record.data() if version_record else {
+                "uid": version_uid,
+                "name": MAIN_VERSION_NAME if version_uid == MAIN_VERSION_UID else version_uid,
+            }
+            graph_json = version_payload.pop("graph_json", None)
+            try:
+                version_graph = json.loads(graph_json or "{}")
+            except (TypeError, ValueError):
+                version_graph = {}
+            if isinstance(version_graph, dict) and (
+                isinstance(version_graph.get("nodes"), list)
+                or isinstance(version_graph.get("edges"), list)
+            ):
+                current_graph_snapshot = _provenance_graph_snapshot_from_graph(version_graph)
+            elif version_uid == pipeline_record["active_version_uid"]:
+                current_graph_snapshot = _provenance_graph_snapshot(session, pipeline_record["uid"])
+            else:
+                current_graph_snapshot = _provenance_graph_snapshot_from_graph({})
 
             events = []
             if _label_exists(session, "PROVENANCE_EVENT"):
@@ -2148,11 +2252,9 @@ def neo4j_get_provenance_events():
                     "created_at": pipeline_record["created_at"],
                     "updated_at": pipeline_record["updated_at"],
                 },
-                "version": version_record.data() if version_record else {
-                    "uid": version_uid,
-                    "name": MAIN_VERSION_NAME if version_uid == MAIN_VERSION_UID else version_uid,
-                },
+                "version": version_payload,
                 "events": events,
+                "current_graph_snapshot": current_graph_snapshot,
             }), 200
     except Exception as e:
         print("[neo4j_api.py] Error loading provenance events:", e)
