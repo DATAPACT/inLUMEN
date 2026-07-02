@@ -7,6 +7,25 @@ export type StepType =
   | "api"
   | "custom";
 
+export type NodeImplementation = Record<string, unknown>;
+
+export type NodeConfigurationStatus = "unconfigured" | "valid" | "invalid";
+
+export type GeneratedArtifact = {
+  status?: "current" | "stale";
+  generator?: string;
+  generator_version?: string;
+  configuration_hash?: string;
+  entrypoint?: string[];
+  files?: Array<{
+    filename?: string;
+    bucket?: string;
+    content_type?: string;
+  }>;
+  data_contract?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
 export const STORAGE_DATABASE_OPTIONS = ["MinIO", "SQLite", "ChromaDB"] as const;
 
 export type StorageDatabaseOption = (typeof STORAGE_DATABASE_OPTIONS)[number];
@@ -118,6 +137,33 @@ export const normalizeType = (type: unknown): StepType => {
   return "action";
 };
 
+export const normalizeDefinitionId = (value: unknown) =>
+  typeof value === "string" ? value.trim() : "";
+
+export const normalizeDefinitionVersion = (value: unknown) => {
+  const version = Number(value);
+  return Number.isInteger(version) && version > 0 ? version : undefined;
+};
+
+export const normalizeNodeImplementation = (value: unknown): NodeImplementation =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? value as NodeImplementation
+    : {};
+
+export const normalizeGeneratedArtifact = (
+  value: unknown,
+): GeneratedArtifact | undefined =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? value as GeneratedArtifact
+    : undefined;
+
+export const normalizeConfigurationStatus = (
+  value: unknown,
+): NodeConfigurationStatus | undefined =>
+  value === "unconfigured" || value === "valid" || value === "invalid"
+    ? value
+    : undefined;
+
 export const typeHasFiles = (type: StepType) =>
   type === "input" || type === "output" || type === "action" || type === "custom";
 
@@ -141,6 +187,22 @@ export const pickBackendUpdatableProps = (
     type: nodeType,
     description: nodeData.description ?? "",
   };
+
+  const definitionId = normalizeDefinitionId(nodeData.definition_id);
+  const definitionVersion = normalizeDefinitionVersion(nodeData.definition_version);
+  if (definitionId) {
+    props.definition_id = definitionId;
+    props.definition_version = definitionVersion ?? 1;
+    props.implementation = normalizeNodeImplementation(nodeData.implementation);
+    const configurationStatus = normalizeConfigurationStatus(nodeData.configuration_status);
+    if (configurationStatus) {
+      props.configuration_status = configurationStatus;
+    }
+    const generatedArtifact = normalizeGeneratedArtifact(nodeData.generated_artifact);
+    if (generatedArtifact) {
+      props.generated_artifact = generatedArtifact;
+    }
+  }
 
   if (typeHasContent(nodeType)) {
     props.content = nodeData.content ?? "";

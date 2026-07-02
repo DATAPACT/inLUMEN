@@ -131,3 +131,23 @@ export const updateNodeTextFile = async (
   }
   return res.json().catch(() => null);
 };
+
+export const generateNodeScript = async (
+  nodeId: string,
+  payload: {
+    llm_config?: Record<string, unknown>;
+    user_instruction?: string;
+    include_sample_data?: boolean;
+  } = {},
+) => {
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/nodes/${encodeURIComponent(nodeId)}/generate-script`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Script generation failed (${res.status}): ${txt}`);
+  }
+  return res.json().catch(() => null);
+};

@@ -5,10 +5,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from analytics_api import _optional_llm_config_from_payload
 from llm_config import resolve_llm_config
 
 
 class LLMConfigTest(unittest.TestCase):
+    def test_deterministic_deployment_does_not_require_llm_configuration(self):
+        self.assertIsNone(
+            _optional_llm_config_from_payload(
+                {"pipeline_graph": {"nodes": [], "edges": []}}
+            )
+        )
+
     def test_requires_request_supplied_configuration(self):
         with self.assertRaisesRegex(ValueError, "LLM provider is required"):
             resolve_llm_config({})

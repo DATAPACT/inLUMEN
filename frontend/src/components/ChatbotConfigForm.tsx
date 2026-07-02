@@ -43,6 +43,7 @@ const formSchema = z.object({
   name: z.string().min(1, "Configuration name is required"),
   provider: z.enum(providerValues),
   model: z.string().min(1, "Model name is required"),
+  codegenModel: z.string().optional(),
   baseUrl: z
     .string()
     .min(1, "Base URL is required")
@@ -71,6 +72,7 @@ export function ChatbotConfigForm({
       name: initialConfig?.name || "New Configuration",
       provider: initialConfig?.provider || defaultConfig.provider,
       model: initialConfig?.model || defaultConfig.model,
+      codegenModel: initialConfig?.codegenModel || "",
       baseUrl: initialConfig?.baseUrl || defaultConfig.baseUrl,
       apiKey: initialConfig?.apiKey || "",
     },
@@ -87,6 +89,7 @@ export function ChatbotConfigForm({
       name: nextConfig.name,
       provider: nextConfig.provider,
       model: nextConfig.model,
+      codegenModel: nextConfig.codegenModel || "",
       baseUrl: nextConfig.baseUrl,
       apiKey: nextConfig.apiKey || "",
     });
@@ -112,6 +115,7 @@ export function ChatbotConfigForm({
         name: values.name,
         provider: values.provider,
         model: values.model,
+        codegenModel: values.codegenModel?.trim() || "",
         baseUrl: values.baseUrl,
         apiKey: values.apiKey?.trim() || "",
       };
@@ -217,6 +221,23 @@ export function ChatbotConfigForm({
                   <FormControl>
                     <Input placeholder="gpt-oss-120b" {...field} />
                   </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="codegenModel"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Code Generation Model</FormLabel>
+                  <FormControl>
+                    <Input placeholder="deepseek-v4-pro" {...field} />
+                  </FormControl>
+                  <p className="text-xs text-muted-foreground">
+                    Required before runtime script generation can call an LLM.
+                  </p>
                   <FormMessage />
                 </FormItem>
               )}

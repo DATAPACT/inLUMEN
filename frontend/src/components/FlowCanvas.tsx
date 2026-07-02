@@ -24,17 +24,22 @@ import {
   addNodeToBackend,
   deleteEdgeFromBackend,
   deleteNodeFromBackend,
+  fetchPipelineScriptGenerationRun,
   fetchPipelineVersions,
   fetchPipelineGraph,
   fetchPipelineUpdatedAt,
+  generatePipelineScripts,
   generatePipelineYaml,
   restoreBackendGraphHistory,
+  resumePipelineScriptGenerationRun,
+  startPipelineScriptGenerationRun,
   type PipelineVersionGraph,
   type PipelineVersionSummary,
+  type PipelineGenerationJob,
+  type PipelineScriptGenerationMode,
   rebuildBackendFromFlow,
   savePipelineVersion,
   updateNodePositionInBackend,
-  clearBackendGraph,
 } from '@/features/flow/flowPersistence';
 import {
   createAgentGraphSnapshot,
@@ -56,6 +61,9 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Progress } from '@/components/ui/progress';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
+import { AlertCircle, CheckCircle2, Database, Loader2, Zap } from 'lucide-react';
 
 interface FlowCanvasProps {
   onNodeSelect: (node: Node | null, options?: { openInspector?: boolean }) => void;
@@ -79,6 +87,125 @@ export interface FlowCanvasRef {
 }
 
 let nodeId = 1;
+
+const CODEGEN_RUNTIME_FILENAMES = new Set([
+  "main.py",
+  "requirements.txt",
+  "node-manifest.json",
+  "validation-report.json",
+]);
+
+const isCodegenRuntimeFile = (filename: unknown) => {
+  const normalized = String(filename || "").trim();
+  return CODEGEN_RUNTIME_FILENAMES.has(normalized) || normalized.startsWith("Dockerfile.");
+};
+
+const nodeFiles = (node: Node): Array<{ filename?: string; name?: string } | string> => {
+  const raw = Array.isArray(node.data?.file_buckets)
+    ? node.data.file_buckets
+    : Array.isArray(node.data?.files)
+      ? node.data.files
+      : [];
+  return raw as Array<{ filename?: string; name?: string } | string>;
+};
+
+const hasUploadedSampleData = (nodes: Node[]) =>
+  nodes.some((node) =>
+    nodeFiles(node).some((file) => {
+      const filename = typeof file === "string" ? file : file.filename || file.name;
+      return Boolean(filename && !isCodegenRuntimeFile(filename));
+    }),
+  );
+
+const generationModeOptions: Array<{
+  value: PipelineScriptGenerationMode;
+  title: string;
+  description: string;
+  icon: typeof Zap;
+}> = [
+  {
+    value: "fast",
+    title: "Fast draft",
+    description: "Generate scripts with static checks only.",
+    icon: Zap,
+  },
+  {
+    value: "generic",
+    title: "Generic draft",
+    description: "Generate without sample data for later customization.",
+    icon: AlertCircle,
+  },
+  {
+    value: "full",
+    title: "Full data-aware",
+    description: "Use uploaded samples, execute each node, repair, and persist on success.",
+    icon: Database,
+  },
+];
+
+const modeToGenerationOptions = (
+  mode: PipelineScriptGenerationMode,
+  hasSampleData: boolean,
+) => {
+  if (mode === "fast") {
+    return {
+      mode,
+      includeSampleData: hasSampleData,
+      validationMode: "static" as const,
+      allowDeterministicFallback: false,
+      repairAttempts: 0,
+    };
+  }
+  if (mode === "generic") {
+    return {
+      mode,
+      includeSampleData: false,
+      validationMode: "static" as const,
+      allowDeterministicFallback: false,
+      repairAttempts: 0,
+    };
+  }
+  return {
+    mode,
+    includeSampleData: true,
+    validationMode: "pipeline_sample" as const,
+    allowDeterministicFallback: false,
+    repairAttempts: 4,
+  };
+};
+
+const generationProgressPercent = (job: PipelineGenerationJob | null) => {
+  const steps = job?.generation_run?.steps || [];
+  if (steps.length === 0) return job?.status === "queued" ? 5 : 10;
+  const completed = steps.filter((step) =>
+    ["valid", "invalid", "skipped"].includes(String(step.status || "")),
+  ).length;
+  const status = String(job?.status || "");
+  if (status === "valid" || status === "invalid" || status === "failed") return 100;
+  return Math.max(10, Math.min(95, Math.round((completed / steps.length) * 100)));
+};
+
+const wait = (ms: number) =>
+  new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+
+const generationFailureMessage = (job: PipelineGenerationJob) => {
+  const runError = Array.isArray(job.generation_run?.errors)
+    ? job.generation_run?.errors.find((item) => typeof item === "string")
+    : undefined;
+  return (
+    job.error ||
+    runError ||
+    job.persistence?.reason ||
+    "Pipeline script generation did not complete successfully."
+  );
+};
+
+const failedGenerationStep = (job: PipelineGenerationJob | null) => {
+  const steps = job?.generation_run?.steps || [];
+  return steps.find((step) => String(step.status || "").toLowerCase() === "invalid");
+};
 
 const getSnapshotFileRef = (file: unknown, nodeIdValue: string) => {
   if (typeof file === "string") return file;
@@ -237,7 +364,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     const savedEdges = localStorage.getItem('ai-flow-edges');
     return savedEdges ? JSON.parse(savedEdges) : [];
   });
-
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
@@ -257,6 +383,18 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     canRedo: false,
   });
   const [isHistoryRestoring, setIsHistoryRestoring] = useState(false);
+  const [isGeneratingScripts, setIsGeneratingScripts] = useState(false);
+  const [isScriptGenerationOpen, setIsScriptGenerationOpen] = useState(false);
+  const [scriptGenerationMode, setScriptGenerationMode] =
+    useState<PipelineScriptGenerationMode>("full");
+  const [generationJob, setGenerationJob] = useState<PipelineGenerationJob | null>(null);
+  const uploadedSampleDataAvailable = hasUploadedSampleData(nodes);
+
+  useEffect(() => {
+    if (!uploadedSampleDataAvailable && scriptGenerationMode === "full") {
+      setScriptGenerationMode("generic");
+    }
+  }, [scriptGenerationMode, uploadedSampleDataAvailable]);
 
   const markLocalWrite = useCallback((ms = 800) => {
     refreshCooldownUntilRef.current = Date.now() + ms;
@@ -751,7 +889,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         position,
         data: {
           ...nodeData.data,
-          content: nodeData.data.type === 'input' ? '{input}' : '',
+          ...(nodeData.data.type === 'input' ? { content: '{input}' } : {}),
         },
       };
 
@@ -843,12 +981,127 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     }
   };
 
+  const handleGeneratePipelineScripts = () => {
+    if (isGeneratingScripts) return;
+    setScriptGenerationMode(uploadedSampleDataAvailable ? "full" : "generic");
+    setIsScriptGenerationOpen(true);
+  };
+
+  const pollPipelineGenerationRun = async (started: PipelineGenerationJob) => {
+    setGenerationJob(started);
+    const runId = String(started.run_id || "").trim();
+    if (!runId) {
+      throw new Error("Pipeline generation run did not return a run id.");
+    }
+    let latest = started;
+    while (!["valid", "invalid", "failed"].includes(String(latest.status || ""))) {
+      await wait(3000);
+      latest = await fetchPipelineScriptGenerationRun(runId);
+      setGenerationJob(latest);
+    }
+    return latest;
+  };
+
+  const handleRunPipelineScriptGeneration = async () => {
+    if (isGeneratingScripts) return;
+    const mode =
+      scriptGenerationMode === "full" && !uploadedSampleDataAvailable
+        ? "generic"
+        : scriptGenerationMode;
+    const options = modeToGenerationOptions(mode, uploadedSampleDataAvailable);
+    setIsGeneratingScripts(true);
+    setGenerationJob(null);
+    try {
+      markLocalWrite(5000);
+      let generatedCount = 0;
+      if (mode === "full") {
+        const started = await startPipelineScriptGenerationRun(
+          activeChatbotConfig,
+          options,
+        );
+        const latest = await pollPipelineGenerationRun(started);
+        if (
+          latest.status !== "valid" ||
+          latest.persistence?.status !== "persisted"
+        ) {
+          throw new Error(generationFailureMessage(latest));
+        }
+        const persistedResult = latest.persistence?.result as { nodes?: unknown[] } | undefined;
+        generatedCount = Array.isArray(persistedResult?.nodes)
+          ? persistedResult.nodes.length
+          : 0;
+      } else {
+        const result = await generatePipelineScripts(activeChatbotConfig, options);
+        generatedCount = Array.isArray(result?.nodes) ? result.nodes.length : 0;
+      }
+      await fetchGraphAndApply();
+      setIsScriptGenerationOpen(false);
+      toast.success("Runtime scripts generated", {
+        description: `${generatedCount} node bundle${generatedCount === 1 ? "" : "s"} generated.`,
+      });
+    } catch (error) {
+      console.error("[FlowCanvas.tsx] Generate pipeline scripts error:", error);
+      toast.error("Script generation failed", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      setIsGeneratingScripts(false);
+    }
+  };
+
+  const handleRepairFailedPipelineNode = async () => {
+    if (isGeneratingScripts) return;
+    const currentRunId = String(generationJob?.run_id || "").trim();
+    const failedStep = failedGenerationStep(generationJob);
+    const failedFlowId = String(failedStep?.flow_id || "").trim();
+    if (!currentRunId || !failedFlowId) {
+      toast.error("Repair unavailable", {
+        description: "No failed node was found for this generation run.",
+      });
+      return;
+    }
+    setIsGeneratingScripts(true);
+    try {
+      markLocalWrite(5000);
+      const started = await resumePipelineScriptGenerationRun(currentRunId, {
+        flowId: failedFlowId,
+        repairAttempts: 4,
+      });
+      const latest = await pollPipelineGenerationRun(started);
+      if (
+        latest.status !== "valid" ||
+        latest.persistence?.status !== "persisted"
+      ) {
+        throw new Error(generationFailureMessage(latest));
+      }
+      const persistedResult = latest.persistence?.result as { nodes?: unknown[] } | undefined;
+      const generatedCount = Array.isArray(persistedResult?.nodes)
+        ? persistedResult.nodes.length
+        : 0;
+      await fetchGraphAndApply();
+      setIsScriptGenerationOpen(false);
+      toast.success("Failed node repaired", {
+        description: `${generatedCount} node bundle${generatedCount === 1 ? "" : "s"} persisted.`,
+      });
+    } catch (error) {
+      console.error("[FlowCanvas.tsx] Repair pipeline script error:", error);
+      toast.error("Node repair failed", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      setIsGeneratingScripts(false);
+    }
+  };
+
   const importFlow = async (e: React.ChangeEvent<HTMLInputElement>) => {
     try {
       const file = e.target.files?.[0];
       if (!file) return;
       const text = await file.text();
-      const flowData = JSON.parse(text) as { nodes?: Node[]; edges?: Edge[] };
+      const flowData = JSON.parse(text) as {
+        nodes?: Node[];
+        edges?: Edge[];
+      };
       if (!Array.isArray(flowData.nodes) || !Array.isArray(flowData.edges)) {
         toast.error('Invalid flow file', {
           description: 'The selected file does not contain a valid flow',
@@ -890,11 +1143,20 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     localStorage.removeItem('ai-flow-edges');
     nodeId = 1;
     markLocalWrite(1200);
-    await clearBackendGraph();
+    await rebuildBackendFromFlow([], []);
     toast.success('Canvas cleared', {
       description: 'All nodes and edges have been removed',
     });
   };
+
+  const generationSteps = generationJob?.generation_run?.steps || [];
+  const generationProgress = generationProgressPercent(generationJob);
+  const repairableFailedStep = failedGenerationStep(generationJob);
+  const canRepairFailedNode = Boolean(
+    generationJob &&
+      ["invalid", "failed"].includes(String(generationJob.status || "")) &&
+      repairableFailedStep?.flow_id,
+  );
 
   return (
     <div ref={reactFlowWrapper} className="h-full w-full">
@@ -964,12 +1226,150 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           onExportYaml={exportFlowYAML}
           onImportClick={triggerImport}
           onImport={importFlow}
+          onGenerateScripts={handleGeneratePipelineScripts}
+          isGeneratingScripts={isGeneratingScripts}
           onClear={clearCanvas}
           canUndo={historyAvailability.canUndo}
           canRedo={historyAvailability.canRedo}
           isHistoryRestoring={isHistoryRestoring}
         />
       </ReactFlow>
+
+      <Dialog
+        open={isScriptGenerationOpen}
+        onOpenChange={(open) => {
+          if (!isGeneratingScripts) setIsScriptGenerationOpen(open);
+        }}
+      >
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Generate Runtime Scripts</DialogTitle>
+            <DialogDescription>
+              Choose how much validation to run for this pipeline.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="flex items-center justify-between rounded-md border border-border px-3 py-2 text-sm">
+              <div className="flex items-center gap-2">
+                {uploadedSampleDataAvailable ? (
+                  <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                ) : (
+                  <AlertCircle className="h-4 w-4 text-amber-500" />
+                )}
+                <span className="font-medium">
+                  {uploadedSampleDataAvailable
+                    ? "Sample data detected"
+                    : "No sample data detected"}
+                </span>
+              </div>
+              <span className="text-xs text-muted-foreground">
+                {uploadedSampleDataAvailable ? "data-aware available" : "generic only"}
+              </span>
+            </div>
+
+            <RadioGroup
+              value={scriptGenerationMode}
+              onValueChange={(value) =>
+                setScriptGenerationMode(value as PipelineScriptGenerationMode)
+              }
+              className="grid gap-2"
+            >
+              {generationModeOptions.map((option) => {
+                const Icon = option.icon;
+                const disabled = option.value === "full" && !uploadedSampleDataAvailable;
+                return (
+                  <Label
+                    key={option.value}
+                    htmlFor={`script-generation-${option.value}`}
+                    className={cn(
+                      "flex cursor-pointer items-start gap-3 rounded-md border border-border p-3 transition-colors",
+                      scriptGenerationMode === option.value &&
+                        "border-primary bg-primary/10",
+                      disabled && "cursor-not-allowed opacity-50",
+                    )}
+                  >
+                    <RadioGroupItem
+                      id={`script-generation-${option.value}`}
+                      value={option.value}
+                      disabled={disabled || isGeneratingScripts}
+                      className="mt-1"
+                    />
+                    <Icon className="mt-0.5 h-4 w-4 text-primary" />
+                    <span className="grid gap-1">
+                      <span className="font-medium">{option.title}</span>
+                      <span className="text-sm font-normal text-muted-foreground">
+                        {option.description}
+                      </span>
+                    </span>
+                  </Label>
+                );
+              })}
+            </RadioGroup>
+
+            {generationJob && (
+              <div className="space-y-3 rounded-md border border-border p-3">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="font-medium">
+                    Run {String(generationJob.run_id || "").slice(0, 8)}
+                  </span>
+                  <span className="text-muted-foreground">
+                    {generationJob.status || "running"}
+                  </span>
+                </div>
+                <Progress value={generationProgress} />
+                {generationSteps.length > 0 && (
+                  <div className="max-h-40 space-y-2 overflow-auto pr-1">
+                    {generationSteps.map((step) => (
+                      <div
+                        key={`${step.flow_id}-${step.stage}`}
+                        className="flex items-center justify-between gap-3 text-sm"
+                      >
+                        <span className="truncate">
+                          Node {step.flow_id || "?"} - {step.stage || "pending"}
+                        </span>
+                        <span className="shrink-0 text-xs text-muted-foreground">
+                          {step.status || "pending"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setIsScriptGenerationOpen(false)}
+              disabled={isGeneratingScripts}
+            >
+              Cancel
+            </Button>
+            {canRepairFailedNode && (
+              <Button
+                variant="outline"
+                onClick={() => { void handleRepairFailedPipelineNode(); }}
+                disabled={isGeneratingScripts}
+              >
+                {isGeneratingScripts && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Repair Node {repairableFailedStep?.flow_id}
+              </Button>
+            )}
+            <Button
+              onClick={() => { void handleRunPipelineScriptGeneration(); }}
+              disabled={
+                isGeneratingScripts ||
+                (scriptGenerationMode === "full" && !uploadedSampleDataAvailable)
+              }
+            >
+              {isGeneratingScripts && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              {isGeneratingScripts ? "Generating" : "Generate"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={isSaveVersionOpen} onOpenChange={setIsSaveVersionOpen}>
         <DialogContent className="sm:max-w-md">

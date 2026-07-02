@@ -5,9 +5,11 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
-import { PlusCircle, Upload, X, Eye } from 'lucide-react';
+import { Loader2, PlusCircle, Upload, Wand2, X, Eye } from 'lucide-react';
+import { toast } from "sonner";
 import { FilePreviewDialog, PreviewType } from '@/components/properties/FilePreviewDialog';
 import { getTypeColor, getTypeIcon } from '@/components/properties/nodeAppearance';
+import { ChatbotConfig, buildCodegenLLMRequestConfig } from '@/services/chatbotService';
 import {
   normalizeType,
   pickBackendUpdatableProps,
@@ -25,10 +27,12 @@ import {
   isTextPreviewName,
   isTextPreviewFile,
   NodeFileReference,
+  GeneratedArtifact,
 } from '@/features/nodes/nodeSchema';
 import {
   readNodeFile,
   removeNodeFile,
+  generateNodeScript,
   updateNodeTextFile,
   updateNodePropertiesInBackend,
   uploadNodeFile,
@@ -47,6 +51,11 @@ export type PropertyNodeData = {
   param?: NodeParamMap;
   endpoint?: string;
   database?: StorageDatabaseOption | string;
+  definition_id?: string;
+  definition_version?: number;
+  implementation?: Record<string, unknown>;
+  configuration_status?: "unconfigured" | "valid" | "invalid";
+  generated_artifact?: GeneratedArtifact;
   [key: string]: unknown;
 };
 
@@ -66,11 +75,20 @@ interface PropertiesPanelProps {
   selectedNode: Node<PropertyNodeData> | null;
   onNodeUpdate: (id: string, data: PropertyNodeData) => void;
   onRemoveNode?: (nodeId: string) => void;
+  activeChatbotConfig?: ChatbotConfig | null;
   className?: string;
 }
 
-export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, className }: PropertiesPanelProps) {
+export function PropertiesPanel({
+  selectedNode,
+  onNodeUpdate,
+  onRemoveNode,
+  activeChatbotConfig,
+  className,
+}: PropertiesPanelProps) {
   const nodeType: StepType = normalizeType(selectedNode?.data?.type ?? selectedNode?.type);
+  const canManageFiles = typeHasFiles(nodeType);
+  const canGenerateScript = canManageFiles;
 
   const [label, setLabel] = useState('');
   const [description, setDescription] = useState('');
@@ -102,6 +120,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
   const [isEditing, setIsEditing] = useState(false);
   const [editedContent, setEditedContent] = useState('');
   const [previewFileIndex, setPreviewFileIndex] = useState<number>(-1);
+  const [isGeneratingScript, setIsGeneratingScript] = useState(false);
 
   // Debounce backend updates to avoid POST per keystroke
   const backendDebounceRef = useRef<number | null>(null);
@@ -202,6 +221,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
       } else {
         setDatabaseName("MinIO");
       }
+
     } else {
       setLabel('');
       setDescription('');
@@ -251,7 +271,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
 
   // Upload newly added files through the backend. Same filename replaces older entry.
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!typeHasFiles(nodeType)) return;
+    if (!canManageFiles) return;
     if (!selectedNode) return;
     const picked = e.target.files ? Array.from(e.target.files) : [];
     if (picked.length === 0) return;
@@ -404,6 +424,65 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
     }
   };
 
+  const handleGenerateScript = async () => {
+    if (!selectedNode || !canGenerateScript || isGeneratingScript) return;
+    setIsGeneratingScript(true);
+    let llmConfig: Record<string, unknown> | undefined;
+    try {
+      if (activeChatbotConfig) {
+        llmConfig = buildCodegenLLMRequestConfig(activeChatbotConfig);
+      }
+    } catch (error) {
+      toast("Code generation model required", {
+        description: error instanceof Error ? error.message : "LLM settings are incomplete.",
+      });
+      setIsGeneratingScript(false);
+      return;
+    }
+
+    try {
+      const result = await generateNodeScript(selectedNode.id, {
+        ...(llmConfig ? { llm_config: llmConfig } : {}),
+      });
+      const generatedArtifact = result?.generated_artifact as GeneratedArtifact | undefined;
+      const generatedFiles = Array.isArray(result?.files)
+        ? normalizeFileReferences(result.files)
+        : [];
+      const mergedFiles = [...files];
+      const indexByName = new Map<string, number>();
+      mergedFiles.forEach((file, index) => {
+        const fileName = getNodeFileName(file);
+        if (fileName) indexByName.set(fileName, index);
+      });
+      generatedFiles.forEach((file) => {
+        const fileName = getNodeFileName(file);
+        if (!fileName) return;
+        const existingIndex = indexByName.get(fileName);
+        if (existingIndex == null) {
+          indexByName.set(fileName, mergedFiles.length);
+          mergedFiles.push(file);
+        } else {
+          mergedFiles[existingIndex] = file;
+        }
+      });
+      setFiles(mergedFiles);
+      pushNodeUpdate({
+        files: mergedFiles,
+        ...(generatedArtifact ? { generated_artifact: generatedArtifact } : {}),
+      });
+      const status = generatedArtifact?.validation_report?.status || "generated";
+      toast("Script generated", {
+        description: `Runtime bundle ${status}.`,
+      });
+    } catch (error) {
+      toast("Script generation failed", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      setIsGeneratingScript(false);
+    }
+  };
+
   // Config param helpers
   const addParamRow = () => {
     let i = 1;
@@ -503,6 +582,38 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
                 placeholder="Enter node description"
               />
             </div>
+
+            {canGenerateScript && (
+              <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="space-y-1">
+                    <Label className="text-sm">Runtime script</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Generate a Python script, requirements file, Dockerfile, and runtime manifest.
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => { void handleGenerateScript(); }}
+                    disabled={isGeneratingScript}
+                  >
+                    {isGeneratingScript ? (
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    ) : (
+                      <Wand2 className="w-4 h-4 mr-2" />
+                    )}
+                    Generate
+                  </Button>
+                </div>
+                {selectedNode.data.generated_artifact?.validation_report && (
+                  <p className="text-xs text-muted-foreground">
+                    Validation: {String(selectedNode.data.generated_artifact.validation_report.status || "unknown")}
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* Content ONLY for input/output */}
             {typeHasContent(nodeType) && (
@@ -632,8 +743,7 @@ export function PropertiesPanel({ selectedNode, onNodeUpdate, onRemoveNode, clas
               </div>
             )}
 
-            {/* Files ONLY for input/output/action/custom (has_files derived internally) */}
-            {typeHasFiles(nodeType) && (
+            {canManageFiles && (
               <div className="space-y-2">
                 <Label className="text-sm">Files</Label>
                 <div className="border border-dashed border-border rounded-lg p-4">

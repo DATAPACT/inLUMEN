@@ -9,6 +9,7 @@ export interface ChatbotConfig {
   name: string;
   provider: LLMProvider;
   model: string;
+  codegenModel?: string;
   baseUrl: string;
   apiKey?: string;
   readOnly?: boolean;
@@ -21,6 +22,7 @@ export interface LLMRequestConfig {
   model: string;
   base_url: string;
   api_key?: string;
+  timeout_seconds?: number;
   model_family: string;
   supports_function_calling: boolean;
   supports_json_output: boolean;
@@ -62,7 +64,7 @@ const REMOTE_CONFIG_SYNC_ENABLED =
   "false";
 
 type StoredConfigValues = Partial<
-  Pick<ChatbotConfig, "provider" | "baseUrl" | "apiKey">
+  Pick<ChatbotConfig, "provider" | "baseUrl" | "apiKey" | "codegenModel">
 >;
 
 const getLocalStorage = (): Storage | null => {
@@ -104,6 +106,11 @@ const readStoredConfigValues = (): Record<string, StoredConfigValues> => {
               ? item.apiKey
               : typeof item.api_key === "string"
                 ? item.api_key
+                : undefined,
+            codegenModel: typeof item.codegenModel === "string"
+              ? item.codegenModel
+              : typeof item.codegen_model === "string"
+                ? item.codegen_model
                 : undefined,
           },
         ];
@@ -281,6 +288,12 @@ const normalizeConfig = (config: Partial<ChatbotConfig> & Record<string, unknown
     name: String(config.name || providerDefaults.label),
     provider,
     model,
+    codegenModel: String(
+      (config.codegenModel as string | undefined) ||
+        (config.codegen_model as string | undefined) ||
+        stored.codegenModel ||
+        ""
+    ).trim(),
     baseUrl,
     apiKey: String(
       (config.apiKey as string | undefined) ||
@@ -302,6 +315,7 @@ const persistLocalConfigValues = (config: ChatbotConfig) => {
     provider: config.provider,
     baseUrl: config.baseUrl,
     apiKey: config.apiKey || "",
+    codegenModel: config.codegenModel || "",
   };
   writeStoredConfigValues(values);
   deleteLegacySessionApiKey(storageKey);
@@ -390,6 +404,8 @@ const backendConfigPayload = (config: ChatbotConfig) => ({
   name: config.name,
   provider: config.provider,
   model: config.model,
+  codegenModel: config.codegenModel || "",
+  codegen_model: config.codegenModel || "",
   baseUrl: config.baseUrl,
   system_prompt: config.system_prompt || "",
   temperature: config.temperature ?? 0.7,
@@ -408,7 +424,7 @@ const readBackendError = async (response: Response) => {
 
 const configFromBackendPayload = (
   payload: unknown,
-  localValues?: Pick<ChatbotConfig, "apiKey" | "baseUrl" | "provider">,
+  localValues?: Pick<ChatbotConfig, "apiKey" | "baseUrl" | "provider" | "codegenModel">,
 ): ChatbotConfig => {
   const raw = (payload && typeof payload === "object" && "config" in payload)
     ? (payload as { config?: unknown }).config
@@ -419,6 +435,7 @@ const configFromBackendPayload = (
     provider: localValues?.provider || config.provider,
     baseUrl: localValues?.baseUrl || config.baseUrl,
     apiKey: localValues?.apiKey || config.apiKey || "",
+    codegenModel: localValues?.codegenModel || config.codegenModel || "",
   };
 };
 
@@ -488,6 +505,36 @@ export const buildLLMRequestConfig = (config: ChatbotConfig): LLMRequestConfig =
     supports_json_output: true,
     supports_structured_output: true,
     supports_vision: false,
+  };
+  if (normalizedConfig.apiKey) {
+    requestConfig.api_key = normalizedConfig.apiKey;
+  }
+  return requestConfig;
+};
+
+export const buildCodegenLLMRequestConfig = (config: ChatbotConfig): LLMRequestConfig => {
+  const normalizedConfig = normalizeConfig(config as Partial<ChatbotConfig> & Record<string, unknown>);
+  const codegenModel = normalizedConfig.codegenModel?.trim();
+  if (!codegenModel) {
+    throw new Error(
+      "Code Generation Model is required before LLM script generation can run.",
+    );
+  }
+  if (!normalizedConfig.provider || !normalizedConfig.baseUrl) {
+    throw new Error(
+      "Complete the LLM provider and base URL in Settings before using code generation.",
+    );
+  }
+  const requestConfig: LLMRequestConfig = {
+    provider: normalizedConfig.provider,
+    model: codegenModel,
+    base_url: normalizedConfig.baseUrl,
+    model_family: "unknown",
+    supports_function_calling: true,
+    supports_json_output: true,
+    supports_structured_output: true,
+    supports_vision: false,
+    timeout_seconds: 90,
   };
   if (normalizedConfig.apiKey) {
     requestConfig.api_key = normalizedConfig.apiKey;
