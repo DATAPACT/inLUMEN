@@ -164,7 +164,6 @@ export function Sidebar({
   const [nodeDefinitions, setNodeDefinitions] = useState<NodeDefinition[]>(
     getFallbackNodeDefinitions,
   );
-  const [nodeDefinitionsError, setNodeDefinitionsError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -172,12 +171,10 @@ export function Sidebar({
       .then((definitions) => {
         if (cancelled) return;
         setNodeDefinitions(definitions);
-        setNodeDefinitionsError("");
       })
       .catch((error) => {
         if (cancelled) return;
         console.warn("[Sidebar.tsx] Using fallback node definitions:", error);
-        setNodeDefinitionsError("Backend node definitions unavailable; showing core nodes.");
       });
     return () => {
       cancelled = true;
@@ -629,9 +626,6 @@ export function Sidebar({
                 <Plus className="w-4 h-4" />
                 Node Types
               </h3>
-              {nodeDefinitionsError && (
-                <p className="text-xs text-amber-400 mb-3">{nodeDefinitionsError}</p>
-              )}
               <div className="space-y-5">
                 {groupNodeDefinitions(nodeDefinitions).map(([family, definitions]) => (
                   <div key={family} className="space-y-2">
