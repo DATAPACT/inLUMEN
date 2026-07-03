@@ -96,7 +96,10 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             'upstream_assets:\n    - "node_1_ingestion"',
             by_path["dagster_project/src/inlumen_dagster_project/defs/node_2_preprocessing/defs.yaml"],
         )
+        self.assertIn('"inputs"', by_path["dagster_project/storage/inputs/input_manifest.json"])
         self.assertIn('"filename": "vital_signs_short.csv"', by_path["dagster_project/storage/inputs/input_manifest.json"])
+        self.assertIn('"path": "storage/inputs/vital_signs_short.csv"', by_path["dagster_project/storage/inputs/input_manifest.json"])
+        self.assertIn("_prepare_input_manifest", by_path["dagster_project/src/inlumen_dagster_project/components/shell_command.py"])
 
 
 if __name__ == "__main__":

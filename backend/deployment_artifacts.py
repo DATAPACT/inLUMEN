@@ -1403,9 +1403,65 @@ def _dagster_yaml(data: dict) -> str:
 
 
 def _dagster_shell_command_component_source() -> str:
-    return '''from pathlib import Path
+    return '''import json
+from pathlib import Path
 
 import dagster as dg
+
+
+def _entry_with_path(entry, manifest_dir, project_root):
+    normalized = dict(entry)
+    filename = str(
+        normalized.get("filename")
+        or normalized.get("name")
+        or ""
+    ).strip()
+    raw_path = str(normalized.get("path") or "").strip()
+    if raw_path:
+        path = Path(raw_path)
+        if not path.is_absolute():
+            project_path = project_root / path
+            path = project_path if project_path.exists() else manifest_dir / path
+        normalized["path"] = str(path)
+    elif filename:
+        normalized["path"] = str(manifest_dir / filename)
+    return normalized
+
+
+def _prepare_input_manifest(source_manifest_path: Path, work_dir: Path, project_root: Path) -> Path:
+    with source_manifest_path.open("r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+
+    manifest_dir = source_manifest_path.parent
+    if isinstance(manifest.get("inputs"), list):
+        inputs = [
+            _entry_with_path(entry, manifest_dir, project_root)
+            for entry in manifest["inputs"]
+            if isinstance(entry, dict)
+        ]
+    elif isinstance(manifest.get("outputs"), list):
+        inputs = [
+            _entry_with_path(entry, manifest_dir, project_root)
+            for entry in manifest["outputs"]
+            if isinstance(entry, dict)
+        ]
+    elif isinstance(manifest.get("files"), list):
+        inputs = [
+            _entry_with_path(entry, manifest_dir, project_root)
+            for entry in manifest["files"]
+            if isinstance(entry, dict)
+        ]
+    else:
+        inputs = []
+
+    prepared_manifest = {
+        "schema_version": "inlumen.input-manifest@1",
+        "inputs": inputs,
+    }
+    prepared_path = work_dir / "_dagster_input_manifest.json"
+    with prepared_path.open("w", encoding="utf-8") as handle:
+        json.dump(prepared_manifest, handle, indent=2)
+    return prepared_path
 
 
 class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
@@ -1422,7 +1478,7 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
         deps = [dg.AssetKey(asset_key) for asset_key in self.upstream_assets]
 
         @dg.asset(name=self.asset_key, deps=deps)
-        def run_script(asset_context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+        def run_script(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             project_root = Path.cwd()
             script_path = Path(self.script_path)
             if not script_path.is_absolute():
@@ -1441,10 +1497,15 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
             if not output_manifest_path.is_absolute():
                 output_manifest_path = project_root / output_manifest_path
             output_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            prepared_input_manifest_path = _prepare_input_manifest(
+                input_manifest_path,
+                output_dir,
+                project_root,
+            )
 
             env = {
                 "INLUMEN_FLOW_ID": self.asset_key,
-                "INLUMEN_INPUT_MANIFEST": str(input_manifest_path),
+                "INLUMEN_INPUT_MANIFEST": str(prepared_input_manifest_path),
                 "INLUMEN_OUTPUT_DIR": str(output_dir),
                 "INLUMEN_OUTPUT_MANIFEST": str(output_manifest_path),
             }
@@ -1456,10 +1517,11 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
 
             result = dg.PipesSubprocessClient().run(
                 command=["python", str(script_path), *self.arguments],
-                context=asset_context,
+                context=context,
                 env=env,
                 extras={
-                    "input_manifest_path": str(input_manifest_path),
+                    "input_manifest_path": str(prepared_input_manifest_path),
+                    "source_input_manifest_path": str(input_manifest_path),
                     "output_dir": str(output_dir),
                     "output_manifest_path": str(output_manifest_path),
                 },
@@ -1626,9 +1688,11 @@ def _root_input_files_for_dagster(
 
 def _input_manifest_for_dagster(input_files: Sequence[dict]) -> str:
     manifest = {
-        "files": [
+        "schema_version": "inlumen.input-manifest@1",
+        "inputs": [
             {
                 "filename": _clean_string(file_entry.get("filename")),
+                "path": f"storage/inputs/{_safe_docker_source(_clean_string(file_entry.get('filename')))}",
                 "kind": "file",
                 "format": PurePosixPath(_clean_string(file_entry.get("filename"))).suffix.lstrip(".") or "text",
                 "description": "Sample input file copied from InLumen.",
