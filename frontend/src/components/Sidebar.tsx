@@ -23,7 +23,8 @@ import {
   FileText,
   Hash,
   Paperclip,
-  Download
+  Download,
+  ShieldCheck
 } from 'lucide-react';
 import {
   createNodeDataFromDefinition,
@@ -95,8 +96,24 @@ type DockerfileGenerationResponse = {
   deployment_files?: DeploymentBundleFile[];
 };
 
-type DagsterGenerationResponse = {
+type DeploymentValidationReport = {
+  ok?: boolean;
+  errors?: string[];
+  argo?: { ok?: boolean; errors?: string[] } | null;
+  dagster?: { ok?: boolean; errors?: string[] } | null;
+};
+
+type DeploymentRepairReport = {
+  ok?: boolean;
+  changed?: boolean;
+  actions?: string[];
+};
+
+type DeploymentBundleGenerationResponse = {
   files?: DeploymentBundleFile[];
+  manifest?: Record<string, unknown>;
+  validation_report?: DeploymentValidationReport | null;
+  repair_report?: DeploymentRepairReport | null;
 };
 
 type DeploymentBundleFile = {
@@ -124,6 +141,7 @@ type RuntimeArtifactDownload = { name: string; url: string };
 type YamlDownload = { name: string; url: string };
 type DeploymentBundleDownload = { name: string; url: string };
 type DeploymentTargets = { argo: boolean; dagster: boolean };
+type DeploymentValidationMode = "fast" | "validate" | "repair";
 
 const FAMILY_LABELS: Record<string, string> = {
   core: "Core",
@@ -157,6 +175,9 @@ export function Sidebar({
   const [yamlDownload, setYamlDownload] = useState<YamlDownload | null>(null);
   const [deploymentBundleDownload, setDeploymentBundleDownload] = useState<DeploymentBundleDownload | null>(null);
   const [deploymentError, setDeploymentError] = useState<string>("");
+  const [deploymentValidationReport, setDeploymentValidationReport] = useState<DeploymentValidationReport | null>(null);
+  const [deploymentRepairReport, setDeploymentRepairReport] = useState<DeploymentRepairReport | null>(null);
+  const [deploymentValidationMode, setDeploymentValidationMode] = useState<DeploymentValidationMode>("fast");
   const [deploymentTargets, setDeploymentTargets] = useState<DeploymentTargets>({
     argo: true,
     dagster: false,
@@ -231,7 +252,18 @@ export function Sidebar({
   const safeZipPath = (file: DeploymentBundleFile, index: number) => {
     const rawPath = String(file.path || "").trim();
     if (rawPath) {
-      const parts = rawPath
+      const parts = rawPath.replace(/\\/g, "/")
+        .split("/")
+        .map((part) => part.trim())
+        .filter((part) => part && part !== ".");
+      if (parts.length > 0 && !rawPath.startsWith("/") && !parts.includes("..")) {
+        return parts.join("/");
+      }
+    }
+    const rawFallbackPath = String(file.path || "").trim();
+    if (rawFallbackPath) {
+      const parts = rawFallbackPath
+        .replace(/\\/g, "/")
         .split("/")
         .map((part) => sanitizeZipSegment(part, "file"))
         .filter((part) => part && part !== "." && part !== "..");
@@ -242,47 +274,8 @@ export function Sidebar({
     return `nodes/${flowId}/${filename}`;
   };
 
-  const fallbackDeploymentFiles = (
-    payload: DockerfileGenerationResponse,
-  ): DeploymentBundleFile[] => {
-    const runtimeFiles = (payload.runtime_artifacts ?? []).flatMap((artifact) =>
-      (artifact.files ?? []).map((file) => ({
-        path: `nodes/${sanitizeZipSegment(artifact.flow_id, "node")}/${file.filename || "artifact.txt"}`,
-        filename: file.filename,
-        flow_id: artifact.flow_id,
-        content: file.content ?? "",
-        content_type: file.content_type,
-        role: file.filename?.startsWith("Dockerfile.") ? "dockerfile" : "runtime",
-      })),
-    );
-    const dockerfiles = (payload.dockerfiles ?? []).map((dockerfile, index) => ({
-      path: `nodes/${sanitizeZipSegment(dockerfile.flow_id, `node-${index + 1}`)}/${dockerfile.dockerfile_filename || `Dockerfile.${index + 1}`}`,
-      filename: dockerfile.dockerfile_filename || `Dockerfile.${index + 1}`,
-      flow_id: dockerfile.flow_id,
-      content: dockerfile.content ?? "",
-      content_type: "text/x-dockerfile",
-      role: "dockerfile",
-    }));
-    const byPath = new Map<string, DeploymentBundleFile>();
-    [...runtimeFiles, ...dockerfiles].forEach((file, index) => {
-      byPath.set(safeZipPath(file, index), file);
-    });
-    return [...byPath.values()];
-  };
-
-  const deploymentFilesFromResponse = (
-    payload: DockerfileGenerationResponse,
-  ): DeploymentBundleFile[] => {
-    const files = Array.isArray(payload.deployment_files)
-      ? payload.deployment_files
-      : [];
-    return files.length > 0 ? files : fallbackDeploymentFiles(payload);
-  };
-
   const buildDeploymentZip = async (
     files: DeploymentBundleFile[],
-    argoWorkflow?: { text: string; name: string },
-    targets?: DeploymentTargets,
   ) => {
     const zip = new JSZip();
     const written = new Set<string>();
@@ -301,34 +294,10 @@ export function Sidebar({
       return nextPath;
     };
 
-    const manifestFiles = files.map((file, index) => {
+    files.forEach((file, index) => {
       const path = safeZipPath(file, index);
-      const zipPath = writeFile(path, file.content ?? "");
-      return {
-        path: zipPath,
-        filename: file.filename || zipPath.split("/").pop() || "",
-        flow_id: file.flow_id || "",
-        content_type: file.content_type || "text/plain",
-        role: file.role || "runtime",
-      };
+      writeFile(path, file.content ?? "");
     });
-    const yamlPath = argoWorkflow
-      ? writeFile(`argo/${sanitizeZipSegment(argoWorkflow.name, "workflow.yaml")}`, argoWorkflow.text)
-      : "";
-    writeFile(
-      "deployment-manifest.json",
-      JSON.stringify(
-        {
-          schema_version: "inlumen.deployment-artifacts@1",
-          generated_at: new Date().toISOString(),
-          targets: targets ?? { argo: Boolean(argoWorkflow), dagster: files.some((file) => file.path?.startsWith("dagster_project/")) },
-          argo_workflow: yamlPath || null,
-          files: manifestFiles,
-        },
-        null,
-        2,
-      ) + "\n",
-    );
 
     return zip.generateAsync({
       type: "blob",
@@ -362,23 +331,35 @@ export function Sidebar({
     return await genRes.json(); // expected: { dockerfiles: [{dockerfile_filename, content}, ...] }
   };
 
-  const generateDagsterProject = async (
+  const generateDeploymentBundle = async (
     dockerfileJson: DockerfileGenerationResponse,
-  ): Promise<DagsterGenerationResponse> => {
-    const dagsterRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_dagster`, {
+  ): Promise<DeploymentBundleGenerationResponse> => {
+    const bundleRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_deployment_bundle`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         dockerfile_json: dockerfileJson,
+        targets: deploymentTargets,
+        validation_mode: deploymentValidationMode,
+        validate_bundle: deploymentValidationMode !== "fast",
+        validation: {
+          enabled: deploymentValidationMode !== "fast",
+          mode: deploymentValidationMode,
+          materialize: deploymentTargets.dagster,
+          validate_argo: deploymentTargets.argo,
+          validate_dagster: deploymentTargets.dagster,
+          argo_lint: false,
+          argo_dry_run: false,
+        },
       }),
     });
 
-    if (!dagsterRes.ok) {
-      const errText = await dagsterRes.text().catch(() => "");
-      throw new Error(`Failed to generate Dagster project: ${dagsterRes.status} ${dagsterRes.statusText} ${errText}`);
+    if (!bundleRes.ok) {
+      const errText = await bundleRes.text().catch(() => "");
+      throw new Error(`Failed to generate deployment bundle: ${bundleRes.status} ${bundleRes.statusText} ${errText}`);
     }
 
-    return await dagsterRes.json();
+    return await bundleRes.json();
   };
 
   // fetch overview properties when opening Overview tab
@@ -429,6 +410,8 @@ export function Sidebar({
   const handleGenerateDeploymentArtifacts = async () => {
     try {
       setDeploymentError("");
+      setDeploymentValidationReport(null);
+      setDeploymentRepairReport(null);
       if (!deploymentTargets.argo && !deploymentTargets.dagster) {
         throw new Error("Select at least one deployment target.");
       }
@@ -468,17 +451,13 @@ export function Sidebar({
             };
           }),
       );
-      const deploymentFiles = deploymentFilesFromResponse(dockerfile_json);
-      let bundledFiles = deploymentFiles;
-      if (deploymentTargets.dagster) {
-        const dagsterProject = await generateDagsterProject(dockerfile_json);
-        bundledFiles = [
-          ...deploymentFiles,
-          ...(Array.isArray(dagsterProject.files) ? dagsterProject.files : []),
-        ];
+      const bundle = await generateDeploymentBundle(dockerfile_json);
+      const bundledFiles = Array.isArray(bundle.files) ? bundle.files : [];
+      if (bundledFiles.length === 0) {
+        throw new Error("Deployment bundle response did not include files.");
       }
-      const deploymentRuntimeLinks = deploymentFiles
-        .filter((file) => file.role !== "dockerfile" && file.filename && !file.path?.startsWith("dagster_project/"))
+      const deploymentRuntimeLinks = bundledFiles
+        .filter((file) => file.role !== "dockerfile" && file.filename && file.path?.startsWith("nodes/"))
         .map((file, index) => {
           const blob = new Blob([file.content ?? ""], {
             type: file.content_type || "text/plain;charset=utf-8",
@@ -488,35 +467,15 @@ export function Sidebar({
             url: URL.createObjectURL(blob),
           };
         });
+      const argoWorkflowFile = bundledFiles.find((file) => file.path === "argo/workflow.yaml");
 
-      let argoWorkflow: { text: string; name: string } | undefined;
-      if (deploymentTargets.argo) {
-        const yamlRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_yaml`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            dockerfile_json,
-          }),
-        });
-
-        if (!yamlRes.ok) {
-          const errText = await yamlRes.text().catch(() => "");
-          throw new Error(`Failed to generate YAML: ${yamlRes.status} ${yamlRes.statusText} ${errText}`);
-        }
-
-        argoWorkflow = {
-          text: await yamlRes.text(),
-          name: `ai-pipeline-${Date.now()}.yaml`,
-        };
-      }
-
-      const yamlDownloadLink = argoWorkflow
+      const yamlDownloadLink = argoWorkflowFile
         ? {
-            name: argoWorkflow.name,
-            url: URL.createObjectURL(new Blob([argoWorkflow.text], { type: "application/x-yaml;charset=utf-8" })),
+            name: argoWorkflowFile.filename || "workflow.yaml",
+            url: URL.createObjectURL(new Blob([argoWorkflowFile.content ?? ""], { type: "application/x-yaml;charset=utf-8" })),
           }
         : null;
-      const bundleBlob = await buildDeploymentZip(bundledFiles, argoWorkflow, deploymentTargets);
+      const bundleBlob = await buildDeploymentZip(bundledFiles);
       const bundleUrl = URL.createObjectURL(bundleBlob);
       const targetName = [
         deploymentTargets.argo ? "argo" : "",
@@ -526,6 +485,8 @@ export function Sidebar({
       setDockerfileDownloads(links);
       setRuntimeArtifactDownloads(deploymentRuntimeLinks.length > 0 ? deploymentRuntimeLinks : runtimeLinks);
       setYamlDownload(yamlDownloadLink);
+      setDeploymentValidationReport(bundle.validation_report || null);
+      setDeploymentRepairReport(bundle.repair_report || null);
       setDeploymentBundleDownload({
         name: `inlumen-${targetName || "deployment"}-artifacts-${Date.now()}.zip`,
         url: bundleUrl,
@@ -534,6 +495,8 @@ export function Sidebar({
       clearDockerfileDownloads();
       clearRuntimeArtifactDownloads();
       clearDeploymentBundleDownload();
+      setDeploymentValidationReport(null);
+      setDeploymentRepairReport(null);
       console.error("[Sidebar.tsx] Generate deployment artifacts error:", e);
       setDeploymentError(errorToMessage(e, "Failed to generate deployment artifacts."));
     } finally {
@@ -547,6 +510,11 @@ export function Sidebar({
     ...overviewData,
   } as PipelineOverview;
   const isMainVersion = activeVersionUid === MAIN_PIPELINE_VERSION_UID;
+  const deploymentButtonLabel = deploymentValidationMode === "repair"
+    ? "Generate, Repair & Validate"
+    : deploymentValidationMode === "validate"
+      ? "Generate & Validate"
+      : "Generate Deployment Artifacts";
 
   useEffect(() => {
     setOverviewVersionDraft(overview?.version ?? "");
@@ -799,17 +767,78 @@ export function Sidebar({
                 </label>
               </div>
 
+              <div className="mb-3 rounded-md border border-border bg-muted/20 p-2">
+                <div className="mb-2 flex items-center gap-2 text-xs font-medium">
+                  <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  Deployment validation
+                </div>
+                <div className="grid grid-cols-3 gap-1">
+                  {([
+                    ["fast", "Fast"],
+                    ["validate", "Validate"],
+                    ["repair", "Repair"],
+                  ] as const).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setDeploymentValidationMode(mode)}
+                      className={cn(
+                        "rounded-md border px-2 py-1.5 text-xs transition-colors",
+                        deploymentValidationMode === mode
+                          ? "border-primary bg-primary/15 text-primary"
+                          : "border-border bg-background text-muted-foreground hover:bg-muted",
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  {deploymentValidationMode === "repair"
+                    ? "Normalize the bundle layout, then validate before download."
+                    : deploymentValidationMode === "validate"
+                      ? "Validate structure and orchestration files before download."
+                      : "Generate the canonical zip without calling the validation service."}
+                </p>
+              </div>
+
               <Button
                 className="h-auto min-h-10 w-full whitespace-normal px-3 py-2 text-center leading-snug"
                 onClick={handleGenerateDeploymentArtifacts}
                 disabled={isGeneratingDeployment || (!deploymentTargets.argo && !deploymentTargets.dagster)}
               >
-                {isGeneratingDeployment ? "Generating..." : "Generate Deployment Artifacts"}
+                {isGeneratingDeployment ? "Generating..." : deploymentButtonLabel}
               </Button>
 
               {deploymentError && (
                 <div className="mt-3 text-xs text-red-400">
                   {deploymentError}
+                </div>
+              )}
+
+              {deploymentValidationReport && (
+                <div className="mt-3 rounded-md border border-border bg-muted/20 p-2 text-xs">
+                  <div className="font-medium">
+                    Validation {deploymentValidationReport.ok ? "passed" : "failed"}
+                  </div>
+                  {deploymentValidationReport.errors && deploymentValidationReport.errors.length > 0 && (
+                    <div className="mt-1 text-red-400">
+                      {deploymentValidationReport.errors.slice(0, 2).join(" ")}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {deploymentRepairReport && (
+                <div className="mt-3 rounded-md border border-border bg-muted/20 p-2 text-xs">
+                  <div className="font-medium">
+                    Repair {deploymentRepairReport.changed ? "applied" : "checked"}
+                  </div>
+                  {deploymentRepairReport.actions && deploymentRepairReport.actions.length > 0 && (
+                    <div className="mt-1 text-muted-foreground">
+                      {deploymentRepairReport.actions.slice(0, 2).join(" ")}
+                    </div>
+                  )}
                 </div>
               )}
 

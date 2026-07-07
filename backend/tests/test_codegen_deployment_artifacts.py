@@ -4,7 +4,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from deployment_artifacts import build_argo_workflow_object, build_argo_workflow_yaml, build_dagster_project_files
+from deployment_artifacts import (
+    build_argo_workflow_object,
+    build_argo_workflow_yaml,
+    build_dagster_project_files,
+    build_deployment_bundle_files,
+)
 
 
 def dockerfile_content():
@@ -87,6 +92,7 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         files = build_dagster_project_files(self.graph(), codegen_payload())
         by_path = {item["path"]: item["content"] for item in files}
         self.assertIn("dagster_project/pyproject.toml", by_path)
+        self.assertIn("dagster==1.13.12", by_path["dagster_project/pyproject.toml"])
         self.assertIn("dagster_project/src/inlumen_dagster_project/components/shell_command.py", by_path)
         self.assertEqual(
             "print('ingest')\n",
@@ -99,7 +105,36 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertIn('"inputs"', by_path["dagster_project/storage/inputs/input_manifest.json"])
         self.assertIn('"filename": "vital_signs_short.csv"', by_path["dagster_project/storage/inputs/input_manifest.json"])
         self.assertIn('"path": "storage/inputs/vital_signs_short.csv"', by_path["dagster_project/storage/inputs/input_manifest.json"])
-        self.assertIn("_prepare_input_manifest", by_path["dagster_project/src/inlumen_dagster_project/components/shell_command.py"])
+        self.assertIn('"kind": "table"', by_path["dagster_project/storage/inputs/input_manifest.json"])
+        shell_command = by_path["dagster_project/src/inlumen_dagster_project/components/shell_command.py"]
+        self.assertIn("_prepare_input_manifest", shell_command)
+        self.assertIn("import sys", shell_command)
+        self.assertIn("project_root.parent / path", shell_command)
+        self.assertIn('normalized["kind"] = "table"', shell_command)
+        self.assertIn("command=[sys.executable, str(script_path), *self.arguments]", shell_command)
+
+    def test_canonical_deployment_bundle_has_runnable_layout(self):
+        bundle = build_deployment_bundle_files(
+            self.graph(),
+            codegen_payload(),
+            targets={"argo": True, "dagster": True},
+        )
+        by_path = {item["path"]: item["content"] for item in bundle["files"]}
+        self.assertIn("bundle-manifest.json", by_path)
+        self.assertIn("inputs/input_manifest.json", by_path)
+        self.assertIn("inputs/vital_signs_short.csv", by_path)
+        self.assertIn("nodes/node-1-ingestion/main.py", by_path)
+        self.assertIn("nodes/node-1-ingestion/Dockerfile.1", by_path)
+        self.assertIn("outputs/node-2-preprocessing/.gitkeep", by_path)
+        self.assertIn("argo/workflow.yaml", by_path)
+        self.assertIn("dagster/pyproject.toml", by_path)
+        self.assertIn("dagster/Dockerfile", by_path)
+        self.assertIn("dagster/docker-compose.yml", by_path)
+        self.assertIn("docker-compose.yml", by_path)
+        self.assertIn("COPY nodes /workspace/nodes", by_path["dagster/Dockerfile"])
+        self.assertIn("script_path: \"../nodes/node-1-ingestion/main.py\"", by_path["dagster/src/inlumen_dagster_project/defs/node_1_ingestion/defs.yaml"])
+        self.assertIn('"path": "inputs/vital_signs_short.csv"', by_path["inputs/input_manifest.json"])
+        self.assertIn('"kind": "table"', by_path["inputs/input_manifest.json"])
 
 
 if __name__ == "__main__":

@@ -3,13 +3,20 @@ import json
 import os
 import re
 import uuid
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from flask import Flask, jsonify, has_request_context, make_response, request
 
 from async_runtime import run_async
 from auth_middleware import require_auth
 from chat_state import clear_state_from_disk, load_state_from_disk, save_state_to_disk
-from deployment_artifacts import build_argo_workflow_yaml, build_dagster_project_files
+from deployment_artifacts import (
+    build_argo_workflow_yaml,
+    build_dagster_project_files,
+    build_deployment_bundle_files,
+)
 from deployment_agents import (
     generate_argo_yaml_from_graph,
     generate_dockerfiles_with_agent,
@@ -26,6 +33,24 @@ from runtime_config import add_cors_headers
 
 app = Flask(__name__)
 
+DEPLOYMENT_VALIDATION_SERVICE_URL = os.getenv(
+    "INLUMEN_DEPLOYMENT_VALIDATION_SERVICE_URL",
+    "http://127.0.0.1:8020",
+).rstrip("/")
+DEPLOYMENT_VALIDATION_TIMEOUT_SECONDS = int(
+    os.getenv("INLUMEN_DEPLOYMENT_VALIDATION_TIMEOUT_SECONDS", "1800")
+)
+DEPLOYMENT_VALIDATION_WORK_DIR = Path(
+    os.getenv("INLUMEN_DEPLOYMENT_VALIDATION_WORK_DIR", "state/deployment-validation")
+)
+DEPLOYMENT_VALIDATION_LOCAL_ROOT = Path(
+    os.getenv("INLUMEN_DEPLOYMENT_VALIDATION_LOCAL_ROOT", str(Path.cwd()))
+).resolve()
+DEPLOYMENT_VALIDATION_REMOTE_ROOT = os.getenv(
+    "INLUMEN_DEPLOYMENT_VALIDATION_REMOTE_ROOT",
+    str(DEPLOYMENT_VALIDATION_LOCAL_ROOT),
+)
+
 
 @app.after_request
 def apply_cors(response):
@@ -34,6 +59,122 @@ def apply_cors(response):
 
 def _preflight_response():
     return make_response("", 200)
+
+
+def _safe_bundle_relative_path(path: str) -> Path:
+    relative = Path(str(path or "").strip())
+    if relative.is_absolute() or any(part == ".." for part in relative.parts):
+        raise ValueError(f"Unsafe bundle file path: {path}")
+    return relative
+
+
+def _validation_remote_path(local_path: Path) -> str:
+    resolved = local_path.resolve()
+    try:
+        relative = resolved.relative_to(DEPLOYMENT_VALIDATION_LOCAL_ROOT)
+    except ValueError:
+        return str(resolved)
+    return str(Path(DEPLOYMENT_VALIDATION_REMOTE_ROOT) / relative)
+
+
+def _write_validation_bundle(files: list[dict]) -> Path:
+    bundle_dir = DEPLOYMENT_VALIDATION_WORK_DIR / f"bundle-{uuid.uuid4().hex}"
+    if not bundle_dir.is_absolute():
+        bundle_dir = Path.cwd() / bundle_dir
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+
+    for file_entry in files:
+        if not isinstance(file_entry, dict):
+            continue
+        relative_path = _safe_bundle_relative_path(str(file_entry.get("path") or ""))
+        destination = bundle_dir / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(str(file_entry.get("content") or ""), encoding="utf-8")
+    return bundle_dir
+
+
+def _post_deployment_validation_request(
+    *,
+    bundle_path: Path,
+    targets: dict,
+    options: dict,
+) -> dict:
+    mode = str(options.get("mode") or "").strip().lower()
+    endpoint = "validate-and-repair" if mode in {"repair", "validate-and-repair"} else "validate"
+    payload = {
+        "bundle_path": _validation_remote_path(bundle_path),
+        "targets": targets,
+        "materialize": bool(options.get("materialize", targets.get("dagster"))),
+        "reinstall": bool(options.get("reinstall", False)),
+        "skip_install": bool(options.get("skip_install", False)),
+        "validate_argo": bool(options.get("validate_argo", targets.get("argo"))),
+        "validate_dagster": bool(options.get("validate_dagster", targets.get("dagster"))),
+        "argo_lint": bool(options.get("argo_lint", False)),
+        "argo_dry_run": bool(options.get("argo_dry_run", False)),
+        "timeout_seconds": int(options.get("timeout_seconds") or DEPLOYMENT_VALIDATION_TIMEOUT_SECONDS),
+    }
+    encoded = json.dumps(payload).encode("utf-8")
+    http_request = Request(
+        f"{DEPLOYMENT_VALIDATION_SERVICE_URL}/{endpoint}",
+        data=encoded,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(http_request, timeout=DEPLOYMENT_VALIDATION_TIMEOUT_SECONDS) as response:
+            response_payload = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Deployment validation service rejected request: {exc.code} {detail}") from exc
+    except URLError as exc:
+        raise RuntimeError(
+            f"Deployment validation service unavailable at {DEPLOYMENT_VALIDATION_SERVICE_URL}: {exc}"
+        ) from exc
+
+    parsed = json.loads(response_payload)
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Deployment validation service returned an invalid response")
+    return parsed
+
+
+def _skip_validation_bundle_file(path: Path, bundle_root: Path) -> bool:
+    try:
+        relative = path.relative_to(bundle_root)
+    except ValueError:
+        return True
+    parts = set(relative.parts)
+    if parts & {".inlumen_dagster_validation_venv", ".dagster_home", "__pycache__"}:
+        return True
+    if path.suffix in {".pyc", ".pyo"}:
+        return True
+    if relative.parts and relative.parts[0] == "outputs" and path.name != ".gitkeep":
+        return True
+    return False
+
+
+def _read_validation_bundle_files(bundle_root: Path) -> list[dict]:
+    files: list[dict] = []
+    for path in sorted(item for item in bundle_root.rglob("*") if item.is_file()):
+        if _skip_validation_bundle_file(path, bundle_root):
+            continue
+        relative = path.relative_to(bundle_root).as_posix()
+        files.append(
+            {
+                "path": relative,
+                "filename": path.name,
+                "flow_id": "",
+                "content": path.read_text(encoding="utf-8", errors="replace"),
+                "content_type": (
+                    "application/json"
+                    if path.suffix == ".json"
+                    else "application/x-yaml;charset=utf-8"
+                    if path.suffix in {".yaml", ".yml"}
+                    else "text/plain;charset=utf-8"
+                ),
+                "role": "runtime",
+            }
+        )
+    return files
 
 
 def _optional_llm_config_from_payload(data: dict):
@@ -518,6 +659,110 @@ def agentic_generate_dagster():
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:
         print("[analytics_api.py] Error generating Dagster project:", exc)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/agentic_generate_deployment_bundle", methods=["POST", "OPTIONS"])
+@require_auth
+def agentic_generate_deployment_bundle():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+
+    data = request.get_json() or {}
+    dockerfile_json = data.get("dockerfile_json") or data.get("dockerfiles_json")
+    targets = data.get("targets") if isinstance(data.get("targets"), dict) else {}
+    validation_options = data.get("validation") if isinstance(data.get("validation"), dict) else {}
+    validation_mode = str(
+        validation_options.get("mode")
+        or data.get("validation_mode")
+        or data.get("deploymentValidationMode")
+        or "fast"
+    ).strip().lower()
+    validate_bundle = bool(
+        validation_mode in {"validate", "repair", "validate-and-repair"}
+        or
+        data.get("validate_bundle")
+        or data.get("validateDeploymentBundle")
+        or validation_options.get("enabled")
+    )
+
+    try:
+        print("[analytics_api.py] Generating canonical deployment bundle.")
+        pipeline_graph = _pipeline_graph_from_payload_or_backend(data)
+        bundle = build_deployment_bundle_files(
+            pipeline_graph,
+            dockerfile_json,
+            targets=targets,
+        )
+
+        validation_report = None
+        repair_report = None
+        if validate_bundle:
+            bundle_dir = _write_validation_bundle(bundle["files"])
+            service_report = _post_deployment_validation_request(
+                bundle_path=bundle_dir,
+                targets=bundle["manifest"]["targets"],
+                options={
+                    **validation_options,
+                    "mode": validation_mode,
+                },
+            )
+            if validation_mode in {"repair", "validate-and-repair"}:
+                repair_report = service_report.get("repair_report")
+                validation_report = (
+                    service_report.get("validation_report")
+                    if isinstance(service_report.get("validation_report"), dict)
+                    else service_report
+                )
+                if service_report.get("ok"):
+                    repaired_files = _read_validation_bundle_files(bundle_dir)
+                    if repaired_files:
+                        bundle["files"] = repaired_files
+            else:
+                validation_report = service_report
+
+            if not validation_report.get("ok"):
+                return jsonify(
+                    {
+                        "error": "Deployment bundle validation failed",
+                        "validation_report": validation_report,
+                        "repair_report": repair_report,
+                    }
+                ), 422
+
+            bundle["files"].append(
+                {
+                    "path": "validation/deployment-validation-report.json",
+                    "filename": "deployment-validation-report.json",
+                    "flow_id": "",
+                    "content": json.dumps(validation_report, indent=2) + "\n",
+                    "content_type": "application/json",
+                    "role": "deployment-validation-report",
+                }
+            )
+            if repair_report is not None:
+                bundle["files"].append(
+                    {
+                        "path": "validation/deployment-repair-report.json",
+                        "filename": "deployment-repair-report.json",
+                        "flow_id": "",
+                        "content": json.dumps(repair_report, indent=2) + "\n",
+                        "content_type": "application/json",
+                        "role": "deployment-repair-report",
+                    }
+                )
+
+        return jsonify(
+            {
+                **bundle,
+                "validation_report": validation_report,
+                "repair_report": repair_report,
+            }
+        ), 200
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        print("[analytics_api.py] Error generating deployment bundle:", exc)
         return jsonify({"error": str(exc)}), 500
 
 
