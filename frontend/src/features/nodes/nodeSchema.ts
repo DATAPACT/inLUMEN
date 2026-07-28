@@ -164,8 +164,9 @@ export const normalizeConfigurationStatus = (
     ? value
     : undefined;
 
-export const typeHasFiles = (type: StepType) =>
-  type === "input" || type === "output" || type === "action" || type === "custom";
+// Dagster treats every graph node as an executable step, so every node type
+// must offer the same simple script/input attachment workflow.
+export const typeHasFiles = (_type: StepType) => true;
 
 export const typeHasContent = (type: StepType) =>
   type === "input" || type === "output";

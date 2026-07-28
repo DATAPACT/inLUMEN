@@ -525,10 +525,16 @@ export const buildCodegenLLMRequestConfig = (config: ChatbotConfig): LLMRequestC
       "Complete the LLM provider and base URL in Settings before using code generation.",
     );
   }
+  if (!normalizedConfig.apiKey) {
+    throw new Error(
+      "Enter an LLM API key in Settings before using code generation.",
+    );
+  }
   const requestConfig: LLMRequestConfig = {
     provider: normalizedConfig.provider,
     model: codegenModel,
     base_url: normalizedConfig.baseUrl,
+    api_key: normalizedConfig.apiKey,
     model_family: "unknown",
     supports_function_calling: true,
     supports_json_output: true,
@@ -536,9 +542,6 @@ export const buildCodegenLLMRequestConfig = (config: ChatbotConfig): LLMRequestC
     supports_vision: false,
     timeout_seconds: 90,
   };
-  if (normalizedConfig.apiKey) {
-    requestConfig.api_key = normalizedConfig.apiKey;
-  }
   return requestConfig;
 };
 

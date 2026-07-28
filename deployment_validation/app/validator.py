@@ -135,7 +135,10 @@ def validate_dagster_project(
 
     required_files = [
         "pyproject.toml",
+        "config/dagster.yaml",
         "src/inlumen_dagster_project/definitions.py",
+        "src/inlumen_dagster_project/defs/__init__.py",
+        "src/inlumen_dagster_project/components/node_runner.py",
         "src/inlumen_dagster_project/components/shell_command.py",
     ]
     missing = [item for item in required_files if not (project_root / item).is_file()]
@@ -167,8 +170,26 @@ def validate_dagster_project(
         **os.environ,
         "DAGSTER_HOME": str(project_root / ".dagster_home"),
         "PYTHONPATH": str(project_root / "src"),
+        "PATH": f"{venv_dir / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
     }
     Path(env["DAGSTER_HOME"]).mkdir(parents=True, exist_ok=True)
+
+    for command in (
+        [str(venv_dir / "bin" / "dg"), "check", "toml"],
+        [str(venv_dir / "bin" / "dg"), "check", "yaml"],
+    ):
+        dg_check_step = _run(
+            command,
+            cwd=project_root,
+            timeout_seconds=timeout_seconds,
+            env=env,
+        )
+        report["steps"].append(dg_check_step)
+        if not dg_check_step["ok"]:
+            report["errors"] = [
+                "Generated Dagster project failed the current dg project checks."
+            ]
+            return report
 
     load_step = _run(
         [str(python), "-c", _validation_script()],
@@ -222,6 +243,7 @@ def _validate_bundle_structure(bundle_root: Path, targets: dict[str, Any]) -> di
     if targets.get("dagster"):
         required_paths.extend([
             "dagster/pyproject.toml",
+            "dagster/config/dagster.yaml",
             "dagster/Dockerfile",
             "dagster/docker-compose.yml",
             "dagster/src/inlumen_dagster_project/definitions.py",
@@ -356,13 +378,25 @@ def _compose_root_content() -> str:
       context: .
       dockerfile: dagster/Dockerfile
     image: inlumen-generated-dagster:local
+    init: true
     ports:
       - "3000:3000"
     volumes:
       - ./outputs:/workspace/outputs
+      - dagster_home:/workspace/dagster/.dagster_home
+      - ./dagster/config/dagster.yaml:/workspace/dagster/.dagster_home/dagster.yaml:ro
     environment:
       DAGSTER_HOME: /workspace/dagster/.dagster_home
       PYTHONUNBUFFERED: "1"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3000/', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  dagster_home:
 """
 
 
@@ -373,14 +407,71 @@ def _compose_dagster_content() -> str:
       context: ..
       dockerfile: dagster/Dockerfile
     image: inlumen-generated-dagster:local
+    init: true
     ports:
       - "3000:3000"
     volumes:
       - ../outputs:/workspace/outputs
+      - dagster_home:/workspace/dagster/.dagster_home
+      - ./config/dagster.yaml:/workspace/dagster/.dagster_home/dagster.yaml:ro
     environment:
       DAGSTER_HOME: /workspace/dagster/.dagster_home
       PYTHONUNBUFFERED: "1"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3000/', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  dagster_home:
 """
+
+
+def _is_runtime_attachment(path: Path) -> bool:
+    basename = path.name.lower()
+    return (
+        basename
+        in {
+            "requirements.txt",
+            "node-manifest.json",
+            "validation-report.json",
+            "package.json",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "pyproject.toml",
+            "poetry.lock",
+        }
+        or basename.startswith("dockerfile.")
+        or path.suffix.lower()
+        in {
+            ".py",
+            ".pyi",
+            ".sh",
+            ".bash",
+            ".js",
+            ".mjs",
+            ".cjs",
+            ".ts",
+            ".tsx",
+            ".ipynb",
+        }
+    )
+
+
+def _repair_entry_script(node_dir: Path, current_script_path: str) -> Path | None:
+    scripts = sorted(path for path in node_dir.rglob("*.py") if path.is_file())
+    if not scripts:
+        return None
+    current_name = Path(current_script_path).name
+    current = next((path for path in scripts if path.name == current_name), None)
+    if current is not None:
+        return current
+    preferred = ("main.py", "app.py", "run.py", "process.py", "pipeline.py", "script.py")
+    by_name = {path.name.lower(): path for path in scripts}
+    return next((by_name[name] for name in preferred if name in by_name), scripts[0])
 
 
 def _repair_dagster_defs(bundle_root: Path, nodes: list[dict[str, Any]], actions: list[str]) -> None:
@@ -407,9 +498,17 @@ def _repair_dagster_defs(bundle_root: Path, nodes: list[dict[str, Any]], actions
             continue
         node_path = str(node.get("path") or "").strip()
         output_path = str(node.get("output_path") or "").strip()
+        node_dir = bundle_root / node_path
         parents = [str(parent) for parent in node.get("parents") or []]
         first_parent = node_by_flow.get(parents[0]) if parents else None
-        attrs["script_path"] = f"../{node_path}/main.py"
+        entry_script = _repair_entry_script(
+            node_dir,
+            str(attrs.get("script_path") or ""),
+        )
+        if entry_script is not None:
+            relative_script = entry_script.relative_to(node_dir).as_posix()
+            attrs["script_path"] = f"../{node_path}/{relative_script}"
+        attrs["source_dir"] = f"../{node_path}"
         attrs["input_manifest_path"] = (
             f"../{first_parent.get('output_path')}/output_manifest.json"
             if first_parent
@@ -417,7 +516,17 @@ def _repair_dagster_defs(bundle_root: Path, nodes: list[dict[str, Any]], actions
         )
         attrs["output_dir"] = f"../{output_path}"
         attrs["output_manifest_path"] = f"../{output_path}/output_manifest.json"
-        attrs["context_path"] = f"../{node_path}/node-manifest.json"
+        manifest_path = node_dir / "node-manifest.json"
+        attrs["context_path"] = (
+            f"../{node_path}/node-manifest.json"
+            if manifest_path.is_file()
+            else ""
+        )
+        attrs["local_input_paths"] = [
+            f"../{node_path}/{path.relative_to(node_dir).as_posix()}"
+            for path in sorted(node_dir.rglob("*"))
+            if path.is_file() and not _is_runtime_attachment(path)
+        ]
         parsed["attributes"] = attrs
         next_text = yaml.safe_dump(parsed, sort_keys=False)
         if defs_file.read_text(encoding="utf-8") != next_text:
@@ -496,6 +605,11 @@ def repair_deployment_bundle(
         }
         _write_text_if_missing(bundle_root / "docker-compose.yml", _compose_root_content(), actions)
         _write_text_if_missing(bundle_root / "dagster" / "docker-compose.yml", _compose_dagster_content(), actions)
+        _write_text_if_missing(
+            bundle_root / "dagster" / "config" / "dagster.yaml",
+            "{}\n",
+            actions,
+        )
         _repair_dagster_defs(bundle_root, repaired_nodes, actions)
 
     next_manifest = json.dumps(manifest, indent=2) + "\n"

@@ -236,7 +236,7 @@ export function ChatbotConfigForm({
                     <Input placeholder="deepseek-v4-pro" {...field} />
                   </FormControl>
                   <p className="text-xs text-muted-foreground">
-                    Required before runtime script generation can call an LLM.
+                    Used only for coding; it reuses this configuration&apos;s provider, base URL, and API key.
                   </p>
                   <FormMessage />
                 </FormItem>

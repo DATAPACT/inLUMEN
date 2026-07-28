@@ -623,6 +623,7 @@ def build_pipeline_editing_team(
                         The create_step and insert_step type MUST be one of: input, action, output, config, storage, api, custom.
                         Use overview to find the relevant flow_id values before calling insert_step unless the flow_id values are already provided by the user.
                         Use the label/description fields for domain-specific names such as ingestion, preprocessing, model training, or alerting.
+                        Represent every capability explicitly requested by the user in the graph before finishing. Do not stop after an intermediate storage or transformation step when the request also asks for a terminal behavior. For example, a request that says "answers questions" must include a connected output step that answers questions. Re-read the user's request after tool calls and add any missing capability as a connected STEP.
                         """,
         max_tool_iterations=30,
         reflect_on_tool_use=True,

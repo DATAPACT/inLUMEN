@@ -1,4 +1,6 @@
+import base64
 import csv
+import hashlib
 import json
 import os
 import uuid
@@ -20,6 +22,7 @@ from analytics_api import (
     agentic_pipeline_editor,
     agentic_pipeline_editor_reset,
 )
+from attachment_validation import attachment_input_errors, read_attachment_probe
 from auth_middleware import require_auth
 from chat_state import clear_state_from_disk
 from generators.routes import create_generator_blueprint
@@ -39,18 +42,65 @@ CODEGEN_SERVICE_URL = os.getenv(
     "INLUMEN_CODEGEN_SERVICE_URL",
     "http://127.0.0.1:8010",
 ).rstrip("/")
+CODEGEN_SERVICE_API_KEY = os.getenv("INLUMEN_CODEGEN_SERVICE_API_KEY", "").strip()
 CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS = int(
     os.getenv("INLUMEN_CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS", "300")
 )
 CODEGEN_PIPELINE_REQUEST_TIMEOUT_SECONDS = int(
     os.getenv("INLUMEN_CODEGEN_PIPELINE_REQUEST_TIMEOUT_SECONDS", "1200")
 )
+CODEGEN_SAMPLE_BINARY_MAX_BYTES = int(
+    os.getenv("INLUMEN_CODEGEN_SAMPLE_BINARY_MAX_BYTES", str(16 * 1024 * 1024))
+)
+DEFAULT_CODEGEN_ALLOWED_PACKAGES = [
+    "pandas",
+    "numpy",
+    "pillow",
+    "scikit-learn",
+    "requests",
+    "pypdf",
+    "SpeechRecognition",
+    "pocketsphinx",
+    "textblob",
+]
 CODEGEN_RUNTIME_FILENAMES = {
     "main.py",
     "requirements.txt",
     "node-manifest.json",
     "validation-report.json",
 }
+PIPELINE_RUNTIME_BEHAVIOR_INSTRUCTION = """Design the entire pipeline as one coherent program before writing any node.
+For every edge, decide the exact output filename, format, schema or object shape, and required runtime dependencies. The producer must write that contract and the consumer must read the same contract.
+Implement every capability requested by the high-level request and graph. A terminal behavior such as answering questions, alerting, or publishing results must produce that real result, not only an intermediate score, index, or status.
+The user supplies input files containing real data. Never create input data, sample data, fake data, placeholder data, or fallback success artifacts.
+Process every supplied input with a real parser, model, algorithm, or service implementation. Never mock, simulate, stub, fabricate, or approximate the requested transformation, and never treat a structured binary format as plain UTF-8 text.
+Preserve information needed by downstream nodes. For example, retrieval pipelines must carry source chunks or records alongside vectors so the final node can return grounded content rather than only an embedding index or similarity score.
+Every node must be a finite, non-interactive Python 3.11 batch program. Validate required inputs before loading large models or doing other slow setup. Invalid inputs and processing failures must raise a clear error and exit non-zero; never serialize an exception or placeholder as a successful output.
+Before returning code, self-check every graph edge, filename, serialization shape, dependency, and requested terminal result end to end."""
+
+PIPELINE_RUNTIME_ATTACHMENT_INSTRUCTION = f"""{PIPELINE_RUNTIME_BEHAVIOR_INSTRUCTION}
+
+Create the files needed to run every pipeline node.
+For each flow_id, return main.py and requirements.txt. Leave requirements.txt empty when the script only uses the Python 3.11 standard library.
+When a node runs, its input files and files from the previous node are in the current working directory. Read them from there and write the node's output files there.
+Keep connected nodes consistent about output filenames and formats.
+Each main.py must be a finite, non-interactive batch program: do not call input(), start a server or UI, watch for files, or loop forever. Validate required input files before loading large models or doing other slow setup, then exit when the output files are written.
+Associate each returned file with its flow_id so inLUMEN can attach it to the correct node."""
+EXTERNAL_AI_RUNTIME_RESPONSE_INSTRUCTION = f"""{PIPELINE_RUNTIME_BEHAVIOR_INSTRUCTION}
+
+For every node, create:
+- main.py
+- requirements.txt only if main.py needs third-party packages
+
+Return code files only. Never create or return input data, example data, fake files, placeholder files, credentials, Dockerfiles, Dagster files, or manifests. The user will upload real input data separately.
+
+Each main.py runs with that node's uploaded input files and the previous node's output files in the current folder. It must read from that folder and write its results back to that folder. Connected nodes must agree on output filenames and formats.
+
+Each main.py must be a one-shot, non-interactive Python 3.11 batch program. It must not call input(), start a server or UI, watch for files, sleep indefinitely, or loop forever. It must validate required input files before loading large models, downloading resources, or doing other slow setup; invalid inputs must fail immediately with a clear error. A node with a downstream connection must write at least one real output file, then exit successfully.
+
+If you can create files, return one ZIP with folders named nodes/<flow_id>/. Otherwise, show each file in its own code block under a clear NODE <flow_id> heading. Return complete working code, not pseudocode.
+
+Finish with a short INPUT UPLOAD MAP. For every real external input the user must provide, state the flow_id and node label that first reads it. Inputs must be uploaded to that first consumer node, never to a later node."""
 PIPELINE_GENERATION_RUNS: dict[str, dict[str, Any]] = {}
 CHATBOT_CONFIGS_PATH = Path(
     os.getenv("CHATBOT_CONFIGS_PATH", "state/chatbot_configurations.json")
@@ -197,25 +247,92 @@ def _validation_status(report: Any) -> str:
     return ""
 
 
-def _invalid_codegen_nodes(generated_nodes: list[Any]) -> list[dict[str, Any]]:
-    invalid_nodes = []
+def _invalid_codegen_nodes(
+    generated_nodes: list[Any],
+    expected_flow_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    invalid_nodes: list[dict[str, Any]] = []
+    seen_flow_ids: list[str] = []
     for item in generated_nodes:
         if not isinstance(item, dict):
-            continue
-        artifact = item.get("generated_artifact")
-        if not isinstance(artifact, dict):
-            continue
-        report = artifact.get("validation_report")
-        if _validation_status(report) != "valid":
             invalid_nodes.append(
                 {
-                    "flow_id": str(item.get("flow_id") or ""),
+                    "flow_id": "",
+                    "errors": ["Generated node result is not an object."],
+                }
+            )
+            continue
+        flow_id = str(item.get("flow_id") or "").strip()
+        if not flow_id:
+            invalid_nodes.append(
+                {
+                    "flow_id": "",
+                    "errors": ["Generated node result is missing flow_id."],
+                }
+            )
+            continue
+        seen_flow_ids.append(flow_id)
+        artifact = item.get("generated_artifact")
+        if not isinstance(artifact, dict):
+            invalid_nodes.append(
+                {
+                    "flow_id": flow_id,
+                    "errors": ["Generated node result is missing generated_artifact."],
+                }
+            )
+            continue
+        errors: list[str] = []
+        report = artifact.get("validation_report")
+        if _validation_status(report) != "valid":
+            errors.append("Generated node validation did not pass.")
+        files = artifact.get("files") if isinstance(artifact.get("files"), list) else []
+        has_python_script = any(
+            isinstance(file_item, dict)
+            and str(file_item.get("filename") or "").strip().lower().endswith(".py")
+            and isinstance(file_item.get("content"), str)
+            and bool(str(file_item.get("content") or "").strip())
+            for file_item in files
+        )
+        if not has_python_script:
+            errors.append("Generated node does not include a non-empty Python script.")
+        if errors:
+            invalid_nodes.append(
+                {
+                    "flow_id": flow_id,
+                    "errors": errors,
                     "validation_report": report if isinstance(report, dict) else {},
                     "data_contract": artifact.get("data_contract")
                     if isinstance(artifact.get("data_contract"), dict)
                     else {},
                 }
             )
+
+    expected = [str(flow_id).strip() for flow_id in (expected_flow_ids or []) if str(flow_id).strip()]
+    for flow_id in expected:
+        count = seen_flow_ids.count(flow_id)
+        if count == 0:
+            invalid_nodes.append(
+                {
+                    "flow_id": flow_id,
+                    "errors": ["No generated files were returned for this pipeline node."],
+                }
+            )
+        elif count > 1:
+            invalid_nodes.append(
+                {
+                    "flow_id": flow_id,
+                    "errors": ["More than one generated result was returned for this pipeline node."],
+                }
+            )
+    expected_set = set(expected)
+    unknown_flow_ids = sorted(set(seen_flow_ids) - expected_set) if expected else []
+    for flow_id in unknown_flow_ids:
+        invalid_nodes.append(
+            {
+                "flow_id": flow_id,
+                "errors": ["Generated files were returned for an unknown pipeline node."],
+            }
+        )
     return invalid_nodes
 
 
@@ -296,7 +413,12 @@ def _node_file_entries(
 
 def _is_codegen_runtime_file(filename: str) -> bool:
     normalized = str(filename or "").strip()
-    return normalized in CODEGEN_RUNTIME_FILENAMES or normalized.startswith("Dockerfile.")
+    lower = normalized.lower()
+    return (
+        lower in CODEGEN_RUNTIME_FILENAMES
+        or lower.startswith("dockerfile.")
+        or lower.endswith((".py", ".pyi", ".sh", ".bash", ".js", ".mjs", ".cjs", ".ts", ".tsx"))
+    )
 
 
 def _sample_file_descriptor(
@@ -306,8 +428,6 @@ def _sample_file_descriptor(
 ) -> dict[str, Any]:
     kind = descriptor.get("kind")
     file_format = descriptor.get("format")
-    if kind not in {"table", "json", "text"}:
-        return {}
     bucket_id = bucket.removeprefix("files-step-id-")
     try:
         response = _proxy(
@@ -321,6 +441,23 @@ def _sample_file_descriptor(
     except Exception:
         return {}
     content = response.content
+    if kind not in {"table", "json", "text"}:
+        if len(content) > CODEGEN_SAMPLE_BINARY_MAX_BYTES:
+            return {
+                "size_bytes": len(content),
+                "sample_transport_error": (
+                    f"Real input exceeds the {CODEGEN_SAMPLE_BINARY_MAX_BYTES}-byte "
+                    "binary validation transport limit."
+                ),
+            }
+        return {
+            "size_bytes": len(content),
+            "sample": {
+                "content_base64": base64.b64encode(content).decode("ascii"),
+                "content_sha256": hashlib.sha256(content).hexdigest(),
+                "omitted_bytes": 0,
+            },
+        }
     max_chars = 12000
     text = content[:max_chars].decode("utf-8", errors="replace")
     omitted = max(0, len(content) - len(content[:max_chars]))
@@ -481,25 +618,50 @@ def _build_codegen_context(
             "language": "python",
             "python_version": "3.11",
             "base_image": "python:3.11-slim",
-            "allowed_packages": [
-                "pandas",
-                "numpy",
-                "pillow",
-                "scikit-learn",
-                "requests",
-            ],
+            "allowed_packages": DEFAULT_CODEGEN_ALLOWED_PACKAGES,
             "network_allowed": False,
             "max_runtime_seconds": 60,
         },
     }
 
 
+def _codegen_request_parts(
+    payload: dict[str, Any] | None = None,
+    *,
+    include_llm_key: bool = False,
+    llm_api_key: str = "",
+) -> tuple[bytes | None, dict[str, str]]:
+    headers = {"Accept": "application/json"}
+    if CODEGEN_SERVICE_API_KEY:
+        headers["Authorization"] = f"Bearer {CODEGEN_SERVICE_API_KEY}"
+
+    encoded: bytes | None = None
+    if payload is not None:
+        safe_payload = dict(payload)
+        raw_llm_config = safe_payload.get("llm_config")
+        llm_config = dict(raw_llm_config) if isinstance(raw_llm_config, dict) else {}
+        snake_case_llm_key = llm_config.pop("api_key", "")
+        camel_case_llm_key = llm_config.pop("apiKey", "")
+        request_llm_key = str(snake_case_llm_key or camel_case_llm_key).strip()
+        if isinstance(raw_llm_config, dict):
+            safe_payload["llm_config"] = llm_config
+        encoded = json.dumps(safe_payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    else:
+        request_llm_key = ""
+
+    llm_key = str(llm_api_key or request_llm_key).strip()
+    if include_llm_key and llm_key:
+        headers["X-LLM-API-Key"] = llm_key
+    return encoded, headers
+
+
 def _post_codegen_request(payload: dict[str, Any]) -> dict[str, Any]:
-    encoded = json.dumps(payload).encode("utf-8")
+    encoded, headers = _codegen_request_parts(payload, include_llm_key=True)
     http_request = Request(
         f"{CODEGEN_SERVICE_URL}/v1/generate/node-script",
         data=encoded,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -517,11 +679,11 @@ def _post_codegen_request(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _post_codegen_pipeline_request(payload: dict[str, Any]) -> dict[str, Any]:
-    encoded = json.dumps(payload).encode("utf-8")
+    encoded, headers = _codegen_request_parts(payload, include_llm_key=True)
     http_request = Request(
         f"{CODEGEN_SERVICE_URL}/v1/generate/pipeline-scripts",
         data=encoded,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -542,11 +704,11 @@ def _post_codegen_pipeline_request(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _post_codegen_pipeline_run_request(payload: dict[str, Any]) -> dict[str, Any]:
-    encoded = json.dumps(payload).encode("utf-8")
+    encoded, headers = _codegen_request_parts(payload, include_llm_key=True)
     http_request = Request(
         f"{CODEGEN_SERVICE_URL}/v1/generate/pipeline-scripts/runs",
         data=encoded,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -566,12 +728,18 @@ def _post_codegen_pipeline_run_request(payload: dict[str, Any]) -> dict[str, Any
 def _post_codegen_pipeline_run_resume_request(
     run_id: str,
     payload: dict[str, Any],
+    *,
+    llm_api_key: str = "",
 ) -> dict[str, Any]:
-    encoded = json.dumps(payload).encode("utf-8")
+    encoded, headers = _codegen_request_parts(
+        payload,
+        include_llm_key=True,
+        llm_api_key=llm_api_key,
+    )
     http_request = Request(
         f"{CODEGEN_SERVICE_URL}/v1/generate/pipeline-scripts/runs/{run_id}/resume",
         data=encoded,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -589,9 +757,10 @@ def _post_codegen_pipeline_run_resume_request(
 
 
 def _get_codegen_pipeline_run_request(run_id: str) -> dict[str, Any]:
+    _, headers = _codegen_request_parts()
     http_request = Request(
         f"{CODEGEN_SERVICE_URL}/v1/generate/pipeline-scripts/runs/{run_id}",
-        headers={"Accept": "application/json"},
+        headers=headers,
         method="GET",
     )
     try:
@@ -614,30 +783,19 @@ def _codegen_llm_config_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         if isinstance(payload.get("llm_config"), dict)
         else {}
     )
-    env_config = {
-        "model": os.getenv("INLUMEN_CODEGEN_LLM_MODEL", "").strip(),
-        "base_url": os.getenv("INLUMEN_CODEGEN_LLM_BASE_URL", "").strip(),
-        "api_key": os.getenv("INLUMEN_CODEGEN_LLM_API_KEY", "").strip(),
-        "temperature": os.getenv("INLUMEN_CODEGEN_LLM_TEMPERATURE", "").strip(),
-        "timeout_seconds": os.getenv("INLUMEN_CODEGEN_LLM_TIMEOUT_SECONDS", "").strip(),
-    }
-    merged = {
+    return {
         key: value
         for key, value in {
-            "model": raw_config.get("model") or env_config["model"],
+            "model": raw_config.get("model"),
             "base_url": raw_config.get("base_url")
-            or raw_config.get("baseUrl")
-            or env_config["base_url"],
+            or raw_config.get("baseUrl"),
             "api_key": raw_config.get("api_key")
-            or raw_config.get("apiKey")
-            or env_config["api_key"],
-            "temperature": raw_config.get("temperature") or env_config["temperature"],
-            "timeout_seconds": raw_config.get("timeout_seconds")
-            or env_config["timeout_seconds"],
+            or raw_config.get("apiKey"),
+            "temperature": raw_config.get("temperature"),
+            "timeout_seconds": raw_config.get("timeout_seconds"),
         }.items()
         if value not in (None, "")
     }
-    return merged
 
 
 def _codegen_configuration_hash(
@@ -801,17 +959,35 @@ def _build_pipeline_codegen_context(
             "language": "python",
             "python_version": "3.11",
             "base_image": "python:3.11-slim",
-            "allowed_packages": [
-                "pandas",
-                "numpy",
-                "pillow",
-                "scikit-learn",
-                "requests",
-            ],
+            "allowed_packages": DEFAULT_CODEGEN_ALLOWED_PACKAGES,
             "network_allowed": False,
             "max_runtime_seconds": 60,
         },
     }
+
+
+def _build_external_ai_runtime_prompt(
+    graph: dict[str, Any],
+    high_level_prompt: str = "",
+) -> str:
+    context = _build_pipeline_codegen_context(graph, include_samples=False)
+    graph_context = context.get("graph") if isinstance(context.get("graph"), dict) else {}
+    pipeline_request = str(high_level_prompt or "").strip()
+    if not pipeline_request:
+        pipeline_request = (
+            "Infer the intended pipeline behavior from the node labels, descriptions, "
+            "parameters, attachments, and edges below."
+        )
+    return (
+        "You are preparing runtime files that a user will manually upload to the "
+        "matching nodes of an inLUMEN pipeline.\n\n"
+        "HIGH-LEVEL PIPELINE REQUEST:\n"
+        f"{pipeline_request}\n\n"
+        "RUNTIME AND DELIVERY CONTRACT:\n"
+        f"{EXTERNAL_AI_RUNTIME_RESPONSE_INSTRUCTION}\n\n"
+        "PIPELINE GRAPH:\n"
+        f"{json.dumps(graph_context, indent=2, sort_keys=True)}\n"
+    )
 
 
 def _pipeline_sample_data_summary(graph: dict[str, Any]) -> dict[str, Any]:
@@ -862,17 +1038,35 @@ def _build_pipeline_codegen_payload(
         repair_attempts = max(0, int(repair_attempts))
     except (TypeError, ValueError):
         repair_attempts = 2
+    generation_strategy = str(
+        payload.get("generation_strategy") or "auto"
+    ).strip()
+    if generation_strategy not in {"auto", "single_pass", "per_node"}:
+        generation_strategy = "auto"
+    high_level_prompt = str(
+        payload.get("high_level_prompt")
+        or payload.get("user_instruction")
+        or ""
+    ).strip()
+    user_instruction = PIPELINE_RUNTIME_ATTACHMENT_INSTRUCTION
+    if high_level_prompt:
+        user_instruction += (
+            "\n\nHIGH-LEVEL PIPELINE REQUEST:\n"
+            + high_level_prompt
+        )
     options = {
         "persist": False,
         "repair_attempts": repair_attempts,
         "include_sample_data": include_sample_data,
         "validation_mode": validation_mode,
+        "generation_strategy": generation_strategy,
         "allow_deterministic_fallback": bool(payload.get("allow_deterministic_fallback")),
-        "user_instruction": str(payload.get("user_instruction") or ""),
+        "user_instruction": user_instruction,
     }
     metadata = {
         "generation_mode": str(payload.get("generation_mode") or "").strip(),
         "data_awareness": _pipeline_sample_data_summary(graph),
+        "high_level_prompt": high_level_prompt,
         "options": options,
     }
     return (
@@ -903,7 +1097,22 @@ def _finalize_pipeline_codegen_response(
         else {}
     )
     generation_run = _persist_codegen_run_report(codegen_response.get("generation_run"))
-    invalid_nodes = _invalid_codegen_nodes(generated_nodes)
+    graph_nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    expected_flow_ids = [
+        str(
+            node.get("id")
+            or _node_data(node).get("flow_id")
+            or _node_data(node).get("id")
+            or ""
+        ).strip()
+        for node in graph_nodes
+        if isinstance(node, dict)
+    ]
+    expected_flow_ids = [flow_id for flow_id in expected_flow_ids if flow_id]
+    invalid_nodes = _invalid_codegen_nodes(
+        generated_nodes,
+        expected_flow_ids,
+    )
     if _validation_status(integration_validation) != "valid" or invalid_nodes:
         return (
             False,
@@ -1479,6 +1688,46 @@ def pipeline_generate_scripts():
         return _json_error(502, "pipeline script generation failed", str(exc))
 
 
+@app.route("/api/pipeline/external-runtime-prompt", methods=["POST", "OPTIONS"])
+@require_auth
+def pipeline_external_runtime_prompt():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    payload = _request_json()
+    try:
+        graph_response = _proxy(
+            dispatch_graph_request,
+            "neo4j_get_graph",
+            method="GET",
+            data=b"",
+        )
+        graph_response.raise_for_status()
+        graph = _upstream_json(graph_response)
+        graph = graph if isinstance(graph, dict) else {}
+        context = _build_pipeline_codegen_context(graph, include_samples=False)
+        graph_nodes = context["graph"]["nodes"]
+        if not graph_nodes:
+            return _json_error(422, "pipeline graph has no nodes")
+        high_level_prompt = str(
+            payload.get("high_level_prompt")
+            or payload.get("user_instruction")
+            or ""
+        ).strip()
+        return jsonify(
+            {
+                "prompt": _build_external_ai_runtime_prompt(
+                    graph,
+                    high_level_prompt,
+                ),
+                "filename": "inlumen-external-ai-runtime-prompt.txt",
+                "node_count": len(graph_nodes),
+                "input_policy": "user_supplied",
+            }
+        ), 200
+    except Exception as exc:
+        return _json_error(502, "external AI runtime prompt preparation failed", str(exc))
+
+
 @app.route("/api/pipeline/generation-runs", methods=["POST", "OPTIONS"])
 @require_auth
 def pipeline_generation_runs():
@@ -1535,14 +1784,33 @@ def pipeline_generation_run_resume(run_id: str):
                 404,
                 "pipeline generation run cannot be resumed; backend run metadata is unavailable",
             )
+        existing_options = (
+            local_run.get("metadata", {}).get("options", {})
+            if isinstance(local_run.get("metadata"), dict)
+            else {}
+        )
+        original_instruction = str(
+            existing_options.get("user_instruction")
+            if isinstance(existing_options, dict)
+            else ""
+        ).strip()
+        repair_instruction = str(payload.get("user_instruction") or "").strip()
+        combined_instruction = original_instruction
+        if repair_instruction:
+            combined_instruction += (
+                "\n\nREPAIR REQUEST:\n"
+                + repair_instruction
+            )
         resume_payload = {
             "flow_id": str(payload.get("flow_id") or "").strip() or None,
             "repair_attempts": payload.get("repair_attempts", 4),
-            "user_instruction": str(payload.get("user_instruction") or ""),
+            "user_instruction": combined_instruction,
         }
+        resume_llm_config = _codegen_llm_config_from_payload(payload)
         codegen_run = _post_codegen_pipeline_run_resume_request(
             run_id,
             resume_payload,
+            llm_api_key=str(resume_llm_config.get("api_key") or ""),
         )
         new_run_id = str(codegen_run.get("run_id") or "").strip()
         if not new_run_id:
@@ -1657,6 +1925,28 @@ def node_files(node_id: str):
         uploaded = request.files.get("file")
         if uploaded is None:
             return _json_error(400, "file is required")
+        uploaded_filename = str(uploaded.filename or "").strip()
+        if uploaded_filename and not _is_codegen_runtime_file(uploaded_filename):
+            try:
+                probe, size_bytes = read_attachment_probe(uploaded.stream)
+            except (OSError, ValueError) as exc:
+                return _json_error(
+                    422,
+                    "input file could not be inspected",
+                    str(exc),
+                )
+            input_errors = attachment_input_errors(
+                uploaded_filename,
+                probe,
+                size_bytes=size_bytes,
+            )
+            if input_errors:
+                return _json_error(
+                    422,
+                    "invalid input attachment",
+                    input_errors,
+                )
+            uploaded.stream.seek(0)
         storage_response = _proxy(
             dispatch_object_request,
             "minio_upload_file",

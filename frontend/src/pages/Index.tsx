@@ -69,6 +69,7 @@ import { ChatbotConfigForm } from '@/components/ChatbotConfigForm';
 const CHAT_SESSION_KEY = "chat-session-id";
 const CHAT_TRANSCRIPT_KEY = "inlumen-chat-transcript";
 const CHAT_HISTORY_KEY = "inlumen-chat-history";
+const PIPELINE_PROMPT_KEY = "inlumen-pipeline-high-level-prompt";
 const PANEL_STATE_KEY = "inlumen-panel-preferences";
 const THEME_KEY = "inlumen-theme";
 const CHAT_PROMPT_SUGGESTIONS = [
@@ -220,9 +221,13 @@ const Index = () => {
   const [isClearingAll, setIsClearingAll] = useState(false);
   const [isGeneratingProvenanceReport, setIsGeneratingProvenanceReport] = useState(false);
   const [isDownloadingProvO, setIsDownloadingProvO] = useState(false);
+  const [workspaceResetKey, setWorkspaceResetKey] = useState(0);
   const [activeVersionUid, setActiveVersionUid] = useState(MAIN_PIPELINE_VERSION_UID);
   const [activeVersionName, setActiveVersionName] = useState('Main');
   const [activePipelineDescription, setActivePipelineDescription] = useState('');
+  const [pipelineHighLevelPrompt, setPipelineHighLevelPrompt] = useState(
+    () => localStorage.getItem(PIPELINE_PROMPT_KEY) || "",
+  );
   const activeVersionSaveTimeoutRef = useRef<number | null>(null);
   const activeVersionDirtyRef = useRef(false);
   const activeVersionUidRef = useRef(MAIN_PIPELINE_VERSION_UID);
@@ -251,6 +256,14 @@ const Index = () => {
   useEffect(() => {
     localStorage.setItem(PANEL_STATE_KEY, JSON.stringify(panelPreferences));
   }, [panelPreferences]);
+
+  useEffect(() => {
+    if (pipelineHighLevelPrompt) {
+      localStorage.setItem(PIPELINE_PROMPT_KEY, pipelineHighLevelPrompt);
+    } else {
+      localStorage.removeItem(PIPELINE_PROMPT_KEY);
+    }
+  }, [pipelineHighLevelPrompt]);
 
   useEffect(() => {
     if (conversation.length === 0) return;
@@ -514,6 +527,12 @@ const Index = () => {
       }
 
       const syncedGraph = await flowCanvasRef.current.syncFromBackend(data.graph);
+      const visibleNodeCountBefore = Array.isArray(canvasGraph?.nodes)
+        ? canvasGraph.nodes.length
+        : 0;
+      if (visibleNodeCountBefore === 0 && syncedGraph.nodes.length > 0) {
+        setPipelineHighLevelPrompt(messageText.trim());
+      }
       scheduleActiveVersionSnapshot();
       const sync = data.sync;
       const nodeCount = sync?.node_count ?? syncedGraph.nodes.length;
@@ -737,6 +756,7 @@ const Index = () => {
 
   const handleBlankPipeline = () => {
     updateActiveVersion(MAIN_PIPELINE_VERSION_UID, 'Main');
+    setPipelineHighLevelPrompt("");
     setFlowNodes([]);
     setSelectedNode(null);
     localStorage.removeItem('ai-flow-nodes');
@@ -938,7 +958,9 @@ const Index = () => {
       applyActiveVersionTimestamps(result.version);
       setFlowNodes([]);
       setSelectedNode(null);
+      setPipelineHighLevelPrompt("");
       resetLocalConversation();
+      setWorkspaceResetKey((key) => key + 1);
       localStorage.removeItem('ai-flow');
       localStorage.removeItem('ai-flow-nodes');
       localStorage.removeItem('ai-flow-edges');
@@ -1059,6 +1081,7 @@ const Index = () => {
             activeVersionUid={activeVersionUid}
             onOverviewUpdated={handleOverviewUpdated}
             activeChatbotConfig={activeConfig}
+            workspaceResetKey={workspaceResetKey}
           />
         )}
 
@@ -1073,6 +1096,7 @@ const Index = () => {
                   onRemoveEdge={handleRemoveEdge}
                   isLightMode={isLightMode}
                   activeChatbotConfig={activeConfig}
+                  pipelinePrompt={pipelineHighLevelPrompt || activePipelineDescription}
                   onVersionSaved={handleVersionSaved}
                   onCanvasEdited={scheduleActiveVersionSnapshot}
                   onActiveVersionChange={updateActiveVersion}

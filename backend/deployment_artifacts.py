@@ -32,7 +32,7 @@ DOCKERFILE_INSTRUCTIONS = {
 DOCKERFILE_NAME_RE = re.compile(r"^Dockerfile\.([A-Za-z0-9][A-Za-z0-9_.-]*)$")
 STEP_ID_RE = re.compile(r"files-step-id-([^/]+)$")
 CODEGEN_GENERATOR = "inlumen-codegen-service"
-DAGSTER_PINNED_VERSION = "1.13.12"
+DAGSTER_PINNED_VERSION = "1.13.14"
 
 
 class DeploymentArtifactValidationError(ValueError):
@@ -1410,14 +1410,22 @@ def _deployment_files_for_step(dockerfiles_payload: Any, flow_id: str) -> List[d
     return output
 
 
-def _dagster_file(path: str, content: str, role: str = "dagster") -> dict:
+def _dagster_file(
+    path: str,
+    content: str,
+    role: str = "dagster",
+    *,
+    content_type: str = "text/plain;charset=utf-8",
+    encoding: str = "",
+) -> dict:
     return {
         "path": path,
         "filename": PurePosixPath(path).name,
         "flow_id": "",
         "content": content,
-        "content_type": "text/plain;charset=utf-8",
+        "content_type": content_type,
         "role": role,
+        **({"encoding": encoding} if encoding else {}),
     }
 
 
@@ -1425,8 +1433,70 @@ def _dagster_yaml(data: dict) -> str:
     return dump_yaml(data)
 
 
+def _dagster_node_runner_source() -> str:
+    return '''import os
+import signal
+import subprocess
+import sys
+
+
+def _stop_process_tree(process):
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=10)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except ProcessLookupError:
+        return
+    process.wait()
+
+
+def main():
+    if len(sys.argv) < 3:
+        print("Node runner requires a timeout and command.", file=sys.stderr)
+        return 2
+    timeout_seconds = max(1, int(sys.argv[1]))
+    command = sys.argv[2:]
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        start_new_session=(os.name == "posix"),
+    )
+    try:
+        return process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        print(
+            f"ERROR: node script timed out after {timeout_seconds} seconds. "
+            "Scripts must finish without waiting for input, running a server, "
+            "or looping forever.",
+            file=sys.stderr,
+        )
+        _stop_process_tree(process)
+        return 124
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
 def _dagster_shell_command_component_source() -> str:
-    return '''import json
+    return '''import hashlib
+import json
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -1460,7 +1530,23 @@ def _entry_with_path(entry, manifest_dir, project_root):
     return normalized
 
 
-def _prepare_input_manifest(source_manifest_path: Path, work_dir: Path, project_root: Path) -> Path:
+def _resolved_project_path(raw_path, project_root):
+    path = Path(raw_path)
+    if path.is_absolute():
+        return path
+    candidates = [
+        project_root / path,
+        project_root.parent / path,
+    ]
+    return next((candidate for candidate in candidates if candidate.exists()), candidates[0])
+
+
+def _prepare_input_manifest(
+    source_manifest_path: Path,
+    work_dir: Path,
+    project_root: Path,
+    local_input_paths,
+) -> Path:
     with source_manifest_path.open("r", encoding="utf-8") as handle:
         manifest = json.load(handle)
 
@@ -1486,6 +1572,29 @@ def _prepare_input_manifest(source_manifest_path: Path, work_dir: Path, project_
     else:
         inputs = []
 
+    # Files attached directly to this node are local inputs even when the node
+    # also receives an upstream output manifest. Prefer the local attachment
+    # when it has the same filename as an upstream file.
+    for raw_path in local_input_paths:
+        path = _resolved_project_path(raw_path, project_root)
+        if not path.is_file():
+            continue
+        filename = path.name
+        file_format = path.suffix.lstrip(".").lower() or "text"
+        inputs = [
+            entry
+            for entry in inputs
+            if str(entry.get("filename") or entry.get("name") or "") != filename
+        ]
+        inputs.append(
+            {
+                "filename": filename,
+                "path": str(path.resolve()),
+                "kind": "table" if file_format in {"csv", "tsv", "parquet"} else "file",
+                "format": file_format,
+            }
+        )
+
     prepared_manifest = {
         "schema_version": "inlumen.input-manifest@1",
         "inputs": inputs,
@@ -1496,15 +1605,121 @@ def _prepare_input_manifest(source_manifest_path: Path, work_dir: Path, project_
     return prepared_path
 
 
+def _copy_node_workspace(source_dir: Path, work_dir: Path) -> None:
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    for source in source_dir.iterdir():
+        target = work_dir / source.name
+        if source.is_dir():
+            shutil.copytree(source, target)
+        else:
+            shutil.copy2(source, target)
+
+
+def _stage_manifest_inputs(prepared_manifest_path: Path, work_dir: Path) -> None:
+    with prepared_manifest_path.open("r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    for entry in manifest.get("inputs") or []:
+        if not isinstance(entry, dict):
+            continue
+        source = Path(str(entry.get("path") or ""))
+        if not source.is_file():
+            continue
+        filename = Path(str(entry.get("filename") or source.name)).name
+        target = work_dir / filename
+        # Direct node attachments were copied first and take precedence.
+        if target.exists():
+            continue
+        shutil.copy2(source, target)
+
+
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _workspace_snapshot(work_dir: Path, ignored_paths) -> dict[str, str]:
+    ignored = {path.resolve() for path in ignored_paths}
+    snapshot = {}
+    for path in work_dir.rglob("*"):
+        if not path.is_file() or path.resolve() in ignored:
+            continue
+        relative = path.relative_to(work_dir)
+        if "__pycache__" in relative.parts or path.suffix == ".pyc":
+            continue
+        snapshot[relative.as_posix()] = _file_digest(path)
+    return snapshot
+
+
+def _ensure_output_manifest(
+    output_dir: Path,
+    output_manifest_path: Path,
+    baseline: dict[str, str],
+    prepared_input_manifest_path: Path,
+) -> None:
+    if output_manifest_path.is_file():
+        try:
+            with output_manifest_path.open("r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            if isinstance(manifest, dict) and isinstance(manifest.get("outputs"), list):
+                for entry in manifest["outputs"]:
+                    if not isinstance(entry, dict) or not entry.get("path"):
+                        continue
+                    path = Path(str(entry["path"]))
+                    if not path.is_absolute():
+                        entry["path"] = str((output_dir / path).resolve())
+                with output_manifest_path.open("w", encoding="utf-8") as handle:
+                    json.dump(manifest, handle, indent=2)
+                    handle.write("\\n")
+                return
+        except (OSError, ValueError, TypeError):
+            pass
+
+    current = _workspace_snapshot(
+        output_dir,
+        [output_manifest_path, prepared_input_manifest_path],
+    )
+    outputs = []
+    for relative, digest in sorted(current.items()):
+        if baseline.get(relative) == digest:
+            continue
+        path = output_dir / relative
+        file_format = path.suffix.lstrip(".").lower() or "text"
+        outputs.append(
+            {
+                "filename": relative,
+                "path": str(path.resolve()),
+                "kind": "table" if file_format in {"csv", "tsv", "parquet"} else "file",
+                "format": file_format,
+            }
+        )
+    with output_manifest_path.open("w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "schema_version": "inlumen.output-manifest@1",
+                "outputs": outputs,
+            },
+            handle,
+            indent=2,
+        )
+        handle.write("\\n")
+
+
 class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
     asset_key: str
     script_path: str
+    source_dir: str
     upstream_assets: list[str] = []
     input_manifest_path: str
     output_dir: str
     output_manifest_path: str
     context_path: str = ""
     arguments: list[str] = []
+    local_input_paths: list[str] = []
 
     def build_defs(self, context: dg.ComponentLoadContext) -> dg.Definitions:
         deps = [dg.AssetKey(asset_key) for asset_key in self.upstream_assets]
@@ -1516,6 +1731,10 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
             if not script_path.is_absolute():
                 script_path = project_root / script_path
 
+            source_dir = Path(self.source_dir)
+            if not source_dir.is_absolute():
+                source_dir = project_root / source_dir
+
             input_manifest_path = Path(self.input_manifest_path)
             if not input_manifest_path.is_absolute():
                 input_manifest_path = project_root / input_manifest_path
@@ -1523,17 +1742,30 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
             output_dir = Path(self.output_dir)
             if not output_dir.is_absolute():
                 output_dir = project_root / output_dir
-            output_dir.mkdir(parents=True, exist_ok=True)
+            _copy_node_workspace(source_dir, output_dir)
 
             output_manifest_path = Path(self.output_manifest_path)
             if not output_manifest_path.is_absolute():
                 output_manifest_path = project_root / output_manifest_path
             output_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            if output_manifest_path.exists():
+                output_manifest_path.unlink()
             prepared_input_manifest_path = _prepare_input_manifest(
                 input_manifest_path,
                 output_dir,
                 project_root,
+                self.local_input_paths,
             )
+            _stage_manifest_inputs(prepared_input_manifest_path, output_dir)
+            baseline = _workspace_snapshot(
+                output_dir,
+                [output_manifest_path, prepared_input_manifest_path],
+            )
+            try:
+                relative_script_path = script_path.relative_to(source_dir)
+            except ValueError:
+                relative_script_path = Path(script_path.name)
+            working_script_path = output_dir / relative_script_path
 
             env = {
                 "INLUMEN_FLOW_ID": self.asset_key,
@@ -1547,16 +1779,56 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
                     context_path = project_root / context_path
                 env["INLUMEN_CONTEXT_PATH"] = str(context_path)
 
-            result = dg.PipesSubprocessClient().run(
-                command=[sys.executable, str(script_path), *self.arguments],
-                context=context,
-                env=env,
-                extras={
-                    "input_manifest_path": str(prepared_input_manifest_path),
-                    "source_input_manifest_path": str(input_manifest_path),
-                    "output_dir": str(output_dir),
-                    "output_manifest_path": str(output_manifest_path),
-                },
+            try:
+                timeout_seconds = max(
+                    1,
+                    int(os.getenv("INLUMEN_NODE_TIMEOUT_SECONDS", "300")),
+                )
+            except ValueError:
+                timeout_seconds = 300
+            context.log.info(
+                "Running attached script %s with a %s second timeout.",
+                working_script_path.name,
+                timeout_seconds,
+            )
+            runner_path = Path(__file__).with_name("node_runner.py")
+            command = [
+                sys.executable,
+                str(runner_path),
+                str(timeout_seconds),
+                sys.executable,
+                str(working_script_path),
+                *self.arguments,
+            ]
+            try:
+                result = dg.PipesSubprocessClient().run(
+                    command=command,
+                    context=context,
+                    env=env,
+                    cwd=str(output_dir),
+                    extras={
+                        "input_manifest_path": str(prepared_input_manifest_path),
+                        "source_input_manifest_path": str(input_manifest_path),
+                        "output_dir": str(output_dir),
+                        "output_manifest_path": str(output_manifest_path),
+                        "timeout_seconds": timeout_seconds,
+                    },
+                )
+            except Exception as exc:
+                if "code 124" in str(exc):
+                    raise dg.Failure(
+                        description=(
+                            f"Node {self.asset_key} timed out after "
+                            f"{timeout_seconds} seconds. Attached scripts must be "
+                            "finite, non-interactive batch programs."
+                        )
+                    ) from exc
+                raise
+            _ensure_output_manifest(
+                output_dir,
+                output_manifest_path,
+                baseline,
+                prepared_input_manifest_path,
             )
             try:
                 return result.get_materialize_result()
@@ -1579,9 +1851,19 @@ def _dagster_readme(
     bundle_layout: bool = False,
 ) -> str:
     sample_note = (
-        "Sample input files from InLumen were copied into `storage/inputs/`."
+        "Sample input files from InLumen were copied into `../inputs/`."
+        if has_sample_inputs and bundle_layout
+        else "Sample input files from InLumen were copied into `storage/inputs/`."
         if has_sample_inputs
-        else "No sample input files were detected; add files beside `storage/inputs/input_manifest.json` before materializing root assets."
+        else (
+            "No sample input files were detected; add files beside "
+            "`../inputs/input_manifest.json` before materializing root assets."
+        )
+        if bundle_layout
+        else (
+            "No sample input files were detected; add files beside "
+            "`storage/inputs/input_manifest.json` before materializing root assets."
+        )
     )
     run_commands = (
         "```bash\n"
@@ -1592,12 +1874,12 @@ def _dagster_readme(
         if bundle_layout
         else "```bash\n"
         "pip install -e .\n"
-        "dagster dev -m inlumen_dagster_project.definitions\n"
+        "dg dev\n"
         "```"
     )
     return f"""# InLumen Dagster Deployment
 
-This project was generated deterministically from persisted InLumen runtime artifacts.
+This project was generated deterministically from the files attached to each InLumen node.
 
 ## Assets
 
@@ -1607,12 +1889,18 @@ This project was generated deterministically from persisted InLumen runtime arti
 
 {run_commands}
 
-The reusable component in `src/inlumen_dagster_project/components/shell_command.py` launches each node script with Dagster Pipes and preserves the InLumen runtime contract:
+Every node uses the same simple file rule:
 
-- `INLUMEN_INPUT_MANIFEST`
-- `INLUMEN_OUTPUT_DIR`
-- `INLUMEN_OUTPUT_MANIFEST`
-- `INLUMEN_CONTEXT_PATH`
+1. `main.py` (or another Python script)
+2. `requirements.txt` only when third-party packages are needed
+3. Any input files used by the node
+
+InLumen copies those files and upstream results into the script's working
+directory, runs the script, and passes new or changed files to downstream nodes.
+No Dagster-specific code or configuration is required in a node script.
+Scripts run as non-interactive batch jobs and are stopped after 300 seconds by
+default. Set `INLUMEN_NODE_TIMEOUT_SECONDS` in the environment to change the
+limit.
 
 {sample_note}
 """
@@ -1622,15 +1910,30 @@ def _dagster_project_metadata_content(install_requires: Sequence[str]) -> str:
     dependencies = [
         f"dagster=={DAGSTER_PINNED_VERSION}",
         f"dagster-pipes=={DAGSTER_PINNED_VERSION}",
+        f"dagster-webserver=={DAGSTER_PINNED_VERSION}",
+        f"dagster-dg-cli=={DAGSTER_PINNED_VERSION}",
         *install_requires,
     ]
     unique_dependencies = []
     seen = set()
+    managed_dagster_packages = {
+        "dagster",
+        "dagster-pipes",
+        "dagster-webserver",
+        "dagster-dg-cli",
+    }
+    seen_managed_packages = set()
     for dependency in dependencies:
         cleaned = dependency.strip()
         if not cleaned or cleaned.startswith("#"):
             continue
         key = cleaned.lower()
+        package_name = re.split(r"[\s\[<>=!~;]", key, maxsplit=1)[0]
+        package_name = package_name.replace("_", "-")
+        if package_name in managed_dagster_packages:
+            if package_name in seen_managed_packages:
+                continue
+            seen_managed_packages.add(package_name)
         if key in seen:
             continue
         seen.add(key)
@@ -1644,10 +1947,18 @@ def _dagster_project_metadata_content(install_requires: Sequence[str]) -> str:
 name = "inlumen-dagster-project"
 version = "0.1.0"
 description = "Dagster project generated from InLumen deployment artifacts."
-requires-python = ">=3.11"
+requires-python = ">=3.10,<3.15"
 dependencies = [
 {dependency_lines}
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inlumen_dagster_project"]
+force-include = {{ "pyproject.toml" = "pyproject.toml" }}
 
 [tool.dagster]
 module_name = "inlumen_dagster_project.definitions"
@@ -1659,6 +1970,7 @@ directory_type = "project"
 [tool.dg.project]
 root_module = "inlumen_dagster_project"
 defs_module = "inlumen_dagster_project.defs"
+registry_modules = ["inlumen_dagster_project.components"]
 """
 
 
@@ -1670,21 +1982,22 @@ WORKDIR /workspace
 COPY dagster /workspace/dagster
 COPY inputs /workspace/inputs
 COPY nodes /workspace/nodes
-RUN mkdir -p /workspace/outputs
+RUN mkdir -p /workspace/outputs /workspace/dagster/.dagster_home
 WORKDIR /workspace/dagster
 RUN pip install --no-cache-dir --upgrade pip \\
     && pip install --no-cache-dir -e .
 EXPOSE 3000
-CMD ["dagster", "dev", "-m", "inlumen_dagster_project.definitions", "-h", "0.0.0.0", "-p", "3000"]
+CMD ["dg", "dev", "--host", "0.0.0.0", "--port", "3000"]
 """
     return """FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY . /app
+RUN mkdir -p /app/.dagster_home
 RUN pip install --no-cache-dir --upgrade pip \\
     && pip install --no-cache-dir -e .
 EXPOSE 3000
-CMD ["dagster", "dev", "-m", "inlumen_dagster_project.definitions", "-h", "0.0.0.0", "-p", "3000"]
+CMD ["dg", "dev", "--host", "0.0.0.0", "--port", "3000"]
 """
 
 
@@ -1696,13 +2009,26 @@ def _dagster_docker_compose_content(*, bundle_layout: bool = False) -> str:
       context: ..
       dockerfile: dagster/Dockerfile
     image: inlumen-generated-dagster:local
+    init: true
     ports:
       - "3000:3000"
     volumes:
       - ../outputs:/workspace/outputs
+      - dagster_home:/workspace/dagster/.dagster_home
+      - ./config/dagster.yaml:/workspace/dagster/.dagster_home/dagster.yaml:ro
     environment:
       DAGSTER_HOME: /workspace/dagster/.dagster_home
       PYTHONUNBUFFERED: "1"
+      INLUMEN_NODE_TIMEOUT_SECONDS: "${INLUMEN_NODE_TIMEOUT_SECONDS:-300}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3000/', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  dagster_home:
 """
     return """services:
   dagster:
@@ -1710,13 +2036,26 @@ def _dagster_docker_compose_content(*, bundle_layout: bool = False) -> str:
       context: .
       dockerfile: Dockerfile
     image: inlumen-generated-dagster:local
+    init: true
     ports:
       - "3000:3000"
     volumes:
       - ./storage:/app/storage
+      - dagster_home:/app/.dagster_home
+      - ./config/dagster.yaml:/app/.dagster_home/dagster.yaml:ro
     environment:
       DAGSTER_HOME: /app/.dagster_home
       PYTHONUNBUFFERED: "1"
+      INLUMEN_NODE_TIMEOUT_SECONDS: "${INLUMEN_NODE_TIMEOUT_SECONDS:-300}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3000/', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  dagster_home:
 """
 
 
@@ -1727,25 +2066,38 @@ def _bundle_root_docker_compose_content() -> str:
       context: .
       dockerfile: dagster/Dockerfile
     image: inlumen-generated-dagster:local
+    init: true
     ports:
       - "3000:3000"
     volumes:
       - ./outputs:/workspace/outputs
+      - dagster_home:/workspace/dagster/.dagster_home
+      - ./dagster/config/dagster.yaml:/workspace/dagster/.dagster_home/dagster.yaml:ro
     environment:
       DAGSTER_HOME: /workspace/dagster/.dagster_home
       PYTHONUNBUFFERED: "1"
+      INLUMEN_NODE_TIMEOUT_SECONDS: "${INLUMEN_NODE_TIMEOUT_SECONDS:-300}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3000/', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  dagster_home:
 """
 
 
 def _dagster_definitions_source() -> str:
     return """from pathlib import Path
 
-import dagster as dg
+from dagster import definitions, load_from_defs_folder
 
 
-@dg.definitions
+@definitions
 def defs():
-    return dg.load_from_defs_folder(project_root=Path(__file__).resolve().parents[2])
+    return load_from_defs_folder(path_within_project=Path(__file__).parent)
 """
 
 
@@ -1775,6 +2127,24 @@ def _root_input_files_for_dagster(
         "requirements.txt",
         "node-manifest.json",
         "validation-report.json",
+        "package.json",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "pyproject.toml",
+        "poetry.lock",
+    }
+    runtime_suffixes = {
+        ".py",
+        ".pyi",
+        ".sh",
+        ".bash",
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".ts",
+        ".tsx",
+        ".ipynb",
     }
     input_files: List[dict] = []
     for step in steps:
@@ -1785,7 +2155,12 @@ def _root_input_files_for_dagster(
             filename = _clean_string(file_entry.get("filename"))
             if not filename:
                 continue
-            if filename in runtime_filenames or filename.startswith("Dockerfile."):
+            basename = PurePosixPath(filename).name
+            if (
+                basename in runtime_filenames
+                or basename.startswith("Dockerfile.")
+                or PurePosixPath(basename).suffix.lower() in runtime_suffixes
+            ):
                 continue
             input_files.append(file_entry)
     return input_files
@@ -1797,6 +2172,38 @@ def _manifest_format_for_filename(filename: str) -> str:
 
 def _manifest_kind_for_format(file_format: str) -> str:
     return "table" if file_format in {"csv", "tsv", "parquet"} else "file"
+
+
+def _is_dagster_runtime_file(filename: str) -> bool:
+    basename = PurePosixPath(filename).name.lower()
+    return (
+        basename
+        in {
+            "requirements.txt",
+            "node-manifest.json",
+            "validation-report.json",
+            "package.json",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "pyproject.toml",
+            "poetry.lock",
+        }
+        or basename.startswith("dockerfile.")
+        or PurePosixPath(basename).suffix
+        in {
+            ".py",
+            ".pyi",
+            ".sh",
+            ".bash",
+            ".js",
+            ".mjs",
+            ".cjs",
+            ".ts",
+            ".tsx",
+            ".ipynb",
+        }
+    )
 
 
 def _input_manifest_for_dagster(input_files: Sequence[dict]) -> str:
@@ -1817,6 +2224,139 @@ def _input_manifest_for_dagster(input_files: Sequence[dict]) -> str:
         ]
     }
     return json.dumps(manifest, indent=2) + "\n"
+
+
+def _dagster_runtime_for_step(
+    step_id: str,
+    dockerfiles_payload: Any,
+) -> dict:
+    files = _deployment_files_for_step(dockerfiles_payload, step_id)
+    files_by_name = {
+        _clean_string(item.get("filename")): item
+        for item in files
+        if _clean_string(item.get("filename"))
+    }
+    basenames: Dict[str, List[str]] = defaultdict(list)
+    for filename in files_by_name:
+        basenames[PurePosixPath(filename).name].append(filename)
+
+    errors: List[str] = []
+    if not files_by_name:
+        errors.append(
+            f"Node {step_id} has no attached files. Attach a Python script and any "
+            "input files needed by the step."
+        )
+
+    requirements_names = basenames.get("requirements.txt") or []
+    manifest_names = basenames.get("node-manifest.json") or []
+
+    dockerfile = _dockerfile_lookup(dockerfiles_payload).get(step_id) or {}
+    command = dockerfile.get("command")
+    if not isinstance(command, list) or not all(isinstance(item, str) for item in command):
+        command = _extract_json_cmd_from_dockerfile(_clean_string(dockerfile.get("content")))
+
+    script_filename = ""
+    script_arg_index = -1
+    for index, token in enumerate(command):
+        normalized = token.replace("\\", "/")
+        if not normalized.lower().endswith(".py"):
+            continue
+        if normalized.startswith("/app/"):
+            normalized = normalized[len("/app/"):]
+        normalized = normalized.lstrip("./")
+        if normalized in files_by_name:
+            script_filename = normalized
+            script_arg_index = index
+            break
+        matches = basenames.get(PurePosixPath(normalized).name) or []
+        if len(matches) == 1:
+            script_filename = matches[0]
+            script_arg_index = index
+            break
+
+    if not script_filename:
+        python_files = sorted(
+            filename
+            for filename in files_by_name
+            if PurePosixPath(filename).suffix.lower() == ".py"
+        )
+        preferred_names = (
+            "main.py",
+            "app.py",
+            "run.py",
+            "process.py",
+            "pipeline.py",
+            "script.py",
+        )
+        python_by_basename = {
+            PurePosixPath(filename).name.lower(): filename
+            for filename in python_files
+        }
+        script_filename = next(
+            (
+                python_by_basename[name]
+                for name in preferred_names
+                if name in python_by_basename
+            ),
+            python_files[0] if python_files else "",
+        )
+
+    if not script_filename:
+        errors.append(
+            f"Node {step_id} attachments do not include a Python entry script."
+        )
+    elif not str(files_by_name[script_filename].get("content") or "").strip():
+        errors.append(
+            f"Node {step_id} attached Python entry script {script_filename} is empty."
+        )
+
+    if errors:
+        raise DeploymentArtifactValidationError(
+            "Dagster node attachment validation failed",
+            errors,
+        )
+
+    requirements_name = requirements_names[0] if requirements_names else ""
+    manifest_name = manifest_names[0] if manifest_names else ""
+    arguments = command[script_arg_index + 1:] if script_arg_index >= 0 else []
+    return {
+        "script_filename": script_filename,
+        "script_content": str(files_by_name[script_filename].get("content") or ""),
+        "requirements_content": (
+            str(files_by_name[requirements_name].get("content") or "")
+            if requirements_name
+            else ""
+        ),
+        "manifest_filename": manifest_name,
+        "arguments": arguments,
+        "input_filenames": sorted(
+            filename
+            for filename in files_by_name
+            if not _is_dagster_runtime_file(filename)
+        ),
+    }
+
+
+def _dagster_runtimes(
+    step_ids: Sequence[str],
+    dockerfiles_payload: Any,
+) -> Dict[str, dict]:
+    runtimes: Dict[str, dict] = {}
+    errors: List[str] = []
+    for step_id in step_ids:
+        try:
+            runtimes[step_id] = _dagster_runtime_for_step(
+                step_id,
+                dockerfiles_payload,
+            )
+        except DeploymentArtifactValidationError as exc:
+            errors.extend(exc.errors)
+    if errors:
+        raise DeploymentArtifactValidationError(
+            "Dagster node attachment validation failed",
+            errors,
+        )
+    return runtimes
 
 
 def build_dagster_project_files(
@@ -1854,6 +2394,7 @@ def build_dagster_project_files(
 
     steps_by_id = {step["flow_id"]: step for step in steps}
     asset_names = _dagster_asset_names([steps_by_id[step_id] for step_id in ordered_ids])
+    dagster_runtimes = _dagster_runtimes(ordered_ids, dockerfiles_payload)
     output_files: List[dict] = []
     aggregate_requirements: List[str] = []
     project_dir = _sanitize_fragment(project_dir, "dagster_project")
@@ -1867,6 +2408,11 @@ def build_dagster_project_files(
                     f"{project_dir}/storage/inputs/{filename}",
                     str(file_entry.get("content") or ""),
                     "dagster-input",
+                    content_type=str(
+                        file_entry.get("content_type")
+                        or "application/octet-stream"
+                    ),
+                    encoding=_clean_string(file_entry.get("encoding")),
                 )
             )
         output_files.append(
@@ -1881,25 +2427,23 @@ def build_dagster_project_files(
         step = steps_by_id[step_id]
         asset_name = asset_names[step_id]
         node_dir = _bundle_node_dir(step)
-        script_content = _deployment_file_content(dockerfiles_payload, step_id, "main.py")
-        if not script_content:
-            raise DeploymentArtifactValidationError(
-                "Dagster deployment guardrail validation failed",
-                [f"Node {step_id} is missing main.py in persisted runtime artifacts."],
-            )
-
-        requirements_content = _deployment_file_content(
-            dockerfiles_payload,
-            step_id,
-            "requirements.txt",
-        )
+        runtime = dagster_runtimes[step_id]
+        script_filename = runtime["script_filename"]
+        script_content = runtime["script_content"]
+        requirements_content = runtime["requirements_content"]
         aggregate_requirements.extend(requirements_content.splitlines())
 
         node_artifact_root = f"{project_dir}/src/inlumen_dagster_project/artifacts/nodes/{_sanitize_fragment(step_id, 'step')}"
         script_root = f"{project_dir}/src/inlumen_dagster_project/scripts/{asset_name}"
         defs_root = f"{project_dir}/src/inlumen_dagster_project/defs/{asset_name}"
         if not bundle_layout:
-            output_files.append(_dagster_file(f"{script_root}/main.py", script_content, "dagster-script"))
+            output_files.append(
+                _dagster_file(
+                    f"{script_root}/{_safe_docker_source(script_filename)}",
+                    script_content,
+                    "dagster-script",
+                )
+            )
 
             for file_entry in _deployment_files_for_step(dockerfiles_payload, step_id):
                 filename = _clean_string(file_entry.get("filename"))
@@ -1910,6 +2454,11 @@ def build_dagster_project_files(
                         f"{node_artifact_root}/{_safe_docker_source(filename)}",
                         str(file_entry.get("content") or ""),
                         "dagster-node-artifact",
+                        content_type=str(
+                            file_entry.get("content_type")
+                            or "application/octet-stream"
+                        ),
+                        encoding=_clean_string(file_entry.get("encoding")),
                     )
                 )
 
@@ -1929,28 +2478,59 @@ def build_dagster_project_files(
             if bundle_layout
             else f"storage/{asset_name}"
         )
+        source_dir = (
+            f"../nodes/{node_dir}"
+            if bundle_layout
+            else (
+                f"src/inlumen_dagster_project/artifacts/nodes/"
+                f"{_sanitize_fragment(step_id, 'step')}"
+            )
+        )
         script_path = (
-            f"../nodes/{node_dir}/main.py"
+            f"../nodes/{node_dir}/{_safe_docker_source(script_filename)}"
             if bundle_layout
-            else f"src/inlumen_dagster_project/scripts/{asset_name}/main.py"
+            else (
+                f"{source_dir}/"
+                f"{_safe_docker_source(script_filename)}"
+            )
         )
-        context_path = (
-            f"../nodes/{node_dir}/node-manifest.json"
-            if bundle_layout
-            else f"src/inlumen_dagster_project/artifacts/nodes/{_sanitize_fragment(step_id, 'step')}/node-manifest.json"
-        )
+        context_path = ""
+        if runtime["manifest_filename"]:
+            context_path = (
+                f"../nodes/{node_dir}/{_safe_docker_source(runtime['manifest_filename'])}"
+                if bundle_layout
+                else (
+                    f"src/inlumen_dagster_project/artifacts/nodes/"
+                    f"{_sanitize_fragment(step_id, 'step')}/"
+                    f"{_safe_docker_source(runtime['manifest_filename'])}"
+                )
+            )
+        local_input_paths = [
+            (
+                f"../nodes/{node_dir}/{_safe_docker_source(filename)}"
+                if bundle_layout
+                else (
+                    f"src/inlumen_dagster_project/artifacts/nodes/"
+                    f"{_sanitize_fragment(step_id, 'step')}/"
+                    f"{_safe_docker_source(filename)}"
+                )
+            )
+            for filename in runtime["input_filenames"]
+        ]
         defs_yaml = _dagster_yaml(
             {
                 "type": "inlumen_dagster_project.components.shell_command.ShellCommand",
                 "attributes": {
                     "asset_key": asset_name,
                     "script_path": script_path,
+                    "source_dir": source_dir,
                     "upstream_assets": [asset_names[parent] for parent in parents],
                     "input_manifest_path": input_manifest_path,
                     "output_dir": output_dir,
                     "output_manifest_path": f"{output_dir}/output_manifest.json",
                     "context_path": context_path,
-                    "arguments": [],
+                    "arguments": runtime["arguments"],
+                    "local_input_paths": local_input_paths,
                 },
             }
         )
@@ -1975,6 +2555,11 @@ def build_dagster_project_files(
                 "dagster-project",
             ),
             _dagster_file(
+                f"{project_dir}/config/dagster.yaml",
+                "{}\n",
+                "dagster-project",
+            ),
+            _dagster_file(
                 f"{project_dir}/README.md",
                 _dagster_readme(
                     asset_names=asset_name_list,
@@ -1994,6 +2579,11 @@ def build_dagster_project_files(
                 "dagster-project",
             ),
             _dagster_file(
+                f"{project_dir}/src/inlumen_dagster_project/defs/__init__.py",
+                "",
+                "dagster-project",
+            ),
+            _dagster_file(
                 f"{project_dir}/src/inlumen_dagster_project/components/__init__.py",
                 "from .shell_command import ShellCommand\n",
                 "dagster-project",
@@ -2001,6 +2591,11 @@ def build_dagster_project_files(
             _dagster_file(
                 f"{project_dir}/src/inlumen_dagster_project/components/shell_command.py",
                 _dagster_shell_command_component_source(),
+                "dagster-project",
+            ),
+            _dagster_file(
+                f"{project_dir}/src/inlumen_dagster_project/components/node_runner.py",
+                _dagster_node_runner_source(),
                 "dagster-project",
             ),
             _dagster_file(
@@ -2029,6 +2624,7 @@ def _bundle_file(
     role: str,
     flow_id: str = "",
     content_type: str = "text/plain;charset=utf-8",
+    encoding: str = "",
 ) -> dict:
     return {
         "path": path,
@@ -2037,6 +2633,7 @@ def _bundle_file(
         "content": content,
         "content_type": content_type,
         "role": role,
+        **({"encoding": encoding} if encoding else {}),
     }
 
 
@@ -2134,6 +2731,7 @@ def build_deployment_bundle_files(
                     role=str(file_entry.get("role") or "runtime"),
                     flow_id=step_id,
                     content_type=str(file_entry.get("content_type") or "text/plain;charset=utf-8"),
+                    encoding=_clean_string(file_entry.get("encoding")),
                 )
             )
         bundle_files.append(
@@ -2156,6 +2754,7 @@ def build_deployment_bundle_files(
                 role="input",
                 flow_id=_clean_string(file_entry.get("flow_id")),
                 content_type=str(file_entry.get("content_type") or "text/plain;charset=utf-8"),
+                encoding=_clean_string(file_entry.get("encoding")),
             )
         )
     bundle_files.append(

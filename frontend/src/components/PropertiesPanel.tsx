@@ -96,7 +96,7 @@ export function PropertiesPanel({
   // input/output only
   const [content, setContent] = useState('');
 
-  // file state (input/output/action/custom)
+  // Every runtime node can carry its script, requirements, and input files.
   const [files, setFiles] = useState<NodeFileReference[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -150,7 +150,7 @@ export function PropertiesPanel({
       if (next.content == null) next.content = "";
     }
 
-    // Files only for input/output/action/custom, and has_files is internal/derived
+    // Files are supported on every runtime node; has_files is internal/derived.
     if (!typeHasFiles(nodeType)) {
       delete next.files;
       delete next.has_files;
@@ -160,13 +160,11 @@ export function PropertiesPanel({
       next.has_files = filesArr.length > 0 ? "yes" : "no"; // internal
     }
 
-    // Config: param editor, no content, no files
+    // Config: param editor and no content.
     if (nodeType === "config") {
       next.param = next.param ?? {};
       if (typeof next.param !== "object" || Array.isArray(next.param) || next.param == null) next.param = {};
       delete next.content;
-      delete next.files;
-      delete next.has_files;
     } else {
       delete next.param;
     }
@@ -298,6 +296,9 @@ export function PropertiesPanel({
         changedCount += 1;
       } catch (err) {
         console.warn(`[PropertiesPanel.tsx] Upload failed for ${f.name} on node ${selectedNode.id}:`, err);
+        toast.error(`Could not upload ${f.name}`, {
+          description: err instanceof Error ? err.message : "The file was rejected.",
+        });
       }
     }
     if (changedCount > 0) {

@@ -66,17 +66,12 @@ interface SidebarProps {
   activeVersionUid?: string;
   onOverviewUpdated?: (overview: PipelineOverviewUpdate) => void;
   activeChatbotConfig?: ChatbotConfig;
+  workspaceResetKey?: number;
 }
 
 type DragNodeType = {
   type: string;
   data: ReturnType<typeof createNodeDataFromDefinition>;
-};
-
-type BackendFileRef = {
-  filename?: string;
-  bucket?: string;
-  [key: string]: unknown;
 };
 
 type DockerfileGenerationResponse = {
@@ -123,6 +118,7 @@ type DeploymentBundleFile = {
   content?: string;
   content_type?: string;
   role?: string;
+  encoding?: "base64";
 };
 
 type PipelineOverviewResponse = {
@@ -157,7 +153,8 @@ export function Sidebar({
   pipelineOverview,
   activeVersionUid,
   onOverviewUpdated,
-  activeChatbotConfig
+  activeChatbotConfig,
+  workspaceResetKey = 0,
 }: SidebarProps) {
   // --- overview state (fetched when Overview tab is opened)
   const [overviewData, setOverviewData] = useState<Partial<PipelineOverview> | null>(null);
@@ -241,6 +238,17 @@ export function Sidebar({
     });
   };
 
+  useEffect(() => {
+    clearDockerfileDownloads();
+    clearRuntimeArtifactDownloads();
+    clearYamlDownload();
+    clearDeploymentBundleDownload();
+    setDeploymentError("");
+    setDeploymentValidationReport(null);
+    setDeploymentRepairReport(null);
+    // The reset key changes only after a confirmed workspace-wide clear.
+  }, [workspaceResetKey]);
+
   const sanitizeZipSegment = (value: unknown, fallback: string) => {
     const cleaned = String(value || "")
       .trim()
@@ -279,7 +287,7 @@ export function Sidebar({
   ) => {
     const zip = new JSZip();
     const written = new Set<string>();
-    const writeFile = (path: string, content: string) => {
+    const writeFile = (path: string, content: string, isBase64 = false) => {
       let nextPath = path;
       let suffix = 2;
       while (written.has(nextPath)) {
@@ -290,13 +298,13 @@ export function Sidebar({
         suffix += 1;
       }
       written.add(nextPath);
-      zip.file(nextPath, content);
+      zip.file(nextPath, content, { base64: isBase64 });
       return nextPath;
     };
 
     files.forEach((file, index) => {
       const path = safeZipPath(file, index);
-      writeFile(path, file.content ?? "");
+      writeFile(path, file.content ?? "", file.encoding === "base64");
     });
 
     return zip.generateAsync({
@@ -305,27 +313,25 @@ export function Sidebar({
     });
   };
 
-  const fetchBackendFiles = async (): Promise<BackendFileRef[]> => {
-    const filesRes = await apiFetch(`${INLUMEN_API_URL}/api/files`, { method: "GET" });
-    if (!filesRes.ok) {
-      const errText = await filesRes.text().catch(() => "");
-      throw new Error(`Failed to fetch files: ${filesRes.status} ${filesRes.statusText} ${errText}`);
-    }
-    return await filesRes.json(); // expected: [{filename,bucket}, ...]
-  };
-
-  const generateDockerfiles = async (files: BackendFileRef[]): Promise<DockerfileGenerationResponse> => {
+  const generateDockerfiles = async (): Promise<DockerfileGenerationResponse> => {
     const genRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_dockerfiles`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        files,
+        // Dagster exports are attachment-driven. A Python script is sufficient;
+        // requirements, manifests, Dockerfiles, and input files are optional.
+        require_attached_runtime: deploymentTargets.dagster,
       }),
     });
 
     if (!genRes.ok) {
-      const errText = await genRes.text().catch(() => "");
-      throw new Error(`Failed to generate Dockerfiles: ${genRes.status} ${genRes.statusText} ${errText}`);
+      const payload = await genRes.json().catch(async () => ({
+        error: await genRes.text().catch(() => ""),
+      }));
+      throw new Error(
+        String(payload?.error || "").trim()
+        || `Could not prepare deployment files (${genRes.status})`,
+      );
     }
 
     return await genRes.json(); // expected: { dockerfiles: [{dockerfile_filename, content}, ...] }
@@ -421,8 +427,7 @@ export function Sidebar({
       clearYamlDownload();
       clearDeploymentBundleDownload();
 
-      const files = await fetchBackendFiles();
-      const dockerfile_json = await generateDockerfiles(files);
+      const dockerfile_json = await generateDockerfiles();
 
       const dockerfiles = dockerfile_json?.dockerfiles ?? [];
       if (!Array.isArray(dockerfiles) || dockerfiles.length === 0) {
@@ -459,7 +464,10 @@ export function Sidebar({
       const deploymentRuntimeLinks = bundledFiles
         .filter((file) => file.role !== "dockerfile" && file.filename && file.path?.startsWith("nodes/"))
         .map((file, index) => {
-          const blob = new Blob([file.content ?? ""], {
+          const blobContent = file.encoding === "base64"
+            ? Uint8Array.from(atob(file.content ?? ""), (character) => character.charCodeAt(0))
+            : file.content ?? "";
+          const blob = new Blob([blobContent], {
             type: file.content_type || "text/plain;charset=utf-8",
           });
           return {
@@ -734,7 +742,7 @@ export function Sidebar({
             <div className="p-4 border rounded-lg border-border">
               <h3 className="text-sm font-medium mb-2">Generate Deployment Artifacts</h3>
               <p className="text-xs text-muted-foreground mb-3">
-                Builds deployment bundles from the generated runtime scripts.
+                Builds from the scripts and input files attached to each node.
               </p>
 
               <div className="mb-3 rounded-md border border-border bg-muted/20 p-2">

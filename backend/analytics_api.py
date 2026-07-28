@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import json
+import mimetypes
 import os
 import re
 import uuid
@@ -89,7 +91,11 @@ def _write_validation_bundle(files: list[dict]) -> Path:
         relative_path = _safe_bundle_relative_path(str(file_entry.get("path") or ""))
         destination = bundle_dir / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(str(file_entry.get("content") or ""), encoding="utf-8")
+        content = str(file_entry.get("content") or "")
+        if str(file_entry.get("encoding") or "") == "base64":
+            destination.write_bytes(base64.b64decode(content))
+        else:
+            destination.write_text(content, encoding="utf-8")
     return bundle_dir
 
 
@@ -158,20 +164,29 @@ def _read_validation_bundle_files(bundle_root: Path) -> list[dict]:
         if _skip_validation_bundle_file(path, bundle_root):
             continue
         relative = path.relative_to(bundle_root).as_posix()
+        raw_content = path.read_bytes()
+        try:
+            content = raw_content.decode("utf-8")
+            encoding = ""
+        except UnicodeDecodeError:
+            content = base64.b64encode(raw_content).decode("ascii")
+            encoding = "base64"
         files.append(
             {
                 "path": relative,
                 "filename": path.name,
                 "flow_id": "",
-                "content": path.read_text(encoding="utf-8", errors="replace"),
+                "content": content,
                 "content_type": (
                     "application/json"
                     if path.suffix == ".json"
                     else "application/x-yaml;charset=utf-8"
                     if path.suffix in {".yaml", ".yml"}
-                    else "text/plain;charset=utf-8"
+                    else mimetypes.guess_type(path.name)[0]
+                    or "application/octet-stream"
                 ),
                 "role": "runtime",
+                **({"encoding": encoding} if encoding else {}),
             }
         )
     return files
@@ -574,9 +589,10 @@ def agentic_generate_dockerfiles():
         return _preflight_response()
 
     data = request.get_json() or {}
-    files = data.get("files", [])
 
     try:
+        pipeline_graph = _pipeline_graph_from_payload_or_backend(data)
+        files = _file_refs_from_version_graph(pipeline_graph)
         filenames, buckets, ids = _dockerfile_inputs(files)
         print("[analytics_api.py] Filenames received:", filenames)
         print("[analytics_api.py] Buckets received:", buckets)
@@ -586,7 +602,6 @@ def agentic_generate_dockerfiles():
         if llm_config is not None:
             log_llm_selection("Generating Dockerfiles from pipeline context", llm_config)
         print("[analytics_api.py] Generating Dockerfiles from registered generators and generic fallback.")
-        pipeline_graph = _pipeline_graph_from_payload_or_backend(data)
         parsed = run_async(
             generate_dockerfiles_with_agent(
                 filenames,
@@ -594,6 +609,7 @@ def agentic_generate_dockerfiles():
                 llm_config,
                 pipeline_graph=pipeline_graph,
                 file_refs=files,
+                require_attached_runtime=bool(data.get("require_attached_runtime")),
             )
         )
         response_payload = parsed.model_dump() if hasattr(parsed, "model_dump") else parsed.dict()

@@ -74,8 +74,10 @@ export type PipelineScriptGenerationOptions = {
   mode?: PipelineScriptGenerationMode;
   includeSampleData?: boolean;
   validationMode?: "static" | "unit" | "edge" | "pipeline_sample";
+  generationStrategy?: "auto" | "single_pass" | "per_node";
   allowDeterministicFallback?: boolean;
   repairAttempts?: number;
+  userInstruction?: string;
 };
 
 export type PipelineGenerationRunStep = {
@@ -119,6 +121,13 @@ export type PipelineGenerationJob = {
     result?: unknown;
     warning?: string;
   };
+};
+
+export type ExternalRuntimePrompt = {
+  prompt: string;
+  filename?: string;
+  node_count?: number;
+  input_policy?: "user_supplied" | string;
 };
 
 export const addNodeToBackend = async (node: Node) => {
@@ -585,11 +594,43 @@ const buildPipelineGenerationPayload = (
   return {
     include_sample_data: options.includeSampleData ?? true,
     validation_mode: options.validationMode ?? "pipeline_sample",
+    generation_strategy: options.generationStrategy ?? "auto",
     generation_mode: options.mode ?? "full",
     allow_deterministic_fallback: options.allowDeterministicFallback ?? false,
     repair_attempts: options.repairAttempts ?? 2,
+    high_level_prompt: options.userInstruction?.trim() || "",
     ...(llm_config ? { llm_config } : {}),
   };
+};
+
+export const prepareExternalRuntimePrompt = async (
+  highLevelPrompt = "",
+): Promise<ExternalRuntimePrompt> => {
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/pipeline/external-runtime-prompt`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        high_level_prompt: highLevelPrompt.trim(),
+      }),
+    },
+  );
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(async () => ({
+      error: await response.text().catch(() => ""),
+    }));
+    throw new Error(
+      formatPipelineGenerationError(
+        errorPayload,
+        response.status,
+        response.statusText,
+      ),
+    );
+  }
+  return response.json();
 };
 
 export const generatePipelineScripts = async (
@@ -671,12 +712,16 @@ export const fetchPipelineScriptGenerationRun = async (
 
 export const resumePipelineScriptGenerationRun = async (
   runId: string,
+  activeChatbotConfig?: ChatbotConfig,
   options: {
     flowId?: string;
     repairAttempts?: number;
     userInstruction?: string;
   } = {},
 ): Promise<PipelineGenerationJob> => {
+  const llm_config = activeChatbotConfig
+    ? buildCodegenLLMRequestConfig(activeChatbotConfig)
+    : undefined;
   const response = await apiFetch(
     `${INLUMEN_API_URL}/api/pipeline/generation-runs/${encodeURIComponent(runId)}/resume`,
     {
@@ -688,6 +733,7 @@ export const resumePipelineScriptGenerationRun = async (
         flow_id: options.flowId || "",
         repair_attempts: options.repairAttempts ?? 4,
         user_instruction: options.userInstruction || "",
+        ...(llm_config ? { llm_config } : {}),
       }),
     },
   );
