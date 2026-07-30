@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
+import JSZip from 'jszip';
 import { apiFetch } from '@/utils/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
-import { ChatbotConfig, buildLLMRequestConfig } from '@/services/chatbotService';
+import type { ChatbotConfig } from '@/services/chatbotService';
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
@@ -13,25 +14,29 @@ import {
   updatePipelineOverviewMetadata,
 } from '@/features/flow/flowPersistence';
 import {
-  Brain,
-  MessageCircle,
-  FileText,
-  Zap,
-  Settings,
-  Clipboard,
-  Database,
   Plus,
-  Info,
   LayoutGrid,
   Beaker,
   PlayCircle,
-  PlusCircle,
   BarChart3,
   Calendar,
+  FileText,
   Hash,
   Paperclip,
-  Download
+  Download,
+  ShieldCheck
 } from 'lucide-react';
+import {
+  createNodeDataFromDefinition,
+  fetchNodeDefinitions,
+  getFallbackNodeDefinitions,
+  groupNodeDefinitions,
+} from '@/features/nodes/registry/nodeRegistry';
+import {
+  getNodeDefinitionColorClasses,
+  getNodeDefinitionIcon,
+} from '@/features/nodes/registry/iconRegistry';
+import type { NodeDefinition } from '@/features/nodes/registry/types';
 
 interface PipelineOverview {
   version: string;
@@ -61,36 +66,63 @@ interface SidebarProps {
   activeVersionUid?: string;
   onOverviewUpdated?: (overview: PipelineOverviewUpdate) => void;
   activeChatbotConfig?: ChatbotConfig;
-}
-
-interface NodeTypeItem {
-  type: string;
-  label: string;
-  description: string;
-  icon: React.ReactNode;
-  color: string;
+  workspaceResetKey?: number;
 }
 
 type DragNodeType = {
   type: string;
-  data: {
-    label: string;
-    description: string;
-    type: string;
-  };
-};
-
-type BackendFileRef = {
-  filename?: string;
-  bucket?: string;
-  [key: string]: unknown;
+  data: ReturnType<typeof createNodeDataFromDefinition>;
 };
 
 type DockerfileGenerationResponse = {
   dockerfiles?: Array<{
     dockerfile_filename?: string;
     content?: string;
+    flow_id?: string;
   }>;
+  runtime_artifacts?: Array<{
+    flow_id?: string;
+    files?: Array<{
+      filename?: string;
+      content?: string;
+      content_type?: string;
+    }>;
+  }>;
+  deployment_files?: DeploymentBundleFile[];
+  input_files?: DeploymentBundleFile[];
+};
+
+type DeploymentValidationReport = {
+  ok?: boolean;
+  errors?: string[];
+  argo?: { ok?: boolean; errors?: string[] } | null;
+  dagster?: { ok?: boolean; errors?: string[] } | null;
+};
+
+type DeploymentRepairReport = {
+  ok?: boolean;
+  changed?: boolean;
+  actions?: string[];
+};
+
+type DeploymentBundleGenerationResponse = {
+  files?: DeploymentBundleFile[];
+  manifest?: Record<string, unknown>;
+  validation_report?: DeploymentValidationReport | null;
+  repair_report?: DeploymentRepairReport | null;
+};
+
+type DeploymentBundleFile = {
+  path?: string;
+  filename?: string;
+  flow_id?: string;
+  content?: string;
+  content_encoding?: "utf-8" | "base64" | string;
+  content_type?: string;
+  size_bytes?: number;
+  sha256?: string;
+  role?: string;
+  encoding?: "base64";
 };
 
 type PipelineOverviewResponse = {
@@ -104,81 +136,16 @@ type PipelineOverviewResponse = {
 const errorToMessage = (error: unknown, fallback: string) =>
   error instanceof Error ? error.message : fallback;
 
-const nodeTypes: NodeTypeItem[] = [
-  {
-    type: 'config',
-    label: 'Model Configuration',
-    description: 'Adjust model parameters, system prompt and more',
-    icon: <Settings className="w-4 h-4" />,
-    color: 'bg-sky-500/20 text-sky-300 border-sky-500/30'
-  },
-  {
-    type: 'input',
-    label: 'Input Data',
-    description: 'Raw data from sensors, APIs, files or user message.',
-    icon: <Database className="w-4 h-4" />,
-    color: 'bg-blue-500/20 text-blue-300 border-blue-500/30'
-  },
-  {
-    type: 'action',
-    label: 'Data Preprocessing',
-    description: 'Clean, normalize, and transform input data',
-    icon: <FileText className="w-4 h-4" />,
-    color: 'bg-lime-500/20 text-lime-300 border-lime-500/30'
-  },
-  {
-    type: 'action',
-    label: 'Feature Engineering',
-    description: 'Generate or select features for model input',
-    icon: <Info className="w-4 h-4" />,
-    color: 'bg-yellow-500/20 text-yellow-300 border-yellow-500/30'
-  },
-  {
-    type: 'action',
-    label: 'Model Training',
-    description: 'Train machine learning or deep learning models',
-    icon: <Brain className="w-4 h-4" />,
-    color: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30'
-  },
-  {
-    type: 'action',
-    label: 'Model Evaluation',
-    description: 'Assess model performance and metrics',
-    icon: <Zap className="w-4 h-4" />,
-    color: 'bg-purple-500/20 text-purple-300 border-purple-500/30'
-  },
-  {
-    type: 'output',
-    label: 'AI/ML Output',
-    description: 'AI/ML pipeline results',
-    icon: <MessageCircle className="w-4 h-4" />,
-    color: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
-  },
-  {
-    type: 'api',
-    label: 'API Call',
-    description: 'Connect to external services',
-    icon: <Database className="w-4 h-4" />,
-    color: 'bg-rose-500/20 text-rose-300 border-rose-500/30'
-  },
-  {
-    type: 'storage',
-    label: 'Clipboard',
-    description: 'Store and retrieve content',
-    icon: <Clipboard className="w-4 h-4" />,
-    color: 'bg-teal-500/20 text-teal-300 border-teal-500/30'
-  },
-  {
-    type: 'custom',
-    label: 'Custom Node',
-    description: 'Add custom label and description',
-    icon: <PlusCircle className="w-4 h-4" />,
-    color: 'bg-violet-500/20 text-violet-300 border-violet-500/30'
-  }
-];
-
 type DockerfileDownload = { name: string; url: string };
+type RuntimeArtifactDownload = { name: string; url: string };
 type YamlDownload = { name: string; url: string };
+type DeploymentBundleDownload = { name: string; url: string };
+type DeploymentTargets = { argo: boolean; dagster: boolean };
+type DeploymentValidationMode = "fast" | "validate" | "repair";
+
+const FAMILY_LABELS: Record<string, string> = {
+  core: "Core",
+};
 
 export function Sidebar({
   className,
@@ -190,7 +157,8 @@ export function Sidebar({
   pipelineOverview,
   activeVersionUid,
   onOverviewUpdated,
-  activeChatbotConfig
+  activeChatbotConfig,
+  workspaceResetKey = 0,
 }: SidebarProps) {
   // --- overview state (fetched when Overview tab is opened)
   const [overviewData, setOverviewData] = useState<Partial<PipelineOverview> | null>(null);
@@ -204,14 +172,44 @@ export function Sidebar({
   // --- Dockerfiles state
   const [isGeneratingDeployment, setIsGeneratingDeployment] = useState(false);
   const [dockerfileDownloads, setDockerfileDownloads] = useState<DockerfileDownload[]>([]);
+  const [runtimeArtifactDownloads, setRuntimeArtifactDownloads] = useState<RuntimeArtifactDownload[]>([]);
   const [yamlDownload, setYamlDownload] = useState<YamlDownload | null>(null);
+  const [deploymentBundleDownload, setDeploymentBundleDownload] = useState<DeploymentBundleDownload | null>(null);
   const [deploymentError, setDeploymentError] = useState<string>("");
+  const [deploymentValidationReport, setDeploymentValidationReport] = useState<DeploymentValidationReport | null>(null);
+  const [deploymentRepairReport, setDeploymentRepairReport] = useState<DeploymentRepairReport | null>(null);
+  const [deploymentValidationMode, setDeploymentValidationMode] = useState<DeploymentValidationMode>("validate");
+  const [deploymentTargets, setDeploymentTargets] = useState<DeploymentTargets>({
+    argo: true,
+    dagster: false,
+  });
+  const [nodeDefinitions, setNodeDefinitions] = useState<NodeDefinition[]>(
+    getFallbackNodeDefinitions,
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchNodeDefinitions()
+      .then((definitions) => {
+        if (cancelled) return;
+        setNodeDefinitions(definitions);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.warn("[Sidebar.tsx] Using fallback node definitions:", error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Cleanup blob URLs on unmount
   useEffect(() => {
     return () => {
       dockerfileDownloads.forEach((d) => URL.revokeObjectURL(d.url));
+      runtimeArtifactDownloads.forEach((d) => URL.revokeObjectURL(d.url));
       if (yamlDownload?.url) URL.revokeObjectURL(yamlDownload.url);
+      if (deploymentBundleDownload?.url) URL.revokeObjectURL(deploymentBundleDownload.url);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -223,6 +221,13 @@ export function Sidebar({
     });
   };
 
+  const clearRuntimeArtifactDownloads = () => {
+    setRuntimeArtifactDownloads((prev) => {
+      prev.forEach((download) => URL.revokeObjectURL(download.url));
+      return [];
+    });
+  };
+
   const clearYamlDownload = () => {
     setYamlDownload((prev) => {
       if (prev?.url) URL.revokeObjectURL(prev.url);
@@ -230,31 +235,153 @@ export function Sidebar({
     });
   };
 
-  const fetchBackendFiles = async (): Promise<BackendFileRef[]> => {
-    const filesRes = await apiFetch(`${INLUMEN_API_URL}/api/files`, { method: "GET" });
-    if (!filesRes.ok) {
-      const errText = await filesRes.text().catch(() => "");
-      throw new Error(`Failed to fetch files: ${filesRes.status} ${filesRes.statusText} ${errText}`);
-    }
-    return await filesRes.json(); // expected: [{filename,bucket}, ...]
+  const clearDeploymentBundleDownload = () => {
+    setDeploymentBundleDownload((prev) => {
+      if (prev?.url) URL.revokeObjectURL(prev.url);
+      return null;
+    });
   };
 
-  const generateDockerfiles = async (files: BackendFileRef[]): Promise<DockerfileGenerationResponse> => {
+  useEffect(() => {
+    clearDockerfileDownloads();
+    clearRuntimeArtifactDownloads();
+    clearYamlDownload();
+    clearDeploymentBundleDownload();
+    setDeploymentError("");
+    setDeploymentValidationReport(null);
+    setDeploymentRepairReport(null);
+    // The reset key changes only after a confirmed workspace-wide clear.
+  }, [workspaceResetKey]);
+
+  const sanitizeZipSegment = (value: unknown, fallback: string) => {
+    const cleaned = String(value || "")
+      .trim()
+      .replace(/[^A-Za-z0-9_.-]+/g, "-")
+      .replace(/^[-.]+|[-.]+$/g, "");
+    return cleaned || fallback;
+  };
+
+  const safeZipPath = (file: DeploymentBundleFile, index: number) => {
+    const rawPath = String(file.path || "").trim();
+    if (rawPath) {
+      const parts = rawPath.replace(/\\/g, "/")
+        .split("/")
+        .map((part) => part.trim())
+        .filter((part) => part && part !== ".");
+      if (parts.length > 0 && !rawPath.startsWith("/") && !parts.includes("..")) {
+        return parts.join("/");
+      }
+    }
+    const rawFallbackPath = String(file.path || "").trim();
+    if (rawFallbackPath) {
+      const parts = rawFallbackPath
+        .replace(/\\/g, "/")
+        .split("/")
+        .map((part) => sanitizeZipSegment(part, "file"))
+        .filter((part) => part && part !== "." && part !== "..");
+      if (parts.length > 0) return parts.join("/");
+    }
+    const flowId = sanitizeZipSegment(file.flow_id, "node");
+    const filename = sanitizeZipSegment(file.filename, `artifact-${index + 1}.txt`);
+    return `nodes/${flowId}/${filename}`;
+  };
+
+  const buildDeploymentZip = async (
+    files: DeploymentBundleFile[],
+  ) => {
+    const zip = new JSZip();
+    const written = new Set<string>();
+    const writeFile = (
+      path: string,
+      content: string,
+      contentEncoding?: string,
+    ) => {
+      let nextPath = path;
+      let suffix = 2;
+      while (written.has(nextPath)) {
+        const dot = path.lastIndexOf(".");
+        nextPath = dot > 0
+          ? `${path.slice(0, dot)}-${suffix}${path.slice(dot)}`
+          : `${path}-${suffix}`;
+        suffix += 1;
+      }
+      written.add(nextPath);
+      zip.file(
+        nextPath,
+        content,
+        contentEncoding === "base64" ? { base64: true } : undefined,
+      );
+      return nextPath;
+    };
+
+    files.forEach((file, index) => {
+      const path = safeZipPath(file, index);
+      writeFile(
+        path,
+        file.content ?? "",
+        file.content_encoding ?? file.encoding,
+      );
+    });
+
+    return zip.generateAsync({
+      type: "blob",
+      compression: "DEFLATE",
+    });
+  };
+
+  const generateDockerfiles = async (): Promise<DockerfileGenerationResponse> => {
     const genRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_dockerfiles`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        files,
-        llm_config: activeChatbotConfig ? buildLLMRequestConfig(activeChatbotConfig) : undefined,
+        // Dagster exports are attachment-driven. A Python script is sufficient;
+        // requirements, manifests, Dockerfiles, and input files are optional.
+        require_attached_runtime: deploymentTargets.dagster,
       }),
     });
 
     if (!genRes.ok) {
-      const errText = await genRes.text().catch(() => "");
-      throw new Error(`Failed to generate Dockerfiles: ${genRes.status} ${genRes.statusText} ${errText}`);
+      const payload = await genRes.json().catch(async () => ({
+        error: await genRes.text().catch(() => ""),
+      }));
+      throw new Error(
+        String(payload?.error || "").trim()
+        || `Could not prepare deployment files (${genRes.status})`,
+      );
     }
 
     return await genRes.json(); // expected: { dockerfiles: [{dockerfile_filename, content}, ...] }
+  };
+
+  const generateDeploymentBundle = async (
+    dockerfileJson: DockerfileGenerationResponse,
+  ): Promise<DeploymentBundleGenerationResponse> => {
+    const bundleRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_deployment_bundle`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dockerfile_json: dockerfileJson,
+        targets: deploymentTargets,
+        validation_mode: deploymentValidationMode,
+        validate_bundle: true,
+        validation: {
+          enabled: true,
+          mode: deploymentValidationMode,
+          materialize: deploymentValidationMode !== "fast" && deploymentTargets.dagster,
+          validate_argo: deploymentValidationMode !== "fast" && deploymentTargets.argo,
+          validate_dagster: deploymentValidationMode !== "fast" && deploymentTargets.dagster,
+          argo_lint: false,
+          argo_dry_run: false,
+        },
+      }),
+    });
+
+    if (!bundleRes.ok) {
+      const errText = await bundleRes.text().catch(() => "");
+      throw new Error(`Failed to generate deployment bundle: ${bundleRes.status} ${bundleRes.statusText} ${errText}`);
+    }
+
+    return await bundleRes.json();
   };
 
   // fetch overview properties when opening Overview tab
@@ -305,12 +432,18 @@ export function Sidebar({
   const handleGenerateDeploymentArtifacts = async () => {
     try {
       setDeploymentError("");
+      setDeploymentValidationReport(null);
+      setDeploymentRepairReport(null);
+      if (!deploymentTargets.argo && !deploymentTargets.dagster) {
+        throw new Error("Select at least one deployment target.");
+      }
       setIsGeneratingDeployment(true);
       clearDockerfileDownloads();
+      clearRuntimeArtifactDownloads();
       clearYamlDownload();
+      clearDeploymentBundleDownload();
 
-      const files = await fetchBackendFiles();
-      const dockerfile_json = await generateDockerfiles(files);
+      const dockerfile_json = await generateDockerfiles();
 
       const dockerfiles = dockerfile_json?.dockerfiles ?? [];
       if (!Array.isArray(dockerfiles) || dockerfiles.length === 0) {
@@ -326,28 +459,68 @@ export function Sidebar({
         }
       );
 
-      setDockerfileDownloads(links);
-
-      const yamlRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_yaml`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          dockerfile_json,
-          llm_config: activeChatbotConfig ? buildLLMRequestConfig(activeChatbotConfig) : undefined,
-        }),
-      });
-
-      if (!yamlRes.ok) {
-        const errText = await yamlRes.text().catch(() => "");
-        throw new Error(`Failed to generate YAML: ${yamlRes.status} ${yamlRes.statusText} ${errText}`);
+      const runtimeLinks = (dockerfile_json.runtime_artifacts ?? []).flatMap((artifact) =>
+        (artifact.files ?? [])
+          .filter((file) => file.filename && !file.filename.startsWith("Dockerfile."))
+          .map((file) => {
+            const blob = new Blob([file.content ?? ""], {
+              type: file.content_type || "text/plain;charset=utf-8",
+            });
+            return {
+              name: `${artifact.flow_id ?? "node"}-${file.filename}`,
+              url: URL.createObjectURL(blob),
+            };
+          }),
+      );
+      const bundle = await generateDeploymentBundle(dockerfile_json);
+      const bundledFiles = Array.isArray(bundle.files) ? bundle.files : [];
+      if (bundledFiles.length === 0) {
+        throw new Error("Deployment bundle response did not include files.");
       }
+      const deploymentRuntimeLinks = bundledFiles
+        .filter((file) => file.role !== "dockerfile" && file.filename && file.path?.startsWith("nodes/"))
+        .map((file, index) => {
+          const blobContent = file.encoding === "base64"
+            ? Uint8Array.from(atob(file.content ?? ""), (character) => character.charCodeAt(0))
+            : file.content ?? "";
+          const blob = new Blob([blobContent], {
+            type: file.content_type || "text/plain;charset=utf-8",
+          });
+          return {
+            name: safeZipPath(file, index).replace(/\//g, "__"),
+            url: URL.createObjectURL(blob),
+          };
+        });
+      const argoWorkflowFile = bundledFiles.find((file) => file.path === "argo/workflow.yaml");
 
-      const yamlText = await yamlRes.text();
-      const blob = new Blob([yamlText], { type: "application/x-yaml;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
+      const yamlDownloadLink = argoWorkflowFile
+        ? {
+            name: argoWorkflowFile.filename || "workflow.yaml",
+            url: URL.createObjectURL(new Blob([argoWorkflowFile.content ?? ""], { type: "application/x-yaml;charset=utf-8" })),
+          }
+        : null;
+      const bundleBlob = await buildDeploymentZip(bundledFiles);
+      const bundleUrl = URL.createObjectURL(bundleBlob);
+      const targetName = [
+        deploymentTargets.argo ? "argo" : "",
+        deploymentTargets.dagster ? "dagster" : "",
+      ].filter(Boolean).join("-");
 
-      setYamlDownload({ name: `ai-pipeline-${Date.now()}.yaml`, url });
+      setDockerfileDownloads(links);
+      setRuntimeArtifactDownloads(deploymentRuntimeLinks.length > 0 ? deploymentRuntimeLinks : runtimeLinks);
+      setYamlDownload(yamlDownloadLink);
+      setDeploymentValidationReport(bundle.validation_report || null);
+      setDeploymentRepairReport(bundle.repair_report || null);
+      setDeploymentBundleDownload({
+        name: `inlumen-${targetName || "deployment"}-artifacts-${Date.now()}.zip`,
+        url: bundleUrl,
+      });
     } catch (e: unknown) {
+      clearDockerfileDownloads();
+      clearRuntimeArtifactDownloads();
+      clearDeploymentBundleDownload();
+      setDeploymentValidationReport(null);
+      setDeploymentRepairReport(null);
       console.error("[Sidebar.tsx] Generate deployment artifacts error:", e);
       setDeploymentError(errorToMessage(e, "Failed to generate deployment artifacts."));
     } finally {
@@ -361,6 +534,11 @@ export function Sidebar({
     ...overviewData,
   } as PipelineOverview;
   const isMainVersion = activeVersionUid === MAIN_PIPELINE_VERSION_UID;
+  const deploymentButtonLabel = deploymentValidationMode === "repair"
+    ? "Generate, Repair & Validate"
+    : deploymentValidationMode === "validate"
+      ? "Generate & Validate"
+      : "Generate Deployment Artifacts";
 
   useEffect(() => {
     setOverviewVersionDraft(overview?.version ?? "");
@@ -440,30 +618,38 @@ export function Sidebar({
                 <Plus className="w-4 h-4" />
                 Node Types
               </h3>
-              <div className="space-y-2">
-                {nodeTypes.map((nodeType) => (
-                  <div
-                    key={nodeType.label}
-                    draggable
-                    onDragStart={(event) =>
-                      onDragStart(event, {
-                        type: 'custom',
-                        data: {
-                          label: nodeType.label,
-                          description: nodeType.description,
-                          type: nodeType.type
-                        }
-                      })
-                    }
-                    className="flex items-start gap-3 p-2.5 rounded-md border border-border cursor-move hover:bg-muted/50 transition-colors"
-                  >
-                    <div className={cn("p-1.5 rounded-md", nodeType.color.split(' ')[0])}>
-                      {nodeType.icon}
-                    </div>
-                    <div>
-                      <h4 className="text-sm font-medium">{nodeType.label}</h4>
-                      <p className="text-xs text-muted-foreground mt-0.5">{nodeType.description}</p>
-                    </div>
+              <div className="space-y-5">
+                {groupNodeDefinitions(nodeDefinitions).map(([family, definitions]) => (
+                  <div key={family} className="space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      {FAMILY_LABELS[family] ?? family}
+                    </p>
+                    {definitions.map((definition) => {
+                      const colorClasses = getNodeDefinitionColorClasses(definition.palette.color);
+                      return (
+                        <div
+                          key={definition.id}
+                          draggable
+                          onDragStart={(event) =>
+                            onDragStart(event, {
+                              type: 'custom',
+                              data: createNodeDataFromDefinition(definition),
+                            })
+                          }
+                          className="flex items-start gap-3 p-2.5 rounded-md border border-border cursor-move hover:bg-muted/50 transition-colors"
+                        >
+                          <div className={cn("p-1.5 rounded-md", colorClasses.split(' ')[0])}>
+                            {getNodeDefinitionIcon(definition.palette.icon)}
+                          </div>
+                          <div>
+                            <h4 className="text-sm font-medium">{definition.palette.label}</h4>
+                            <p className="text-xs text-muted-foreground mt-0.5">
+                              {definition.palette.description}
+                            </p>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 ))}
               </div>
@@ -572,20 +758,133 @@ export function Sidebar({
             <div className="p-4 border rounded-lg border-border">
               <h3 className="text-sm font-medium mb-2">Generate Deployment Artifacts</h3>
               <p className="text-xs text-muted-foreground mb-3">
-                Produces the Dockerfiles for each step and then builds the Argo Workflow YAML using those artifacts.
+                Builds from the scripts and input files attached to each node.
               </p>
+
+              <div className="mb-3 rounded-md border border-border bg-muted/20 p-2">
+                <div className="mb-2 text-xs font-medium">Deployment target</div>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={deploymentTargets.argo}
+                    onChange={(event) =>
+                      setDeploymentTargets((current) => ({
+                        ...current,
+                        argo: event.target.checked,
+                      }))
+                    }
+                  />
+                  <span>Argo Workflow</span>
+                </label>
+                <label className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={deploymentTargets.dagster}
+                    onChange={(event) =>
+                      setDeploymentTargets((current) => ({
+                        ...current,
+                        dagster: event.target.checked,
+                      }))
+                    }
+                  />
+                  <span>Dagster project</span>
+                </label>
+              </div>
+
+              <div className="mb-3 rounded-md border border-border bg-muted/20 p-2">
+                <div className="mb-2 flex items-center gap-2 text-xs font-medium">
+                  <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  Deployment validation
+                </div>
+                <div className="grid grid-cols-3 gap-1">
+                  {([
+                    ["fast", "Fast"],
+                    ["validate", "Validate"],
+                    ["repair", "Repair"],
+                  ] as const).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setDeploymentValidationMode(mode)}
+                      className={cn(
+                        "rounded-md border px-2 py-1.5 text-xs transition-colors",
+                        deploymentValidationMode === mode
+                          ? "border-primary bg-primary/15 text-primary"
+                          : "border-border bg-background text-muted-foreground hover:bg-muted",
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  {deploymentValidationMode === "repair"
+                    ? "Normalize the bundle layout, then validate before download."
+                    : deploymentValidationMode === "validate"
+                      ? "Validate contracts and materialize selected Dagster assets before download."
+                      : "Validate bundle structure, required inputs, contracts, paths, sizes, and checksums without installing or materializing targets."}
+                </p>
+              </div>
 
               <Button
                 className="h-auto min-h-10 w-full whitespace-normal px-3 py-2 text-center leading-snug"
                 onClick={handleGenerateDeploymentArtifacts}
-                disabled={isGeneratingDeployment}
+                disabled={isGeneratingDeployment || (!deploymentTargets.argo && !deploymentTargets.dagster)}
               >
-                {isGeneratingDeployment ? "Generating..." : "Generate Deployment Artifacts"}
+                {isGeneratingDeployment ? "Generating..." : deploymentButtonLabel}
               </Button>
 
               {deploymentError && (
                 <div className="mt-3 text-xs text-red-400">
                   {deploymentError}
+                </div>
+              )}
+
+              {deploymentValidationReport && (
+                <div className="mt-3 rounded-md border border-border bg-muted/20 p-2 text-xs">
+                  <div className="font-medium">
+                    Validation {deploymentValidationReport.ok ? "passed" : "failed"}
+                  </div>
+                  {deploymentValidationReport.errors && deploymentValidationReport.errors.length > 0 && (
+                    <div className="mt-1 text-red-400">
+                      {deploymentValidationReport.errors.slice(0, 2).join(" ")}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {deploymentRepairReport && (
+                <div className="mt-3 rounded-md border border-border bg-muted/20 p-2 text-xs">
+                  <div className="font-medium">
+                    Repair {deploymentRepairReport.changed ? "applied" : "checked"}
+                  </div>
+                  {deploymentRepairReport.actions && deploymentRepairReport.actions.length > 0 && (
+                    <div className="mt-1 text-muted-foreground">
+                      {deploymentRepairReport.actions.slice(0, 2).join(" ")}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {deploymentBundleDownload && (
+                <div className="mt-4">
+                  <div className="text-xs font-medium mb-2">Deployment Bundle</div>
+                  <a
+                    href={deploymentBundleDownload.url}
+                    download={deploymentBundleDownload.name}
+                    className="flex items-center gap-2 text-xs underline"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span className="truncate">{deploymentBundleDownload.name}</span>
+                  </a>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-3 w-full"
+                    onClick={clearDeploymentBundleDownload}
+                  >
+                    Clear Bundle Link
+                  </Button>
                 </div>
               )}
 
@@ -612,6 +911,33 @@ export function Sidebar({
                     onClick={clearDockerfileDownloads}
                   >
                     Clear Dockerfile Links
+                  </Button>
+                </div>
+              )}
+
+              {runtimeArtifactDownloads.length > 0 && (
+                <div className="mt-4">
+                  <div className="text-xs font-medium mb-2">Runtime Artifact Downloads</div>
+                  <div className="space-y-1">
+                    {runtimeArtifactDownloads.map((download) => (
+                      <a
+                        key={download.url}
+                        href={download.url}
+                        download={download.name}
+                        className="flex items-center gap-2 text-xs underline"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span className="truncate">{download.name}</span>
+                      </a>
+                    ))}
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-3 w-full"
+                    onClick={clearRuntimeArtifactDownloads}
+                  >
+                    Clear Runtime Artifact Links
                   </Button>
                 </div>
               )}

@@ -133,7 +133,49 @@ Step 5: Wait for the stack to finish starting. The root compose file now:
 - connects the LLM agents to the OpenAI-compatible endpoint selected in the UI
 - is set up to behave consistently on macOS and Windows through Docker Desktop
 
-Step 6: Configure an LLM provider from the UI. Open `http://localhost:8080`, choose Settings, and create an LLM configuration with provider, base URL, model, and API key. The backend does not read LLM provider, endpoint, model, or API key values from `.env`.
+Step 6: Configure an LLM provider from the UI. Open `http://localhost:8080`, choose Settings, and create an LLM configuration with provider, base URL, general model, Code Generation Model, and API key. Coding reuses the same provider, base URL, and API key while selecting its model from the separate Code Generation Model field.
+
+### Code generation service
+
+Code generation is a separate backend-to-backend service. The browser never
+calls it directly. For the current local setup, start its repository separately
+and point the inLUMEN backend container at the host-published port:
+
+```text
+# inLUMEN/.env
+INLUMEN_CODEGEN_SERVICE_URL=http://host.docker.internal:8010
+INLUMEN_CODEGEN_SERVICE_API_KEY=<same value as CODEGEN_SERVICE_API_KEY>
+```
+
+```bash
+# ../inlumen-codegen-service
+cp .env.example .env
+docker compose up --build --wait -d
+
+# ../inLUMEN
+docker compose up --build -d
+```
+
+For local caller-owned LLM configuration, set
+`CODEGEN_ALLOW_REQUEST_LLM_CONFIG=true` in the codegen `.env`. The model,
+provider URL, and API key selected in the inLUMEN Settings dialog are forwarded
+through the backend; the provider key is moved to the `X-LLM-API-Key` request
+header and is not included in the JSON sent to codegen. The coding request uses
+the separate Code Generation Model field from that same Settings configuration.
+
+Codegen can later be deployed independently without frontend changes. Set:
+
+```text
+INLUMEN_CODEGEN_SERVICE_URL=https://codegen.example.com
+INLUMEN_CODEGEN_SERVICE_API_KEY=<deployed service token>
+```
+
+Use HTTPS for any non-local endpoint. A remote deployment can own its provider
+configuration by keeping `CODEGEN_ALLOW_REQUEST_LLM_CONFIG=false` and setting
+`CODEGEN_LLM_MODEL`, `CODEGEN_LLM_BASE_URL`, and its provider key on the
+codegen service. In that mode, codegen ignores caller-supplied provider options.
+The codegen service currently keeps async run state in memory, so deploy one
+replica and avoid restarts during an active generation run.
 
 For OpenRouter, use your OpenRouter API key after adding the provider key in OpenRouter settings. Short model aliases such as `gpt-oss-120b` are accepted by inLUMEN and normalized before the request is sent.
 
@@ -158,6 +200,37 @@ The frontend talks only to the inLUMEN backend gateway API on `INLUMEN_API_PORT`
 LLM configuration metadata is also saved through the gateway by default (`VITE_ENABLE_REMOTE_CHATBOT_CONFIG_SYNC=true`); user-provided API keys remain browser-local and are never stored by the backend.
 
 LLM agents use OpenAI-compatible Chat Completions endpoints. Configure OpenRouter, Ollama Cloud, or a custom on-prem endpoint in the Settings dialog. The backend rejects LLM requests that do not include a browser-supplied LLM configuration.
+
+### Bring your own node scripts
+
+Dagster deployment generation accepts files from any external source through the
+normal node **Upload Files** control. The simple node-file rule is:
+
+1. Attach `main.py`.
+2. Attach `requirements.txt` only when the script needs third-party packages.
+3. Attach each real input file to the first node that reads it.
+
+At runtime, the node's attachments and upstream outputs are placed in the
+script's working directory. Ordinary scripts can read files such as `input.csv`
+and write result files there. inLUMEN automatically passes new or changed files
+to the next node and creates all Dagster packaging. No Dagster code, manifest, or
+Dockerfile is required from the user.
+
+The **Generate Runtime Scripts** action reuses the high-level prompt that created
+the pipeline. Users can either select **Generate and attach**, or select
+**Copy prompt** and paste the ready-made request into any external AI. Both paths
+produce the same simple node files. The external AI is asked to return code only;
+input data always comes from the user. Its response includes an input upload map
+with the correct node ID for each input. Bundle generation also catches clear
+cases where an input was attached to a later node instead of its first consumer.
+Clearly malformed or placeholder inputs
+(for example a text placeholder renamed to `.wav`) are rejected before a bundle
+is generated.
+
+Node scripts must be finite, non-interactive batch programs. The generated
+Dagster runtime disables keyboard input and stops a node after 300 seconds by
+default instead of leaving a run stuck indefinitely. Set
+`INLUMEN_NODE_TIMEOUT_SECONDS` when starting the bundle to change that limit.
 
 API key handling:
 - Provider API keys are entered only in the UI, kept in browser localStorage so they survive refreshes, browser restarts, and container restarts, sent to the backend only inside the specific LLM request payload, and are not saved by the backend `/api/chatbot-configs` endpoints.

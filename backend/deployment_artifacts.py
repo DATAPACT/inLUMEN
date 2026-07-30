@@ -4,6 +4,9 @@ from collections import defaultdict, deque
 from pathlib import PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from artifact_content import decode_artifact_content, verify_artifact_integrity
+from artifact_contract import classify_artifact
+
 try:
     import yaml
 except Exception:  # pragma: no cover - runtime image installs PyYAML.
@@ -31,6 +34,9 @@ DOCKERFILE_INSTRUCTIONS = {
 }
 DOCKERFILE_NAME_RE = re.compile(r"^Dockerfile\.([A-Za-z0-9][A-Za-z0-9_.-]*)$")
 STEP_ID_RE = re.compile(r"files-step-id-([^/]+)$")
+CODEGEN_GENERATOR = "inlumen-codegen-service"
+DAGSTER_PINNED_VERSION = "1.13.12"
+DAGSTER_LIBRARY_PINNED_VERSION = "0.29.12"
 
 
 class DeploymentArtifactValidationError(ValueError):
@@ -44,6 +50,18 @@ class DeploymentArtifactValidationError(ValueError):
 
 def _clean_string(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _json_object(value: Any) -> dict:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _sanitize_fragment(value: Any, fallback: str) -> str:
@@ -98,6 +116,16 @@ def normalize_file_refs(files: Any) -> List[dict]:
                 "filename": filename,
                 "bucket": bucket,
                 "step_id": step_id,
+                **(
+                    {"snapshot_bucket": _clean_string(entry.get("snapshot_bucket"))}
+                    if _clean_string(entry.get("snapshot_bucket"))
+                    else {}
+                ),
+                **(
+                    {"snapshot_object": _clean_string(entry.get("snapshot_object"))}
+                    if _clean_string(entry.get("snapshot_object"))
+                    else {}
+                ),
             }
         )
     return normalized
@@ -121,6 +149,16 @@ def _files_from_step_data(data: dict, flow_id: str) -> List[dict]:
                 "bucket": _clean_string(entry.get("bucket"))
                 or f"files-step-id-{flow_id}",
                 "step_id": flow_id,
+                **(
+                    {"snapshot_bucket": _clean_string(entry.get("snapshot_bucket"))}
+                    if _clean_string(entry.get("snapshot_bucket"))
+                    else {}
+                ),
+                **(
+                    {"snapshot_object": _clean_string(entry.get("snapshot_object"))}
+                    if _clean_string(entry.get("snapshot_object"))
+                    else {}
+                ),
             }
         )
 
@@ -167,12 +205,27 @@ def extract_pipeline_steps(pipeline_graph: Optional[dict], files: Any = None) ->
             "endpoint": _clean_string(step_data.get("endpoint")),
             "database": _clean_string(step_data.get("database")),
             "param": step_data.get("param") if isinstance(step_data.get("param"), dict) else {},
+            "definition_id": _clean_string(step_data.get("definition_id")),
+            "definition_version": step_data.get("definition_version"),
+            "implementation": (
+                step_data.get("implementation")
+                if isinstance(step_data.get("implementation"), dict)
+                else _json_object(step_data.get("implementation_json"))
+            ),
+            "configuration_status": _clean_string(step_data.get("configuration_status")),
+            "generated_artifact": (
+                step_data.get("generated_artifact")
+                if isinstance(step_data.get("generated_artifact"), dict)
+                else _json_object(step_data.get("generated_artifact_json"))
+            ),
             "files": normalize_file_refs(
                 [
                     {
                         "filename": f.get("filename"),
                         "bucket": f.get("bucket") or f"files-step-id-{flow_id}",
                         "step_id": flow_id,
+                        "snapshot_bucket": f.get("snapshot_bucket"),
+                        "snapshot_object": f.get("snapshot_object"),
                     }
                     for f in files_for_step
                     if isinstance(f, dict) and f.get("filename")
@@ -205,6 +258,19 @@ def extract_pipeline_steps(pipeline_graph: Optional[dict], files: Any = None) ->
             "endpoint": _clean_string(data.get("endpoint")),
             "database": _clean_string(data.get("database")),
             "param": param,
+            "definition_id": _clean_string(data.get("definition_id")),
+            "definition_version": data.get("definition_version"),
+            "implementation": (
+                data.get("implementation")
+                if isinstance(data.get("implementation"), dict)
+                else _json_object(data.get("implementation_json"))
+            ),
+            "configuration_status": _clean_string(data.get("configuration_status")),
+            "generated_artifact": (
+                data.get("generated_artifact")
+                if isinstance(data.get("generated_artifact"), dict)
+                else _json_object(data.get("generated_artifact_json"))
+            ),
             "files": _files_from_step_data(data, flow_id),
         }
 
@@ -219,6 +285,11 @@ def extract_pipeline_steps(pipeline_graph: Optional[dict], files: Any = None) ->
                 "endpoint": "",
                 "database": "",
                 "param": {},
+                "definition_id": "",
+                "definition_version": None,
+                "implementation": {},
+                "configuration_status": "",
+                "generated_artifact": {},
                 "files": [],
             }
         known = {(f["filename"], f.get("bucket", "")) for f in steps_by_id[step_id]["files"]}
@@ -265,6 +336,12 @@ def extract_pipeline_edges(pipeline_graph: Optional[dict]) -> List[dict]:
         seen.add(key)
         deduped.append(edge)
     return deduped
+
+
+def select_runtime_steps(
+    steps: Sequence[dict],
+) -> List[dict]:
+    return list(steps)
 
 
 def _step_sort_key(flow_id: Any) -> Tuple[int, Any]:
@@ -381,18 +458,33 @@ def build_dockerfile_artifacts(
     deployment_agents.py so attached files and step semantics can be interpreted
     with natural-language context.
     """
-    steps = extract_pipeline_steps(pipeline_graph, files)
+    all_steps = extract_pipeline_steps(pipeline_graph, files)
+    steps = select_runtime_steps(all_steps)
     if not steps:
         raise ValueError("No pipeline steps were found for Dockerfile generation.")
 
-    dockerfiles = [_dockerfile_for_step(step) for step in steps]
+    from generators.registry import GeneratorRegistry
+
+    generator_registry = GeneratorRegistry()
+    runtime_artifacts = []
+    dockerfiles = []
+    for step in steps:
+        generator = generator_registry.generator_for_step(step)
+        if generator is None:
+            dockerfiles.append(_dockerfile_for_step(step))
+            continue
+        bundle = generator.generate(step, pipeline_graph)
+        runtime_artifacts.append(bundle.to_dict(include_content=True))
+        dockerfiles.append(bundle.dockerfile_artifact())
     validate_dockerfile_artifacts(dockerfiles, [step["flow_id"] for step in steps], steps)
     return {
         "dockerfiles": dockerfiles,
+        "runtime_artifacts": runtime_artifacts,
         "guardrails": {
             "valid": True,
             "checks": [
-                "one Dockerfile per pipeline step",
+                "one Dockerfile per executable pipeline step",
+                "registered deterministic generators bypass the generic runtime inference",
                 "Dockerfile filenames match Dockerfile.<step_id>",
                 "Dockerfiles include FROM, WORKDIR, build context handling, and CMD",
             ],
@@ -436,6 +528,11 @@ def validate_dockerfile_artifacts(
     expected_ids = {_clean_string(step_id) for step_id in (expected_step_ids or []) if _clean_string(step_id)}
     step_files = {
         _clean_string(step.get("flow_id")): [entry["filename"] for entry in step.get("files") or []]
+        for step in (steps or [])
+        if isinstance(step, dict)
+    }
+    steps_by_id = {
+        _clean_string(step.get("flow_id")): step
         for step in (steps or [])
         if isinstance(step, dict)
     }
@@ -587,22 +684,326 @@ def _dependency_lookup(step_ids: Sequence[str], edges: Sequence[dict]) -> Dict[s
     return dependencies
 
 
+def _is_current_codegen_step(step: dict) -> bool:
+    artifact = step.get("generated_artifact")
+    if not isinstance(artifact, dict):
+        return False
+    if _clean_string(artifact.get("generator")) != CODEGEN_GENERATOR:
+        return False
+    return (_clean_string(artifact.get("status")) or "current").lower() == "current"
+
+
+def _is_codegen_dockerfile_payload(
+    step_ids: Sequence[str],
+    dockerfiles_by_step: Dict[str, dict],
+) -> bool:
+    if not step_ids:
+        return False
+    for step_id in step_ids:
+        dockerfile = dockerfiles_by_step.get(step_id)
+        if not isinstance(dockerfile, dict):
+            return False
+        if _clean_string(dockerfile.get("generator")) != CODEGEN_GENERATOR:
+            return False
+    return True
+
+
+def _python_identifier(value: Any, fallback: str) -> str:
+    text = _clean_string(value).lower()
+    text = re.sub(r"[^a-z0-9_]+", "_", text).strip("_")
+    text = re.sub(r"_+", "_", text)
+    if not text:
+        text = fallback
+    if not re.match(r"^[a-z_]", text):
+        text = f"{fallback}_{text}"
+    return text[:80].rstrip("_") or fallback
+
+
+def _dagster_asset_names(steps: Sequence[dict]) -> Dict[str, str]:
+    names: Dict[str, str] = {}
+    used: set[str] = set()
+    for step in steps:
+        flow_id = _clean_string(step.get("flow_id"))
+        step_fragment = re.sub(r"[^a-z0-9_]+", "_", flow_id.lower()).strip("_") or "step"
+        label_fragment = re.sub(
+            r"[^a-z0-9_]+",
+            "_",
+            _clean_string(step.get("label")).lower(),
+        ).strip("_")
+        base_name = f"node_{step_fragment}"
+        if label_fragment:
+            base_name = f"{base_name}_{label_fragment}"
+        base_name = _python_identifier(base_name, "node")
+        name = base_name
+        suffix = 2
+        while name in used:
+            name = f"{base_name}_{suffix}"
+            suffix += 1
+        used.add(name)
+        names[flow_id] = name
+    return names
+
+
+def _bundle_node_dir(step: dict) -> str:
+    flow_fragment = _sanitize_fragment(step.get("flow_id"), "step")
+    label_fragment = _sanitize_fragment(step.get("label"), "")
+    if label_fragment:
+        return f"node-{flow_fragment}-{label_fragment}"
+    return f"node-{flow_fragment}"
+
+
+def _step_data_contract(step: dict) -> dict:
+    artifact = step.get("generated_artifact")
+    if not isinstance(artifact, dict):
+        return {}
+    contract = artifact.get("data_contract")
+    return contract if isinstance(contract, dict) else {}
+
+
+def _contract_env_name(contract: dict, key: str, default: str) -> str:
+    value = _clean_string(contract.get(key))
+    return value if value else default
+
+
+def _validate_codegen_argo_shape(
+    *,
+    ordered_ids: Sequence[str],
+    dependencies: Dict[str, List[str]],
+) -> None:
+    errors: List[str] = []
+    for step_id in ordered_ids:
+        parents = dependencies.get(step_id) or []
+        if len(parents) > 1:
+            errors.append(
+                f"Node {step_id} has multiple upstream parents; generated-script Argo "
+                "handoff currently requires an explicit merge node first."
+            )
+    if errors:
+        raise DeploymentArtifactValidationError(
+            "Generated-script Argo Workflow guardrail validation failed",
+            errors,
+        )
+
+
+def _build_codegen_argo_workflow_object(
+    *,
+    steps: Sequence[dict],
+    ordered_ids: Sequence[str],
+    dependencies: Dict[str, List[str]],
+    dockerfiles_by_step: Dict[str, dict],
+) -> dict:
+    _validate_codegen_argo_shape(
+        ordered_ids=ordered_ids,
+        dependencies=dependencies,
+    )
+
+    steps_by_id = {step["flow_id"]: step for step in steps}
+    child_lookup: Dict[str, List[str]] = {step_id: [] for step_id in ordered_ids}
+    for child, parents in dependencies.items():
+        for parent in parents:
+            child_lookup[parent].append(child)
+    leaf_ids = [step_id for step_id in ordered_ids if not child_lookup[step_id]]
+
+    tasks = []
+    entry_template = {
+        "name": "inlumen-pipeline",
+        "dag": {"tasks": tasks},
+    }
+    if leaf_ids:
+        entry_template["outputs"] = {
+            "artifacts": [
+                {
+                    "name": "result" if len(leaf_ids) == 1 else f"result-{_argo_name(leaf_id)}",
+                    "from": f"{{{{tasks.{_argo_name(leaf_id)}.outputs.artifacts.outputs}}}}",
+                }
+                for leaf_id in leaf_ids
+            ]
+        }
+
+    templates = [entry_template]
+    image_parameters = []
+
+    for step_id in ordered_ids:
+        parent_ids = dependencies.get(step_id) or []
+        task = {
+            "name": _argo_name(step_id),
+            "template": _argo_name(step_id),
+            "arguments": {
+                "artifacts": [
+                    {
+                        "name": "inputs",
+                        **(
+                            {
+                                "from": f"{{{{tasks.{_argo_name(parent_ids[0])}.outputs.artifacts.outputs}}}}"
+                            }
+                            if parent_ids
+                            else {
+                                "s3": {
+                                    "key": "{{workflow.parameters.input-artifact-key}}"
+                                }
+                            }
+                        ),
+                    }
+                ]
+            },
+        }
+        if parent_ids:
+            task["dependencies"] = [_argo_name(parent) for parent in parent_ids]
+        tasks.append(task)
+
+    for step_id in ordered_ids:
+        step = steps_by_id[step_id]
+        dockerfile = dockerfiles_by_step[step_id]
+        contract = _step_data_contract(step)
+        image_parameter = _argo_name(f"image-{step_id}", "image")
+        image_parameters.append(
+            {
+                "name": image_parameter,
+                "value": dockerfile["image"],
+            }
+        )
+
+        command = dockerfile.get("command")
+        if not isinstance(command, list) or not all(isinstance(item, str) for item in command):
+            command = _extract_json_cmd_from_dockerfile(_clean_string(dockerfile.get("content")))
+        if not command:
+            command = ["python", "/app/main.py"]
+
+        output_artifact = {
+            "name": "outputs",
+            "path": "/inlumen/outputs",
+            "archive": {"none": {}},
+        }
+        if step_id in leaf_ids:
+            output_artifact["s3"] = {
+                "key": f"{{{{workflow.parameters.output-artifact-prefix}}}}/{_argo_name(step_id)}"
+            }
+
+        env = [
+            {"name": "INLUMEN_FLOW_ID", "value": step_id},
+            {
+                "name": _contract_env_name(
+                    contract,
+                    "input_manifest_env",
+                    "INLUMEN_INPUT_MANIFEST",
+                ),
+                "value": "/inlumen/inputs/input_manifest.json",
+            },
+            {
+                "name": _contract_env_name(
+                    contract,
+                    "output_dir_env",
+                    "INLUMEN_OUTPUT_DIR",
+                ),
+                "value": "/inlumen/outputs",
+            },
+            {
+                "name": _contract_env_name(
+                    contract,
+                    "output_manifest_env",
+                    "INLUMEN_OUTPUT_MANIFEST",
+                ),
+                "value": "/inlumen/outputs/output_manifest.json",
+            },
+            {
+                "name": _contract_env_name(
+                    contract,
+                    "context_path_env",
+                    "INLUMEN_CONTEXT_PATH",
+                ),
+                "value": "/app/node-manifest.json",
+            },
+        ]
+        if step.get("label"):
+            env.append({"name": "INLUMEN_STEP_LABEL", "value": step["label"]})
+        if step.get("description"):
+            env.append({"name": "INLUMEN_STEP_DESCRIPTION", "value": step["description"]})
+
+        annotations = {
+            "inlumen.ai/flow-id": step_id,
+            "inlumen.ai/type": step.get("type") or "custom",
+            "inlumen.ai/generator": CODEGEN_GENERATOR,
+            "inlumen.ai/dockerfile": dockerfile["dockerfile_filename"],
+        }
+        if dockerfile.get("configuration_hash"):
+            annotations["inlumen.ai/configuration-hash"] = dockerfile["configuration_hash"]
+        if step.get("label"):
+            annotations["inlumen.ai/label"] = step["label"]
+
+        templates.append(
+            {
+                "name": _argo_name(step_id),
+                "metadata": {"annotations": annotations},
+                "inputs": {
+                    "artifacts": [
+                        {
+                            "name": "inputs",
+                            "path": "/inlumen/inputs",
+                        }
+                    ]
+                },
+                "outputs": {"artifacts": [output_artifact]},
+                "container": {
+                    "image": f"{{{{workflow.parameters.{image_parameter}}}}}",
+                    "imagePullPolicy": "IfNotPresent",
+                    "workingDir": "/app",
+                    "command": command,
+                    "env": env,
+                },
+            }
+        )
+
+    return {
+        "apiVersion": "argoproj.io/v1alpha1",
+        "kind": "Workflow",
+        "metadata": {
+            "generateName": "inlumen-codegen-",
+            "labels": {
+                "app.kubernetes.io/name": "inlumen-codegen-workflow",
+                "app.kubernetes.io/component": "deployment-artifact",
+            },
+        },
+        "spec": {
+            "entrypoint": "inlumen-pipeline",
+            "artifactRepositoryRef": {
+                "configMap": "inlumen-artifact-repositories",
+                "key": "minio",
+            },
+            "arguments": {
+                "parameters": [
+                    {
+                        "name": "input-artifact-key",
+                        "value": "inlumen/input/input-artifact.tgz",
+                    },
+                    {
+                        "name": "output-artifact-prefix",
+                        "value": "inlumen/output",
+                    },
+                    *image_parameters,
+                ],
+            },
+            "templates": templates,
+        },
+    }
+
+
 def build_argo_workflow_object(
     pipeline_graph: Optional[dict],
     dockerfiles_payload: Any,
     files: Any = None,
 ) -> dict:
-    steps = extract_pipeline_steps(pipeline_graph, files)
-    if not steps:
+    all_steps = extract_pipeline_steps(pipeline_graph, files)
+    if not all_steps:
         raise ValueError("No pipeline steps were found for Argo Workflow generation.")
 
+    edges = extract_pipeline_edges(pipeline_graph)
+    steps = select_runtime_steps(all_steps)
     step_ids = [step["flow_id"] for step in steps]
     dockerfiles = _dockerfiles_from_payload(dockerfiles_payload)
     if not dockerfiles:
         raise ValueError("Dockerfile metadata is required for Argo Workflow generation.")
     validate_dockerfile_artifacts(dockerfiles, step_ids, steps)
 
-    edges = extract_pipeline_edges(pipeline_graph)
     explicit_edges = [
         edge for edge in edges if edge.get("source") in step_ids and edge.get("target") in step_ids
     ]
@@ -617,6 +1018,19 @@ def build_argo_workflow_object(
     steps_by_id = {step["flow_id"]: step for step in steps}
     dependencies = _dependency_lookup(step_ids, explicit_edges)
     dockerfiles_by_step = _dockerfile_lookup(dockerfiles)
+
+    if steps and (
+        all(_is_current_codegen_step(step) for step in steps)
+        or _is_codegen_dockerfile_payload(step_ids, dockerfiles_by_step)
+    ):
+        workflow = _build_codegen_argo_workflow_object(
+            steps=steps,
+            ordered_ids=ordered_ids,
+            dependencies=dependencies,
+            dockerfiles_by_step=dockerfiles_by_step,
+        )
+        validate_argo_workflow_object(workflow, step_ids)
+        return workflow
 
     tasks = []
     templates = [
@@ -915,7 +1329,1763 @@ def build_argo_workflow_yaml(
     files: Any = None,
 ) -> str:
     steps = extract_pipeline_steps(pipeline_graph, files)
+    runtime_steps = select_runtime_steps(steps)
     workflow = build_argo_workflow_object(pipeline_graph, dockerfiles_payload, files)
     yaml_text = dump_yaml(workflow)
-    validate_argo_workflow_yaml(yaml_text, [step["flow_id"] for step in steps])
+    validate_argo_workflow_yaml(
+        yaml_text,
+        [step["flow_id"] for step in runtime_steps],
+    )
     return yaml_text
+
+
+def _payload_deployment_files(dockerfiles_payload: Any) -> List[dict]:
+    if not isinstance(dockerfiles_payload, dict):
+        return []
+    files = dockerfiles_payload.get("deployment_files")
+    return [item for item in files if isinstance(item, dict)] if isinstance(files, list) else []
+
+
+def _payload_input_files(dockerfiles_payload: Any) -> List[dict]:
+    if not isinstance(dockerfiles_payload, dict):
+        return []
+    files = dockerfiles_payload.get("input_files")
+    return [item for item in files if isinstance(item, dict)] if isinstance(files, list) else []
+
+
+def _payload_runtime_artifacts(dockerfiles_payload: Any) -> List[dict]:
+    if not isinstance(dockerfiles_payload, dict):
+        return []
+    artifacts = dockerfiles_payload.get("runtime_artifacts")
+    return [item for item in artifacts if isinstance(item, dict)] if isinstance(artifacts, list) else []
+
+
+def _deployment_file_content(
+    dockerfiles_payload: Any,
+    flow_id: str,
+    filename: str,
+) -> str:
+    for file_entry in _payload_deployment_files(dockerfiles_payload):
+        if _clean_string(file_entry.get("flow_id")) != flow_id:
+            continue
+        if _clean_string(file_entry.get("filename")) == filename:
+            return str(file_entry.get("content") or "")
+
+    for artifact in _payload_runtime_artifacts(dockerfiles_payload):
+        if _clean_string(artifact.get("flow_id")) != flow_id:
+            continue
+        for file_entry in artifact.get("files") or []:
+            if isinstance(file_entry, dict) and _clean_string(file_entry.get("filename")) == filename:
+                return str(file_entry.get("content") or "")
+    return ""
+
+
+def _deployment_files_for_step(dockerfiles_payload: Any, flow_id: str) -> List[dict]:
+    files = [
+        item
+        for item in _payload_deployment_files(dockerfiles_payload)
+        if _clean_string(item.get("flow_id")) == flow_id
+    ]
+    if files:
+        filenames = {_clean_string(item.get("filename")) for item in files}
+        dockerfile = _dockerfile_lookup(dockerfiles_payload).get(flow_id)
+        if dockerfile is not None:
+            dockerfile_filename = _clean_string(dockerfile.get("dockerfile_filename"))
+            if dockerfile_filename and dockerfile_filename not in filenames:
+                files.append(
+                    {
+                        "filename": dockerfile_filename,
+                        "flow_id": flow_id,
+                        "content": dockerfile.get("content") or "",
+                        "content_type": "text/x-dockerfile",
+                        "role": "dockerfile",
+                    }
+                )
+        return files
+
+    output = []
+    for artifact in _payload_runtime_artifacts(dockerfiles_payload):
+        if _clean_string(artifact.get("flow_id")) != flow_id:
+            continue
+        for file_entry in artifact.get("files") or []:
+            if isinstance(file_entry, dict):
+                output.append(
+                    {
+                        "filename": file_entry.get("filename"),
+                        "flow_id": flow_id,
+                        "content": file_entry.get("content") or "",
+                        "content_type": file_entry.get("content_type") or "text/plain",
+                        "role": "runtime",
+                        **(
+                            {"content_encoding": file_entry.get("content_encoding")}
+                            if file_entry.get("content_encoding")
+                            else {}
+                        ),
+                        **(
+                            {"size_bytes": file_entry.get("size_bytes")}
+                            if file_entry.get("size_bytes") is not None
+                            else {}
+                        ),
+                        **(
+                            {"sha256": file_entry.get("sha256")}
+                            if file_entry.get("sha256")
+                            else {}
+                        ),
+                    }
+                )
+    return output
+
+
+def _dagster_file(
+    path: str,
+    content: str,
+    role: str = "dagster",
+    *,
+    content_type: str = "text/plain;charset=utf-8",
+    content_encoding: str = "",
+    size_bytes: Any = None,
+    sha256: str = "",
+) -> dict:
+    file_payload = {
+        "path": path,
+        "filename": PurePosixPath(path).name,
+        "flow_id": "",
+        "content": content,
+        "content_type": content_type,
+        "role": role,
+    }
+    if content_encoding:
+        file_payload["content_encoding"] = content_encoding
+    if size_bytes is not None:
+        file_payload["size_bytes"] = size_bytes
+    if sha256:
+        file_payload["sha256"] = sha256
+    return file_payload
+
+
+def _dagster_yaml(data: dict) -> str:
+    return dump_yaml(data)
+
+
+def _dagster_shell_command_component_source() -> str:
+    return '''import json
+import os
+import queue
+import subprocess
+import sys
+import threading
+import time
+from collections import deque
+from pathlib import Path
+
+import dagster as dg
+
+
+TABLE_FORMATS = {"csv", "tsv", "parquet", "xlsx", "xls", "arrow", "feather"}
+JSON_FORMATS = {"json", "jsonl", "ndjson"}
+TEXT_FORMATS = {"txt", "md", "markdown", "xml", "yaml", "yml", "html", "htm", "rtf", "log"}
+IMAGE_FORMATS = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "svg"}
+
+
+def _canonical_kind(filename, file_format):
+    normalized_format = str(file_format or "").strip().lower().lstrip(".")
+    if not normalized_format:
+        normalized_format = Path(str(filename or "")).suffix.lower().lstrip(".") or "binary"
+    if normalized_format in TABLE_FORMATS:
+        return "table", normalized_format
+    if normalized_format in JSON_FORMATS:
+        return "json", normalized_format
+    if normalized_format in TEXT_FORMATS:
+        return "text", normalized_format
+    if normalized_format in IMAGE_FORMATS:
+        return "image", normalized_format
+    return "binary", normalized_format
+
+
+def _entry_with_path(entry, manifest_dir, project_root):
+    normalized = dict(entry)
+    filename = str(
+        normalized.get("filename")
+        or normalized.get("name")
+        or ""
+    ).strip()
+    raw_path = str(normalized.get("path") or "").strip()
+    if raw_path:
+        path = Path(raw_path)
+        if not path.is_absolute():
+            candidates = [
+                project_root / path,
+                project_root.parent / path,
+                manifest_dir / path,
+            ]
+            if filename:
+                candidates.append(manifest_dir / filename)
+            path = next((candidate for candidate in candidates if candidate.exists()), candidates[0])
+        normalized["path"] = str(path)
+    elif filename:
+        normalized["path"] = str(manifest_dir / filename)
+    inferred_kind, normalized_format = _canonical_kind(
+        filename,
+        normalized.get("format"),
+    )
+    normalized["format"] = normalized_format
+    if str(normalized.get("kind") or "").lower() in {"", "file"}:
+        normalized["kind"] = inferred_kind
+    return normalized
+
+
+def _prepare_input_manifest(source_manifest_path: Path, work_dir: Path, project_root: Path) -> Path:
+    with source_manifest_path.open("r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+
+    manifest_dir = source_manifest_path.parent
+    if isinstance(manifest.get("inputs"), list):
+        inputs = [
+            _entry_with_path(entry, manifest_dir, project_root)
+            for entry in manifest["inputs"]
+            if isinstance(entry, dict)
+        ]
+    elif isinstance(manifest.get("outputs"), list):
+        inputs = [
+            _entry_with_path(entry, manifest_dir, project_root)
+            for entry in manifest["outputs"]
+            if isinstance(entry, dict)
+        ]
+    elif isinstance(manifest.get("files"), list):
+        inputs = [
+            _entry_with_path(entry, manifest_dir, project_root)
+            for entry in manifest["files"]
+            if isinstance(entry, dict)
+        ]
+    else:
+        inputs = []
+
+    prepared_manifest = {
+        "schema_version": "inlumen.input-manifest@1",
+        "inputs": inputs,
+    }
+    prepared_path = work_dir / "_dagster_input_manifest.json"
+    with prepared_path.open("w", encoding="utf-8") as handle:
+        json.dump(prepared_manifest, handle, indent=2)
+    return prepared_path
+
+
+def _quality_gates_from_manifest(output_manifest_path: Path, project_root: Path):
+    if not output_manifest_path.is_file():
+        return []
+    try:
+        with output_manifest_path.open("r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    entries = manifest.get("outputs") or manifest.get("files") or []
+    gates = []
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        normalized = _entry_with_path(
+            entry,
+            output_manifest_path.parent,
+            project_root,
+        )
+        path = Path(str(normalized.get("path") or ""))
+        if not path.is_file() or path.suffix.lower() != ".json":
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        quality_gate = payload.get("quality_gate") if isinstance(payload, dict) else None
+        if isinstance(quality_gate, dict):
+            gates.append({
+                "filename": str(normalized.get("filename") or path.name),
+                "status": str(quality_gate.get("status") or "unknown").lower(),
+                "failures": list(quality_gate.get("failures") or []),
+                "warnings": list(quality_gate.get("warnings") or []),
+            })
+    return gates
+
+
+def _json_type_matches(value, expected_type):
+    if expected_type == "object":
+        return isinstance(value, dict)
+    if expected_type == "array":
+        return isinstance(value, list)
+    if expected_type == "string":
+        return isinstance(value, str)
+    if expected_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected_type == "boolean":
+        return isinstance(value, bool)
+    if expected_type == "null":
+        return value is None
+    return True
+
+
+def _json_schema_errors(value, schema, location):
+    if not isinstance(schema, dict):
+        return []
+    errors = []
+    expected_type = schema.get("type")
+    if expected_type and not _json_type_matches(value, expected_type):
+        return [
+            f"{location} must be {expected_type}, got {type(value).__name__}."
+        ]
+    allowed = schema.get("enum")
+    if isinstance(allowed, list) and allowed and value not in allowed:
+        errors.append(f"{location} must be one of {allowed!r}.")
+    if isinstance(value, dict):
+        required = schema.get("required") or []
+        missing = [
+            str(key)
+            for key in required
+            if isinstance(key, str) and key not in value
+        ]
+        if missing:
+            errors.append(
+                f"{location} is missing required fields: {', '.join(missing)}."
+            )
+        properties = schema.get("properties") or {}
+        if isinstance(properties, dict):
+            for key, property_schema in properties.items():
+                if key in value:
+                    errors.extend(
+                        _json_schema_errors(
+                            value[key],
+                            property_schema,
+                            f"{location}.{key}",
+                        )
+                    )
+    elif isinstance(value, list) and isinstance(schema.get("items"), dict):
+        for index, item in enumerate(value):
+            errors.extend(
+                _json_schema_errors(
+                    item,
+                    schema["items"],
+                    f"{location}[{index}]",
+                )
+            )
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and schema.get("minimum") is not None
+        and value < schema["minimum"]
+    ):
+        errors.append(f"{location} must be at least {schema['minimum']}.")
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and schema.get("maximum") is not None
+        and value > schema["maximum"]
+    ):
+        errors.append(f"{location} must be at most {schema['maximum']}.")
+    return errors
+
+
+def _output_contract_errors(
+    output_manifest_path: Path,
+    context_path: Path | None,
+    output_dir: Path,
+):
+    errors = []
+    try:
+        with output_manifest_path.open("r", encoding="utf-8") as handle:
+            output_manifest = json.load(handle)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return [f"Output manifest is unreadable or invalid JSON: {exc}"]
+
+    actual_entries = output_manifest.get("outputs") or output_manifest.get("files")
+    if not isinstance(actual_entries, list):
+        return ["Output manifest must contain an outputs list."]
+    actual_by_name = {}
+    for entry in actual_entries:
+        if not isinstance(entry, dict):
+            errors.append("Output manifest entries must be objects.")
+            continue
+        name = str(entry.get("name") or Path(str(entry.get("filename") or "")).stem)
+        if not name:
+            errors.append("Output manifest entry is missing name and filename.")
+            continue
+        if name in actual_by_name:
+            errors.append(f"Output manifest contains duplicate output {name!r}.")
+        actual_by_name[name] = entry
+
+    expected_entries = []
+    if context_path is not None and context_path.is_file():
+        try:
+            with context_path.open("r", encoding="utf-8") as handle:
+                node_manifest = json.load(handle)
+            contract = node_manifest.get("data_contract") or {}
+            expected_entries = contract.get("outputs") or []
+            if not isinstance(expected_entries, list):
+                errors.append("Node data contract outputs must be a list.")
+                expected_entries = []
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            errors.append(f"Node data contract is unreadable or invalid JSON: {exc}")
+
+    expected_by_name = {
+        str(entry.get("name") or Path(str(entry.get("filename") or "")).stem): entry
+        for entry in expected_entries
+        if isinstance(entry, dict)
+    }
+    for name in sorted(set(actual_by_name) - set(expected_by_name)):
+        if expected_by_name:
+            errors.append(f"Output manifest contains undeclared output {name!r}.")
+
+    output_root = output_dir.resolve()
+    for name, expected in expected_by_name.items():
+        actual = actual_by_name.get(name)
+        if actual is None:
+            errors.append(f"Output manifest is missing declared output {name!r}.")
+            continue
+        for field in ("filename", "kind", "format"):
+            expected_value = str(expected.get(field) or "").strip().lower()
+            actual_value = str(actual.get(field) or "").strip().lower()
+            if expected_value and actual_value != expected_value:
+                errors.append(
+                    f"Output {name!r} {field} mismatch: expected "
+                    f"{expected_value!r}, got {actual_value or '<missing>'!r}."
+                )
+
+        raw_path = str(actual.get("path") or actual.get("filename") or "").strip()
+        if not raw_path:
+            errors.append(f"Output {name!r} is missing path and filename.")
+            continue
+        output_path = Path(raw_path)
+        if not output_path.is_absolute():
+            output_path = output_dir / output_path
+        resolved_path = output_path.resolve()
+        try:
+            resolved_path.relative_to(output_root)
+        except ValueError:
+            errors.append(
+                f"Output {name!r} resolves outside its output directory: "
+                f"{resolved_path}."
+            )
+            continue
+        if not resolved_path.is_file():
+            errors.append(f"Output file for {name!r} does not exist: {resolved_path}.")
+            continue
+        if resolved_path.stat().st_size <= 0:
+            errors.append(f"Output file for {name!r} is empty.")
+            continue
+
+        expected_kind = str(expected.get("kind") or "").strip().lower()
+        expected_format = str(expected.get("format") or "").strip().lower()
+        if expected_kind == "json" or expected_format in JSON_FORMATS:
+            try:
+                with resolved_path.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                errors.append(f"JSON output {name!r} is invalid: {exc}")
+                continue
+            errors.extend(
+                _json_schema_errors(
+                    payload,
+                    expected.get("schema") or {},
+                    f"JSON output {name!r}",
+                )
+            )
+    return errors
+
+
+class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
+    asset_key: str
+    script_path: str
+    upstream_assets: list[str] = []
+    input_manifest_path: str
+    output_dir: str
+    output_manifest_path: str
+    context_path: str = ""
+    arguments: list[str] = []
+
+    def build_defs(self, context: dg.ComponentLoadContext) -> dg.Definitions:
+        deps = [dg.AssetKey(asset_key) for asset_key in self.upstream_assets]
+
+        @dg.asset(name=self.asset_key, deps=deps)
+        def run_script(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+            project_root = Path.cwd()
+            script_path = Path(self.script_path)
+            if not script_path.is_absolute():
+                script_path = project_root / script_path
+
+            input_manifest_path = Path(self.input_manifest_path)
+            if not input_manifest_path.is_absolute():
+                input_manifest_path = project_root / input_manifest_path
+
+            output_dir = Path(self.output_dir)
+            if not output_dir.is_absolute():
+                output_dir = project_root / output_dir
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            output_manifest_path = Path(self.output_manifest_path)
+            if not output_manifest_path.is_absolute():
+                output_manifest_path = project_root / output_manifest_path
+            output_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            prepared_input_manifest_path = _prepare_input_manifest(
+                input_manifest_path,
+                output_dir,
+                project_root,
+            )
+
+            env = dict(os.environ)
+            env.update({
+                "INLUMEN_FLOW_ID": self.asset_key,
+                "INLUMEN_INPUT_MANIFEST": str(prepared_input_manifest_path),
+                "INLUMEN_OUTPUT_DIR": str(output_dir),
+                "INLUMEN_OUTPUT_MANIFEST": str(output_manifest_path),
+            })
+            if self.context_path:
+                context_path = Path(self.context_path)
+                if not context_path.is_absolute():
+                    context_path = project_root / context_path
+                env["INLUMEN_CONTEXT_PATH"] = str(context_path)
+
+            started_at = time.monotonic()
+            process = subprocess.Popen(
+                [sys.executable, str(script_path), *self.arguments],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            output_queue: queue.Queue = queue.Queue()
+            stream_closed = object()
+            recent_output = deque(maxlen=400)
+
+            def read_output() -> None:
+                assert process.stdout is not None
+                try:
+                    for raw_line in process.stdout:
+                        output_queue.put(raw_line.rstrip())
+                finally:
+                    output_queue.put(stream_closed)
+
+            output_reader = threading.Thread(
+                target=read_output,
+                name=f"inlumen-log-{self.asset_key}",
+                daemon=True,
+            )
+            output_reader.start()
+            while True:
+                try:
+                    line = output_queue.get(timeout=15.0)
+                except queue.Empty:
+                    if process.poll() is None:
+                        elapsed = time.monotonic() - started_at
+                        context.log.info(
+                            f"Node {self.asset_key} is still running "
+                            f"({elapsed:.0f}s elapsed)."
+                        )
+                        continue
+                    line = stream_closed
+                if line is stream_closed:
+                    break
+                if line:
+                    recent_output.append(line)
+                    context.log.info(line)
+
+            returncode = process.wait()
+            output_reader.join(timeout=1.0)
+            if returncode != 0:
+                diagnostic = "\\n".join(recent_output).strip()
+                raise RuntimeError(
+                    f"Node script {self.asset_key} failed with exit code "
+                    f"{returncode}:\\n{diagnostic[-12000:]}"
+                )
+            if not output_manifest_path.is_file():
+                raise RuntimeError(
+                    f"Node script {self.asset_key} did not write required output "
+                    f"manifest {output_manifest_path}."
+                )
+            contract_context_path = None
+            if self.context_path:
+                contract_context_path = Path(self.context_path)
+                if not contract_context_path.is_absolute():
+                    contract_context_path = project_root / contract_context_path
+            contract_errors = _output_contract_errors(
+                output_manifest_path,
+                contract_context_path,
+                output_dir,
+            )
+            if contract_errors:
+                raise RuntimeError(
+                    f"Node {self.asset_key} output contract validation failed:\\n- "
+                    + "\\n- ".join(contract_errors)
+                )
+            return dg.MaterializeResult(
+                metadata={
+                    "output_dir": str(output_dir),
+                    "output_manifest_path": str(output_manifest_path),
+                }
+            )
+
+        @dg.asset_check(asset=run_script, name="quality_policy")
+        def quality_policy_check() -> dg.AssetCheckResult:
+            project_root = Path.cwd()
+            output_manifest_path = Path(self.output_manifest_path)
+            if not output_manifest_path.is_absolute():
+                output_manifest_path = project_root / output_manifest_path
+            gates = _quality_gates_from_manifest(
+                output_manifest_path,
+                project_root,
+            )
+            failed = [gate for gate in gates if gate["status"] == "fail"]
+            warned = [gate for gate in gates if gate["status"] == "warn"]
+            return dg.AssetCheckResult(
+                passed=not failed,
+                metadata={
+                    "quality_gate_count": len(gates),
+                    "warning_gate_count": len(warned),
+                    "failed_gate_count": len(failed),
+                    "quality_gates": dg.MetadataValue.json(gates),
+                },
+            )
+
+        return dg.Definitions(
+            assets=[run_script],
+            asset_checks=[quality_policy_check],
+        )
+'''
+
+
+def _dagster_readme(
+    *,
+    asset_names: Sequence[str],
+    has_sample_inputs: bool,
+    bundle_layout: bool = False,
+) -> str:
+    input_dir = "inputs" if bundle_layout else "storage/inputs"
+    input_manifest = f"{input_dir}/input_manifest.json"
+    sample_note = (
+        f"Sample input files from InLumen were copied into `{input_dir}/`."
+        if has_sample_inputs
+        else f"No sample input files were detected; add files beside `{input_manifest}` before materializing root assets."
+    )
+    run_commands = (
+        "```bash\n"
+        "docker compose up\n"
+        "```\n\n"
+        "From the exported bundle root, the compose file builds the generated Dagster image, "
+        "starts the Dagster webserver and daemon with PostgreSQL-backed storage, exposes "
+        "the UI on port `3000`, and writes materialized task outputs to `outputs/`."
+        if bundle_layout
+        else "```bash\n"
+        "pip install -e .\n"
+        "dagster dev -m inlumen_dagster_project.definitions\n"
+        "```"
+    )
+    return f"""# InLumen Dagster Deployment
+
+This project was generated deterministically from persisted InLumen runtime artifacts.
+
+## Assets
+
+{chr(10).join(f"- `{name}`" for name in asset_names)}
+
+## Run Locally
+
+{run_commands}
+
+The reusable component in `src/inlumen_dagster_project/components/shell_command.py` launches each node script as a local subprocess, forwards its logs to Dagster, and preserves the InLumen runtime contract:
+
+- `INLUMEN_INPUT_MANIFEST`
+- `INLUMEN_OUTPUT_DIR`
+- `INLUMEN_OUTPUT_MANIFEST`
+- `INLUMEN_CONTEXT_PATH`
+
+{sample_note}
+"""
+
+
+def _dagster_project_dependencies(install_requires: Sequence[str]) -> List[str]:
+    dependencies = [
+        f"dagster=={DAGSTER_PINNED_VERSION}",
+        f"dagster-webserver=={DAGSTER_PINNED_VERSION}",
+        f"dagster-postgres=={DAGSTER_LIBRARY_PINNED_VERSION}",
+        *install_requires,
+    ]
+    unique_dependencies = []
+    seen = set()
+    for dependency in dependencies:
+        cleaned = dependency.strip()
+        if not cleaned or cleaned.startswith("#"):
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_dependencies.append(cleaned)
+    return unique_dependencies
+
+
+def _dagster_project_metadata_content(install_requires: Sequence[str]) -> str:
+    unique_dependencies = _dagster_project_dependencies(install_requires)
+    dependency_lines = ",\n".join(
+        f'  "{dependency}"'
+        for dependency in unique_dependencies
+    )
+    return f"""[project]
+name = "inlumen-dagster-project"
+version = "0.1.0"
+description = "Dagster project generated from InLumen deployment artifacts."
+requires-python = ">=3.11"
+dependencies = [
+{dependency_lines}
+]
+
+[tool.dagster]
+module_name = "inlumen_dagster_project.definitions"
+registry_modules = ["inlumen_dagster_project.components"]
+
+[tool.dg]
+directory_type = "project"
+
+[tool.dg.project]
+root_module = "inlumen_dagster_project"
+defs_module = "inlumen_dagster_project.defs"
+"""
+
+
+def _dagster_requirements_content(install_requires: Sequence[str]) -> str:
+    return "\n".join(_dagster_project_dependencies(install_requires)) + "\n"
+
+
+def _parse_requirements_for_dagster_project(content: str) -> List[str]:
+    requirements: List[str] = []
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith(("-", "--")):
+            continue
+        if line.startswith(("git+", "http://", "https://", "file:", ".")):
+            continue
+        if "://" in line:
+            continue
+        if " #" in line:
+            line = line.split(" #", 1)[0].strip()
+        if line:
+            requirements.append(line)
+    return requirements
+
+
+def _dagster_dockerfile_content(*, bundle_layout: bool = False) -> str:
+    if bundle_layout:
+        return """# syntax=docker/dockerfile:1.7
+FROM python:3.11-slim
+ENV PYTHONUNBUFFERED=1
+ARG INLUMEN_ACCELERATOR=cpu
+ARG INLUMEN_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
+WORKDIR /workspace
+COPY dagster/requirements.txt /tmp/inlumen-requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \\
+    python -m pip install --upgrade pip \\
+    && if [ "$INLUMEN_ACCELERATOR" = "cpu" ] && grep -Eiq '^torch([<>=!~].*)?$' /tmp/inlumen-requirements.txt; then \\
+         TORCH_REQUIREMENT="$(grep -Ei '^torch([<>=!~].*)?$' /tmp/inlumen-requirements.txt | head -n 1)" \\
+         && python -m pip install --index-url "$INLUMEN_PYTORCH_CPU_INDEX_URL" "$TORCH_REQUIREMENT"; \\
+       fi \\
+    && python -m pip install -r /tmp/inlumen-requirements.txt
+COPY dagster /workspace/dagster
+COPY inputs /workspace/inputs
+COPY nodes /workspace/nodes
+RUN mkdir -p /workspace/outputs /workspace/dagster/.dagster_home
+WORKDIR /workspace/dagster
+RUN python -m pip install --no-deps -e .
+EXPOSE 3000
+CMD ["dagster", "dev", "-m", "inlumen_dagster_project.definitions", "-h", "0.0.0.0", "-p", "3000"]
+"""
+    return """# syntax=docker/dockerfile:1.7
+FROM python:3.11-slim
+ENV PYTHONUNBUFFERED=1
+ARG INLUMEN_ACCELERATOR=cpu
+ARG INLUMEN_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
+WORKDIR /app
+COPY requirements.txt /tmp/inlumen-requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \\
+    python -m pip install --upgrade pip \\
+    && if [ "$INLUMEN_ACCELERATOR" = "cpu" ] && grep -Eiq '^torch([<>=!~].*)?$' /tmp/inlumen-requirements.txt; then \\
+         TORCH_REQUIREMENT="$(grep -Ei '^torch([<>=!~].*)?$' /tmp/inlumen-requirements.txt | head -n 1)" \\
+         && python -m pip install --index-url "$INLUMEN_PYTORCH_CPU_INDEX_URL" "$TORCH_REQUIREMENT"; \\
+       fi \\
+    && python -m pip install -r /tmp/inlumen-requirements.txt
+COPY . /app
+RUN mkdir -p /app/.dagster_home
+RUN python -m pip install --no-deps -e .
+EXPOSE 3000
+CMD ["dagster", "dev", "-m", "inlumen_dagster_project.definitions", "-h", "0.0.0.0", "-p", "3000"]
+"""
+
+
+def _dagster_instance_yaml_content() -> str:
+    return """telemetry:
+  enabled: false
+
+run_storage:
+  module: dagster_postgres.run_storage
+  class: PostgresRunStorage
+  config:
+    postgres_db:
+      hostname:
+        env: DAGSTER_POSTGRES_HOST
+      username:
+        env: DAGSTER_POSTGRES_USER
+      password:
+        env: DAGSTER_POSTGRES_PASSWORD
+      db_name:
+        env: DAGSTER_POSTGRES_DB
+      port: 5432
+
+event_log_storage:
+  module: dagster_postgres.event_log
+  class: PostgresEventLogStorage
+  config:
+    postgres_db:
+      hostname:
+        env: DAGSTER_POSTGRES_HOST
+      username:
+        env: DAGSTER_POSTGRES_USER
+      password:
+        env: DAGSTER_POSTGRES_PASSWORD
+      db_name:
+        env: DAGSTER_POSTGRES_DB
+      port: 5432
+
+schedule_storage:
+  module: dagster_postgres.schedule_storage
+  class: PostgresScheduleStorage
+  config:
+    postgres_db:
+      hostname:
+        env: DAGSTER_POSTGRES_HOST
+      username:
+        env: DAGSTER_POSTGRES_USER
+      password:
+        env: DAGSTER_POSTGRES_PASSWORD
+      db_name:
+        env: DAGSTER_POSTGRES_DB
+      port: 5432
+"""
+
+
+def _dagster_compose_content(
+    *,
+    build_context: str,
+    dockerfile: str,
+    output_mount: str,
+    input_mount: str,
+    dagster_home: str,
+) -> str:
+    input_volume_line = f"  - {input_mount}\n" if input_mount else ""
+    return f"""x-dagster-build: &dagster-build
+  context: {build_context}
+  dockerfile: {dockerfile}
+  args:
+    INLUMEN_ACCELERATOR: "${{INLUMEN_ACCELERATOR:-cpu}}"
+    INLUMEN_PYTORCH_CPU_INDEX_URL: "${{INLUMEN_PYTORCH_CPU_INDEX_URL:-https://download.pytorch.org/whl/cpu}}"
+
+x-dagster-environment: &dagster-environment
+  DAGSTER_HOME: {dagster_home}
+  DAGSTER_POSTGRES_HOST: dagster-postgres
+  DAGSTER_POSTGRES_USER: "${{DAGSTER_POSTGRES_USER:-dagster}}"
+  DAGSTER_POSTGRES_PASSWORD: "${{DAGSTER_POSTGRES_PASSWORD:-dagster}}"
+  DAGSTER_POSTGRES_DB: "${{DAGSTER_POSTGRES_DB:-dagster}}"
+  HF_HOME: /model-cache
+  HF_TOKEN: "${{HF_TOKEN:-}}"
+  HF_HUB_ETAG_TIMEOUT: "${{HF_HUB_ETAG_TIMEOUT:-30}}"
+  HF_HUB_DOWNLOAD_TIMEOUT: "${{HF_HUB_DOWNLOAD_TIMEOUT:-120}}"
+  INLUMEN_ASR_PROFILE: "${{INLUMEN_ASR_PROFILE:-auto}}"
+  INLUMEN_ASR_CPU_THREADS: "${{INLUMEN_ASR_CPU_THREADS:-2}}"
+  INLUMEN_ASR_NUM_WORKERS: "${{INLUMEN_ASR_NUM_WORKERS:-1}}"
+  PYTHONUNBUFFERED: "1"
+
+x-dagster-volumes: &dagster-volumes
+  - {output_mount}
+{input_volume_line}\
+  - inlumen_model_cache:/model-cache
+  - dagster_compute_logs:{dagster_home}/storage
+
+services:
+  dagster-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${{DAGSTER_POSTGRES_USER:-dagster}}"
+      POSTGRES_PASSWORD: "${{DAGSTER_POSTGRES_PASSWORD:-dagster}}"
+      POSTGRES_DB: "${{DAGSTER_POSTGRES_DB:-dagster}}"
+    volumes:
+      - dagster_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${{POSTGRES_USER}} -d $${{POSTGRES_DB}}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  dagster-webserver:
+    build: *dagster-build
+    command:
+      - dagster-webserver
+      - -m
+      - inlumen_dagster_project.definitions
+      - -h
+      - 0.0.0.0
+      - -p
+      - "3000"
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      dagster-postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    volumes: *dagster-volumes
+    environment: *dagster-environment
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3000', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  dagster-daemon:
+    build: *dagster-build
+    command:
+      - dagster-daemon
+      - run
+      - -m
+      - inlumen_dagster_project.definitions
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      dagster-postgres:
+        condition: service_healthy
+    volumes: *dagster-volumes
+    environment: *dagster-environment
+
+volumes:
+  dagster_postgres_data:
+  dagster_compute_logs:
+  inlumen_model_cache:
+    name: "${{INLUMEN_MODEL_CACHE_VOLUME:-inlumen_model_cache}}"
+"""
+
+
+def _dagster_docker_compose_content(*, bundle_layout: bool = False) -> str:
+    if bundle_layout:
+        return _dagster_compose_content(
+            build_context="..",
+            dockerfile="dagster/Dockerfile",
+            output_mount="../outputs:/workspace/outputs",
+            input_mount="../inputs:/workspace/inputs:ro",
+            dagster_home="/workspace/dagster/.dagster_home",
+        )
+    return _dagster_compose_content(
+        build_context=".",
+        dockerfile="Dockerfile",
+        output_mount="./storage:/app/storage",
+        input_mount="",
+        dagster_home="/app/.dagster_home",
+    )
+
+
+def _bundle_root_docker_compose_content() -> str:
+    return _dagster_compose_content(
+        build_context=".",
+        dockerfile="dagster/Dockerfile",
+        output_mount="./outputs:/workspace/outputs",
+        input_mount="./inputs:/workspace/inputs:ro",
+        dagster_home="/workspace/dagster/.dagster_home",
+    )
+
+
+def _deployment_bundle_readme_content(*, targets: Dict[str, bool]) -> str:
+    dagster_section = ""
+    if targets.get("dagster"):
+        dagster_section = f"""
+## Dagster
+
+Run the exported bundle directly from this directory:
+
+```bash
+docker compose up
+```
+
+Then open Dagster at `http://localhost:3000`. The generated image pins Dagster to `{DAGSTER_PINNED_VERSION}`, installs one consolidated dependency set, mounts `outputs/`, and executes node scripts through the manifest contract. The Compose topology separates the webserver and daemon and uses PostgreSQL for concurrent orchestration writes. CPU-only PyTorch is the default; set `INLUMEN_ACCELERATOR=gpu` only for a GPU-capable runtime. ASR defaults to `INLUMEN_ASR_PROFILE=auto`, which selects the pinned multilingual `balanced` model on CPU and the pinned `accuracy` model on CUDA. Set the profile explicitly to `accuracy`, `balanced`, or `fast` when the runtime trade-off is known. Model downloads are retained in the shared `inlumen_model_cache` volume across regenerated bundles. A first run may download several gigabytes; subsequent runs reuse the cache and node logs report download, load, and inference progress.
+"""
+
+    argo_section = ""
+    if targets.get("argo"):
+        argo_section = """
+## Argo
+
+The deterministic workflow template is available at `argo/workflow.yaml`. Build and push the node images declared in each `nodes/<node>/Dockerfile.*`, then apply the workflow in your Argo-enabled cluster.
+"""
+
+    return f"""# InLumen Deployment Bundle
+
+This bundle was generated deterministically from persisted InLumen runtime artifacts.
+
+## Layout
+
+- `inputs/`: sample data and `input_manifest.json`
+- `nodes/`: per-node runtime files, requirements, Dockerfiles, and manifests
+- `outputs/`: per-node output folders used during local Dagster execution
+- `bundle-manifest.json`: machine-readable bundle index
+{dagster_section}{argo_section}"""
+
+
+def _dagster_definitions_source() -> str:
+    return """from pathlib import Path
+
+import dagster as dg
+
+
+@dg.definitions
+def defs():
+    return dg.load_from_defs_folder(project_root=Path(__file__).resolve().parents[2])
+"""
+
+
+def _require_single_parent_handoff(
+    ordered_ids: Sequence[str],
+    dependencies: Dict[str, List[str]],
+) -> None:
+    errors = [
+        f"Node {step_id} has multiple upstream parents; Dagster script handoff requires an explicit merge node first."
+        for step_id in ordered_ids
+        if len(dependencies.get(step_id) or []) > 1
+    ]
+    if errors:
+        raise DeploymentArtifactValidationError(
+            "Dagster deployment guardrail validation failed",
+            errors,
+        )
+
+
+def _root_input_files_for_dagster(
+    steps: Sequence[dict],
+    dependencies: Dict[str, List[str]],
+    dockerfiles_payload: Any,
+) -> List[dict]:
+    if isinstance(dockerfiles_payload, dict) and "input_files" in dockerfiles_payload:
+        return _payload_input_files(dockerfiles_payload)
+
+    # Backward-compatible fallback for bundles generated before input_files
+    # became a first-class payload separate from runtime artifacts.
+    runtime_filenames = {
+        "main.py",
+        "requirements.txt",
+        "node-manifest.json",
+        "validation-report.json",
+    }
+    input_files: List[dict] = []
+    for step in steps:
+        flow_id = step["flow_id"]
+        if dependencies.get(flow_id):
+            continue
+        step_files = _deployment_files_for_step(dockerfiles_payload, flow_id)
+        node_manifest = _json_object(
+            next(
+                (
+                    str(file_entry.get("content") or "")
+                    for file_entry in step_files
+                    if _clean_string(file_entry.get("filename"))
+                    == "node-manifest.json"
+                ),
+                "",
+            )
+        )
+        data_contract = (
+            node_manifest.get("data_contract")
+            if isinstance(node_manifest.get("data_contract"), dict)
+            else {}
+        )
+        contract_inputs = (
+            data_contract.get("inputs")
+            if isinstance(data_contract.get("inputs"), list)
+            else []
+        )
+        descriptors = {}
+        for descriptor in contract_inputs:
+            if not isinstance(descriptor, dict):
+                continue
+            descriptor_filename = _clean_string(
+                descriptor.get("filename") or descriptor.get("name")
+            )
+            if descriptor_filename:
+                descriptors[descriptor_filename] = descriptor
+
+        for file_entry in step_files:
+            filename = _clean_string(file_entry.get("filename"))
+            if not filename:
+                continue
+            if filename in runtime_filenames or filename.startswith("Dockerfile."):
+                continue
+            descriptor = descriptors.get(filename, {})
+            enriched = dict(file_entry)
+            for field in (
+                "kind",
+                "format",
+                "columns",
+                "required_columns",
+                "schema",
+                "semantic_role",
+                "description",
+            ):
+                if descriptor.get(field) not in (None, "", [], {}):
+                    enriched[field] = descriptor[field]
+            input_files.append(enriched)
+    return input_files
+
+
+def _required_root_input_errors(
+    steps: Sequence[dict],
+    dependencies: Dict[str, List[str]],
+    dockerfiles_payload: Any,
+    input_files: Sequence[dict],
+) -> List[str]:
+    available = {
+        (
+            _clean_string(item.get("flow_id")),
+            _clean_string(item.get("filename")),
+        )
+        for item in input_files
+        if _clean_string(item.get("filename"))
+    }
+    errors: List[str] = []
+    for step in steps:
+        flow_id = _clean_string(step.get("flow_id"))
+        if dependencies.get(flow_id):
+            continue
+        step_files = _deployment_files_for_step(dockerfiles_payload, flow_id)
+        node_manifest = _json_object(
+            next(
+                (
+                    str(file_entry.get("content") or "")
+                    for file_entry in step_files
+                    if _clean_string(file_entry.get("filename"))
+                    == "node-manifest.json"
+                ),
+                "",
+            )
+        )
+        contract = (
+            node_manifest.get("data_contract")
+            if isinstance(node_manifest.get("data_contract"), dict)
+            else {}
+        )
+        for descriptor in contract.get("inputs") or []:
+            if not isinstance(descriptor, dict):
+                continue
+            filename = _clean_string(
+                descriptor.get("filename") or descriptor.get("name")
+            )
+            if filename and (flow_id, filename) not in available:
+                errors.append(
+                    f"Root node {flow_id} requires input {filename}, but it was "
+                    "not packaged from InLumen storage."
+                )
+    return errors
+
+
+def _validate_explicit_input_integrity(
+    dockerfiles_payload: Any,
+    input_files: Sequence[dict],
+) -> None:
+    if not (
+        isinstance(dockerfiles_payload, dict)
+        and "input_files" in dockerfiles_payload
+    ):
+        return
+
+    errors: List[str] = []
+    for file_entry in input_files:
+        filename = _clean_string(file_entry.get("filename")) or "<unnamed>"
+        if file_entry.get("size_bytes") is None:
+            errors.append(f"Input {filename} is missing size_bytes.")
+        if not _clean_string(file_entry.get("sha256")):
+            errors.append(f"Input {filename} is missing sha256.")
+        try:
+            content = decode_artifact_content(file_entry)
+            verify_artifact_integrity(file_entry, content)
+        except Exception as exc:
+            errors.append(f"Input {filename} failed integrity validation: {exc}")
+    if errors:
+        raise DeploymentArtifactValidationError(
+            "Deployment input guardrail validation failed",
+            errors,
+        )
+
+
+def _manifest_input_entry(file_entry: dict, *, path_prefix: str) -> dict:
+    filename = _clean_string(file_entry.get("filename"))
+    classification = classify_artifact(
+        filename,
+        kind=file_entry.get("kind"),
+        file_format=file_entry.get("format"),
+    )
+    return {
+        "filename": filename,
+        "path": f"{path_prefix}/{_safe_docker_source(filename)}",
+        **classification,
+        "description": _clean_string(file_entry.get("description"))
+        or "Sample input file copied from InLumen.",
+        **(
+            {"columns": list(file_entry.get("columns") or [])}
+            if file_entry.get("columns")
+            else {}
+        ),
+        **(
+            {"required_columns": list(file_entry.get("required_columns") or [])}
+            if file_entry.get("required_columns")
+            else {}
+        ),
+        **(
+            {"schema": file_entry.get("schema")}
+            if isinstance(file_entry.get("schema"), dict)
+            and file_entry.get("schema")
+            else {}
+        ),
+        **(
+            {"semantic_role": _clean_string(file_entry.get("semantic_role"))}
+            if _clean_string(file_entry.get("semantic_role"))
+            else {}
+        ),
+        **(
+            {"size_bytes": file_entry.get("size_bytes")}
+            if file_entry.get("size_bytes") is not None
+            else {}
+        ),
+        **(
+            {"sha256": _clean_string(file_entry.get("sha256"))}
+            if _clean_string(file_entry.get("sha256"))
+            else {}
+        ),
+    }
+
+
+def _input_manifest_for_dagster(input_files: Sequence[dict]) -> str:
+    manifest = {
+        "schema_version": "inlumen.input-manifest@1",
+        "inputs": [
+            _manifest_input_entry(file_entry, path_prefix="storage/inputs")
+            for file_entry in input_files
+            if _clean_string(file_entry.get("filename"))
+        ]
+    }
+    return json.dumps(manifest, indent=2) + "\n"
+
+
+def build_dagster_project_files(
+    pipeline_graph: Optional[dict],
+    dockerfiles_payload: Any,
+    files: Any = None,
+    *,
+    project_dir: str = "dagster_project",
+    bundle_layout: bool = False,
+) -> List[dict]:
+    all_steps = extract_pipeline_steps(pipeline_graph, files)
+    if not all_steps:
+        raise ValueError("No pipeline steps were found for Dagster project generation.")
+
+    edges = extract_pipeline_edges(pipeline_graph)
+    steps = select_runtime_steps(all_steps)
+    step_ids = [step["flow_id"] for step in steps]
+    dockerfiles = _dockerfiles_from_payload(dockerfiles_payload)
+    if not dockerfiles:
+        raise ValueError("Dockerfile metadata is required for Dagster project generation.")
+    validate_dockerfile_artifacts(dockerfiles, step_ids, steps)
+
+    explicit_edges = [
+        edge for edge in edges if edge.get("source") in step_ids and edge.get("target") in step_ids
+    ]
+    if not explicit_edges:
+        explicit_edges = [
+            {"source": step_ids[idx], "target": step_ids[idx + 1]}
+            for idx in range(len(step_ids) - 1)
+        ]
+
+    ordered_ids = _topological_order(step_ids, explicit_edges)
+    dependencies = _dependency_lookup(step_ids, explicit_edges)
+    _require_single_parent_handoff(ordered_ids, dependencies)
+
+    steps_by_id = {step["flow_id"]: step for step in steps}
+    asset_names = _dagster_asset_names([steps_by_id[step_id] for step_id in ordered_ids])
+    output_files: List[dict] = []
+    aggregate_requirements: List[str] = []
+    project_dir = _sanitize_fragment(project_dir, "dagster_project")
+
+    root_input_files = _root_input_files_for_dagster(steps, dependencies, dockerfiles_payload)
+    input_errors = _required_root_input_errors(
+        steps,
+        dependencies,
+        dockerfiles_payload,
+        root_input_files,
+    )
+    if input_errors:
+        raise DeploymentArtifactValidationError(
+            "Dagster deployment input validation failed",
+            input_errors,
+        )
+    _validate_explicit_input_integrity(dockerfiles_payload, root_input_files)
+    if not bundle_layout:
+        for file_entry in root_input_files:
+            filename = _safe_docker_source(_clean_string(file_entry.get("filename")))
+            output_files.append(
+                _dagster_file(
+                    f"{project_dir}/storage/inputs/{filename}",
+                    str(file_entry.get("content") or ""),
+                    "dagster-input",
+                    content_type=str(
+                        file_entry.get("content_type")
+                        or "application/octet-stream"
+                    ),
+                    content_encoding=_clean_string(
+                        file_entry.get("content_encoding")
+                    ),
+                    size_bytes=file_entry.get("size_bytes"),
+                    sha256=_clean_string(file_entry.get("sha256")),
+                )
+            )
+        output_files.append(
+            _dagster_file(
+                f"{project_dir}/storage/inputs/input_manifest.json",
+                _input_manifest_for_dagster(root_input_files),
+                "dagster-input",
+            )
+        )
+
+    for step_id in ordered_ids:
+        step = steps_by_id[step_id]
+        asset_name = asset_names[step_id]
+        node_dir = _bundle_node_dir(step)
+        script_content = _deployment_file_content(dockerfiles_payload, step_id, "main.py")
+        if not script_content:
+            raise DeploymentArtifactValidationError(
+                "Dagster deployment guardrail validation failed",
+                [f"Node {step_id} is missing main.py in persisted runtime artifacts."],
+            )
+
+        requirements_content = _deployment_file_content(
+            dockerfiles_payload,
+            step_id,
+            "requirements.txt",
+        )
+        aggregate_requirements.extend(
+            _parse_requirements_for_dagster_project(requirements_content)
+        )
+
+        node_artifact_root = f"{project_dir}/src/inlumen_dagster_project/artifacts/nodes/{_sanitize_fragment(step_id, 'step')}"
+        script_root = f"{project_dir}/src/inlumen_dagster_project/scripts/{asset_name}"
+        defs_root = f"{project_dir}/src/inlumen_dagster_project/defs/{asset_name}"
+        if not bundle_layout:
+            output_files.append(_dagster_file(f"{script_root}/main.py", script_content, "dagster-script"))
+
+            for file_entry in _deployment_files_for_step(dockerfiles_payload, step_id):
+                filename = _clean_string(file_entry.get("filename"))
+                if not filename:
+                    continue
+                output_files.append(
+                    _dagster_file(
+                        f"{node_artifact_root}/{_safe_docker_source(filename)}",
+                        str(file_entry.get("content") or ""),
+                        "dagster-node-artifact",
+                        content_type=str(
+                            file_entry.get("content_type")
+                            or "application/octet-stream"
+                        ),
+                        content_encoding=_clean_string(
+                            file_entry.get("content_encoding")
+                        ),
+                        size_bytes=file_entry.get("size_bytes"),
+                        sha256=_clean_string(file_entry.get("sha256")),
+                    )
+                )
+
+        parents = dependencies.get(step_id) or []
+        parent_asset = asset_names[parents[0]] if parents else ""
+        input_manifest_path = (
+            f"../outputs/{_bundle_node_dir(steps_by_id[parents[0]])}/output_manifest.json"
+            if bundle_layout and parents
+            else f"storage/{parent_asset}/output_manifest.json"
+            if parent_asset
+            else "../inputs/input_manifest.json"
+            if bundle_layout
+            else "storage/inputs/input_manifest.json"
+        )
+        output_dir = (
+            f"../outputs/{node_dir}"
+            if bundle_layout
+            else f"storage/{asset_name}"
+        )
+        script_path = (
+            f"../nodes/{node_dir}/main.py"
+            if bundle_layout
+            else f"src/inlumen_dagster_project/scripts/{asset_name}/main.py"
+        )
+        context_path = (
+            f"../nodes/{node_dir}/node-manifest.json"
+            if bundle_layout
+            else f"src/inlumen_dagster_project/artifacts/nodes/{_sanitize_fragment(step_id, 'step')}/node-manifest.json"
+        )
+        defs_yaml = _dagster_yaml(
+            {
+                "type": "inlumen_dagster_project.components.shell_command.ShellCommand",
+                "attributes": {
+                    "asset_key": asset_name,
+                    "script_path": script_path,
+                    "upstream_assets": [asset_names[parent] for parent in parents],
+                    "input_manifest_path": input_manifest_path,
+                    "output_dir": output_dir,
+                    "output_manifest_path": f"{output_dir}/output_manifest.json",
+                    "context_path": context_path,
+                    "arguments": [],
+                },
+            }
+        )
+        output_files.append(_dagster_file(f"{defs_root}/defs.yaml", defs_yaml, "dagster-defs"))
+
+    asset_name_list = [asset_names[step_id] for step_id in ordered_ids]
+    output_files.extend(
+        [
+            _dagster_file(
+                f"{project_dir}/pyproject.toml",
+                _dagster_project_metadata_content(aggregate_requirements),
+                "dagster-project",
+            ),
+            _dagster_file(
+                f"{project_dir}/requirements.txt",
+                _dagster_requirements_content(aggregate_requirements),
+                "dagster-project",
+            ),
+            _dagster_file(
+                f"{project_dir}/Dockerfile",
+                _dagster_dockerfile_content(bundle_layout=bundle_layout),
+                "dagster-project",
+            ),
+            _dagster_file(
+                f"{project_dir}/docker-compose.yml",
+                _dagster_docker_compose_content(bundle_layout=bundle_layout),
+                "dagster-project",
+            ),
+            _dagster_file(
+                f"{project_dir}/README.md",
+                _dagster_readme(
+                    asset_names=asset_name_list,
+                    has_sample_inputs=bool(root_input_files),
+                    bundle_layout=bundle_layout,
+                ),
+                "dagster-project",
+            ),
+            _dagster_file(
+                f"{project_dir}/.dagster_home/dagster.yaml",
+                _dagster_instance_yaml_content(),
+                "dagster-project",
+            ),
+            _dagster_file(
+                f"{project_dir}/src/inlumen_dagster_project/__init__.py",
+                "",
+                "dagster-project",
+            ),
+            _dagster_file(
+                f"{project_dir}/src/inlumen_dagster_project/definitions.py",
+                _dagster_definitions_source(),
+                "dagster-project",
+            ),
+            _dagster_file(
+                f"{project_dir}/src/inlumen_dagster_project/components/__init__.py",
+                "from .shell_command import ShellCommand\n",
+                "dagster-project",
+            ),
+            _dagster_file(
+                f"{project_dir}/src/inlumen_dagster_project/components/shell_command.py",
+                _dagster_shell_command_component_source(),
+                "dagster-project",
+            ),
+            _dagster_file(
+                f"{project_dir}/deployment-manifest.json",
+                json.dumps(
+                    {
+                        "schema_version": "inlumen.dagster-deployment@1",
+                        "asset_order": asset_name_list,
+                        "source": "inlumen deployment artifacts",
+                        "bundle_layout": bundle_layout,
+                    },
+                    indent=2,
+                )
+                + "\n",
+                "dagster-project",
+            ),
+        ]
+    )
+    return output_files
+
+
+def _bundle_file(
+    path: str,
+    content: str,
+    *,
+    role: str,
+    flow_id: str = "",
+    content_type: str = "text/plain;charset=utf-8",
+    content_encoding: str = "",
+    size_bytes: Any = None,
+    sha256: str = "",
+) -> dict:
+    file_payload = {
+        "path": path,
+        "filename": PurePosixPath(path).name,
+        "flow_id": flow_id,
+        "content": content,
+        "content_type": content_type,
+        "role": role,
+    }
+    if content_encoding:
+        file_payload["content_encoding"] = content_encoding
+    if size_bytes is not None:
+        file_payload["size_bytes"] = size_bytes
+    if sha256:
+        file_payload["sha256"] = sha256
+    return file_payload
+
+
+def _bundle_input_manifest(input_files: Sequence[dict]) -> str:
+    manifest = {
+        "schema_version": "inlumen.input-manifest@1",
+        "inputs": [
+            _manifest_input_entry(file_entry, path_prefix="inputs")
+            for file_entry in input_files
+            if _clean_string(file_entry.get("filename"))
+        ],
+    }
+    return json.dumps(manifest, indent=2) + "\n"
+
+
+def _dedupe_bundle_files(files: Sequence[dict]) -> List[dict]:
+    by_path: dict[str, dict] = {}
+    for file_entry in files:
+        path = _clean_string(file_entry.get("path"))
+        if not path:
+            continue
+        by_path[path] = file_entry
+    return [by_path[path] for path in sorted(by_path)]
+
+
+def build_deployment_bundle_files(
+    pipeline_graph: Optional[dict],
+    dockerfiles_payload: Any,
+    *,
+    targets: Optional[dict] = None,
+    files: Any = None,
+) -> dict:
+    selected_targets = {
+        "argo": bool((targets or {}).get("argo", True)),
+        "dagster": bool((targets or {}).get("dagster", False)),
+    }
+    if not selected_targets["argo"] and not selected_targets["dagster"]:
+        raise ValueError("Select at least one deployment target.")
+
+    all_steps = extract_pipeline_steps(pipeline_graph, files)
+    if not all_steps:
+        raise ValueError("No pipeline steps were found for deployment bundle generation.")
+
+    edges = extract_pipeline_edges(pipeline_graph)
+    steps = select_runtime_steps(all_steps)
+    step_ids = [step["flow_id"] for step in steps]
+    dockerfiles = _dockerfiles_from_payload(dockerfiles_payload)
+    if not dockerfiles:
+        raise ValueError("Dockerfile metadata is required for deployment bundle generation.")
+    validate_dockerfile_artifacts(dockerfiles, step_ids, steps)
+
+    explicit_edges = [
+        edge for edge in edges if edge.get("source") in step_ids and edge.get("target") in step_ids
+    ]
+    if not explicit_edges:
+        explicit_edges = [
+            {"source": step_ids[idx], "target": step_ids[idx + 1]}
+            for idx in range(len(step_ids) - 1)
+        ]
+    ordered_ids = _topological_order(step_ids, explicit_edges)
+    dependencies = _dependency_lookup(step_ids, explicit_edges)
+    steps_by_id = {step["flow_id"]: step for step in steps}
+
+    bundle_files: List[dict] = []
+    node_entries = []
+    for step_id in ordered_ids:
+        step = steps_by_id[step_id]
+        node_dir = _bundle_node_dir(step)
+        node_entries.append(
+            {
+                "flow_id": step_id,
+                "label": step.get("label") or "",
+                "type": step.get("type") or "custom",
+                "path": f"nodes/{node_dir}",
+                "output_path": f"outputs/{node_dir}",
+                "parents": dependencies.get(step_id) or [],
+            }
+        )
+        for file_entry in _deployment_files_for_step(dockerfiles_payload, step_id):
+            filename = _clean_string(file_entry.get("filename"))
+            if not filename:
+                continue
+            bundle_files.append(
+                _bundle_file(
+                    f"nodes/{node_dir}/{_safe_docker_source(filename)}",
+                    str(file_entry.get("content") or ""),
+                    role=str(file_entry.get("role") or "runtime"),
+                    flow_id=step_id,
+                    content_type=str(file_entry.get("content_type") or "text/plain;charset=utf-8"),
+                    content_encoding=_clean_string(
+                        file_entry.get("content_encoding")
+                    ),
+                    size_bytes=file_entry.get("size_bytes"),
+                    sha256=_clean_string(file_entry.get("sha256")),
+                )
+            )
+        bundle_files.append(
+            _bundle_file(
+                f"outputs/{node_dir}/.gitkeep",
+                "",
+                role="output-placeholder",
+                flow_id=step_id,
+                content_type="text/plain",
+            )
+        )
+
+    root_input_files = _root_input_files_for_dagster(steps, dependencies, dockerfiles_payload)
+    input_errors = _required_root_input_errors(
+        steps,
+        dependencies,
+        dockerfiles_payload,
+        root_input_files,
+    )
+    if input_errors:
+        raise DeploymentArtifactValidationError(
+            "Deployment bundle input validation failed",
+            input_errors,
+        )
+    _validate_explicit_input_integrity(dockerfiles_payload, root_input_files)
+    for file_entry in root_input_files:
+        filename = _safe_docker_source(_clean_string(file_entry.get("filename")))
+        bundle_files.append(
+            _bundle_file(
+                f"inputs/{filename}",
+                str(file_entry.get("content") or ""),
+                role="input",
+                flow_id=_clean_string(file_entry.get("flow_id")),
+                content_type=str(file_entry.get("content_type") or "text/plain;charset=utf-8"),
+                content_encoding=_clean_string(
+                    file_entry.get("content_encoding")
+                ),
+                size_bytes=file_entry.get("size_bytes"),
+                sha256=_clean_string(file_entry.get("sha256")),
+            )
+        )
+    bundle_files.append(
+        _bundle_file(
+            "inputs/input_manifest.json",
+            _bundle_input_manifest(root_input_files),
+            role="input-manifest",
+            content_type="application/json",
+        )
+    )
+
+    argo_workflow_path = None
+    if selected_targets["argo"]:
+        argo_workflow_path = "argo/workflow.yaml"
+        bundle_files.append(
+            _bundle_file(
+                argo_workflow_path,
+                build_argo_workflow_yaml(pipeline_graph, dockerfiles_payload, files),
+                role="argo-workflow",
+                content_type="application/x-yaml;charset=utf-8",
+            )
+        )
+
+    dagster_project_path = None
+    if selected_targets["dagster"]:
+        dagster_project_path = "dagster"
+        bundle_files.extend(
+            build_dagster_project_files(
+                pipeline_graph,
+                dockerfiles_payload,
+                files,
+                project_dir=dagster_project_path,
+                bundle_layout=True,
+            )
+        )
+        bundle_files.append(
+            _bundle_file(
+                "docker-compose.yml",
+                _bundle_root_docker_compose_content(),
+                role="dagster-compose",
+                content_type="application/x-yaml;charset=utf-8",
+            )
+        )
+
+    bundle_files.append(
+        _bundle_file(
+            "README.md",
+            _deployment_bundle_readme_content(targets=selected_targets),
+            role="bundle-readme",
+            content_type="text/markdown;charset=utf-8",
+        )
+    )
+
+    manifest = {
+        "schema_version": "inlumen.deployment-bundle@1",
+        "targets": selected_targets,
+        "readme": "README.md",
+        "node_order": ordered_ids,
+        "nodes": node_entries,
+        "inputs": {
+            "path": "inputs",
+            "manifest": "inputs/input_manifest.json",
+            "sample_file_count": len(root_input_files),
+        },
+        "outputs": {
+            "path": "outputs",
+            "per_node": [entry["output_path"] for entry in node_entries],
+        },
+        "argo": {"workflow": argo_workflow_path} if argo_workflow_path else None,
+        "dagster": (
+            {
+                "project": dagster_project_path,
+                "dockerfile": "dagster/Dockerfile",
+                "compose": "docker-compose.yml",
+                "project_compose": "dagster/docker-compose.yml",
+                "dagster_version": DAGSTER_PINNED_VERSION,
+            }
+            if dagster_project_path
+            else None
+        ),
+    }
+    bundle_files.append(
+        _bundle_file(
+            "bundle-manifest.json",
+            json.dumps(manifest, indent=2) + "\n",
+            role="bundle-manifest",
+            content_type="application/json",
+        )
+    )
+
+    deduped = _dedupe_bundle_files(bundle_files)
+    return {
+        "files": deduped,
+        "manifest": manifest,
+        "guardrails": {
+            "valid": True,
+            "checks": [
+                "canonical deployment bundle layout generated",
+                "node runtime artifacts copied under nodes/<node>/",
+                "root inputs and per-node output directories declared",
+                "selected deployment targets generated deterministically",
+            ],
+        },
+    }

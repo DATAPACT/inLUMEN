@@ -28,12 +28,21 @@ services:
       NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_MAX_SIZE:-512m}
       NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE_SIZE:-512m}
     healthcheck:
+      # cypher-shell launches a JVM for every probe. Under Docker Desktop
+      # pressure those probes can overlap after timeout, exhaust the 2 GiB
+      # container limit, and make an otherwise started database unresponsive.
+      # Neo4j only exposes HTTP after the database is ready to accept traffic.
       test:
-        - CMD-SHELL
-        - 'AUTH_USER="$${NEO4J_AUTH%%/*}"; AUTH_PASS="$${NEO4J_AUTH#*/}"; cypher-shell -u "$$AUTH_USER" -p "$$AUTH_PASS" "RETURN 1;"'
-      interval: 5s
+        - CMD
+        - wget
+        - --quiet
+        - --spider
+        - --timeout=3
+        - http://127.0.0.1:7474/
+      interval: 10s
       timeout: 5s
       retries: 24
+      start_period: 60s
     networks:
       datapact_network:
         aliases:
@@ -69,6 +78,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_started
+      deployment-validation:
+        condition: service_healthy
     working_dir: /usr/inlumen
     ports:
       - "${INLUMEN_API_PORT:-5000}:${INLUMEN_API_PORT:-5000}"
@@ -86,16 +97,52 @@ services:
       KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-}
       KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-}
       KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:-}
+      INLUMEN_CODEGEN_SERVICE_URL: ${INLUMEN_CODEGEN_SERVICE_URL:-http://host.docker.internal:8010}
+      INLUMEN_CODEGEN_SERVICE_API_KEY: ${INLUMEN_CODEGEN_SERVICE_API_KEY:-}
+      INLUMEN_CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS:-300}
+      INLUMEN_CODEGEN_PIPELINE_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_CODEGEN_PIPELINE_REQUEST_TIMEOUT_SECONDS:-1200}
+      INLUMEN_DEPLOYMENT_VALIDATION_SERVICE_URL: ${INLUMEN_DEPLOYMENT_VALIDATION_SERVICE_URL:-http://deployment-validation:8020}
+      INLUMEN_DEPLOYMENT_VALIDATION_WORK_DIR: ${INLUMEN_DEPLOYMENT_VALIDATION_WORK_DIR:-/usr/inlumen/state/deployment-validation}
+      INLUMEN_DEPLOYMENT_VALIDATION_LOCAL_ROOT: ${INLUMEN_DEPLOYMENT_VALIDATION_LOCAL_ROOT:-/usr/inlumen}
+      INLUMEN_DEPLOYMENT_VALIDATION_REMOTE_ROOT: ${INLUMEN_DEPLOYMENT_VALIDATION_REMOTE_ROOT:-/validation/inlumen/backend}
+      INLUMEN_DEPLOYMENT_VALIDATION_TIMEOUT_SECONDS: ${INLUMEN_DEPLOYMENT_VALIDATION_TIMEOUT_SECONDS:-1800}
       WATCH_INTERVAL_SECONDS: ${WATCH_INTERVAL_SECONDS:-1.0}
     command:
       - python
       - dev_runner.py
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test:
         - CMD
         - python
         - -c
         - "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.getenv(\"INLUMEN_API_PORT\", \"5000\")}/health', timeout=5)"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      - datapact_network
+
+  deployment-validation:
+    build:
+      context: ./deployment_validation
+    image: inlumen-deployment-validation:local
+    container_name: inlumen_deployment_validation
+    hostname: deployment-validation
+    restart: unless-stopped
+    ports:
+      - "${INLUMEN_DEPLOYMENT_VALIDATION_PORT:-8020}:8020"
+    volumes:
+      - ./backend:/validation/inlumen/backend
+    environment:
+      PYTHONUNBUFFERED: "1"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8020/health', timeout=5)"
       interval: 5s
       timeout: 5s
       retries: 12

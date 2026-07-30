@@ -88,6 +88,7 @@ def minio_update_text_file():
     if not isinstance(content, str):
         return jsonify({'status': 400, 'error': 'content must be a string'}), 400
     try:
+        create_bucket(bucket_name=bucket_id)
         with tempfile.NamedTemporaryFile('w', encoding='utf-8', delete=False) as temp_file:
             temp_file.write(content)
             temp_path = temp_file.name

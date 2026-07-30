@@ -1,0 +1,82 @@
+import json
+import sys
+import unittest
+from pathlib import Path
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import neo4j_api  # noqa: E402
+
+
+class ModelPlanPersistenceTest(unittest.TestCase):
+    def test_visible_action_node_serializes_model_plan(self):
+        model_plan = {
+            "framework": "transformers",
+            "model_id": "cardiffnlp/twitter-roberta-base-sentiment-latest",
+            "model_revision": "pinned-revision",
+        }
+        nodes, _ = neo4j_api._parse_visible_graph(
+            {
+                "nodes": [
+                    {
+                        "id": "4",
+                        "position": {"x": 10, "y": 20},
+                        "data": {
+                            "type": "action",
+                            "label": "Sentiment Analysis",
+                            "param": {"model_plan": model_plan},
+                        },
+                    }
+                ],
+                "edges": [],
+            }
+        )
+
+        self.assertEqual(
+            "cardiffnlp/twitter-roberta-base-sentiment-latest",
+            json.loads(nodes[0]["props"]["param_json"])["model_plan"]["model_id"],
+        )
+        self.assertEqual(
+            "3216a57f2a0d9c45a2e6c20157c20c49fb4bf9c7",
+            json.loads(nodes[0]["props"]["param_json"])["model_plan"][
+                "model_revision"
+            ],
+        )
+
+    def test_visible_action_node_recovers_plan_from_implementation(self):
+        model_plan = {
+            "framework": "transformers",
+            "model_id": "openai/whisper-large-v3",
+            "model_revision": "pinned-revision",
+        }
+        nodes, _ = neo4j_api._parse_visible_graph(
+            {
+                "nodes": [
+                    {
+                        "id": "3",
+                        "data": {
+                            "type": "action",
+                            "label": "Speech-to-Text",
+                            "implementation": model_plan,
+                        },
+                    }
+                ],
+                "edges": [],
+            }
+        )
+
+        self.assertEqual(
+            "Systran/faster-whisper-large-v3",
+            json.loads(nodes[0]["props"]["param_json"])["model_plan"]["model_id"],
+        )
+        self.assertEqual(
+            "edaa852ec7e145841d8ffdb056a99866b5f0a478",
+            json.loads(nodes[0]["props"]["param_json"])["model_plan"][
+                "model_revision"
+            ],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

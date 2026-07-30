@@ -37,8 +37,19 @@ export const uploadNodeFile = async (nodeId: string, file: File) => {
       body: form,
     });
     if (!res.ok) {
-      const txt = await res.text().catch(() => "");
-      throw new Error(`File upload failed (${res.status}): ${txt}`);
+      const payload = await res.json().catch(async () => ({
+        error: await res.text().catch(() => ""),
+      }));
+      const details = Array.isArray(payload?.details)
+        ? payload.details.filter((item: unknown) => typeof item === "string").join(" ")
+        : typeof payload?.details === "string"
+          ? payload.details
+          : "";
+      throw new Error(
+        details
+        || String(payload?.error || "").trim()
+        || `File upload failed (${res.status})`,
+      );
     }
     const json = await res.json().catch(() => null);
     console.log("[nodePersistence.ts] File upload ok:", {
@@ -128,6 +139,26 @@ export const updateNodeTextFile = async (
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
     throw new Error(`File text update failed (${res.status}): ${txt}`);
+  }
+  return res.json().catch(() => null);
+};
+
+export const generateNodeScript = async (
+  nodeId: string,
+  payload: {
+    llm_config?: Record<string, unknown>;
+    user_instruction?: string;
+    include_sample_data?: boolean;
+  } = {},
+) => {
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/nodes/${encodeURIComponent(nodeId)}/generate-script`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Script generation failed (${res.status}): ${txt}`);
   }
   return res.json().catch(() => null);
 };

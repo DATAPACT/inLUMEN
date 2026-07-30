@@ -1,7 +1,15 @@
 import { Edge, Node } from 'reactflow';
 import { apiFetch } from '@/utils/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
-import { ChatbotConfig, buildLLMRequestConfig } from '@/services/chatbotService';
+import {
+  ChatbotConfig,
+  buildCodegenLLMRequestConfig,
+  buildLLMRequestConfig,
+} from '@/services/chatbotService';
+import {
+  normalizeType,
+  pickBackendUpdatableProps,
+} from '@/features/nodes/nodeSchema';
 
 export const MAIN_PIPELINE_VERSION_UID = 'main';
 
@@ -60,17 +68,77 @@ export type PipelineOverviewMetadata = {
   updated_at?: string | null;
 };
 
+export type PipelineScriptGenerationMode = "fast" | "generic" | "full";
+
+export type PipelineScriptGenerationOptions = {
+  mode?: PipelineScriptGenerationMode;
+  includeSampleData?: boolean;
+  validationMode?: "static" | "unit" | "edge" | "pipeline_sample";
+  generationStrategy?: "auto" | "single_pass" | "per_node";
+  allowDeterministicFallback?: boolean;
+  repairAttempts?: number;
+  userInstruction?: string;
+};
+
+export type PipelineGenerationRunStep = {
+  flow_id?: string;
+  status?: string;
+  stage?: string;
+  attempts?: number;
+  validation_report?: {
+    status?: string;
+    errors?: string[];
+    warnings?: string[];
+  } | null;
+};
+
+export type PipelineGenerationRun = {
+  run_id?: string;
+  status?: string;
+  mode?: string;
+  steps?: PipelineGenerationRunStep[];
+  errors?: string[];
+  warnings?: string[];
+};
+
+export type PipelineGenerationJob = {
+  run_id?: string;
+  status?: string;
+  resumed_from_run_id?: string | null;
+  resume_from_flow_id?: string | null;
+  generation_run?: PipelineGenerationRun | null;
+  result?: unknown;
+  error?: string | null;
+  mode?: string;
+  data_awareness?: {
+    has_sample_data?: boolean;
+    sample_file_count?: number;
+    sample_nodes?: Array<Record<string, unknown>>;
+  };
+  persistence?: {
+    status?: string;
+    reason?: string;
+    result?: unknown;
+    warning?: string;
+  };
+};
+
+export type ExternalRuntimePrompt = {
+  prompt: string;
+  filename?: string;
+  node_count?: number;
+  input_policy?: "user_supplied" | string;
+};
+
 export const addNodeToBackend = async (node: Node) => {
   try {
+    const nodeType = normalizeType(node.data?.type);
     const response = await apiFetch(`${INLUMEN_API_URL}/api/graph/nodes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         properties: {
-          flow_id: node.id,
-          label: node.data.label,
-          type: node.data?.type,
-          description: node.data?.description || "",
+          ...pickBackendUpdatableProps(node.id, node.data ?? {}, nodeType),
           x: node.position?.x ?? 0,
           y: node.position?.y ?? 0,
         },
@@ -397,7 +465,36 @@ export const restoreBackendGraphHistory = async (
   return res.json().catch(() => ({}));
 };
 
-export const rebuildBackendFromFlow = async (nodes: Node[], edges: Edge[]) => {
+export const rebuildBackendFromFlow = async (
+  nodes: Node[],
+  edges: Edge[],
+  settings?: Record<string, unknown>,
+) => {
+  try {
+    const response = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/graph`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        graph: {
+          nodes,
+          edges,
+          ...(settings && Object.keys(settings).length > 0 ? { settings } : {}),
+        },
+      }),
+    });
+    if (response.ok) {
+      const result = await response.json().catch(() => ({}));
+      console.log("[flowPersistence.ts] Graph sync:", result);
+      return;
+    }
+    const errText = await response.text().catch(() => "");
+    console.warn(
+      `[flowPersistence.ts] Whole graph sync unavailable (${response.status}): ${errText}`,
+    );
+  } catch (err) {
+    console.warn("[flowPersistence.ts] Whole graph sync failed, falling back:", err);
+  }
+
   await clearBackendGraph();
 
   for (const node of nodes) {
@@ -484,4 +581,295 @@ export const generatePipelineYaml = async (activeChatbotConfig?: ChatbotConfig) 
   }
 
   return responseYAML.text();
+};
+
+const buildPipelineGenerationPayload = (
+  activeChatbotConfig?: ChatbotConfig,
+  options: PipelineScriptGenerationOptions = {},
+) => {
+  let llm_config: ReturnType<typeof buildLLMRequestConfig> | undefined;
+  if (activeChatbotConfig) {
+    llm_config = buildCodegenLLMRequestConfig(activeChatbotConfig);
+  }
+  return {
+    include_sample_data: options.includeSampleData ?? true,
+    validation_mode: options.validationMode ?? "pipeline_sample",
+    generation_strategy: options.generationStrategy ?? "auto",
+    generation_mode: options.mode ?? "full",
+    allow_deterministic_fallback: options.allowDeterministicFallback ?? false,
+    repair_attempts: options.repairAttempts ?? 7,
+    high_level_prompt: options.userInstruction?.trim() || "",
+    ...(llm_config ? { llm_config } : {}),
+  };
+};
+
+export const prepareExternalRuntimePrompt = async (
+  highLevelPrompt = "",
+): Promise<ExternalRuntimePrompt> => {
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/pipeline/external-runtime-prompt`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        high_level_prompt: highLevelPrompt.trim(),
+      }),
+    },
+  );
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(async () => ({
+      error: await response.text().catch(() => ""),
+    }));
+    throw new Error(
+      formatPipelineGenerationError(
+        errorPayload,
+        response.status,
+        response.statusText,
+      ),
+    );
+  }
+  return response.json();
+};
+
+export const generatePipelineScripts = async (
+  activeChatbotConfig?: ChatbotConfig,
+  options: PipelineScriptGenerationOptions = {},
+) => {
+  const response = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/generate-scripts`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(buildPipelineGenerationPayload(activeChatbotConfig, options)),
+  });
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(async () => ({
+      error: await response.text().catch(() => ""),
+    }));
+    const message = formatPipelineGenerationError(
+      errorPayload,
+      response.status,
+      response.statusText,
+    );
+    const error = new Error(message);
+    (error as Error & { payload?: unknown }).payload = errorPayload;
+    throw error;
+  }
+  return response.json();
+};
+
+export const startPipelineScriptGenerationRun = async (
+  activeChatbotConfig?: ChatbotConfig,
+  options: PipelineScriptGenerationOptions = {},
+): Promise<PipelineGenerationJob> => {
+  const response = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/generation-runs`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(buildPipelineGenerationPayload(activeChatbotConfig, options)),
+  });
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(async () => ({
+      error: await response.text().catch(() => ""),
+    }));
+    const message = formatPipelineGenerationError(
+      errorPayload,
+      response.status,
+      response.statusText,
+    );
+    const error = new Error(message);
+    (error as Error & { payload?: unknown }).payload = errorPayload;
+    throw error;
+  }
+  return response.json();
+};
+
+export const fetchPipelineScriptGenerationRun = async (
+  runId: string,
+): Promise<PipelineGenerationJob> => {
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/pipeline/generation-runs/${encodeURIComponent(runId)}`,
+    { method: "GET" },
+  );
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(async () => ({
+      error: await response.text().catch(() => ""),
+    }));
+    const message = formatPipelineGenerationError(
+      errorPayload,
+      response.status,
+      response.statusText,
+    );
+    const error = new Error(message);
+    (error as Error & { payload?: unknown }).payload = errorPayload;
+    throw error;
+  }
+  return response.json();
+};
+
+export const cancelPipelineScriptGenerationRun = async (
+  runId: string,
+): Promise<PipelineGenerationJob> => {
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/pipeline/generation-runs/${encodeURIComponent(runId)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(async () => ({
+      error: await response.text().catch(() => ""),
+    }));
+    const message = formatPipelineGenerationError(
+      errorPayload,
+      response.status,
+      response.statusText,
+    );
+    const error = new Error(message);
+    (error as Error & { payload?: unknown }).payload = errorPayload;
+    throw error;
+  }
+  return response.json();
+};
+
+export const resumePipelineScriptGenerationRun = async (
+  runId: string,
+  activeChatbotConfig?: ChatbotConfig,
+  options: {
+    flowId?: string;
+    repairAttempts?: number;
+    userInstruction?: string;
+  } = {},
+): Promise<PipelineGenerationJob> => {
+  const llm_config = activeChatbotConfig
+    ? buildCodegenLLMRequestConfig(activeChatbotConfig)
+    : undefined;
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/pipeline/generation-runs/${encodeURIComponent(runId)}/resume`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        flow_id: options.flowId || "",
+        repair_attempts: options.repairAttempts ?? 7,
+        user_instruction: options.userInstruction || "",
+        ...(llm_config ? { llm_config } : {}),
+      }),
+    },
+  );
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(async () => ({
+      error: await response.text().catch(() => ""),
+    }));
+    const message = formatPipelineGenerationError(
+      errorPayload,
+      response.status,
+      response.statusText,
+    );
+    const error = new Error(message);
+    (error as Error & { payload?: unknown }).payload = errorPayload;
+    throw error;
+  }
+  return response.json();
+};
+
+const formatPipelineGenerationError = (
+  payload: unknown,
+  status: number,
+  statusText: string,
+) => {
+  if (!payload || typeof payload !== "object") {
+    return `Failed to generate pipeline scripts: ${status} ${statusText}`;
+  }
+  const body = payload as {
+    error?: unknown;
+    details?: {
+      invalid_nodes?: Array<{
+        flow_id?: unknown;
+        validation_report?: {
+          errors?: unknown;
+          warnings?: unknown;
+        };
+      }>;
+      integration_validation?: {
+        errors?: unknown;
+        warnings?: unknown;
+      };
+      generation_run?: {
+        run_id?: unknown;
+        steps?: Array<{
+          flow_id?: unknown;
+          stage?: unknown;
+          status?: unknown;
+          validation_report?: {
+            errors?: unknown;
+          } | null;
+        }>;
+      };
+    };
+  };
+  const lines: string[] = [
+    typeof body.error === "string"
+      ? body.error
+      : `Failed to generate pipeline scripts: ${status} ${statusText}`,
+  ];
+  const invalidNodes = Array.isArray(body.details?.invalid_nodes)
+    ? body.details.invalid_nodes
+    : [];
+  invalidNodes.slice(0, 4).forEach((node) => {
+    const errors = Array.isArray(node.validation_report?.errors)
+      ? node.validation_report.errors
+      : [];
+    const firstError = errors.find((item) => typeof item === "string");
+    if (firstError) {
+      lines.push(`Node ${String(node.flow_id || "?")}: ${firstError}`);
+    }
+  });
+  const integrationErrors = Array.isArray(body.details?.integration_validation?.errors)
+    ? body.details?.integration_validation?.errors
+    : [];
+  const firstIntegrationError = integrationErrors.find((item) => typeof item === "string");
+  if (firstIntegrationError && lines.length < 5) {
+    lines.push(String(firstIntegrationError));
+  }
+  const runId = body.details?.generation_run?.run_id;
+  if (typeof runId === "string" && runId.trim()) {
+    lines.push(`Generation run: ${runId.trim()}`);
+  }
+  const failedStep = Array.isArray(body.details?.generation_run?.steps)
+    ? body.details.generation_run.steps.find((step) => step.status !== "valid")
+    : undefined;
+  if (failedStep && lines.length < 7) {
+    const stepErrors = Array.isArray(failedStep.validation_report?.errors)
+      ? failedStep.validation_report?.errors
+      : [];
+    const firstStepError = stepErrors.find((item) => typeof item === "string");
+    const stage = typeof failedStep.stage === "string" ? failedStep.stage : "unknown";
+    lines.push(
+      `Run step ${String(failedStep.flow_id || "?")} (${stage}): ${
+        firstStepError || String(failedStep.status || "invalid")
+      }`,
+    );
+  }
+  return lines.join("\n");
+};
+
+export const uploadPipelineSourceFile = async (file: File): Promise<void> => {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/source`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    console.warn(
+      `[flowPersistence.ts] Pipeline source upload not available (${res.status}): ${txt}`,
+    );
+    return;
+  }
+  console.log("[flowPersistence.ts] Pipeline source saved to MinIO:", file.name);
 };

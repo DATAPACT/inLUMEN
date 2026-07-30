@@ -1,6 +1,6 @@
 import React from 'react';
 import { Panel } from 'reactflow';
-import { Download, Redo2, Save, Trash2, Undo2, Upload } from 'lucide-react';
+import { Download, Redo2, Save, Trash2, Undo2, Upload, Wand2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 type FlowCanvasActionsPanelProps = {
@@ -12,6 +12,8 @@ type FlowCanvasActionsPanelProps = {
   onExportYaml: () => void;
   onImportClick: () => void;
   onImport: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  onGenerateScripts: () => void;
+  isGeneratingScripts?: boolean;
   onClear: () => void;
   canUndo: boolean;
   canRedo: boolean;
@@ -27,6 +29,8 @@ export const FlowCanvasActionsPanel = ({
   onExportYaml,
   onImportClick,
   onImport,
+  onGenerateScripts,
+  isGeneratingScripts,
   onClear,
   canUndo,
   canRedo,
@@ -84,6 +88,16 @@ export const FlowCanvasActionsPanel = ({
         className="hidden"
         onChange={onImport}
       />
+      <Button
+        size="sm"
+        variant="outline"
+        className="flex items-center gap-1 h-7"
+        onClick={onGenerateScripts}
+        disabled={isGeneratingScripts}
+      >
+        <Wand2 className="h-3.5 w-3.5" />
+        {isGeneratingScripts ? "Generating" : "Scripts"}
+      </Button>
       <Button
         size="sm"
         variant="destructive"

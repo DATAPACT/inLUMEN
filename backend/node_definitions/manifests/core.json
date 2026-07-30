@@ -1,0 +1,194 @@
+{
+  "definitions": [
+    {
+      "id": "core.model-configuration",
+      "version": 1,
+      "base_type": "config",
+      "family": "core",
+      "palette": {
+        "label": "Model Configuration",
+        "description": "Adjust model parameters, system prompt and more",
+        "icon": "settings",
+        "color": "sky",
+        "order": 10
+      },
+      "editor": {
+        "kind": "default"
+      },
+      "runtime": {
+        "generator": "generic"
+      }
+    },
+    {
+      "id": "core.input-data",
+      "version": 1,
+      "base_type": "input",
+      "family": "core",
+      "palette": {
+        "label": "Input Data",
+        "description": "Raw data from sensors, APIs, files or user message.",
+        "icon": "database",
+        "color": "blue",
+        "order": 20
+      },
+      "editor": {
+        "kind": "default"
+      },
+      "runtime": {
+        "generator": "generic"
+      }
+    },
+    {
+      "id": "core.data-preprocessing",
+      "version": 1,
+      "base_type": "action",
+      "family": "core",
+      "palette": {
+        "label": "Data Preprocessing",
+        "description": "Clean, normalize, and transform input data",
+        "icon": "file-text",
+        "color": "lime",
+        "order": 30
+      },
+      "editor": {
+        "kind": "default"
+      },
+      "runtime": {
+        "generator": "generic"
+      }
+    },
+    {
+      "id": "core.feature-engineering",
+      "version": 1,
+      "base_type": "action",
+      "family": "core",
+      "palette": {
+        "label": "Feature Engineering",
+        "description": "Generate or select features for model input",
+        "icon": "info",
+        "color": "yellow",
+        "order": 40
+      },
+      "editor": {
+        "kind": "default"
+      },
+      "runtime": {
+        "generator": "generic"
+      }
+    },
+    {
+      "id": "core.model-training",
+      "version": 1,
+      "base_type": "action",
+      "family": "core",
+      "palette": {
+        "label": "Model Training",
+        "description": "Train machine learning or deep learning models",
+        "icon": "brain",
+        "color": "indigo",
+        "order": 50
+      },
+      "editor": {
+        "kind": "default"
+      },
+      "runtime": {
+        "generator": "generic"
+      }
+    },
+    {
+      "id": "core.model-evaluation",
+      "version": 1,
+      "base_type": "action",
+      "family": "core",
+      "palette": {
+        "label": "Model Evaluation",
+        "description": "Assess model performance and metrics",
+        "icon": "zap",
+        "color": "purple",
+        "order": 60
+      },
+      "editor": {
+        "kind": "default"
+      },
+      "runtime": {
+        "generator": "generic"
+      }
+    },
+    {
+      "id": "core.output",
+      "version": 1,
+      "base_type": "output",
+      "family": "core",
+      "palette": {
+        "label": "AI/ML Output",
+        "description": "AI/ML pipeline results",
+        "icon": "message-circle",
+        "color": "emerald",
+        "order": 70
+      },
+      "editor": {
+        "kind": "default"
+      },
+      "runtime": {
+        "generator": "generic"
+      }
+    },
+    {
+      "id": "core.api-call",
+      "version": 1,
+      "base_type": "api",
+      "family": "core",
+      "palette": {
+        "label": "API Call",
+        "description": "Connect to external services",
+        "icon": "network",
+        "color": "rose",
+        "order": 80
+      },
+      "editor": {
+        "kind": "default"
+      },
+      "runtime": {
+        "generator": "generic"
+      }
+    },
+    {
+      "id": "core.clipboard",
+      "version": 1,
+      "base_type": "storage",
+      "family": "core",
+      "palette": {
+        "label": "Clipboard",
+        "description": "Store and retrieve content",
+        "icon": "clipboard",
+        "color": "teal",
+        "order": 90
+      },
+      "editor": {
+        "kind": "default"
+      },
+      "runtime": {
+        "generator": "generic"
+      }
+    },
+    {
+      "id": "core.custom",
+      "version": 1,
+      "base_type": "custom",
+      "family": "core",
+      "palette": {
+        "label": "Custom Node",
+        "description": "Add custom label and description",
+        "icon": "plus-circle",
+        "color": "violet",
+        "order": 100
+      },
+      "editor": {
+        "kind": "default"
+      },
+      "runtime": {
+        "generator": "generic"
+      }
+    }
+  ]
+}

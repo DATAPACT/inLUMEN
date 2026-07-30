@@ -22,19 +22,26 @@ import { FlowCanvasActionsPanel } from '@/components/flow/FlowCanvasActionsPanel
 import {
   addEdgeToBackend,
   addNodeToBackend,
+  cancelPipelineScriptGenerationRun,
   deleteEdgeFromBackend,
   deleteNodeFromBackend,
+  fetchPipelineScriptGenerationRun,
   fetchPipelineVersions,
   fetchPipelineGraph,
   fetchPipelineUpdatedAt,
+  generatePipelineScripts,
   generatePipelineYaml,
+  prepareExternalRuntimePrompt,
   restoreBackendGraphHistory,
+  resumePipelineScriptGenerationRun,
+  startPipelineScriptGenerationRun,
   type PipelineVersionGraph,
   type PipelineVersionSummary,
+  type PipelineGenerationJob,
+  type PipelineScriptGenerationMode,
   rebuildBackendFromFlow,
   savePipelineVersion,
   updateNodePositionInBackend,
-  clearBackendGraph,
 } from '@/features/flow/flowPersistence';
 import {
   createAgentGraphSnapshot,
@@ -56,6 +63,17 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Progress } from '@/components/ui/progress';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
+import { Textarea } from '@/components/ui/textarea';
+import {
+  AlertCircle,
+  CheckCircle2,
+  Copy,
+  Database,
+  Loader2,
+  Zap,
+} from 'lucide-react';
 
 interface FlowCanvasProps {
   onNodeSelect: (node: Node | null, options?: { openInspector?: boolean }) => void;
@@ -64,6 +82,7 @@ interface FlowCanvasProps {
   onRemoveEdge?: (edgeId: string) => void;
   isLightMode?: boolean;
   activeChatbotConfig?: ChatbotConfig;
+  pipelinePrompt?: string;
   onVersionSaved?: (version: PipelineVersionSummary) => void;
   onCanvasEdited?: () => void;
   onActiveVersionChange?: (versionUid: string) => void;
@@ -79,6 +98,193 @@ export interface FlowCanvasRef {
 }
 
 let nodeId = 1;
+
+const CODEGEN_RUNTIME_FILENAMES = new Set([
+  "main.py",
+  "requirements.txt",
+  "node-manifest.json",
+  "validation-report.json",
+]);
+
+const isCodegenRuntimeFile = (filename: unknown) => {
+  const normalized = String(filename || "").trim();
+  const lower = normalized.toLowerCase();
+  return CODEGEN_RUNTIME_FILENAMES.has(lower)
+    || lower.startsWith("dockerfile.")
+    || [".py", ".pyi", ".sh", ".bash", ".js", ".mjs", ".cjs", ".ts", ".tsx"]
+      .some((suffix) => lower.endsWith(suffix));
+};
+
+const nodeFiles = (node: Node): Array<{ filename?: string; name?: string } | string> => {
+  const raw = Array.isArray(node.data?.file_buckets)
+    ? node.data.file_buckets
+    : Array.isArray(node.data?.files)
+      ? node.data.files
+      : [];
+  return raw as Array<{ filename?: string; name?: string } | string>;
+};
+
+const hasUploadedSampleData = (nodes: Node[]) =>
+  nodes.some((node) =>
+    nodeFiles(node).some((file) => {
+      const filename = typeof file === "string" ? file : file.filename || file.name;
+      return Boolean(filename && !isCodegenRuntimeFile(filename));
+    }),
+  );
+
+const generationModeOptions: Array<{
+  value: PipelineScriptGenerationMode;
+  title: string;
+  description: string;
+  icon: typeof Zap;
+}> = [
+  {
+    value: "fast",
+    title: "Fast draft",
+    description: "Generate quickly with static checks. Sample inputs are optional.",
+    icon: Zap,
+  },
+  {
+    value: "generic",
+    title: "Generic draft",
+    description: "Generate reusable scripts without reading uploaded sample data.",
+    icon: AlertCircle,
+  },
+  {
+    value: "full",
+    title: "Full data-aware",
+    description: "Run with uploaded inputs, validate each node, and repair failures.",
+    icon: Database,
+  },
+];
+
+const modeToGenerationOptions = (
+  mode: PipelineScriptGenerationMode,
+  hasInputFiles: boolean,
+) => {
+  if (mode === "fast") {
+    return {
+      mode,
+      includeSampleData: hasInputFiles,
+      validationMode: "static" as const,
+      generationStrategy: "single_pass" as const,
+      allowDeterministicFallback: false,
+      repairAttempts: 0,
+    };
+  }
+  if (mode === "generic") {
+    return {
+      mode,
+      includeSampleData: false,
+      validationMode: "static" as const,
+      generationStrategy: "single_pass" as const,
+      allowDeterministicFallback: false,
+      repairAttempts: 0,
+    };
+  }
+  return {
+    mode,
+    includeSampleData: true,
+    validationMode: "pipeline_sample" as const,
+    generationStrategy: "single_pass" as const,
+    allowDeterministicFallback: false,
+    repairAttempts: 7,
+  };
+};
+
+const generationProgressPercent = (job: PipelineGenerationJob | null) => {
+  const steps = job?.generation_run?.steps || [];
+  if (steps.length === 0) return job?.status === "queued" ? 5 : 10;
+  const completed = steps.filter((step) =>
+    ["valid", "invalid", "failed", "skipped"].includes(String(step.status || "")),
+  ).length;
+  const status = effectiveGenerationStatus(job);
+  if (
+    status === "valid" ||
+    status === "invalid" ||
+    status === "failed" ||
+    status === "cancelled"
+  ) return 100;
+  return Math.max(10, Math.min(95, Math.round((completed / steps.length) * 100)));
+};
+
+const GENERATION_TERMINAL_STATUSES = new Set([
+  "valid",
+  "invalid",
+  "failed",
+  "cancelled",
+]);
+
+const effectiveGenerationStatus = (job: PipelineGenerationJob | null) => {
+  const outer = String(job?.status || "").toLowerCase();
+  if (GENERATION_TERMINAL_STATUSES.has(outer)) return outer;
+  const nested = String(job?.generation_run?.status || "").toLowerCase();
+  return nested || outer || "running";
+};
+
+const wait = (ms: number) =>
+  new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+
+const copyTextToClipboard = async (value: string) => {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) {
+    throw new Error("The browser did not allow clipboard access.");
+  }
+};
+
+const generationFailureMessage = (job: PipelineGenerationJob) => {
+  const runError = Array.isArray(job.generation_run?.errors)
+    ? job.generation_run?.errors.find((item) => typeof item === "string")
+    : undefined;
+  return (
+    job.error ||
+    runError ||
+    job.persistence?.reason ||
+    "Pipeline script generation did not complete successfully."
+  );
+};
+
+const failedGenerationStep = (job: PipelineGenerationJob | null) => {
+  const steps = job?.generation_run?.steps || [];
+  const failed = steps.filter((step) =>
+    ["invalid", "failed"].includes(String(step.status || "").toLowerCase()),
+  );
+  return failed.length === 1 ? failed[0] : undefined;
+};
+
+const generationStageLabel = (stage: unknown) => {
+  const key = String(stage || "pending").toLowerCase();
+  const labels: Record<string, string> = {
+    pending: "waiting",
+    pipeline_planning: "planning pipeline",
+    pipeline_generation: "generating canonical pipeline",
+    pipeline_validation: "validating canonical pipeline",
+    pipeline_repair: "repairing canonical pipeline",
+    dependency_validation: "validating dependencies",
+    dependency_installation: "installing dependencies",
+    sandbox_execution: "executing sample in sandbox",
+    node_compilation: "extracting independent nodes",
+    compiled_independent_bundle: "complete",
+    validated_cache_hit: "reused validated result",
+    complete: "complete",
+    cancelled: "cancelled",
+  };
+  return labels[key] || key.replace(/_/g, " ");
+};
 
 const getSnapshotFileRef = (file: unknown, nodeIdValue: string) => {
   if (typeof file === "string") return file;
@@ -223,6 +429,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   onRemoveEdge,
   isLightMode,
   activeChatbotConfig,
+  pipelinePrompt,
   onVersionSaved,
   onCanvasEdited,
   onActiveVersionChange,
@@ -237,7 +444,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     const savedEdges = localStorage.getItem('ai-flow-edges');
     return savedEdges ? JSON.parse(savedEdges) : [];
   });
-
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
@@ -257,6 +463,22 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     canRedo: false,
   });
   const [isHistoryRestoring, setIsHistoryRestoring] = useState(false);
+  const [isGeneratingScripts, setIsGeneratingScripts] = useState(false);
+  const [isCancellingScripts, setIsCancellingScripts] = useState(false);
+  const generationCancelRequestedRef = useRef(false);
+  const [isScriptGenerationOpen, setIsScriptGenerationOpen] = useState(false);
+  const [scriptGenerationPrompt, setScriptGenerationPrompt] = useState("");
+  const [scriptGenerationMode, setScriptGenerationMode] =
+    useState<PipelineScriptGenerationMode>("full");
+  const [isPreparingExternalPrompt, setIsPreparingExternalPrompt] = useState(false);
+  const [generationJob, setGenerationJob] = useState<PipelineGenerationJob | null>(null);
+  const uploadedSampleDataAvailable = hasUploadedSampleData(nodes);
+
+  useEffect(() => {
+    if (!uploadedSampleDataAvailable && scriptGenerationMode === "full") {
+      setScriptGenerationMode("generic");
+    }
+  }, [scriptGenerationMode, uploadedSampleDataAvailable]);
 
   const markLocalWrite = useCallback((ms = 800) => {
     refreshCooldownUntilRef.current = Date.now() + ms;
@@ -751,7 +973,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         position,
         data: {
           ...nodeData.data,
-          content: nodeData.data.type === 'input' ? '{input}' : '',
+          ...(nodeData.data.type === 'input' ? { content: '{input}' } : {}),
         },
       };
 
@@ -843,12 +1065,199 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     }
   };
 
+  const handleGeneratePipelineScripts = () => {
+    if (isGeneratingScripts) return;
+    setScriptGenerationPrompt(String(pipelinePrompt || "").trim());
+    setScriptGenerationMode(uploadedSampleDataAvailable ? "full" : "generic");
+    setIsScriptGenerationOpen(true);
+  };
+
+  const pollPipelineGenerationRun = async (started: PipelineGenerationJob) => {
+    setGenerationJob(started);
+    const runId = String(started.run_id || "").trim();
+    if (!runId) {
+      throw new Error("Pipeline generation run did not return a run id.");
+    }
+    let latest = started;
+    while (
+      !GENERATION_TERMINAL_STATUSES.has(effectiveGenerationStatus(latest))
+    ) {
+      await wait(3000);
+      latest = await fetchPipelineScriptGenerationRun(runId);
+      setGenerationJob(latest);
+    }
+    return latest;
+  };
+
+  const handleRunPipelineScriptGeneration = async () => {
+    if (isGeneratingScripts) return;
+    const mode =
+      scriptGenerationMode === "full" && !uploadedSampleDataAvailable
+        ? "generic"
+        : scriptGenerationMode;
+    const options = {
+      ...modeToGenerationOptions(mode, uploadedSampleDataAvailable),
+      userInstruction: scriptGenerationPrompt.trim(),
+    };
+    generationCancelRequestedRef.current = false;
+    setIsGeneratingScripts(true);
+    setGenerationJob(null);
+    try {
+      markLocalWrite(5000);
+      let generatedCount = 0;
+      if (mode === "full") {
+        const started = await startPipelineScriptGenerationRun(
+          activeChatbotConfig,
+          options,
+        );
+        const latest = await pollPipelineGenerationRun(started);
+        if (
+          latest.status !== "valid" ||
+          latest.persistence?.status !== "persisted"
+        ) {
+          throw new Error(generationFailureMessage(latest));
+        }
+        const persistedResult = latest.persistence?.result as { nodes?: unknown[] } | undefined;
+        generatedCount = Array.isArray(persistedResult?.nodes)
+          ? persistedResult.nodes.length
+          : 0;
+      } else {
+        const result = await generatePipelineScripts(activeChatbotConfig, options);
+        generatedCount = Array.isArray(result?.nodes) ? result.nodes.length : 0;
+      }
+      await fetchGraphAndApply();
+      setIsScriptGenerationOpen(false);
+      toast.success("Runtime scripts generated", {
+        description: `${generatedCount} node bundle${generatedCount === 1 ? "" : "s"} generated.`,
+      });
+    } catch (error) {
+      if (generationCancelRequestedRef.current) {
+        return;
+      }
+      console.error("[FlowCanvas.tsx] Generate pipeline scripts error:", error);
+      toast.error("Script generation failed", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      setIsGeneratingScripts(false);
+    }
+  };
+
+  const handleExternalRuntimePrompt = async () => {
+    if (isPreparingExternalPrompt) return;
+    setIsPreparingExternalPrompt(true);
+    try {
+      const result = await prepareExternalRuntimePrompt(
+        scriptGenerationPrompt.trim(),
+      );
+      const prompt = String(result.prompt || "").trim();
+      if (!prompt) {
+        throw new Error("The prepared external AI prompt was empty.");
+      }
+      await copyTextToClipboard(prompt);
+      toast.success("Prompt copied", {
+        description: `Paste it into any AI for ${result.node_count || nodes.length} pipeline node${(result.node_count || nodes.length) === 1 ? "" : "s"}.`,
+      });
+    } catch (error) {
+      console.error("[FlowCanvas.tsx] Prepare external AI prompt error:", error);
+      toast.error("Could not prepare external AI prompt", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      setIsPreparingExternalPrompt(false);
+    }
+  };
+
+  const handleRepairFailedPipelineNode = async () => {
+    if (isGeneratingScripts) return;
+    const currentRunId = String(generationJob?.run_id || "").trim();
+    const failedStep = failedGenerationStep(generationJob);
+    const failedFlowId = String(failedStep?.flow_id || "").trim();
+    if (!currentRunId || !failedFlowId) {
+      toast.error("Repair unavailable", {
+        description: "No failed node was found for this generation run.",
+      });
+      return;
+    }
+    setIsGeneratingScripts(true);
+    generationCancelRequestedRef.current = false;
+    try {
+      markLocalWrite(5000);
+      const started = await resumePipelineScriptGenerationRun(
+        currentRunId,
+        activeChatbotConfig,
+        {
+          flowId: failedFlowId,
+          repairAttempts: 7,
+        },
+      );
+      const latest = await pollPipelineGenerationRun(started);
+      if (
+        latest.status !== "valid" ||
+        latest.persistence?.status !== "persisted"
+      ) {
+        throw new Error(generationFailureMessage(latest));
+      }
+      const persistedResult = latest.persistence?.result as { nodes?: unknown[] } | undefined;
+      const generatedCount = Array.isArray(persistedResult?.nodes)
+        ? persistedResult.nodes.length
+        : 0;
+      await fetchGraphAndApply();
+      setIsScriptGenerationOpen(false);
+      toast.success("Failed node repaired", {
+        description: `${generatedCount} node bundle${generatedCount === 1 ? "" : "s"} persisted.`,
+      });
+    } catch (error) {
+      if (generationCancelRequestedRef.current) {
+        return;
+      }
+      console.error("[FlowCanvas.tsx] Repair pipeline script error:", error);
+      toast.error("Node repair failed", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      setIsGeneratingScripts(false);
+    }
+  };
+
+  const handleCancelPipelineScriptGeneration = async () => {
+    if (!isGeneratingScripts) {
+      setIsScriptGenerationOpen(false);
+      return;
+    }
+    const runId = String(
+      generationJob?.run_id || generationJob?.generation_run?.run_id || "",
+    ).trim();
+    if (!runId || isCancellingScripts) return;
+
+    generationCancelRequestedRef.current = true;
+    setIsCancellingScripts(true);
+    try {
+      const cancelled = await cancelPipelineScriptGenerationRun(runId);
+      setGenerationJob(cancelled);
+      setIsGeneratingScripts(false);
+      toast.info("Runtime script generation stopped", {
+        description: `Run ${runId.slice(0, 8)} was cancelled.`,
+      });
+    } catch (error) {
+      generationCancelRequestedRef.current = false;
+      toast.error("Could not stop generation", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      setIsCancellingScripts(false);
+    }
+  };
+
   const importFlow = async (e: React.ChangeEvent<HTMLInputElement>) => {
     try {
       const file = e.target.files?.[0];
       if (!file) return;
       const text = await file.text();
-      const flowData = JSON.parse(text) as { nodes?: Node[]; edges?: Edge[] };
+      const flowData = JSON.parse(text) as {
+        nodes?: Node[];
+        edges?: Edge[];
+      };
       if (!Array.isArray(flowData.nodes) || !Array.isArray(flowData.edges)) {
         toast.error('Invalid flow file', {
           description: 'The selected file does not contain a valid flow',
@@ -890,11 +1299,23 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     localStorage.removeItem('ai-flow-edges');
     nodeId = 1;
     markLocalWrite(1200);
-    await clearBackendGraph();
+    await rebuildBackendFromFlow([], []);
     toast.success('Canvas cleared', {
       description: 'All nodes and edges have been removed',
     });
   };
+
+  const generationSteps = generationJob?.generation_run?.steps || [];
+  const generationProgress = generationProgressPercent(generationJob);
+  const generationStatus = effectiveGenerationStatus(generationJob);
+  const generationFailed = ["invalid", "failed"].includes(generationStatus);
+  const repairableFailedStep = failedGenerationStep(generationJob);
+  const canRepairFailedNode = Boolean(
+    generationJob &&
+      generationFailed &&
+      repairableFailedStep?.flow_id &&
+      generationJob.result,
+  );
 
   return (
     <div ref={reactFlowWrapper} className="h-full w-full">
@@ -964,12 +1385,227 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           onExportYaml={exportFlowYAML}
           onImportClick={triggerImport}
           onImport={importFlow}
+          onGenerateScripts={handleGeneratePipelineScripts}
+          isGeneratingScripts={isGeneratingScripts}
           onClear={clearCanvas}
           canUndo={historyAvailability.canUndo}
           canRedo={historyAvailability.canRedo}
           isHistoryRestoring={isHistoryRestoring}
         />
       </ReactFlow>
+
+      <Dialog
+        open={isScriptGenerationOpen}
+        onOpenChange={(open) => {
+          if (!isGeneratingScripts) setIsScriptGenerationOpen(open);
+        }}
+      >
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Add Node Scripts</DialogTitle>
+            <DialogDescription>
+              Every node follows the same simple file rule, whether the files
+              come from you, another AI, or inLUMEN.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="space-y-2 rounded-md border border-border bg-muted/20 p-3 text-sm">
+              <p className="font-medium">Files to attach to each node</p>
+              <div className="grid gap-1 text-muted-foreground">
+                <p><code className="text-foreground">main.py</code> — the node script</p>
+                <p><code className="text-foreground">requirements.txt</code> — only when packages are needed</p>
+                <p><span className="text-foreground">Input files</span> — upload them to the first node that reads them</p>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                That is all. inLUMEN builds the Dagster setup and passes files
+                between connected nodes automatically.
+              </p>
+              <p className="text-xs text-muted-foreground">
+                To upload: select a node, open Inspector, and choose Upload Files.
+              </p>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="pipeline-runtime-prompt">
+                What should the pipeline do?
+              </Label>
+              <Textarea
+                id="pipeline-runtime-prompt"
+                value={scriptGenerationPrompt}
+                onChange={(event) => setScriptGenerationPrompt(event.target.value)}
+                placeholder="Describe the result you want."
+                disabled={isGeneratingScripts}
+                className="min-h-24"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <Label>Generation mode</Label>
+                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  {uploadedSampleDataAvailable ? (
+                    <>
+                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                      Input data detected
+                    </>
+                  ) : (
+                    <>
+                      <AlertCircle className="h-3.5 w-3.5 text-amber-500" />
+                      No input data attached
+                    </>
+                  )}
+                </span>
+              </div>
+              <RadioGroup
+                value={scriptGenerationMode}
+                onValueChange={(value) =>
+                  setScriptGenerationMode(value as PipelineScriptGenerationMode)
+                }
+                className="grid gap-2"
+              >
+                {generationModeOptions.map((option) => {
+                  const Icon = option.icon;
+                  const disabled =
+                    option.value === "full" && !uploadedSampleDataAvailable;
+                  return (
+                    <Label
+                      key={option.value}
+                      htmlFor={`script-generation-${option.value}`}
+                      className={cn(
+                        "flex cursor-pointer items-start gap-3 rounded-md border border-border p-3 transition-colors",
+                        scriptGenerationMode === option.value &&
+                          "border-primary bg-primary/10",
+                        disabled && "cursor-not-allowed opacity-50",
+                      )}
+                    >
+                      <RadioGroupItem
+                        id={`script-generation-${option.value}`}
+                        value={option.value}
+                        disabled={disabled || isGeneratingScripts}
+                        className="mt-1"
+                      />
+                      <Icon className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                      <span className="grid gap-1">
+                        <span className="font-medium">{option.title}</span>
+                        <span className="text-sm font-normal text-muted-foreground">
+                          {option.description}
+                        </span>
+                      </span>
+                    </Label>
+                  );
+                })}
+              </RadioGroup>
+              {!uploadedSampleDataAvailable && (
+                <p className="text-xs text-muted-foreground">
+                  Attach an input file to its first consumer node to enable Full data-aware.
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3">
+              <div className="space-y-1">
+                <p className="text-sm font-medium">Using ChatGPT or another AI?</p>
+                <p className="text-xs text-muted-foreground">
+                  Copy one ready-made prompt, paste it into the AI, then upload
+                  the returned files to the matching nodes. The response also
+                  tells you exactly which node receives each real input file.
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => { void handleExternalRuntimePrompt(); }}
+                disabled={isPreparingExternalPrompt || isGeneratingScripts}
+              >
+                {isPreparingExternalPrompt ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Copy className="mr-2 h-4 w-4" />
+                )}
+                Copy prompt
+              </Button>
+            </div>
+
+            {generationJob && (
+              <div className="space-y-3 rounded-md border border-border p-3">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="font-medium">
+                    Run {String(generationJob.run_id || "").slice(0, 8)}
+                  </span>
+                  <span className="text-muted-foreground">
+                    {generationStatus}
+                  </span>
+                </div>
+                <Progress value={generationProgress} />
+                {generationSteps.length > 0 && (
+                  <div className="max-h-40 space-y-2 overflow-auto pr-1">
+                    {generationSteps.map((step) => (
+                      <div
+                        key={`${step.flow_id}-${step.stage}`}
+                        className="flex items-center justify-between gap-3 text-sm"
+                      >
+                        <span className="truncate">
+                          Node {step.flow_id || "?"} - {generationStageLabel(step.stage)}
+                        </span>
+                        <span className="shrink-0 text-xs text-muted-foreground">
+                          {step.status || "pending"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {generationFailed && (
+                  <div
+                    role="alert"
+                    className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+                  >
+                    {generationFailureMessage(generationJob)}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => { void handleCancelPipelineScriptGeneration(); }}
+              disabled={isCancellingScripts}
+            >
+              {isCancellingScripts && (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              )}
+              {isGeneratingScripts ? "Stop generation" : "Cancel"}
+            </Button>
+            {canRepairFailedNode && (
+              <Button
+                variant="outline"
+                onClick={() => { void handleRepairFailedPipelineNode(); }}
+                disabled={isGeneratingScripts}
+              >
+                {isGeneratingScripts && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Retry Node {repairableFailedStep?.flow_id}
+              </Button>
+            )}
+            <Button
+              onClick={() => { void handleRunPipelineScriptGeneration(); }}
+              disabled={
+                isGeneratingScripts ||
+                (scriptGenerationMode === "full" && !uploadedSampleDataAvailable)
+              }
+            >
+              {isGeneratingScripts && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              {isGeneratingScripts
+                ? "Generating"
+                : generationFailed
+                  ? "Retry all"
+                  : "Generate and attach"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={isSaveVersionOpen} onOpenChange={setIsSaveVersionOpen}>
         <DialogContent className="sm:max-w-md">
@@ -1026,6 +1662,7 @@ export const WrappedFlowCanvas = ({
   onRemoveEdge,
   isLightMode,
   activeChatbotConfig,
+  pipelinePrompt,
   onVersionSaved,
   onCanvasEdited,
   onActiveVersionChange,
@@ -1042,6 +1679,7 @@ export const WrappedFlowCanvas = ({
       onRemoveEdge={onRemoveEdge}
       isLightMode={isLightMode}
       activeChatbotConfig={activeChatbotConfig}
+      pipelinePrompt={pipelinePrompt}
       onVersionSaved={onVersionSaved}
       onCanvasEdited={onCanvasEdited}
       onActiveVersionChange={onActiveVersionChange}

@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from graph_client import run_neo4j_query
 from llm_config import LLMConfig, log_llm_selection, select_model_client
+from model_plans import resolve_implementation_plan
 from step_types import normalize_step_type
 
 
@@ -292,7 +293,12 @@ def build_pipeline_editing_team(
         except Exception as exc:
             return repr({"Error in graph_operator": str(exc)})
 
-    def _step_props_lines(step_type: str, label: str, description: str) -> List[str]:
+    def _step_props_lines(
+        step_type: str,
+        label: str,
+        description: str,
+        implementation: Any = None,
+    ) -> List[str]:
         """Builds shared STEP properties for create and insert tools."""
         props_lines = [
             "uid:        randomUUID()",
@@ -317,17 +323,60 @@ def build_pipeline_editing_team(
             props_lines.append("has_files: 'no'")
         elif step_type == "custom":
             props_lines.append("has_files: 'no'")
+        if isinstance(implementation, dict) and implementation:
+            implementation = resolve_implementation_plan(
+                implementation,
+                label=label,
+                description=description,
+            )
+            props_lines = [
+                line for line in props_lines if not line.lstrip().startswith("param_json:")
+            ]
+            param_json = json.dumps(
+                {"model_plan": implementation},
+                ensure_ascii=True,
+                sort_keys=True,
+            )
+            escaped_param_json = param_json.replace("\\", "\\\\").replace("'", "\\'")
+            props_lines.append(f"param_json: '{escaped_param_json}'")
         return props_lines
 
     async def create_step(params: str) -> str:
-        """Creates new STEP and connects it after the last STEP, if present."""
+        """Creates new STEP and connects it after the last STEP, if present.
+
+        params JSON:
+        {
+          "type": "input|action|output|config|storage|api|custom",
+          "label": "step label",
+          "description": "step description",
+          "implementation": {
+            "task": "model-backed task",
+            "domain": "inferred domain",
+            "framework": "runtime framework",
+            "model_id": "preferred quality-first model identifier or family",
+            "model_revision": "optional proposed revision; trusted adapters resolve it",
+            "device": "auto|cpu|cuda",
+            "precision": "auto|float32|float16|bfloat16|int8",
+            "required_packages": ["package constraints"],
+            "inference_parameters": {},
+            "selection_rationale": ["why this model fits"]
+          }
+        }
+        Include implementation for model-backed analytical steps. Omit it for
+        deterministic ingestion, formatting, storage, and output assembly.
+        """
         try:
             query_type = "create_step"
             data = json.loads(params)
             step_type = normalize_step_type(data.get("type"))
             label = str(data.get("label", "")).replace("'", "\\'")
             description = str(data.get("description", "")).replace("'", "\\'")
-            props_lines = _step_props_lines(step_type, label, description)
+            props_lines = _step_props_lines(
+                step_type,
+                label,
+                description,
+                data.get("implementation"),
+            )
             props_str = ",\n            ".join(props_lines)
             query = f"""
             OPTIONAL MATCH (candidate:PIPELINE {{status:'design'}})
@@ -406,6 +455,7 @@ def build_pipeline_editing_team(
           "type": "input|action|output|config|storage|api|custom",
           "label": "step label",
           "description": "step description",
+          "implementation": "optional model implementation object from create_step",
           "before_flow_id": "required target flow_id",
           "after_flow_id": "optional source flow_id for between-step insertion"
         }
@@ -430,7 +480,14 @@ def build_pipeline_editing_team(
                 if raw_after_flow_id is not None and str(raw_after_flow_id).strip() != ""
                 else None
             )
-            props_str = ",\n            ".join(_step_props_lines(step_type, label, description))
+            props_str = ",\n            ".join(
+                _step_props_lines(
+                    step_type,
+                    label,
+                    description,
+                    data.get("implementation"),
+                )
+            )
 
             if after_flow_id is None:
                 query_type = "insert_initial_step"
@@ -623,6 +680,12 @@ def build_pipeline_editing_team(
                         The create_step and insert_step type MUST be one of: input, action, output, config, storage, api, custom.
                         Use overview to find the relevant flow_id values before calling insert_step unless the flow_id values are already provided by the user.
                         Use the label/description fields for domain-specific names such as ingestion, preprocessing, model training, or alerting.
+                        Represent every capability explicitly requested by the user in the graph before finishing. Do not stop after an intermediate storage or transformation step when the request also asks for a terminal behavior. For example, a request that says "answers questions" must include a connected output step that answers questions. Re-read the user's request after tool calls and add any missing capability as a connected STEP.
+                        This is a one-shot, quality-first design. For every model-backed analytical step, identify the task, domain, preferred model family, device constraints, inference parameters, and selection rationale. Assume sufficient CPU, GPU, memory, model download time, and validation time unless the user states a constraint.
+                        Put that decision in the create_step or insert_step implementation object. Do not invent repository commit hashes: InLUMEN's trusted adapter registry resolves supported tasks to verified model IDs, revisions, packages, and quality policies before persistence and code generation.
+                        Prefer high-quality neural models over lightweight baselines. Do not choose PocketSphinx, VADER, keyword lists, dummy estimators, or similarly limited baselines merely to reduce container size or execution cost.
+                        Select domain-specific or multilingual models when the request indicates that need. For long-text analysis, include chunking and aggregation parameters. For speech recognition, include language strategy, decoding parameters, timestamps, voice activity detection, and diarization requirements when relevant.
+                        For deterministic steps such as byte-preserving ingestion, file conversion, storage, or report assembly that need no learned model, omit implementation rather than inventing a model.
                         """,
         max_tool_iterations=30,
         reflect_on_tool_use=True,

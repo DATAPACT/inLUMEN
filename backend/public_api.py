@@ -1391,6 +1391,9 @@ def build_openapi_schema() -> dict[str, Any]:
                         "image": {"type": "string"},
                         "command": {"type": "array", "items": {"type": "string"}},
                         "files": {"type": "array", "items": {"type": "string"}},
+                        "generator": {"type": "string"},
+                        "configuration_hash": {"type": "string"},
+                        "build_manifest": {"type": "string"},
                     },
                 },
                 "DockerfileArtifactsResponse": {
@@ -1403,6 +1406,14 @@ def build_openapi_schema() -> dict[str, Any]:
                         "dockerfiles": {
                             "type": "array",
                             "items": {"$ref": "#/components/schemas/DockerfileArtifact"},
+                        },
+                        "runtime_artifacts": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                        },
+                        "deployment_files": {
+                            "type": "array",
+                            "items": {"type": "object"},
                         },
                         "guardrails": {
                             "type": "object",
@@ -2060,6 +2071,8 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                 "name": {"type": "string"},
                 "provider": {"type": "string"},
                 "model": {"type": "string"},
+                "codegenModel": {"type": "string"},
+                "codegen_model": {"type": "string"},
                 "baseUrl": {"type": "string"},
                 "base_url": {"type": "string"},
                 "system_prompt": {"type": "string"},
@@ -2076,6 +2089,8 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                 "name": {"type": "string"},
                 "provider": {"type": "string"},
                 "model": {"type": "string"},
+                "codegenModel": {"type": "string"},
+                "codegen_model": {"type": "string"},
                 "baseUrl": {"type": "string"},
                 "base_url": {"type": "string"},
                 "system_prompt": {"type": "string"},

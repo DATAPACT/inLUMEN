@@ -13,14 +13,20 @@ POLL_INTERVAL_SECONDS = float(os.getenv("WATCH_INTERVAL_SECONDS", "1.0"))
 
 
 def iter_watched_files():
-    for path in WATCH_ROOT.rglob("*"):
-        if not path.is_file():
+    for root, dirnames, filenames in os.walk(WATCH_ROOT):
+        dirnames[:] = [
+            dirname
+            for dirname in dirnames
+            if dirname not in IGNORED_DIRS and not dirname.startswith(".inlumen_")
+        ]
+        root_path = Path(root)
+        if any(part in IGNORED_DIRS for part in root_path.relative_to(WATCH_ROOT).parts):
             continue
-        if path.suffix not in WATCH_EXTENSIONS:
-            continue
-        if any(part in IGNORED_DIRS for part in path.relative_to(WATCH_ROOT).parts[:-1]):
-            continue
-        yield path
+        for filename in filenames:
+            path = root_path / filename
+            if path.suffix not in WATCH_EXTENSIONS:
+                continue
+            yield path
 
 
 def build_signature():
