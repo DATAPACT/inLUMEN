@@ -54,6 +54,8 @@ async def generate_dockerfiles_with_agent(
     llm_config: Optional[LLMConfig] = None,
     pipeline_graph: Optional[dict] = None,
     file_refs: Optional[list[dict]] = None,
+    *,
+    require_attached_runtime: bool = False,
 ) -> ListDockerfilesResponse:
     """Generate deterministic Dockerfiles where registered, using the LLM otherwise."""
     if file_refs is None:
@@ -68,7 +70,34 @@ async def generate_dockerfiles_with_agent(
             for filename, step_id in zip(filenames, ids)
         ]
 
-    all_steps = extract_pipeline_steps(pipeline_graph, file_refs)
+    graph_steps = extract_pipeline_steps(pipeline_graph)
+    if graph_steps:
+        # The current graph is authoritative. Global file listings can contain
+        # attachments from another pipeline/version with the same numeric id.
+        all_steps = graph_steps
+        graph_file_refs = [
+            dict(file_ref)
+            for step in graph_steps
+            for file_ref in step.get("files") or []
+            if isinstance(file_ref, dict)
+        ]
+        if graph_file_refs:
+            file_refs = graph_file_refs
+        else:
+            graph_step_ids = {
+                str(step.get("flow_id") or "") for step in graph_steps
+            }
+            file_refs = [
+                dict(file_ref)
+                for file_ref in file_refs or []
+                if isinstance(file_ref, dict)
+                and str(
+                    file_ref.get("step_id") or file_ref.get("flow_id") or ""
+                )
+                in graph_step_ids
+            ]
+    else:
+        all_steps = extract_pipeline_steps(pipeline_graph, file_refs)
     steps = select_runtime_steps(all_steps)
     if not steps:
         raise ValueError("No pipeline steps were found for Dockerfile generation.")
@@ -80,8 +109,12 @@ async def generate_dockerfiles_with_agent(
     generic_steps = []
     artifact_errors: list[str] = []
     for step in steps:
-        codegen_artifact = _codegen_artifact_for_step(step)
-        if codegen_artifact is None:
+        codegen_artifact = (
+            _codegen_artifact_from_persisted_files(step)
+            if require_attached_runtime
+            else _codegen_artifact_for_step(step)
+        )
+        if codegen_artifact is None and not require_attached_runtime:
             codegen_artifact = _codegen_artifact_from_persisted_files(step)
         if codegen_artifact is not None:
             try:
@@ -94,6 +127,15 @@ async def generate_dockerfiles_with_agent(
                 continue
             codegen_runtime_artifacts.append(runtime_artifact)
             codegen_dockerfiles.append(dockerfile)
+            continue
+
+        if require_attached_runtime:
+            artifact_errors.append(
+                f"Node {step.get('flow_id') or '<unknown>'} cannot be exported "
+                "to validated orchestration until its generated runtime bundle "
+                "is attached (main.py, requirements.txt, node-manifest.json, "
+                "and Dockerfile.<flow_id>)."
+            )
             continue
 
         generator = generator_registry.generator_for_step(step)

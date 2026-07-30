@@ -1,4 +1,5 @@
 import base64
+import inspect
 import io
 import sys
 import unittest
@@ -21,6 +22,21 @@ else:
 
 
 class DeploymentAgentsTest(unittest.TestCase):
+    @unittest.skipIf(
+        generate_dockerfiles_with_agent is None,
+        f"deployment agent dependencies are unavailable: {IMPORT_ERROR}",
+    )
+    def test_attached_runtime_option_is_part_of_the_public_signature(self):
+        self.assertIn(
+            "require_attached_runtime",
+            inspect.signature(generate_dockerfiles_with_agent).parameters,
+        )
+        parameter = inspect.signature(
+            generate_dockerfiles_with_agent
+        ).parameters["require_attached_runtime"]
+        self.assertEqual(inspect.Parameter.KEYWORD_ONLY, parameter.kind)
+        self.assertFalse(parameter.default)
+
     @unittest.skipIf(
         generate_dockerfiles_with_agent is None,
         f"deployment agent dependencies are unavailable: {IMPORT_ERROR}",

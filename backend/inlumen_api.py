@@ -1090,11 +1090,16 @@ def _build_pipeline_codegen_payload(
         repair_attempts = max(0, int(repair_attempts))
     except (TypeError, ValueError):
         repair_attempts = 7
-    generation_strategy = str(
+    requested_generation_strategy = str(
         payload.get("generation_strategy") or "auto"
     ).strip()
-    if generation_strategy not in {"auto", "single_pass", "per_node"}:
-        generation_strategy = "auto"
+    generation_strategy = {
+        "auto": "pipeline_first",
+        "single_pass": "pipeline_first",
+        "per_node": "node_first",
+        "pipeline_first": "pipeline_first",
+        "node_first": "node_first",
+    }.get(requested_generation_strategy, "pipeline_first")
     high_level_prompt = str(
         payload.get("high_level_prompt")
         or payload.get("user_instruction")

@@ -62,7 +62,7 @@ class CodegenRequestSecurityTests(unittest.TestCase):
         )
         self.assertNotIn("fresh-provider-secret", encoded.decode("utf-8"))
 
-    def test_pipeline_codegen_payload_forwards_single_pass_strategy(self):
+    def test_pipeline_codegen_payload_maps_single_pass_to_pipeline_first(self):
         codegen_payload, metadata = inlumen_api._build_pipeline_codegen_payload(
             {"nodes": [], "edges": []},
             {
@@ -72,11 +72,26 @@ class CodegenRequestSecurityTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            "single_pass",
+            "pipeline_first",
             codegen_payload["options"]["generation_strategy"],
         )
         self.assertEqual(
-            "single_pass",
+            "pipeline_first",
+            metadata["options"]["generation_strategy"],
+        )
+
+    def test_pipeline_codegen_payload_maps_per_node_to_node_first(self):
+        codegen_payload, metadata = inlumen_api._build_pipeline_codegen_payload(
+            {"nodes": [], "edges": []},
+            {"generation_strategy": "per_node"},
+        )
+
+        self.assertEqual(
+            "node_first",
+            codegen_payload["options"]["generation_strategy"],
+        )
+        self.assertEqual(
+            "node_first",
             metadata["options"]["generation_strategy"],
         )
 

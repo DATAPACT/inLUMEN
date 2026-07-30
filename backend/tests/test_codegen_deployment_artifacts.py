@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import sys
+import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -10,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from deployment_artifacts import (
     DeploymentArtifactValidationError,
+    _dagster_shell_command_component_source,
     build_argo_workflow_object,
     build_argo_workflow_yaml,
     build_dagster_project_files,
@@ -109,6 +111,89 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             ],
             "edges": [{"source": "1", "target": "2"}],
         }
+
+    def test_dagster_runtime_rejects_json_payload_that_violates_node_contract(self):
+        component_source = _dagster_shell_command_component_source().replace(
+            "import dagster as dg",
+            "",
+        )
+        helper_source = component_source.split("\nclass ShellCommand", 1)[0]
+        namespace = {}
+        exec(compile(helper_source, "shell_command.py", "exec"), namespace)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "outputs"
+            output_dir.mkdir()
+            payload_path = output_dir / "sentiment_analysis.json"
+            payload_path.write_text(
+                json.dumps(
+                    {
+                        "label": "positive",
+                        "score": 0.91,
+                        "scores": {"positive": 0.91},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output_manifest_path = output_dir / "output_manifest.json"
+            output_manifest_path.write_text(
+                json.dumps(
+                    {
+                        "outputs": [
+                            {
+                                "name": "sentiment_analysis",
+                                "filename": "sentiment_analysis.json",
+                                "path": str(payload_path),
+                                "kind": "json",
+                                "format": "json",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            context_path = Path(tmp) / "node-manifest.json"
+            context_path.write_text(
+                json.dumps(
+                    {
+                        "data_contract": {
+                            "outputs": [
+                                {
+                                    "name": "sentiment_analysis",
+                                    "filename": "sentiment_analysis.json",
+                                    "kind": "json",
+                                    "format": "json",
+                                    "schema": {
+                                        "type": "object",
+                                        "required": [
+                                            "transcript",
+                                            "sentiment_label",
+                                            "confidence",
+                                        ],
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            errors = namespace["_output_contract_errors"](
+                output_manifest_path,
+                context_path,
+                output_dir,
+            )
+
+        self.assertEqual(
+            [
+                (
+                    "JSON output 'sentiment_analysis' is missing required fields: "
+                    "transcript, sentiment_label, confidence."
+                )
+            ],
+            errors,
+        )
 
     def test_codegen_dockerfile_payload_selects_manifest_handoff_without_node_metadata(self):
         workflow = build_argo_workflow_object(self.graph(), codegen_payload())

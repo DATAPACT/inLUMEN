@@ -1607,6 +1607,191 @@ def _quality_gates_from_manifest(output_manifest_path: Path, project_root: Path)
     return gates
 
 
+def _json_type_matches(value, expected_type):
+    if expected_type == "object":
+        return isinstance(value, dict)
+    if expected_type == "array":
+        return isinstance(value, list)
+    if expected_type == "string":
+        return isinstance(value, str)
+    if expected_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected_type == "boolean":
+        return isinstance(value, bool)
+    if expected_type == "null":
+        return value is None
+    return True
+
+
+def _json_schema_errors(value, schema, location):
+    if not isinstance(schema, dict):
+        return []
+    errors = []
+    expected_type = schema.get("type")
+    if expected_type and not _json_type_matches(value, expected_type):
+        return [
+            f"{location} must be {expected_type}, got {type(value).__name__}."
+        ]
+    allowed = schema.get("enum")
+    if isinstance(allowed, list) and allowed and value not in allowed:
+        errors.append(f"{location} must be one of {allowed!r}.")
+    if isinstance(value, dict):
+        required = schema.get("required") or []
+        missing = [
+            str(key)
+            for key in required
+            if isinstance(key, str) and key not in value
+        ]
+        if missing:
+            errors.append(
+                f"{location} is missing required fields: {', '.join(missing)}."
+            )
+        properties = schema.get("properties") or {}
+        if isinstance(properties, dict):
+            for key, property_schema in properties.items():
+                if key in value:
+                    errors.extend(
+                        _json_schema_errors(
+                            value[key],
+                            property_schema,
+                            f"{location}.{key}",
+                        )
+                    )
+    elif isinstance(value, list) and isinstance(schema.get("items"), dict):
+        for index, item in enumerate(value):
+            errors.extend(
+                _json_schema_errors(
+                    item,
+                    schema["items"],
+                    f"{location}[{index}]",
+                )
+            )
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and schema.get("minimum") is not None
+        and value < schema["minimum"]
+    ):
+        errors.append(f"{location} must be at least {schema['minimum']}.")
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and schema.get("maximum") is not None
+        and value > schema["maximum"]
+    ):
+        errors.append(f"{location} must be at most {schema['maximum']}.")
+    return errors
+
+
+def _output_contract_errors(
+    output_manifest_path: Path,
+    context_path: Path | None,
+    output_dir: Path,
+):
+    errors = []
+    try:
+        with output_manifest_path.open("r", encoding="utf-8") as handle:
+            output_manifest = json.load(handle)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return [f"Output manifest is unreadable or invalid JSON: {exc}"]
+
+    actual_entries = output_manifest.get("outputs") or output_manifest.get("files")
+    if not isinstance(actual_entries, list):
+        return ["Output manifest must contain an outputs list."]
+    actual_by_name = {}
+    for entry in actual_entries:
+        if not isinstance(entry, dict):
+            errors.append("Output manifest entries must be objects.")
+            continue
+        name = str(entry.get("name") or Path(str(entry.get("filename") or "")).stem)
+        if not name:
+            errors.append("Output manifest entry is missing name and filename.")
+            continue
+        if name in actual_by_name:
+            errors.append(f"Output manifest contains duplicate output {name!r}.")
+        actual_by_name[name] = entry
+
+    expected_entries = []
+    if context_path is not None and context_path.is_file():
+        try:
+            with context_path.open("r", encoding="utf-8") as handle:
+                node_manifest = json.load(handle)
+            contract = node_manifest.get("data_contract") or {}
+            expected_entries = contract.get("outputs") or []
+            if not isinstance(expected_entries, list):
+                errors.append("Node data contract outputs must be a list.")
+                expected_entries = []
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            errors.append(f"Node data contract is unreadable or invalid JSON: {exc}")
+
+    expected_by_name = {
+        str(entry.get("name") or Path(str(entry.get("filename") or "")).stem): entry
+        for entry in expected_entries
+        if isinstance(entry, dict)
+    }
+    for name in sorted(set(actual_by_name) - set(expected_by_name)):
+        if expected_by_name:
+            errors.append(f"Output manifest contains undeclared output {name!r}.")
+
+    output_root = output_dir.resolve()
+    for name, expected in expected_by_name.items():
+        actual = actual_by_name.get(name)
+        if actual is None:
+            errors.append(f"Output manifest is missing declared output {name!r}.")
+            continue
+        for field in ("filename", "kind", "format"):
+            expected_value = str(expected.get(field) or "").strip().lower()
+            actual_value = str(actual.get(field) or "").strip().lower()
+            if expected_value and actual_value != expected_value:
+                errors.append(
+                    f"Output {name!r} {field} mismatch: expected "
+                    f"{expected_value!r}, got {actual_value or '<missing>'!r}."
+                )
+
+        raw_path = str(actual.get("path") or actual.get("filename") or "").strip()
+        if not raw_path:
+            errors.append(f"Output {name!r} is missing path and filename.")
+            continue
+        output_path = Path(raw_path)
+        if not output_path.is_absolute():
+            output_path = output_dir / output_path
+        resolved_path = output_path.resolve()
+        try:
+            resolved_path.relative_to(output_root)
+        except ValueError:
+            errors.append(
+                f"Output {name!r} resolves outside its output directory: "
+                f"{resolved_path}."
+            )
+            continue
+        if not resolved_path.is_file():
+            errors.append(f"Output file for {name!r} does not exist: {resolved_path}.")
+            continue
+        if resolved_path.stat().st_size <= 0:
+            errors.append(f"Output file for {name!r} is empty.")
+            continue
+
+        expected_kind = str(expected.get("kind") or "").strip().lower()
+        expected_format = str(expected.get("format") or "").strip().lower()
+        if expected_kind == "json" or expected_format in JSON_FORMATS:
+            try:
+                with resolved_path.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                errors.append(f"JSON output {name!r} is invalid: {exc}")
+                continue
+            errors.extend(
+                _json_schema_errors(
+                    payload,
+                    expected.get("schema") or {},
+                    f"JSON output {name!r}",
+                )
+            )
+    return errors
+
+
 class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
     asset_key: str
     script_path: str
@@ -1716,6 +1901,21 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
                 raise RuntimeError(
                     f"Node script {self.asset_key} did not write required output "
                     f"manifest {output_manifest_path}."
+                )
+            contract_context_path = None
+            if self.context_path:
+                contract_context_path = Path(self.context_path)
+                if not contract_context_path.is_absolute():
+                    contract_context_path = project_root / contract_context_path
+            contract_errors = _output_contract_errors(
+                output_manifest_path,
+                contract_context_path,
+                output_dir,
+            )
+            if contract_errors:
+                raise RuntimeError(
+                    f"Node {self.asset_key} output contract validation failed:\\n- "
+                    + "\\n- ".join(contract_errors)
                 )
             return dg.MaterializeResult(
                 metadata={
