@@ -597,7 +597,7 @@ const buildPipelineGenerationPayload = (
     generation_strategy: options.generationStrategy ?? "auto",
     generation_mode: options.mode ?? "full",
     allow_deterministic_fallback: options.allowDeterministicFallback ?? false,
-    repair_attempts: options.repairAttempts ?? 2,
+    repair_attempts: options.repairAttempts ?? 7,
     high_level_prompt: options.userInstruction?.trim() || "",
     ...(llm_config ? { llm_config } : {}),
   };
@@ -710,6 +710,29 @@ export const fetchPipelineScriptGenerationRun = async (
   return response.json();
 };
 
+export const cancelPipelineScriptGenerationRun = async (
+  runId: string,
+): Promise<PipelineGenerationJob> => {
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/pipeline/generation-runs/${encodeURIComponent(runId)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(async () => ({
+      error: await response.text().catch(() => ""),
+    }));
+    const message = formatPipelineGenerationError(
+      errorPayload,
+      response.status,
+      response.statusText,
+    );
+    const error = new Error(message);
+    (error as Error & { payload?: unknown }).payload = errorPayload;
+    throw error;
+  }
+  return response.json();
+};
+
 export const resumePipelineScriptGenerationRun = async (
   runId: string,
   activeChatbotConfig?: ChatbotConfig,
@@ -731,7 +754,7 @@ export const resumePipelineScriptGenerationRun = async (
       },
       body: JSON.stringify({
         flow_id: options.flowId || "",
-        repair_attempts: options.repairAttempts ?? 4,
+        repair_attempts: options.repairAttempts ?? 7,
         user_instruction: options.userInstruction || "",
         ...(llm_config ? { llm_config } : {}),
       }),

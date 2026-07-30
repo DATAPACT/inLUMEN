@@ -89,6 +89,7 @@ type DockerfileGenerationResponse = {
     }>;
   }>;
   deployment_files?: DeploymentBundleFile[];
+  input_files?: DeploymentBundleFile[];
 };
 
 type DeploymentValidationReport = {
@@ -116,7 +117,10 @@ type DeploymentBundleFile = {
   filename?: string;
   flow_id?: string;
   content?: string;
+  content_encoding?: "utf-8" | "base64" | string;
   content_type?: string;
+  size_bytes?: number;
+  sha256?: string;
   role?: string;
   encoding?: "base64";
 };
@@ -174,7 +178,7 @@ export function Sidebar({
   const [deploymentError, setDeploymentError] = useState<string>("");
   const [deploymentValidationReport, setDeploymentValidationReport] = useState<DeploymentValidationReport | null>(null);
   const [deploymentRepairReport, setDeploymentRepairReport] = useState<DeploymentRepairReport | null>(null);
-  const [deploymentValidationMode, setDeploymentValidationMode] = useState<DeploymentValidationMode>("fast");
+  const [deploymentValidationMode, setDeploymentValidationMode] = useState<DeploymentValidationMode>("validate");
   const [deploymentTargets, setDeploymentTargets] = useState<DeploymentTargets>({
     argo: true,
     dagster: false,
@@ -287,7 +291,11 @@ export function Sidebar({
   ) => {
     const zip = new JSZip();
     const written = new Set<string>();
-    const writeFile = (path: string, content: string, isBase64 = false) => {
+    const writeFile = (
+      path: string,
+      content: string,
+      contentEncoding?: string,
+    ) => {
       let nextPath = path;
       let suffix = 2;
       while (written.has(nextPath)) {
@@ -298,13 +306,21 @@ export function Sidebar({
         suffix += 1;
       }
       written.add(nextPath);
-      zip.file(nextPath, content, { base64: isBase64 });
+      zip.file(
+        nextPath,
+        content,
+        contentEncoding === "base64" ? { base64: true } : undefined,
+      );
       return nextPath;
     };
 
     files.forEach((file, index) => {
       const path = safeZipPath(file, index);
-      writeFile(path, file.content ?? "", file.encoding === "base64");
+      writeFile(
+        path,
+        file.content ?? "",
+        file.content_encoding ?? file.encoding,
+      );
     });
 
     return zip.generateAsync({
@@ -347,13 +363,13 @@ export function Sidebar({
         dockerfile_json: dockerfileJson,
         targets: deploymentTargets,
         validation_mode: deploymentValidationMode,
-        validate_bundle: deploymentValidationMode !== "fast",
+        validate_bundle: true,
         validation: {
-          enabled: deploymentValidationMode !== "fast",
+          enabled: true,
           mode: deploymentValidationMode,
-          materialize: deploymentTargets.dagster,
-          validate_argo: deploymentTargets.argo,
-          validate_dagster: deploymentTargets.dagster,
+          materialize: deploymentValidationMode !== "fast" && deploymentTargets.dagster,
+          validate_argo: deploymentValidationMode !== "fast" && deploymentTargets.argo,
+          validate_dagster: deploymentValidationMode !== "fast" && deploymentTargets.dagster,
           argo_lint: false,
           argo_dry_run: false,
         },
@@ -805,8 +821,8 @@ export function Sidebar({
                   {deploymentValidationMode === "repair"
                     ? "Normalize the bundle layout, then validate before download."
                     : deploymentValidationMode === "validate"
-                      ? "Validate structure and orchestration files before download."
-                      : "Generate the canonical zip without calling the validation service."}
+                      ? "Validate contracts and materialize selected Dagster assets before download."
+                      : "Validate bundle structure, required inputs, contracts, paths, sizes, and checksums without installing or materializing targets."}
                 </p>
               </div>
 

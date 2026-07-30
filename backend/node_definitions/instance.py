@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .artifacts import configuration_hash
+from .artifacts import (
+    configuration_definition_id,
+    configuration_hash,
+    implementation_plan_from_data,
+)
+from model_plans import resolve_implementation_plan
 
 
 VALID_CONFIGURATION_STATUSES = {"unconfigured", "valid", "invalid"}
@@ -26,6 +31,11 @@ def definition_properties_from_data(data: Any) -> dict[str, Any]:
     implementation = data.get("implementation")
     if not isinstance(implementation, dict):
         implementation = {}
+    implementation = resolve_implementation_plan(
+        implementation,
+        label=str(data.get("label") or ""),
+        description=str(data.get("description") or ""),
+    )
 
     properties: dict[str, Any] = {
         "definition_id": definition_id,
@@ -73,8 +83,6 @@ def definition_data_from_properties(properties: Any) -> dict[str, Any]:
     if not isinstance(properties, dict):
         return {}
     definition_id = str(properties.get("definition_id") or "").strip()
-    if not definition_id:
-        return {}
 
     try:
         definition_version = max(
@@ -93,14 +101,26 @@ def definition_data_from_properties(properties: Any) -> dict[str, Any]:
         )
     except (TypeError, ValueError):
         implementation = {}
-    if not isinstance(implementation, dict):
-        implementation = {}
+    if not isinstance(implementation, dict) or not implementation:
+        implementation = implementation_plan_from_data(properties)
+    else:
+        implementation = resolve_implementation_plan(
+            implementation,
+            label=str(properties.get("label") or ""),
+            description=str(properties.get("description") or ""),
+        )
 
-    data: dict[str, Any] = {
-        "definition_id": definition_id,
-        "definition_version": definition_version,
-        "implementation": implementation,
-    }
+    data: dict[str, Any] = {}
+    if definition_id:
+        data.update(
+            {
+                "definition_id": definition_id,
+                "definition_version": definition_version,
+                "implementation": implementation,
+            }
+        )
+    elif implementation:
+        data["implementation"] = implementation
     configuration_status = str(
         properties.get("configuration_status") or ""
     ).strip().lower()
@@ -125,7 +145,7 @@ def definition_data_from_properties(properties: Any) -> dict[str, Any]:
             else ""
         )
         current_hash = configuration_hash(
-            definition_id=definition_id,
+            definition_id=configuration_definition_id(properties),
             definition_version=definition_version,
             implementation=implementation,
             generator=str(generated_artifact.get("generator") or ""),

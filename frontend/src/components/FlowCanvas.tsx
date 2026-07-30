@@ -22,6 +22,7 @@ import { FlowCanvasActionsPanel } from '@/components/flow/FlowCanvasActionsPanel
 import {
   addEdgeToBackend,
   addNodeToBackend,
+  cancelPipelineScriptGenerationRun,
   deleteEdgeFromBackend,
   deleteNodeFromBackend,
   fetchPipelineScriptGenerationRun,
@@ -187,7 +188,7 @@ const modeToGenerationOptions = (
     validationMode: "pipeline_sample" as const,
     generationStrategy: "single_pass" as const,
     allowDeterministicFallback: false,
-    repairAttempts: 4,
+    repairAttempts: 7,
   };
 };
 
@@ -195,11 +196,30 @@ const generationProgressPercent = (job: PipelineGenerationJob | null) => {
   const steps = job?.generation_run?.steps || [];
   if (steps.length === 0) return job?.status === "queued" ? 5 : 10;
   const completed = steps.filter((step) =>
-    ["valid", "invalid", "skipped"].includes(String(step.status || "")),
+    ["valid", "invalid", "failed", "skipped"].includes(String(step.status || "")),
   ).length;
-  const status = String(job?.status || "");
-  if (status === "valid" || status === "invalid" || status === "failed") return 100;
+  const status = effectiveGenerationStatus(job);
+  if (
+    status === "valid" ||
+    status === "invalid" ||
+    status === "failed" ||
+    status === "cancelled"
+  ) return 100;
   return Math.max(10, Math.min(95, Math.round((completed / steps.length) * 100)));
+};
+
+const GENERATION_TERMINAL_STATUSES = new Set([
+  "valid",
+  "invalid",
+  "failed",
+  "cancelled",
+]);
+
+const effectiveGenerationStatus = (job: PipelineGenerationJob | null) => {
+  const outer = String(job?.status || "").toLowerCase();
+  if (GENERATION_TERMINAL_STATUSES.has(outer)) return outer;
+  const nested = String(job?.generation_run?.status || "").toLowerCase();
+  return nested || outer || "running";
 };
 
 const wait = (ms: number) =>
@@ -240,7 +260,30 @@ const generationFailureMessage = (job: PipelineGenerationJob) => {
 
 const failedGenerationStep = (job: PipelineGenerationJob | null) => {
   const steps = job?.generation_run?.steps || [];
-  return steps.find((step) => String(step.status || "").toLowerCase() === "invalid");
+  const failed = steps.filter((step) =>
+    ["invalid", "failed"].includes(String(step.status || "").toLowerCase()),
+  );
+  return failed.length === 1 ? failed[0] : undefined;
+};
+
+const generationStageLabel = (stage: unknown) => {
+  const key = String(stage || "pending").toLowerCase();
+  const labels: Record<string, string> = {
+    pending: "waiting",
+    pipeline_planning: "planning pipeline",
+    pipeline_generation: "generating canonical pipeline",
+    pipeline_validation: "validating canonical pipeline",
+    pipeline_repair: "repairing canonical pipeline",
+    dependency_validation: "validating dependencies",
+    dependency_installation: "installing dependencies",
+    sandbox_execution: "executing sample in sandbox",
+    node_compilation: "extracting independent nodes",
+    compiled_independent_bundle: "complete",
+    validated_cache_hit: "reused validated result",
+    complete: "complete",
+    cancelled: "cancelled",
+  };
+  return labels[key] || key.replace(/_/g, " ");
 };
 
 const getSnapshotFileRef = (file: unknown, nodeIdValue: string) => {
@@ -421,6 +464,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   });
   const [isHistoryRestoring, setIsHistoryRestoring] = useState(false);
   const [isGeneratingScripts, setIsGeneratingScripts] = useState(false);
+  const [isCancellingScripts, setIsCancellingScripts] = useState(false);
+  const generationCancelRequestedRef = useRef(false);
   const [isScriptGenerationOpen, setIsScriptGenerationOpen] = useState(false);
   const [scriptGenerationPrompt, setScriptGenerationPrompt] = useState("");
   const [scriptGenerationMode, setScriptGenerationMode] =
@@ -1034,7 +1079,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       throw new Error("Pipeline generation run did not return a run id.");
     }
     let latest = started;
-    while (!["valid", "invalid", "failed"].includes(String(latest.status || ""))) {
+    while (
+      !GENERATION_TERMINAL_STATUSES.has(effectiveGenerationStatus(latest))
+    ) {
       await wait(3000);
       latest = await fetchPipelineScriptGenerationRun(runId);
       setGenerationJob(latest);
@@ -1052,6 +1099,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       ...modeToGenerationOptions(mode, uploadedSampleDataAvailable),
       userInstruction: scriptGenerationPrompt.trim(),
     };
+    generationCancelRequestedRef.current = false;
     setIsGeneratingScripts(true);
     setGenerationJob(null);
     try {
@@ -1083,6 +1131,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         description: `${generatedCount} node bundle${generatedCount === 1 ? "" : "s"} generated.`,
       });
     } catch (error) {
+      if (generationCancelRequestedRef.current) {
+        return;
+      }
       console.error("[FlowCanvas.tsx] Generate pipeline scripts error:", error);
       toast.error("Script generation failed", {
         description: error instanceof Error ? error.message : "Unknown error",
@@ -1129,6 +1180,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       return;
     }
     setIsGeneratingScripts(true);
+    generationCancelRequestedRef.current = false;
     try {
       markLocalWrite(5000);
       const started = await resumePipelineScriptGenerationRun(
@@ -1136,7 +1188,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         activeChatbotConfig,
         {
           flowId: failedFlowId,
-          repairAttempts: 4,
+          repairAttempts: 7,
         },
       );
       const latest = await pollPipelineGenerationRun(started);
@@ -1156,12 +1208,44 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         description: `${generatedCount} node bundle${generatedCount === 1 ? "" : "s"} persisted.`,
       });
     } catch (error) {
+      if (generationCancelRequestedRef.current) {
+        return;
+      }
       console.error("[FlowCanvas.tsx] Repair pipeline script error:", error);
       toast.error("Node repair failed", {
         description: error instanceof Error ? error.message : "Unknown error",
       });
     } finally {
       setIsGeneratingScripts(false);
+    }
+  };
+
+  const handleCancelPipelineScriptGeneration = async () => {
+    if (!isGeneratingScripts) {
+      setIsScriptGenerationOpen(false);
+      return;
+    }
+    const runId = String(
+      generationJob?.run_id || generationJob?.generation_run?.run_id || "",
+    ).trim();
+    if (!runId || isCancellingScripts) return;
+
+    generationCancelRequestedRef.current = true;
+    setIsCancellingScripts(true);
+    try {
+      const cancelled = await cancelPipelineScriptGenerationRun(runId);
+      setGenerationJob(cancelled);
+      setIsGeneratingScripts(false);
+      toast.info("Runtime script generation stopped", {
+        description: `Run ${runId.slice(0, 8)} was cancelled.`,
+      });
+    } catch (error) {
+      generationCancelRequestedRef.current = false;
+      toast.error("Could not stop generation", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      setIsCancellingScripts(false);
     }
   };
 
@@ -1223,11 +1307,14 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
   const generationSteps = generationJob?.generation_run?.steps || [];
   const generationProgress = generationProgressPercent(generationJob);
+  const generationStatus = effectiveGenerationStatus(generationJob);
+  const generationFailed = ["invalid", "failed"].includes(generationStatus);
   const repairableFailedStep = failedGenerationStep(generationJob);
   const canRepairFailedNode = Boolean(
     generationJob &&
-      ["invalid", "failed"].includes(String(generationJob.status || "")) &&
-      repairableFailedStep?.flow_id,
+      generationFailed &&
+      repairableFailedStep?.flow_id &&
+      generationJob.result,
   );
 
   return (
@@ -1448,7 +1535,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
                     Run {String(generationJob.run_id || "").slice(0, 8)}
                   </span>
                   <span className="text-muted-foreground">
-                    {generationJob.status || "running"}
+                    {generationStatus}
                   </span>
                 </div>
                 <Progress value={generationProgress} />
@@ -1460,13 +1547,21 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
                         className="flex items-center justify-between gap-3 text-sm"
                       >
                         <span className="truncate">
-                          Node {step.flow_id || "?"} - {step.stage || "pending"}
+                          Node {step.flow_id || "?"} - {generationStageLabel(step.stage)}
                         </span>
                         <span className="shrink-0 text-xs text-muted-foreground">
                           {step.status || "pending"}
                         </span>
                       </div>
                     ))}
+                  </div>
+                )}
+                {generationFailed && (
+                  <div
+                    role="alert"
+                    className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+                  >
+                    {generationFailureMessage(generationJob)}
                   </div>
                 )}
               </div>
@@ -1476,10 +1571,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           <DialogFooter>
             <Button
               variant="outline"
-              onClick={() => setIsScriptGenerationOpen(false)}
-              disabled={isGeneratingScripts}
+              onClick={() => { void handleCancelPipelineScriptGeneration(); }}
+              disabled={isCancellingScripts}
             >
-              Cancel
+              {isCancellingScripts && (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              )}
+              {isGeneratingScripts ? "Stop generation" : "Cancel"}
             </Button>
             {canRepairFailedNode && (
               <Button
@@ -1488,7 +1586,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
                 disabled={isGeneratingScripts}
               >
                 {isGeneratingScripts && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                Repair Node {repairableFailedStep?.flow_id}
+                Retry Node {repairableFailedStep?.flow_id}
               </Button>
             )}
             <Button
@@ -1499,7 +1597,11 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
               }
             >
               {isGeneratingScripts && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              {isGeneratingScripts ? "Generating" : "Generate and attach"}
+              {isGeneratingScripts
+                ? "Generating"
+                : generationFailed
+                  ? "Retry all"
+                  : "Generate and attach"}
             </Button>
           </DialogFooter>
         </DialogContent>

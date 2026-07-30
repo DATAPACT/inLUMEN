@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
@@ -13,6 +14,7 @@ from urllib.request import Request, urlopen
 
 from flask import Flask, Response, jsonify, make_response, request
 
+from artifact_contract import classify_artifact
 from analytics_api import (
     agentic_generate_deployment_bundle,
     agentic_generate_dagster,
@@ -29,7 +31,11 @@ from generators.routes import create_generator_blueprint
 from graph_client import dispatch_graph_request
 from local_api_client import LocalApiResponse
 from node_definitions import create_node_definitions_blueprint
-from node_definitions.artifacts import configuration_hash
+from node_definitions.artifacts import (
+    configuration_definition_id,
+    configuration_hash,
+    implementation_plan_from_data,
+)
 from object_client import dispatch_object_request
 from provenance_provo import build_prov_o_jsonld, provenance_prov_o_filename
 from provenance_report import build_provenance_pdf, provenance_report_filename
@@ -507,16 +513,7 @@ def _sample_file_descriptor(
 
 
 def _file_kind_and_format(filename: str) -> dict[str, str]:
-    extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    if extension in {"csv", "tsv", "parquet", "xlsx"}:
-        return {"kind": "table", "format": extension}
-    if extension == "json":
-        return {"kind": "json", "format": "json"}
-    if extension in {"txt", "md", "xml", "yaml", "yml"}:
-        return {"kind": "text", "format": extension}
-    if extension in {"png", "jpg", "jpeg", "gif", "webp", "bmp"}:
-        return {"kind": "image", "format": extension}
-    return {"kind": "binary", "format": extension or "binary"}
+    return classify_artifact(filename)
 
 
 def _node_descriptor(
@@ -535,12 +532,14 @@ def _node_descriptor(
     content = data.get("content")
     if isinstance(content, str) and content.strip():
         parameters["content"] = content.strip()
+    implementation = implementation_plan_from_data(data)
     return {
         "flow_id": str(node.get("id") or data.get("flow_id") or data.get("id") or ""),
         "label": str(data.get("label") or ""),
         "description": str(data.get("description") or ""),
         "type": str(data.get("type") or "custom"),
         "parameters": parameters,
+        "implementation": implementation,
         "files": _node_file_entries(node, include_samples=include_samples),
     }
 
@@ -619,49 +618,20 @@ def _build_codegen_context(
             "python_version": "3.11",
             "base_image": "python:3.11-slim",
             "allowed_packages": DEFAULT_CODEGEN_ALLOWED_PACKAGES,
-            "network_allowed": False,
-            "max_runtime_seconds": 60,
+            "allow_unlisted_model_packages": True,
+            "network_allowed": True,
+            "max_runtime_seconds": 900,
         },
     }
 
 
-def _codegen_request_parts(
-    payload: dict[str, Any] | None = None,
-    *,
-    include_llm_key: bool = False,
-    llm_api_key: str = "",
-) -> tuple[bytes | None, dict[str, str]]:
-    headers = {"Accept": "application/json"}
-    if CODEGEN_SERVICE_API_KEY:
-        headers["Authorization"] = f"Bearer {CODEGEN_SERVICE_API_KEY}"
-
-    encoded: bytes | None = None
-    if payload is not None:
-        safe_payload = dict(payload)
-        raw_llm_config = safe_payload.get("llm_config")
-        llm_config = dict(raw_llm_config) if isinstance(raw_llm_config, dict) else {}
-        snake_case_llm_key = llm_config.pop("api_key", "")
-        camel_case_llm_key = llm_config.pop("apiKey", "")
-        request_llm_key = str(snake_case_llm_key or camel_case_llm_key).strip()
-        if isinstance(raw_llm_config, dict):
-            safe_payload["llm_config"] = llm_config
-        encoded = json.dumps(safe_payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    else:
-        request_llm_key = ""
-
-    llm_key = str(llm_api_key or request_llm_key).strip()
-    if include_llm_key and llm_key:
-        headers["X-LLM-API-Key"] = llm_key
-    return encoded, headers
-
-
 def _post_codegen_request(payload: dict[str, Any]) -> dict[str, Any]:
-    encoded, headers = _codegen_request_parts(payload, include_llm_key=True)
+    request_payload, llm_api_key = _prepare_codegen_request(payload)
+    encoded = json.dumps(request_payload).encode("utf-8")
     http_request = Request(
         f"{CODEGEN_SERVICE_URL}/v1/generate/node-script",
         data=encoded,
-        headers=headers,
+        headers=_codegen_request_headers(llm_api_key=llm_api_key),
         method="POST",
     )
     try:
@@ -679,11 +649,12 @@ def _post_codegen_request(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _post_codegen_pipeline_request(payload: dict[str, Any]) -> dict[str, Any]:
-    encoded, headers = _codegen_request_parts(payload, include_llm_key=True)
+    request_payload, llm_api_key = _prepare_codegen_request(payload)
+    encoded = json.dumps(request_payload).encode("utf-8")
     http_request = Request(
         f"{CODEGEN_SERVICE_URL}/v1/generate/pipeline-scripts",
         data=encoded,
-        headers=headers,
+        headers=_codegen_request_headers(llm_api_key=llm_api_key),
         method="POST",
     )
     try:
@@ -704,11 +675,12 @@ def _post_codegen_pipeline_request(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _post_codegen_pipeline_run_request(payload: dict[str, Any]) -> dict[str, Any]:
-    encoded, headers = _codegen_request_parts(payload, include_llm_key=True)
+    request_payload, llm_api_key = _prepare_codegen_request(payload)
+    encoded = json.dumps(request_payload).encode("utf-8")
     http_request = Request(
         f"{CODEGEN_SERVICE_URL}/v1/generate/pipeline-scripts/runs",
         data=encoded,
-        headers=headers,
+        headers=_codegen_request_headers(llm_api_key=llm_api_key),
         method="POST",
     )
     try:
@@ -731,15 +703,13 @@ def _post_codegen_pipeline_run_resume_request(
     *,
     llm_api_key: str = "",
 ) -> dict[str, Any]:
-    encoded, headers = _codegen_request_parts(
-        payload,
-        include_llm_key=True,
-        llm_api_key=llm_api_key,
-    )
+    request_payload, request_llm_api_key = _prepare_codegen_request(payload)
+    selected_llm_api_key = str(llm_api_key or request_llm_api_key).strip()
+    encoded = json.dumps(request_payload).encode("utf-8")
     http_request = Request(
         f"{CODEGEN_SERVICE_URL}/v1/generate/pipeline-scripts/runs/{run_id}/resume",
         data=encoded,
-        headers=headers,
+        headers=_codegen_request_headers(llm_api_key=selected_llm_api_key),
         method="POST",
     )
     try:
@@ -757,10 +727,9 @@ def _post_codegen_pipeline_run_resume_request(
 
 
 def _get_codegen_pipeline_run_request(run_id: str) -> dict[str, Any]:
-    _, headers = _codegen_request_parts()
     http_request = Request(
         f"{CODEGEN_SERVICE_URL}/v1/generate/pipeline-scripts/runs/{run_id}",
-        headers=headers,
+        headers=_codegen_request_headers(include_content_type=False),
         method="GET",
     )
     try:
@@ -775,6 +744,92 @@ def _get_codegen_pipeline_run_request(run_id: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise RuntimeError("Codegen service returned an invalid response")
     return parsed
+
+
+def _cancel_codegen_pipeline_run_request(run_id: str) -> dict[str, Any]:
+    http_request = Request(
+        f"{CODEGEN_SERVICE_URL}/v1/generate/pipeline-scripts/runs/{run_id}",
+        headers=_codegen_request_headers(include_content_type=False),
+        method="DELETE",
+    )
+    try:
+        with urlopen(
+            http_request,
+            timeout=CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS,
+        ) as response:
+            response_payload = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Codegen service rejected cancellation: {exc.code} {detail}"
+        ) from exc
+    except URLError as exc:
+        raise RuntimeError(
+            f"Codegen service unavailable at {CODEGEN_SERVICE_URL}: {exc}"
+        ) from exc
+    parsed = json.loads(response_payload)
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Codegen service returned an invalid cancellation response")
+    return parsed
+
+
+def _prepare_codegen_request(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    request_payload = deepcopy(payload)
+    llm_config = request_payload.get("llm_config")
+    if not isinstance(llm_config, dict):
+        return request_payload, ""
+
+    llm_api_key = str(
+        llm_config.get("api_key") or llm_config.get("apiKey") or ""
+    ).strip()
+    llm_config.pop("api_key", None)
+    llm_config.pop("apiKey", None)
+    return request_payload, llm_api_key
+
+
+def _codegen_request_headers(
+    *,
+    llm_api_key: str = "",
+    include_content_type: bool = True,
+) -> dict[str, str]:
+    headers = {"Accept": "application/json"}
+    if include_content_type:
+        headers["Content-Type"] = "application/json"
+
+    service_api_key = (
+        os.getenv("INLUMEN_CODEGEN_SERVICE_API_KEY", "").strip()
+        or CODEGEN_SERVICE_API_KEY
+    )
+    if service_api_key:
+        headers["Authorization"] = f"Bearer {service_api_key}"
+    if llm_api_key:
+        headers["X-LLM-API-Key"] = llm_api_key
+    return headers
+
+
+def _codegen_request_parts(
+    payload: dict[str, Any] | None = None,
+    *,
+    include_llm_key: bool = False,
+    llm_api_key: str = "",
+) -> tuple[bytes | None, dict[str, str]]:
+    request_payload: dict[str, Any] | None = None
+    request_llm_api_key = ""
+    if payload is not None:
+        request_payload, request_llm_api_key = _prepare_codegen_request(payload)
+    selected_llm_api_key = str(llm_api_key or request_llm_api_key).strip()
+    headers = _codegen_request_headers(
+        llm_api_key=selected_llm_api_key if include_llm_key else "",
+        include_content_type=payload is not None,
+    )
+    encoded = (
+        json.dumps(request_payload).encode("utf-8")
+        if request_payload is not None
+        else None
+    )
+    return encoded, headers
 
 
 def _codegen_llm_config_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -806,16 +861,12 @@ def _codegen_configuration_hash(
     nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
     node = next((item for item in nodes if str(item.get("id") or "") == node_id), None)
     data = _node_data(node) if isinstance(node, dict) else {}
-    definition_id = str(data.get("definition_id") or "").strip()
-    if not definition_id:
-        return ""
+    definition_id = configuration_definition_id(data, flow_id=node_id)
     try:
         definition_version = int(data.get("definition_version") or 1)
     except (TypeError, ValueError):
         definition_version = 1
-    implementation = data.get("implementation")
-    if not isinstance(implementation, dict):
-        implementation = {}
+    implementation = implementation_plan_from_data(data)
     contract = artifact.get("data_contract")
     contract_version = (
         str(contract.get("version") or "")
@@ -960,8 +1011,9 @@ def _build_pipeline_codegen_context(
             "python_version": "3.11",
             "base_image": "python:3.11-slim",
             "allowed_packages": DEFAULT_CODEGEN_ALLOWED_PACKAGES,
-            "network_allowed": False,
-            "max_runtime_seconds": 60,
+            "allow_unlisted_model_packages": True,
+            "network_allowed": True,
+            "max_runtime_seconds": 900,
         },
     }
 
@@ -1033,11 +1085,11 @@ def _build_pipeline_codegen_payload(
     validation_mode = str(payload.get("validation_mode") or "pipeline_sample").strip()
     if validation_mode not in {"static", "unit", "edge", "pipeline_sample"}:
         validation_mode = "pipeline_sample"
-    repair_attempts = payload.get("repair_attempts", 2)
+    repair_attempts = payload.get("repair_attempts", 7)
     try:
         repair_attempts = max(0, int(repair_attempts))
     except (TypeError, ValueError):
-        repair_attempts = 2
+        repair_attempts = 7
     generation_strategy = str(
         payload.get("generation_strategy") or "auto"
     ).strip()
@@ -1608,7 +1660,7 @@ def node_generate_script(node_id: str):
             "context": context,
             "options": {
                 "persist": False,
-                "repair_attempts": 2,
+                "repair_attempts": 7,
                 "include_sample_data": bool(payload.get("include_sample_data")),
                 "user_instruction": str(payload.get("user_instruction") or ""),
             },
@@ -1803,7 +1855,7 @@ def pipeline_generation_run_resume(run_id: str):
             )
         resume_payload = {
             "flow_id": str(payload.get("flow_id") or "").strip() or None,
-            "repair_attempts": payload.get("repair_attempts", 4),
+            "repair_attempts": payload.get("repair_attempts", 7),
             "user_instruction": combined_instruction,
         }
         resume_llm_config = _codegen_llm_config_from_payload(payload)
@@ -1821,10 +1873,10 @@ def pipeline_generation_run_resume(run_id: str):
         try:
             options["repair_attempts"] = max(
                 int(options.get("repair_attempts") or 0),
-                int(resume_payload["repair_attempts"] or 4),
+                int(resume_payload["repair_attempts"] or 7),
             )
         except (TypeError, ValueError):
-            options["repair_attempts"] = 4
+            options["repair_attempts"] = 7
         metadata["options"] = options
         metadata["generation_mode"] = "repair"
         PIPELINE_GENERATION_RUNS[new_run_id] = {
@@ -1847,12 +1899,34 @@ def pipeline_generation_run_resume(run_id: str):
         return _json_error(502, "pipeline generation run resume failed", str(exc))
 
 
-@app.route("/api/pipeline/generation-runs/<run_id>", methods=["GET", "OPTIONS"])
+@app.route(
+    "/api/pipeline/generation-runs/<run_id>",
+    methods=["GET", "DELETE", "OPTIONS"],
+)
 @require_auth
 def pipeline_generation_run(run_id: str):
     if request.method == "OPTIONS":
         return _preflight_response()
     try:
+        if request.method == "DELETE":
+            codegen_run = _cancel_codegen_pipeline_run_request(run_id)
+            local_run = PIPELINE_GENERATION_RUNS.get(run_id)
+            if local_run is not None:
+                local_run["updated_at"] = _utc_now_iso()
+                local_run["cancelled"] = True
+            return jsonify(
+                {
+                    **codegen_run,
+                    "mode": (local_run or {})
+                    .get("metadata", {})
+                    .get("generation_mode", ""),
+                    "data_awareness": (local_run or {})
+                    .get("metadata", {})
+                    .get("data_awareness", {}),
+                    "persistence": {"status": "cancelled"},
+                }
+            ), 200
+
         codegen_run = _get_codegen_pipeline_run_request(run_id)
         local_run = PIPELINE_GENERATION_RUNS.get(run_id)
         response_payload = {
@@ -1865,7 +1939,14 @@ def pipeline_generation_run(run_id: str):
             "persistence": {"status": "pending"},
         }
         status = str(codegen_run.get("status") or "").strip().lower()
-        result = codegen_run.get("result") if isinstance(codegen_run.get("result"), dict) else None
+        result = (
+            codegen_run.get("result")
+            if isinstance(codegen_run.get("result"), dict)
+            else None
+        )
+        if status == "cancelled":
+            response_payload["persistence"] = {"status": "cancelled"}
+            return jsonify(response_payload), 200
         if result is None or status not in {"valid", "invalid", "failed"}:
             return jsonify(response_payload), 200
 

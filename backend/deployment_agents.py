@@ -1,23 +1,19 @@
-import base64
 import inspect
 import json
-import mimetypes
 import re
-from pathlib import PurePosixPath
 from typing import Any, Optional
 
 from autogen_core.models import SystemMessage, UserMessage
 from pydantic import BaseModel, Field
 
 from attachment_validation import attachment_input_errors
+from artifact_content import encode_artifact_bytes, is_text_artifact
 from async_runtime import run_async
 from deployment_artifacts import (
     DeploymentArtifactValidationError,
     _argo_name,
-    _extract_json_cmd_from_dockerfile,
     _sanitize_fragment,
     build_argo_workflow_yaml,
-    extract_pipeline_edges,
     extract_pipeline_steps,
     select_runtime_steps,
     validate_dockerfile_artifacts,
@@ -27,36 +23,6 @@ from llm_config import LLMConfig, resolve_llm_config, select_model_client
 from minio_gateway import read_minio_object, read_minio_object_bytes
 
 CODEGEN_GENERATOR = "inlumen-codegen-service"
-RUNTIME_ATTACHMENT_NAMES = {
-    "requirements.txt",
-    "node-manifest.json",
-    "validation-report.json",
-    "package.json",
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "yarn.lock",
-    "pyproject.toml",
-    "poetry.lock",
-}
-RUNTIME_ATTACHMENT_SUFFIXES = {
-    ".py",
-    ".pyi",
-    ".sh",
-    ".bash",
-    ".js",
-    ".mjs",
-    ".cjs",
-    ".ts",
-    ".tsx",
-}
-PYTHON_ENTRYPOINT_NAMES = (
-    "main.py",
-    "app.py",
-    "run.py",
-    "process.py",
-    "pipeline.py",
-    "script.py",
-)
 
 
 class ListDockerfilesResponse(BaseModel):
@@ -78,6 +44,7 @@ class ListDockerfilesResponse(BaseModel):
     dockerfiles: list[DockerfileItem]
     runtime_artifacts: list[dict[str, Any]] = Field(default_factory=list)
     deployment_files: list[dict[str, Any]] = Field(default_factory=list)
+    input_files: list[dict[str, Any]] = Field(default_factory=list)
     guardrails: Optional[GuardrailReport] = None
 
 
@@ -87,8 +54,6 @@ async def generate_dockerfiles_with_agent(
     llm_config: Optional[LLMConfig] = None,
     pipeline_graph: Optional[dict] = None,
     file_refs: Optional[list[dict]] = None,
-    *,
-    require_attached_runtime: bool = False,
 ) -> ListDockerfilesResponse:
     """Generate deterministic Dockerfiles where registered, using the LLM otherwise."""
     if file_refs is None:
@@ -103,20 +68,7 @@ async def generate_dockerfiles_with_agent(
             for filename, step_id in zip(filenames, ids)
         ]
 
-    graph_steps = extract_pipeline_steps(pipeline_graph)
-    if graph_steps:
-        # The files attached to the current graph are authoritative. A global file
-        # listing can contain files from another pipeline/version with the same
-        # step id and must not leak into this deployment.
-        all_steps = graph_steps
-        file_refs = [
-            dict(file_ref)
-            for step in graph_steps
-            for file_ref in step.get("files") or []
-            if isinstance(file_ref, dict)
-        ]
-    else:
-        all_steps = extract_pipeline_steps(pipeline_graph, file_refs)
+    all_steps = extract_pipeline_steps(pipeline_graph, file_refs)
     steps = select_runtime_steps(all_steps)
     if not steps:
         raise ValueError("No pipeline steps were found for Dockerfile generation.")
@@ -128,15 +80,8 @@ async def generate_dockerfiles_with_agent(
     generic_steps = []
     artifact_errors: list[str] = []
     for step in steps:
-        # For Dagster, the files attached to the node are the runtime source.
-        # They may have been uploaded manually or produced by any external tool.
-        # A generated_artifact record is useful metadata, but is not required.
-        codegen_artifact = (
-            _codegen_artifact_from_persisted_files(step)
-            if require_attached_runtime
-            else _codegen_artifact_for_step(step)
-        )
-        if codegen_artifact is None and not require_attached_runtime:
+        codegen_artifact = _codegen_artifact_for_step(step)
+        if codegen_artifact is None:
             codegen_artifact = _codegen_artifact_from_persisted_files(step)
         if codegen_artifact is not None:
             try:
@@ -149,14 +94,6 @@ async def generate_dockerfiles_with_agent(
                 continue
             codegen_runtime_artifacts.append(runtime_artifact)
             codegen_dockerfiles.append(dockerfile)
-            continue
-
-        if require_attached_runtime:
-            artifact_errors.append(
-                f"Node {step.get('flow_id') or '<unknown>'} cannot be exported to Dagster "
-                "until it has an attached Python script (*.py). requirements.txt is "
-                "optional; InLumen generates the remaining Dagster packaging."
-            )
             continue
 
         generator = generator_registry.generator_for_step(step)
@@ -241,33 +178,28 @@ async def generate_dockerfiles_with_agent(
             for bundle in deterministic_bundles
         ],
     ]
-    attached_files = await _fetch_attached_deployment_files(file_refs)
-    routing_errors = _input_attachment_routing_errors(
-        steps,
-        pipeline_graph or {},
-        attached_files,
+    input_files = await _read_root_input_files(
+        steps=steps,
+        pipeline_graph=pipeline_graph or {},
+        file_refs=file_refs or [],
+        runtime_artifacts=runtime_artifacts,
     )
-    if routing_errors:
-        raise DeploymentArtifactValidationError(
-            "Node input attachment routing failed",
-            routing_errors,
-        )
     artifact_payload = {
         "dockerfiles": dockerfiles,
         "runtime_artifacts": runtime_artifacts,
         "deployment_files": _deployment_files_from_artifacts(
             dockerfiles,
             runtime_artifacts,
-            attached_files,
         ),
+        "input_files": input_files,
         "guardrails": {
             "valid": True,
             "checks": [
-                "current graph node attachments were used as the deployment source",
                 "persisted codegen runtime artifacts were reused before Dockerfile fallback",
                 "registered node generators bypassed the LLM",
                 "generic nodes used the existing guarded LLM path",
                 "one validated Dockerfile was produced per executable pipeline step",
+                "root pipeline inputs were packaged separately from generated runtime artifacts",
             ],
         },
     }
@@ -281,7 +213,6 @@ async def generate_dockerfiles_with_agent(
 def _deployment_files_from_artifacts(
     dockerfiles: list[dict[str, Any]],
     runtime_artifacts: list[dict[str, Any]],
-    attached_files: Optional[list[dict[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
     files: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
@@ -293,7 +224,9 @@ def _deployment_files_from_artifacts(
         content: Any,
         content_type: str = "text/plain",
         role: str = "runtime",
-        encoding: str = "",
+        content_encoding: str = "",
+        size_bytes: Any = None,
+        sha256: str = "",
     ) -> None:
         clean_filename = str(filename or "").strip()
         if not clean_filename:
@@ -303,17 +236,21 @@ def _deployment_files_from_artifacts(
         if path in seen_paths:
             return
         seen_paths.add(path)
-        files.append(
-            {
-                "path": path,
-                "filename": clean_filename,
-                "flow_id": str(flow_id or ""),
-                "content": str(content or ""),
-                "content_type": content_type,
-                "role": role,
-                **({"encoding": encoding} if encoding else {}),
-            }
-        )
+        file_payload = {
+            "path": path,
+            "filename": clean_filename,
+            "flow_id": str(flow_id or ""),
+            "content": str(content or ""),
+            "content_type": content_type,
+            "role": role,
+        }
+        if content_encoding:
+            file_payload["content_encoding"] = content_encoding
+        if size_bytes is not None:
+            file_payload["size_bytes"] = size_bytes
+        if sha256:
+            file_payload["sha256"] = sha256
+        files.append(file_payload)
 
     for artifact in runtime_artifacts:
         if not isinstance(artifact, dict):
@@ -329,6 +266,9 @@ def _deployment_files_from_artifacts(
                 content=file_item.get("content"),
                 content_type=str(file_item.get("content_type") or "text/plain"),
                 role="dockerfile" if filename.startswith("Dockerfile.") else "runtime",
+                content_encoding=str(file_item.get("content_encoding") or ""),
+                size_bytes=file_item.get("size_bytes"),
+                sha256=str(file_item.get("sha256") or ""),
             )
 
     for dockerfile in dockerfiles:
@@ -342,183 +282,169 @@ def _deployment_files_from_artifacts(
             role="dockerfile",
         )
 
-    for file_item in attached_files or []:
-        if not isinstance(file_item, dict):
-            continue
-        add_file(
-            flow_id=str(file_item.get("flow_id") or file_item.get("step_id") or ""),
-            filename=str(file_item.get("filename") or ""),
-            content=file_item.get("content"),
-            content_type=str(file_item.get("content_type") or "text/plain"),
-            role="attachment",
-            encoding=str(file_item.get("encoding") or ""),
-        )
-
     return files
 
 
-async def _fetch_attached_deployment_files(
-    file_refs: Optional[list[dict]],
-) -> list[dict[str, Any]]:
-    retrieved: list[dict[str, Any]] = []
-    errors: list[str] = []
-    seen: set[tuple[str, str]] = set()
-    for entry in file_refs or []:
-        if not isinstance(entry, dict):
-            continue
-        step_id = str(entry.get("step_id") or entry.get("flow_id") or "").strip()
-        bucket = str(entry.get("bucket") or f"files-step-id-{step_id}").strip().lower()
-        filename = str(entry.get("filename") or "").strip()
-        read_bucket = str(entry.get("snapshot_bucket") or bucket).strip().lower()
-        read_object = str(entry.get("snapshot_object") or filename).strip()
-        key = (step_id, filename)
-        if not step_id or not filename or key in seen:
-            continue
-        seen.add(key)
-        try:
-            raw_content = await read_minio_object_bytes(read_bucket, read_object)
-        except Exception as exc:
-            errors.append(
-                f"Node {step_id} attachment {filename} could not be read from "
-                f"{read_bucket}: {exc}"
-            )
-            continue
-        lower_filename = filename.lower()
-        is_runtime_file = (
-            lower_filename in RUNTIME_ATTACHMENT_NAMES
-            or lower_filename.startswith("dockerfile.")
-            or PurePosixPath(lower_filename).suffix in RUNTIME_ATTACHMENT_SUFFIXES
+def _root_step_ids(
+    steps: list[dict[str, Any]],
+    pipeline_graph: dict[str, Any],
+) -> set[str]:
+    step_ids = {
+        str(step.get("flow_id") or "").strip()
+        for step in steps
+        if str(step.get("flow_id") or "").strip()
+    }
+    incoming = {
+        str(edge.get("target") or "").strip()
+        for edge in (
+            pipeline_graph.get("edges")
+            if isinstance(pipeline_graph.get("edges"), list)
+            else []
         )
-        if not is_runtime_file:
+        if isinstance(edge, dict)
+        and str(edge.get("source") or "").strip() in step_ids
+        and str(edge.get("target") or "").strip() in step_ids
+    }
+    roots = step_ids - incoming
+    if roots:
+        return roots
+    return {str(steps[0].get("flow_id") or "").strip()} if steps else set()
+
+
+def _step_id_from_file_ref(file_ref: dict[str, Any]) -> str:
+    step_id = str(file_ref.get("step_id") or "").strip()
+    if step_id:
+        return step_id
+    bucket = str(file_ref.get("bucket") or "").strip().lower()
+    match = re.search(r"files-step-id-(.+)$", bucket)
+    return match.group(1).strip() if match else ""
+
+
+def _root_contract_descriptors(
+    root_ids: set[str],
+    runtime_artifacts: list[dict[str, Any]],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    descriptors: dict[tuple[str, str], dict[str, Any]] = {}
+    for artifact in runtime_artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        flow_id = str(artifact.get("flow_id") or "").strip()
+        if flow_id not in root_ids:
+            continue
+        contract = (
+            artifact.get("data_contract")
+            if isinstance(artifact.get("data_contract"), dict)
+            else {}
+        )
+        for descriptor in contract.get("inputs") or []:
+            if not isinstance(descriptor, dict):
+                continue
+            filename = str(
+                descriptor.get("filename") or descriptor.get("name") or ""
+            ).strip()
+            if filename:
+                descriptors[(flow_id, filename)] = descriptor
+    return descriptors
+
+
+async def _read_root_input_files(
+    *,
+    steps: list[dict[str, Any]],
+    pipeline_graph: dict[str, Any],
+    file_refs: list[dict[str, Any]],
+    runtime_artifacts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Read user inputs for root nodes without mixing them into runtime code."""
+    root_ids = _root_step_ids(steps, pipeline_graph)
+    descriptors = _root_contract_descriptors(root_ids, runtime_artifacts)
+    runtime_filenames = {
+        "main.py",
+        "requirements.txt",
+        "node-manifest.json",
+        "validation-report.json",
+    }
+    inputs: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for file_ref in file_refs:
+        if not isinstance(file_ref, dict):
+            continue
+        flow_id = _step_id_from_file_ref(file_ref)
+        filename = str(file_ref.get("filename") or "").strip()
+        if not flow_id or flow_id not in root_ids or not filename:
+            continue
+        if filename in runtime_filenames or filename.startswith("Dockerfile."):
+            continue
+
+        descriptor = descriptors.get((flow_id, filename))
+        if descriptors and descriptor is None:
+            continue
+        key = (flow_id, filename)
+        if key in seen:
+            continue
+
+        bucket = str(
+            file_ref.get("snapshot_bucket")
+            or file_ref.get("bucket")
+            or f"files-step-id-{flow_id}"
+        ).strip().lower()
+        object_name = str(
+            file_ref.get("snapshot_object") or filename
+        ).strip()
+        if not bucket or not object_name:
+            continue
+        try:
+            raw_content = await read_minio_object_bytes(bucket, object_name)
             input_errors = attachment_input_errors(
                 filename,
-                raw_content[:1024 * 1024],
+                raw_content[: 1024 * 1024],
                 size_bytes=len(raw_content),
             )
             if input_errors:
-                errors.extend(
-                    f"Node {step_id}: {message}"
-                    for message in input_errors
+                raise DeploymentArtifactValidationError(
+                    "Deployment input validation failed",
+                    [f"Root node {flow_id}: {message}" for message in input_errors],
                 )
-                continue
-        guessed_content_type = mimetypes.guess_type(filename)[0]
-        content_type = str(
-            entry.get("content_type")
-            or guessed_content_type
-            or "application/octet-stream"
-        )
-        try:
-            content = raw_content.decode("utf-8")
-            encoding = ""
-        except UnicodeDecodeError:
-            content = base64.b64encode(raw_content).decode("ascii")
-            encoding = "base64"
-        retrieved.append(
+            encoded = encode_artifact_bytes(
+                raw_content,
+                filename=filename,
+                content_type=str(file_ref.get("content_type") or ""),
+            )
+        except DeploymentArtifactValidationError:
+            raise
+        except Exception as exc:
+            raise DeploymentArtifactValidationError(
+                "Deployment input packaging failed",
+                [
+                    f"Root node {flow_id} failed to read required input "
+                    f"{filename} from {bucket}: {exc}"
+                ],
+            ) from exc
+
+        metadata = descriptor if isinstance(descriptor, dict) else {}
+        inputs.append(
             {
-                "flow_id": step_id,
+                "flow_id": flow_id,
                 "filename": filename,
-                "content": content,
-                "content_type": content_type,
-                **({"encoding": encoding} if encoding else {}),
+                "role": "input",
+                **encoded,
+                **{
+                    field: metadata[field]
+                    for field in (
+                        "kind",
+                        "format",
+                        "columns",
+                        "required_columns",
+                        "schema",
+                        "semantic_role",
+                        "description",
+                    )
+                    if metadata.get(field) not in (None, "", [], {})
+                },
             }
         )
-    if errors:
-        raise DeploymentArtifactValidationError(
-            "Node attachment retrieval failed",
-            errors,
-        )
-    return retrieved
-
-
-def _input_attachment_routing_errors(
-    steps: list[dict[str, Any]],
-    pipeline_graph: dict[str, Any],
-    attached_files: list[dict[str, Any]],
-) -> list[str]:
-    """Catch clear cases where a pipeline input was uploaded to a later node."""
-    step_ids = {str(step.get("flow_id") or "") for step in steps}
-    incoming = {step_id: 0 for step_id in step_ids}
-    for edge in extract_pipeline_edges(pipeline_graph):
-        target = str(edge.get("target") or "")
-        if target in incoming:
-            incoming[target] += 1
-    root_ids = {step_id for step_id, count in incoming.items() if count == 0}
-    if not root_ids:
-        return []
-
-    def is_runtime_file(filename: str) -> bool:
-        lower = filename.lower()
-        return (
-            lower in RUNTIME_ATTACHMENT_NAMES
-            or lower.startswith("dockerfile.")
-            or PurePosixPath(lower).suffix in RUNTIME_ATTACHMENT_SUFFIXES
-        )
-
-    data_files = [
-        item
-        for item in attached_files
-        if isinstance(item, dict)
-        and str(item.get("filename") or "").strip()
-        and not is_runtime_file(str(item.get("filename") or "").strip())
-    ]
-    if not data_files:
-        return []
-
-    step_by_id = {
-        str(step.get("flow_id") or ""): step
-        for step in steps
-    }
-    dynamic_file_search_markers = (
-        ".iterdir(",
-        ".glob(",
-        ".rglob(",
-        "glob.glob(",
-        "os.listdir(",
-        "os.scandir(",
-    )
-    errors: list[str] = []
-    for root_id in sorted(root_ids):
-        local_data = [
-            item
-            for item in data_files
-            if str(item.get("flow_id") or "") == root_id
-        ]
-        if local_data:
-            continue
-        root_scripts = "\n".join(
-            str(item.get("content") or "")
-            for item in attached_files
-            if str(item.get("flow_id") or "") == root_id
-            and str(item.get("filename") or "").lower().endswith(".py")
-        ).lower()
-        if not root_scripts:
-            continue
-
-        for data_file in data_files:
-            owner_id = str(data_file.get("flow_id") or "")
-            if owner_id in root_ids:
-                continue
-            filename = str(data_file.get("filename") or "").strip()
-            extension = PurePosixPath(filename).suffix.lower()
-            exact_name_match = filename.lower() in root_scripts
-            dynamic_extension_match = (
-                len(data_files) == 1
-                and bool(extension)
-                and extension in root_scripts
-                and any(marker in root_scripts for marker in dynamic_file_search_markers)
-            )
-            if not exact_name_match and not dynamic_extension_match:
-                continue
-            root = step_by_id.get(root_id) or {}
-            owner = step_by_id.get(owner_id) or {}
-            root_label = str(root.get("label") or root_id)
-            owner_label = str(owner.get("label") or owner_id)
-            errors.append(
-                f"{filename} is attached to node {owner_id} ({owner_label}), but "
-                f"node {root_id} ({root_label}) appears to read it. Move the input "
-                f"file to node {root_id} before generating the bundle."
-            )
-    return errors
+        seen.add(key)
+    return inputs
 
 
 def _codegen_artifact_from_persisted_files(step: dict[str, Any]) -> dict[str, Any] | None:
@@ -528,25 +454,16 @@ def _codegen_artifact_from_persisted_files(step: dict[str, Any]) -> dict[str, An
         for item in files
         if isinstance(item, dict)
     }
-    if not any(name.lower().endswith(".py") for name in filenames):
+    has_runtime_files = all(
+        required in filenames
+        for required in ("main.py", "requirements.txt", "node-manifest.json")
+    ) and any(name.startswith("Dockerfile.") for name in filenames)
+    if not has_runtime_files:
         return None
-    runtime_files = [
-        item
-        for item in files
-        if isinstance(item, dict)
-        and (
-            str(item.get("filename") or "").strip() in RUNTIME_ATTACHMENT_NAMES
-            or str(item.get("filename") or "").strip().startswith("Dockerfile.")
-            or any(
-                str(item.get("filename") or "").strip().lower().endswith(suffix)
-                for suffix in RUNTIME_ATTACHMENT_SUFFIXES
-            )
-        )
-    ]
     return {
         "status": "current",
         "generator": CODEGEN_GENERATOR,
-        "files": runtime_files,
+        "files": files,
     }
 
 
@@ -583,8 +500,11 @@ def _codegen_artifact_ready_errors(step: dict[str, Any], artifact: dict[str, Any
         for item in files
         if isinstance(item, dict)
     }
-    if not any(name.lower().endswith(".py") for name in filenames):
-        errors.append(f"Node {flow_id} codegen runtime artifact is missing a Python entry script.")
+    for required in ("main.py", "requirements.txt", "node-manifest.json"):
+        if required not in filenames:
+            errors.append(f"Node {flow_id} codegen runtime artifact is missing {required}.")
+    if not any(name.startswith("Dockerfile.") for name in filenames):
+        errors.append(f"Node {flow_id} codegen runtime artifact is missing Dockerfile.{flow_id}.")
     return errors
 
 
@@ -599,76 +519,6 @@ def _codegen_image_reference(flow_id: str, artifact: dict[str, Any]) -> str:
         return node_image_reference(flow_id, configuration_hash, prefix="codegen")
     except Exception:
         return f"inlumen/{_argo_name(flow_id)}:latest"
-
-
-def _safe_attachment_path(filename: str) -> str:
-    path = PurePosixPath(str(filename or "").replace("\\", "/"))
-    if not filename or path.is_absolute() or any(part in {"", ".."} for part in path.parts):
-        raise DeploymentArtifactValidationError(
-            "Node attachment validation failed",
-            [f"Unsafe node attachment path: {filename!r}."],
-        )
-    return str(path)
-
-
-def _infer_python_entrypoint(
-    retrieved_files: list[dict[str, Any]],
-    artifact: dict[str, Any],
-    node_manifest: dict[str, Any],
-    dockerfile_content: str,
-) -> list[str]:
-    entrypoint = artifact.get("entrypoint") or node_manifest.get("entrypoint")
-    if not isinstance(entrypoint, list) or not all(isinstance(item, str) for item in entrypoint):
-        entrypoint = _extract_json_cmd_from_dockerfile(dockerfile_content)
-    if entrypoint:
-        return entrypoint
-
-    python_scripts = sorted(
-        _safe_attachment_path(item["filename"])
-        for item in retrieved_files
-        if str(item.get("filename") or "").lower().endswith(".py")
-    )
-    by_basename = {
-        PurePosixPath(filename).name.lower(): filename
-        for filename in python_scripts
-    }
-    script = next(
-        (by_basename[name] for name in PYTHON_ENTRYPOINT_NAMES if name in by_basename),
-        python_scripts[0],
-    )
-    return ["python", f"/app/{script}"]
-
-
-def _synthesized_attachment_dockerfile(
-    flow_id: str,
-    retrieved_files: list[dict[str, Any]],
-    entrypoint: list[str],
-) -> dict[str, Any]:
-    filenames = [
-        _safe_attachment_path(item["filename"])
-        for item in retrieved_files
-        if not str(item.get("filename") or "").startswith("Dockerfile.")
-    ]
-    lines = [
-        "FROM python:3.11-slim",
-        "ENV PYTHONUNBUFFERED=1",
-        "WORKDIR /app",
-    ]
-    for filename in filenames:
-        lines.append(f"COPY {json.dumps([filename, f'/app/{filename}'])}")
-    if any(PurePosixPath(name).name.lower() == "requirements.txt" for name in filenames):
-        lines.append("RUN pip install --no-cache-dir -r requirements.txt")
-    lines.extend(
-        [
-            f'LABEL inlumen.flow_id="{flow_id}"',
-            f"CMD {json.dumps(entrypoint)}",
-        ]
-    )
-    return {
-        "filename": f"Dockerfile.{_sanitize_fragment(flow_id, 'step')}",
-        "content": "\n".join(lines) + "\n",
-        "generated": True,
-    }
 
 
 async def _read_persisted_codegen_artifact(
@@ -694,20 +544,40 @@ async def _read_persisted_codegen_artifact(
         if not filename or not read_bucket or not read_object:
             continue
         content = item.get("content")
+        content_type = str(item.get("content_type") or "")
         if not isinstance(content, str):
             try:
-                content = await read_minio_object(read_bucket, read_object)
+                encoded_content = encode_artifact_bytes(
+                    await read_minio_object_bytes(read_bucket, read_object),
+                    filename=filename,
+                    content_type=content_type,
+                )
             except Exception as exc:
                 raise DeploymentArtifactValidationError(
                     "Persisted codegen runtime artifact validation failed",
                     [f"Node {flow_id} failed to read {filename} from {read_bucket}: {exc}"],
                 ) from exc
+        else:
+            encoded_content = {
+                "content": content,
+                "content_type": content_type or "text/plain",
+                **(
+                    {"content_encoding": item.get("content_encoding")}
+                    if item.get("content_encoding")
+                    else {}
+                ),
+                **(
+                    {"size_bytes": item.get("size_bytes")}
+                    if item.get("size_bytes") is not None
+                    else {}
+                ),
+                **({"sha256": item.get("sha256")} if item.get("sha256") else {}),
+            }
         retrieved_files.append(
             {
                 "filename": filename,
                 "bucket": bucket,
-                "content": content,
-                "content_type": str(item.get("content_type") or "text/plain"),
+                **encoded_content,
             }
         )
 
@@ -715,6 +585,11 @@ async def _read_persisted_codegen_artifact(
         (item for item in retrieved_files if item["filename"].startswith("Dockerfile.")),
         None,
     )
+    if dockerfile is None:
+        raise DeploymentArtifactValidationError(
+            "Persisted codegen runtime artifact validation failed",
+            [f"Node {flow_id} codegen runtime artifact did not include a Dockerfile."],
+        )
 
     node_manifest: dict[str, Any] = {}
     manifest_file = next(
@@ -744,19 +619,9 @@ async def _read_persisted_codegen_artifact(
             except json.JSONDecodeError:
                 validation_report = {}
 
-    dockerfile_content = str(dockerfile.get("content") or "") if dockerfile else ""
-    entrypoint = _infer_python_entrypoint(
-        retrieved_files,
-        artifact,
-        node_manifest,
-        dockerfile_content,
-    )
-    if dockerfile is None:
-        dockerfile = _synthesized_attachment_dockerfile(
-            flow_id,
-            retrieved_files,
-            entrypoint,
-        )
+    entrypoint = artifact.get("entrypoint") or node_manifest.get("entrypoint")
+    if not isinstance(entrypoint, list) or not all(isinstance(item, str) for item in entrypoint):
+        entrypoint = ["python", "/app/main.py"]
 
     context_files = [
         item["filename"]
@@ -794,11 +659,7 @@ async def _read_persisted_codegen_artifact(
         "files": context_files,
         "generator": str(artifact.get("generator") or CODEGEN_GENERATOR),
         "configuration_hash": configuration_hash,
-        "build_manifest": (
-            "node-manifest.json"
-            if any(item["filename"] == "node-manifest.json" for item in retrieved_files)
-            else None
-        ),
+        "build_manifest": "node-manifest.json",
         "data_contract": runtime_artifact["data_contract"],
     }
     return runtime_artifact, dockerfile_artifact
@@ -815,7 +676,21 @@ async def _fetch_dockerfile_prompt_files(file_refs: Optional[list[dict]]) -> lis
         if not bucket or not filename:
             continue
         try:
-            content = await read_minio_object(read_bucket, read_object)
+            content_type = str(entry.get("content_type") or "")
+            if is_text_artifact(filename, content_type):
+                content = await read_minio_object(read_bucket, read_object)
+            else:
+                encoded = encode_artifact_bytes(
+                    await read_minio_object_bytes(read_bucket, read_object),
+                    filename=filename,
+                    content_type=content_type,
+                )
+                content = (
+                    f"[Binary input: filename={filename}, "
+                    f"content_type={encoded['content_type']}, "
+                    f"size_bytes={encoded['size_bytes']}, "
+                    f"sha256={encoded['sha256']}]"
+                )
         except Exception as exc:
             content = f"[ERROR: {exc}]"
         retrieved.append(
@@ -1017,7 +892,21 @@ def _minio_codefetch_tool(params: Optional[dict] = None) -> dict:
         if not bucket or not filename:
             continue
         try:
-            content = run_async(read_minio_object(read_bucket, read_object))
+            content_type = str(entry.get("content_type") or "")
+            if is_text_artifact(filename, content_type):
+                content = run_async(read_minio_object(read_bucket, read_object))
+            else:
+                encoded = encode_artifact_bytes(
+                    run_async(read_minio_object_bytes(read_bucket, read_object)),
+                    filename=filename,
+                    content_type=content_type,
+                )
+                content = (
+                    f"[Binary input: filename={filename}, "
+                    f"content_type={encoded['content_type']}, "
+                    f"size_bytes={encoded['size_bytes']}, "
+                    f"sha256={encoded['sha256']}]"
+                )
         except Exception as exc:
             content = f"[ERROR: {exc}]"
         retrieved.append(

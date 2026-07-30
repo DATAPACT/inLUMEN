@@ -11,10 +11,16 @@ from urllib.request import Request, urlopen
 
 from flask import Flask, jsonify, has_request_context, make_response, request
 
+from artifact_content import (
+    decode_artifact_content,
+    encode_artifact_bytes,
+    verify_artifact_integrity,
+)
 from async_runtime import run_async
 from auth_middleware import require_auth
 from chat_state import clear_state_from_disk, load_state_from_disk, save_state_to_disk
 from deployment_artifacts import (
+    DeploymentArtifactValidationError,
     build_argo_workflow_yaml,
     build_dagster_project_files,
     build_deployment_bundle_files,
@@ -91,11 +97,9 @@ def _write_validation_bundle(files: list[dict]) -> Path:
         relative_path = _safe_bundle_relative_path(str(file_entry.get("path") or ""))
         destination = bundle_dir / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
-        content = str(file_entry.get("content") or "")
-        if str(file_entry.get("encoding") or "") == "base64":
-            destination.write_bytes(base64.b64decode(content))
-        else:
-            destination.write_text(content, encoding="utf-8")
+        content = decode_artifact_content(file_entry)
+        verify_artifact_integrity(file_entry, content)
+        destination.write_bytes(content)
     return bundle_dir
 
 
@@ -164,29 +168,29 @@ def _read_validation_bundle_files(bundle_root: Path) -> list[dict]:
         if _skip_validation_bundle_file(path, bundle_root):
             continue
         relative = path.relative_to(bundle_root).as_posix()
-        raw_content = path.read_bytes()
-        try:
-            content = raw_content.decode("utf-8")
-            encoding = ""
-        except UnicodeDecodeError:
-            content = base64.b64encode(raw_content).decode("ascii")
-            encoding = "base64"
+        encoded = encode_artifact_bytes(
+            path.read_bytes(),
+            filename=path.name,
+            content_type=(
+                "application/json"
+                if path.suffix == ".json"
+                else "application/x-yaml;charset=utf-8"
+                if path.suffix in {".yaml", ".yml"}
+                else ""
+            ),
+        )
         files.append(
             {
                 "path": relative,
                 "filename": path.name,
                 "flow_id": "",
-                "content": content,
-                "content_type": (
-                    "application/json"
-                    if path.suffix == ".json"
-                    else "application/x-yaml;charset=utf-8"
-                    if path.suffix in {".yaml", ".yml"}
-                    else mimetypes.guess_type(path.name)[0]
-                    or "application/octet-stream"
-                ),
+                **encoded,
                 "role": "runtime",
-                **({"encoding": encoding} if encoding else {}),
+                **(
+                    {"encoding": "base64"}
+                    if encoded.get("content_encoding") == "base64"
+                    else {}
+                ),
             }
         )
     return files
@@ -692,15 +696,12 @@ def agentic_generate_deployment_bundle():
         validation_options.get("mode")
         or data.get("validation_mode")
         or data.get("deploymentValidationMode")
-        or "fast"
+        or "validate"
     ).strip().lower()
-    validate_bundle = bool(
-        validation_mode in {"validate", "repair", "validate-and-repair"}
-        or
-        data.get("validate_bundle")
-        or data.get("validateDeploymentBundle")
-        or validation_options.get("enabled")
-    )
+    # Structural and input-contract validation is mandatory for every bundle.
+    # Fast mode skips heavyweight target loading/materialization only.
+    validate_bundle = True
+    fast_validation = validation_mode == "fast"
 
     try:
         print("[analytics_api.py] Generating canonical deployment bundle.")
@@ -721,6 +722,15 @@ def agentic_generate_deployment_bundle():
                 options={
                     **validation_options,
                     "mode": validation_mode,
+                    **(
+                        {
+                            "materialize": False,
+                            "validate_argo": False,
+                            "validate_dagster": False,
+                        }
+                        if fast_validation
+                        else {}
+                    ),
                 },
             )
             if validation_mode in {"repair", "validate-and-repair"}:
@@ -775,6 +785,16 @@ def agentic_generate_deployment_bundle():
                 "repair_report": repair_report,
             }
         ), 200
+    except DeploymentArtifactValidationError as exc:
+        return jsonify(
+            {
+                "error": "Deployment bundle validation failed",
+                "validation_report": {
+                    "ok": False,
+                    "errors": exc.errors,
+                },
+            }
+        ), 422
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:

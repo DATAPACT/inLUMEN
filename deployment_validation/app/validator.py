@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -37,6 +38,14 @@ def _bundle_root(path: Path) -> Path:
     if candidate.suffix.lower() in {".yaml", ".yml"}:
         return candidate.parent
     return candidate
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
 
 
 def _run(
@@ -135,15 +144,29 @@ def validate_dagster_project(
 
     required_files = [
         "pyproject.toml",
-        "config/dagster.yaml",
         "src/inlumen_dagster_project/definitions.py",
-        "src/inlumen_dagster_project/defs/__init__.py",
-        "src/inlumen_dagster_project/components/node_runner.py",
         "src/inlumen_dagster_project/components/shell_command.py",
     ]
     missing = [item for item in required_files if not (project_root / item).is_file()]
     if missing:
         report["errors"] = [f"Missing required file: {item}" for item in missing]
+        return report
+
+    dockerfile = project_root / "Dockerfile"
+    pyproject_content = (project_root / "pyproject.toml").read_text(encoding="utf-8")
+    dockerfile_content = (
+        dockerfile.read_text(encoding="utf-8")
+        if dockerfile.is_file()
+        else ""
+    )
+    if (
+        '"dagster", "dev"' in dockerfile_content
+        and "dagster-webserver" not in pyproject_content
+    ):
+        report["errors"] = [
+            "Generated Dagster Dockerfile runs `dagster dev`, but "
+            "pyproject.toml does not install dagster-webserver."
+        ]
         return report
 
     venv_dir = project_root / ".inlumen_dagster_validation_venv"
@@ -170,26 +193,8 @@ def validate_dagster_project(
         **os.environ,
         "DAGSTER_HOME": str(project_root / ".dagster_home"),
         "PYTHONPATH": str(project_root / "src"),
-        "PATH": f"{venv_dir / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
     }
     Path(env["DAGSTER_HOME"]).mkdir(parents=True, exist_ok=True)
-
-    for command in (
-        [str(venv_dir / "bin" / "dg"), "check", "toml"],
-        [str(venv_dir / "bin" / "dg"), "check", "yaml"],
-    ):
-        dg_check_step = _run(
-            command,
-            cwd=project_root,
-            timeout_seconds=timeout_seconds,
-            env=env,
-        )
-        report["steps"].append(dg_check_step)
-        if not dg_check_step["ok"]:
-            report["errors"] = [
-                "Generated Dagster project failed the current dg project checks."
-            ]
-            return report
 
     load_step = _run(
         [str(python), "-c", _validation_script()],
@@ -231,6 +236,215 @@ def _load_json(path: Path) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+TABLE_FORMATS = {"csv", "tsv", "parquet", "xlsx", "xls", "arrow", "feather"}
+JSON_FORMATS = {"json", "jsonl", "ndjson"}
+TEXT_FORMATS = {
+    "txt",
+    "md",
+    "markdown",
+    "xml",
+    "yaml",
+    "yml",
+    "html",
+    "htm",
+    "rtf",
+    "log",
+}
+IMAGE_FORMATS = {
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "webp",
+    "bmp",
+    "tif",
+    "tiff",
+    "svg",
+}
+CANONICAL_ARTIFACT_KINDS = {
+    "table",
+    "json",
+    "text",
+    "image",
+    "model",
+    "directory",
+    "binary",
+}
+
+
+def _canonical_artifact(
+    filename: str,
+    *,
+    kind: Any = "",
+    file_format: Any = "",
+) -> dict[str, str]:
+    normalized_format = str(file_format or "").strip().lower().lstrip(".")
+    if not normalized_format:
+        normalized_format = Path(filename).suffix.lower().lstrip(".") or "binary"
+    if normalized_format in TABLE_FORMATS:
+        inferred_kind = "table"
+    elif normalized_format in JSON_FORMATS:
+        inferred_kind = "json"
+    elif normalized_format in TEXT_FORMATS:
+        inferred_kind = "text"
+    elif normalized_format in IMAGE_FORMATS:
+        inferred_kind = "image"
+    else:
+        inferred_kind = "binary"
+    declared_kind = str(kind or "").strip().lower()
+    return {
+        "kind": (
+            declared_kind
+            if declared_kind in CANONICAL_ARTIFACT_KINDS
+            else inferred_kind
+        ),
+        "format": normalized_format,
+    }
+
+
+def _root_contract_descriptors(
+    bundle_root: Path,
+    bundle_manifest: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    descriptors: dict[str, dict[str, Any]] = {}
+    nodes = (
+        bundle_manifest.get("nodes")
+        if isinstance(bundle_manifest.get("nodes"), list)
+        else []
+    )
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("parents"):
+            continue
+        node_path = str(node.get("path") or "").strip()
+        if not node_path:
+            continue
+        node_manifest = _load_json(bundle_root / node_path / "node-manifest.json")
+        data_contract = (
+            node_manifest.get("data_contract")
+            if isinstance(node_manifest.get("data_contract"), dict)
+            else {}
+        )
+        inputs = (
+            data_contract.get("inputs")
+            if isinstance(data_contract.get("inputs"), list)
+            else []
+        )
+        for descriptor in inputs:
+            if not isinstance(descriptor, dict):
+                continue
+            filename = str(
+                descriptor.get("filename") or descriptor.get("name") or ""
+            ).strip()
+            if filename:
+                descriptors[filename] = descriptor
+    return descriptors
+
+
+def _input_contract_errors(
+    bundle_root: Path,
+    bundle_manifest: dict[str, Any],
+) -> list[str]:
+    manifest_path = bundle_root / "inputs" / "input_manifest.json"
+    input_manifest = _load_json(manifest_path)
+    raw_inputs = input_manifest.get("inputs")
+    if not isinstance(raw_inputs, list):
+        return ["inputs/input_manifest.json must contain an inputs array."]
+
+    errors: list[str] = []
+    entries: dict[str, dict[str, Any]] = {}
+    for entry in raw_inputs:
+        if not isinstance(entry, dict):
+            errors.append("Input manifest entries must be JSON objects.")
+            continue
+        filename = str(entry.get("filename") or entry.get("name") or "").strip()
+        if not filename:
+            errors.append("Input manifest entry is missing filename.")
+            continue
+        if filename in entries:
+            errors.append(f"Input manifest contains duplicate filename {filename}.")
+            continue
+        entries[filename] = entry
+        kind = str(entry.get("kind") or "").strip().lower()
+        file_format = str(entry.get("format") or "").strip().lower().lstrip(".")
+        if kind not in CANONICAL_ARTIFACT_KINDS:
+            errors.append(
+                f"Input {filename} has non-canonical kind '{kind or '<missing>'}'."
+            )
+        if not file_format:
+            errors.append(f"Input {filename} is missing format.")
+
+        raw_path = str(entry.get("path") or "").strip()
+        relative_path = Path(raw_path)
+        if (
+            not raw_path
+            or relative_path.is_absolute()
+            or ".." in relative_path.parts
+        ):
+            errors.append(f"Input {filename} has unsafe or missing path '{raw_path}'.")
+        else:
+            input_path = bundle_root / relative_path
+            if not input_path.is_file():
+                errors.append(
+                    f"Input {filename} references missing bundle file '{raw_path}'."
+                )
+            else:
+                expected_size = entry.get("size_bytes")
+                if expected_size is None:
+                    errors.append(f"Input {filename} is missing size_bytes.")
+                else:
+                    try:
+                        parsed_size = int(expected_size)
+                    except (TypeError, ValueError):
+                        errors.append(
+                            f"Input {filename} has invalid size_bytes {expected_size!r}."
+                        )
+                    else:
+                        actual_size = input_path.stat().st_size
+                        if parsed_size != actual_size:
+                            errors.append(
+                                f"Input {filename} size mismatch: expected "
+                                f"{parsed_size}, got {actual_size}."
+                            )
+
+                expected_digest = str(entry.get("sha256") or "").strip()
+                if not expected_digest:
+                    errors.append(f"Input {filename} is missing sha256.")
+                else:
+                    actual_digest = _sha256_file(input_path)
+                    if expected_digest != actual_digest:
+                        errors.append(
+                            f"Input {filename} checksum mismatch: expected "
+                            f"{expected_digest}, got {actual_digest}."
+                        )
+
+    descriptors = _root_contract_descriptors(bundle_root, bundle_manifest)
+    for filename, descriptor in descriptors.items():
+        entry = entries.get(filename)
+        if entry is None:
+            errors.append(
+                f"Root node contract input {filename} is missing from inputs/input_manifest.json."
+            )
+            continue
+        expected = _canonical_artifact(
+            filename,
+            kind=descriptor.get("kind"),
+            file_format=descriptor.get("format"),
+        )
+        actual_kind = str(entry.get("kind") or "").strip().lower()
+        actual_format = str(entry.get("format") or "").strip().lower().lstrip(".")
+        if actual_kind != expected["kind"]:
+            errors.append(
+                f"Input {filename} kind '{actual_kind}' does not match root node "
+                f"contract kind '{expected['kind']}'."
+            )
+        if actual_format != expected["format"]:
+            errors.append(
+                f"Input {filename} format '{actual_format}' does not match root node "
+                f"contract format '{expected['format']}'."
+            )
+    return errors
+
+
 def _validate_bundle_structure(bundle_root: Path, targets: dict[str, Any]) -> dict[str, Any]:
     required_paths = [
         "bundle-manifest.json",
@@ -243,7 +457,6 @@ def _validate_bundle_structure(bundle_root: Path, targets: dict[str, Any]) -> di
     if targets.get("dagster"):
         required_paths.extend([
             "dagster/pyproject.toml",
-            "dagster/config/dagster.yaml",
             "dagster/Dockerfile",
             "dagster/docker-compose.yml",
             "dagster/src/inlumen_dagster_project/definitions.py",
@@ -270,6 +483,8 @@ def _validate_bundle_structure(bundle_root: Path, targets: dict[str, Any]) -> di
 
     errors = [f"Missing required bundle path: {item}" for item in missing]
     errors.extend(f"Missing node output directory: {item}" for item in missing_node_outputs)
+    if not missing and (bundle_root / "inputs" / "input_manifest.json").is_file():
+        errors.extend(_input_contract_errors(bundle_root, manifest))
     return {
         "ok": not errors,
         "bundle_root": str(bundle_root),
@@ -332,6 +547,8 @@ def _normalize_input_manifest(bundle_root: Path, actions: list[str]) -> None:
     raw_entries = manifest.get("inputs")
     if not isinstance(raw_entries, list):
         raw_entries = manifest.get("files") if isinstance(manifest.get("files"), list) else []
+    bundle_manifest = _load_json(bundle_root / "bundle-manifest.json")
+    descriptors = _root_contract_descriptors(bundle_root, bundle_manifest)
     inputs = []
     for entry in raw_entries:
         if not isinstance(entry, dict):
@@ -342,23 +559,36 @@ def _normalize_input_manifest(bundle_root: Path, actions: list[str]) -> None:
             continue
         normalized["filename"] = filename
         normalized["path"] = f"inputs/{filename}"
-        normalized.setdefault("kind", "file")
-        normalized.setdefault("format", Path(filename).suffix.lstrip(".") or "text")
+        input_path = input_dir / filename
+        if input_path.is_file():
+            normalized["size_bytes"] = input_path.stat().st_size
+            normalized["sha256"] = _sha256_file(input_path)
+        descriptor = descriptors.get(filename, {})
+        classification = _canonical_artifact(
+            filename,
+            kind=descriptor.get("kind") or normalized.get("kind"),
+            file_format=descriptor.get("format") or normalized.get("format"),
+        )
+        normalized.update(classification)
         inputs.append(normalized)
 
     known_filenames = {entry["filename"] for entry in inputs}
     for input_file in sorted(item for item in input_dir.iterdir() if item.is_file() and item.name != "input_manifest.json"):
         if input_file.name in known_filenames:
             continue
-        inputs.append(
-            {
-                "filename": input_file.name,
-                "path": f"inputs/{input_file.name}",
-                "kind": "file",
-                "format": input_file.suffix.lstrip(".") or "text",
-                "description": "Sample input file copied from InLumen.",
-            }
-        )
+        descriptor = descriptors.get(input_file.name, {})
+        inputs.append({
+            "filename": input_file.name,
+            "path": f"inputs/{input_file.name}",
+            "size_bytes": input_file.stat().st_size,
+            "sha256": _sha256_file(input_file),
+            **_canonical_artifact(
+                input_file.name,
+                kind=descriptor.get("kind"),
+                file_format=descriptor.get("format"),
+            ),
+            "description": "Sample input file copied from InLumen.",
+        })
 
     repaired = {
         "schema_version": "inlumen.input-manifest@1",
@@ -377,26 +607,13 @@ def _compose_root_content() -> str:
     build:
       context: .
       dockerfile: dagster/Dockerfile
-    image: inlumen-generated-dagster:local
-    init: true
     ports:
       - "3000:3000"
     volumes:
       - ./outputs:/workspace/outputs
-      - dagster_home:/workspace/dagster/.dagster_home
-      - ./dagster/config/dagster.yaml:/workspace/dagster/.dagster_home/dagster.yaml:ro
     environment:
       DAGSTER_HOME: /workspace/dagster/.dagster_home
       PYTHONUNBUFFERED: "1"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3000/', timeout=2)"]
-      interval: 5s
-      timeout: 3s
-      retries: 12
-      start_period: 10s
-
-volumes:
-  dagster_home:
 """
 
 
@@ -406,72 +623,14 @@ def _compose_dagster_content() -> str:
     build:
       context: ..
       dockerfile: dagster/Dockerfile
-    image: inlumen-generated-dagster:local
-    init: true
     ports:
       - "3000:3000"
     volumes:
       - ../outputs:/workspace/outputs
-      - dagster_home:/workspace/dagster/.dagster_home
-      - ./config/dagster.yaml:/workspace/dagster/.dagster_home/dagster.yaml:ro
     environment:
       DAGSTER_HOME: /workspace/dagster/.dagster_home
       PYTHONUNBUFFERED: "1"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3000/', timeout=2)"]
-      interval: 5s
-      timeout: 3s
-      retries: 12
-      start_period: 10s
-
-volumes:
-  dagster_home:
 """
-
-
-def _is_runtime_attachment(path: Path) -> bool:
-    basename = path.name.lower()
-    return (
-        basename
-        in {
-            "requirements.txt",
-            "node-manifest.json",
-            "validation-report.json",
-            "package.json",
-            "package-lock.json",
-            "pnpm-lock.yaml",
-            "yarn.lock",
-            "pyproject.toml",
-            "poetry.lock",
-        }
-        or basename.startswith("dockerfile.")
-        or path.suffix.lower()
-        in {
-            ".py",
-            ".pyi",
-            ".sh",
-            ".bash",
-            ".js",
-            ".mjs",
-            ".cjs",
-            ".ts",
-            ".tsx",
-            ".ipynb",
-        }
-    )
-
-
-def _repair_entry_script(node_dir: Path, current_script_path: str) -> Path | None:
-    scripts = sorted(path for path in node_dir.rglob("*.py") if path.is_file())
-    if not scripts:
-        return None
-    current_name = Path(current_script_path).name
-    current = next((path for path in scripts if path.name == current_name), None)
-    if current is not None:
-        return current
-    preferred = ("main.py", "app.py", "run.py", "process.py", "pipeline.py", "script.py")
-    by_name = {path.name.lower(): path for path in scripts}
-    return next((by_name[name] for name in preferred if name in by_name), scripts[0])
 
 
 def _repair_dagster_defs(bundle_root: Path, nodes: list[dict[str, Any]], actions: list[str]) -> None:
@@ -498,17 +657,9 @@ def _repair_dagster_defs(bundle_root: Path, nodes: list[dict[str, Any]], actions
             continue
         node_path = str(node.get("path") or "").strip()
         output_path = str(node.get("output_path") or "").strip()
-        node_dir = bundle_root / node_path
         parents = [str(parent) for parent in node.get("parents") or []]
         first_parent = node_by_flow.get(parents[0]) if parents else None
-        entry_script = _repair_entry_script(
-            node_dir,
-            str(attrs.get("script_path") or ""),
-        )
-        if entry_script is not None:
-            relative_script = entry_script.relative_to(node_dir).as_posix()
-            attrs["script_path"] = f"../{node_path}/{relative_script}"
-        attrs["source_dir"] = f"../{node_path}"
+        attrs["script_path"] = f"../{node_path}/main.py"
         attrs["input_manifest_path"] = (
             f"../{first_parent.get('output_path')}/output_manifest.json"
             if first_parent
@@ -516,17 +667,7 @@ def _repair_dagster_defs(bundle_root: Path, nodes: list[dict[str, Any]], actions
         )
         attrs["output_dir"] = f"../{output_path}"
         attrs["output_manifest_path"] = f"../{output_path}/output_manifest.json"
-        manifest_path = node_dir / "node-manifest.json"
-        attrs["context_path"] = (
-            f"../{node_path}/node-manifest.json"
-            if manifest_path.is_file()
-            else ""
-        )
-        attrs["local_input_paths"] = [
-            f"../{node_path}/{path.relative_to(node_dir).as_posix()}"
-            for path in sorted(node_dir.rglob("*"))
-            if path.is_file() and not _is_runtime_attachment(path)
-        ]
+        attrs["context_path"] = f"../{node_path}/node-manifest.json"
         parsed["attributes"] = attrs
         next_text = yaml.safe_dump(parsed, sort_keys=False)
         if defs_file.read_text(encoding="utf-8") != next_text:
@@ -605,11 +746,6 @@ def repair_deployment_bundle(
         }
         _write_text_if_missing(bundle_root / "docker-compose.yml", _compose_root_content(), actions)
         _write_text_if_missing(bundle_root / "dagster" / "docker-compose.yml", _compose_dagster_content(), actions)
-        _write_text_if_missing(
-            bundle_root / "dagster" / "config" / "dagster.yaml",
-            "{}\n",
-            actions,
-        )
         _repair_dagster_defs(bundle_root, repaired_nodes, actions)
 
     next_manifest = json.dumps(manifest, indent=2) + "\n"

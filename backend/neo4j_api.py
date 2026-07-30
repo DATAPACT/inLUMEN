@@ -10,6 +10,7 @@ from urllib.parse import quote
 from runtime_config import add_cors_headers, get_neo4j_settings
 from step_types import normalize_step_type
 from minio_access import create_bucket, list_objects, read_object_bytes, remove_object, upload_object
+from model_plans import resolve_implementation_plan
 from node_definitions.instance import (
     definition_data_from_properties,
     definition_properties_from_data,
@@ -167,14 +168,42 @@ def _parse_visible_graph(graph: dict) -> tuple[list[dict], list[dict]]:
             "y": y,
         }
         props.update(definition_properties_from_data(data))
+        param_obj = (
+            dict(data["param"])
+            if isinstance(data.get("param"), dict)
+            else {}
+        )
+        if (
+            "model_plan" not in param_obj
+            and isinstance(data.get("implementation"), dict)
+            and data["implementation"]
+        ):
+            param_obj["model_plan"] = resolve_implementation_plan(
+                data["implementation"],
+                label=str(data.get("label") or ""),
+                description=str(data.get("description") or ""),
+            )
+        elif isinstance(param_obj.get("model_plan"), dict):
+            param_obj["model_plan"] = resolve_implementation_plan(
+                param_obj["model_plan"],
+                label=str(data.get("label") or ""),
+                description=str(data.get("description") or ""),
+            )
+        if param_obj or isinstance(data.get("param"), dict):
+            # Model-backed action nodes persist their reviewed implementation
+            # plan in param.model_plan, not only configuration nodes.
+            props["param_json"] = json.dumps(
+                param_obj,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
         if step_type in ("input", "output"):
             props["content"] = str(data.get("content") or "")
             props["has_files"] = "yes" if files else str(data.get("has_files") or "no").lower().strip()
         elif step_type in ("action", "custom"):
             props["has_files"] = "yes" if files else str(data.get("has_files") or "no").lower().strip()
         elif step_type == "config":
-            param_obj = data.get("param") if isinstance(data.get("param"), dict) else {}
-            props["param_json"] = json.dumps(param_obj)
+            props.setdefault("param_json", "{}")
         elif step_type == "storage":
             props["endpoint"] = str(data.get("endpoint") or "")
             db = str(data.get("database") or "minio").lower().strip()

@@ -28,12 +28,21 @@ services:
       NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_MAX_SIZE:-512m}
       NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE_SIZE:-512m}
     healthcheck:
+      # cypher-shell launches a JVM for every probe. Under Docker Desktop
+      # pressure those probes can overlap after timeout, exhaust the 2 GiB
+      # container limit, and make an otherwise started database unresponsive.
+      # Neo4j only exposes HTTP after the database is ready to accept traffic.
       test:
-        - CMD-SHELL
-        - 'AUTH_USER="$${NEO4J_AUTH%%/*}"; AUTH_PASS="$${NEO4J_AUTH#*/}"; cypher-shell -u "$$AUTH_USER" -p "$$AUTH_PASS" "RETURN 1;"'
-      interval: 5s
+        - CMD
+        - wget
+        - --quiet
+        - --spider
+        - --timeout=3
+        - http://127.0.0.1:7474/
+      interval: 10s
       timeout: 5s
       retries: 24
+      start_period: 60s
     networks:
       datapact_network:
         aliases:

@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 from unittest.mock import patch
 
@@ -15,7 +16,10 @@ class CodegenRequestSecurityTests(unittest.TestCase):
             },
         }
 
-        with patch.object(inlumen_api, "CODEGEN_SERVICE_API_KEY", "service-secret"):
+        with patch.dict(
+            os.environ,
+            {"INLUMEN_CODEGEN_SERVICE_API_KEY": "service-secret"},
+        ):
             encoded, headers = inlumen_api._codegen_request_parts(
                 payload,
                 include_llm_key=True,
@@ -30,7 +34,10 @@ class CodegenRequestSecurityTests(unittest.TestCase):
         )
 
     def test_poll_request_only_sends_service_authentication(self):
-        with patch.object(inlumen_api, "CODEGEN_SERVICE_API_KEY", "service-secret"):
+        with patch.dict(
+            os.environ,
+            {"INLUMEN_CODEGEN_SERVICE_API_KEY": "service-secret"},
+        ):
             encoded, headers = inlumen_api._codegen_request_parts()
 
         self.assertIsNone(encoded)

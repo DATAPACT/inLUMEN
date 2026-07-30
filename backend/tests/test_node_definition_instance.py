@@ -11,6 +11,7 @@ from node_definitions.instance import (  # noqa: E402
     definition_properties_from_data,
     normalize_definition_properties,
 )
+from node_definitions.artifacts import configuration_hash  # noqa: E402
 
 
 class NodeDefinitionInstanceTest(unittest.TestCase):
@@ -77,6 +78,48 @@ class NodeDefinitionInstanceTest(unittest.TestCase):
 
         self.assertEqual({"label": "Legacy"}, properties)
         self.assertEqual({}, definition_data_from_properties(properties))
+
+    def test_dynamic_model_plan_marks_artifact_stale_when_revision_changes(self):
+        model_plan = {
+            "framework": "transformers",
+            "model_id": "example/custom-model",
+            "model_revision": "revision-1",
+        }
+        artifact_hash = configuration_hash(
+            definition_id="inlumen.dynamic-step.3",
+            definition_version=1,
+            implementation=model_plan,
+            generator="inlumen-codegen-service",
+            generator_version="0.1.0",
+            contract_version="1",
+        )
+        properties = {
+            "flow_id": "3",
+            "param_json": json.dumps({"model_plan": model_plan}),
+            "generated_artifact_json": json.dumps(
+                {
+                    "configuration_hash": artifact_hash,
+                    "generator": "inlumen-codegen-service",
+                    "generator_version": "0.1.0",
+                    "data_contract": {"version": "1"},
+                }
+            ),
+        }
+
+        current = definition_data_from_properties(properties)
+        self.assertEqual(model_plan, current["implementation"])
+        self.assertEqual("current", current["generated_artifact"]["status"])
+
+        properties["param_json"] = json.dumps(
+            {
+                "model_plan": {
+                    **model_plan,
+                    "model_revision": "revision-2",
+                }
+            }
+        )
+        stale = definition_data_from_properties(properties)
+        self.assertEqual("stale", stale["generated_artifact"]["status"])
 
 
 if __name__ == "__main__":
