@@ -137,9 +137,14 @@ Step 6: Configure an LLM provider from the UI. Open `http://localhost:8080`, cho
 
 ### Code generation service
 
-Code generation is a separate backend-to-backend service. The browser never
-calls it directly. For the current local setup, start its repository separately
-and point the inLUMEN backend container at the host-published port:
+> [!IMPORTANT]
+> Code generation requires both this inLUMEN application and the separate
+> [inlumen-codegen-service](https://github.com/aliduabubakari/inlumen-codegen-service)
+> to be running. Starting inLUMEN alone does not provide code generation.
+
+The companion repository is a separate backend-to-backend service; the browser
+never calls it directly. Start it separately and point the inLUMEN backend
+container at its endpoint. For a local setup, use the host-published port:
 
 ```text
 # inLUMEN/.env
