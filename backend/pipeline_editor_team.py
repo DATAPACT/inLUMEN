@@ -350,11 +350,12 @@ def build_pipeline_editing_team(
           "label": "step label",
           "description": "step description",
           "implementation": {
-            "task": "model-backed task",
+            "task": "analytical or model-backed task",
             "domain": "inferred domain",
-            "framework": "runtime framework",
-            "model_id": "preferred quality-first model identifier or family",
-            "model_revision": "optional proposed revision; trusted adapters resolve it",
+            "execution_profile": "classical_ml|trusted_heavy_model|custom_model",
+            "framework": "optional requested runtime framework",
+            "model_id": "only an explicitly requested or registry-known model identifier",
+            "model_revision": "optional explicit revision; trusted adapters resolve supported tasks",
             "device": "auto|cpu|cuda",
             "precision": "auto|float32|float16|bfloat16|int8",
             "required_packages": ["package constraints"],
@@ -362,8 +363,10 @@ def build_pipeline_editing_team(
             "selection_rationale": ["why this model fits"]
           }
         }
-        Include implementation for model-backed analytical steps. Omit it for
-        deterministic ingestion, formatting, storage, and output assembly.
+        Include implementation for analytical steps. For ordinary structured
+        model training, specify task/domain and classical_ml but omit model_id.
+        Omit implementation for deterministic ingestion, formatting, storage,
+        and output assembly. Never invent a model repository identifier.
         """
         try:
             query_type = "create_step"
@@ -681,9 +684,10 @@ def build_pipeline_editing_team(
                         Use overview to find the relevant flow_id values before calling insert_step unless the flow_id values are already provided by the user.
                         Use the label/description fields for domain-specific names such as ingestion, preprocessing, model training, or alerting.
                         Represent every capability explicitly requested by the user in the graph before finishing. Do not stop after an intermediate storage or transformation step when the request also asks for a terminal behavior. For example, a request that says "answers questions" must include a connected output step that answers questions. Re-read the user's request after tool calls and add any missing capability as a connected STEP.
-                        This is a one-shot, quality-first design. For every model-backed analytical step, identify the task, domain, preferred model family, device constraints, inference parameters, and selection rationale. Assume sufficient CPU, GPU, memory, model download time, and validation time unless the user states a constraint.
-                        Put that decision in the create_step or insert_step implementation object. Do not invent repository commit hashes: InLUMEN's trusted adapter registry resolves supported tasks to verified model IDs, revisions, packages, and quality policies before persistence and code generation.
-                        Prefer high-quality neural models over lightweight baselines. Do not choose PocketSphinx, VADER, keyword lists, dummy estimators, or similarly limited baselines merely to reduce container size or execution cost.
+                        This is a one-shot, quality-first design. Choose an implementation class for every analytical step: deterministic processing, classical ML training, trusted pretrained inference, or an explicitly requested custom model.
+                        Default structured/tabular model-training tasks to a scikit-learn implementation unless the user explicitly requests deep learning, a pretrained model, or a named framework/model. Do not invent a pretrained model merely because the domain is specialized.
+                        Use trusted pretrained inference for tasks that require it, including speech-to-text and transcript sentiment analysis. Put the task and runtime preferences in the create_step or insert_step implementation object; InLUMEN's routing and trusted-adapter registries resolve supported tasks to verified execution profiles, model IDs, revisions, packages, and quality policies before persistence and code generation.
+                        Never invent model repository identifiers, revisions, benchmark claims, dataset provenance, or capabilities. Prefer a real classical baseline over an unverified neural model. Do not choose PocketSphinx, VADER, keyword lists, dummy estimators, or similarly limited substitutes for tasks that require a trusted pretrained model.
                         Select domain-specific or multilingual models when the request indicates that need. For long-text analysis, include chunking and aggregation parameters. For speech recognition, include language strategy, decoding parameters, timestamps, voice activity detection, and diarization requirements when relevant.
                         For deterministic steps such as byte-preserving ingestion, file conversion, storage, or report assembly that need no learned model, omit implementation rather than inventing a model.
                         """,

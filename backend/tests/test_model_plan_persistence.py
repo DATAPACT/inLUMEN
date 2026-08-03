@@ -3,13 +3,51 @@ import sys
 import unittest
 from pathlib import Path
 
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import neo4j_api  # noqa: E402
+from model_plans import resolve_implementation_plan  # noqa: E402
 
 
 class ModelPlanPersistenceTest(unittest.TestCase):
+    def test_tabular_model_training_replaces_unverified_neural_plan(self):
+        plan = resolve_implementation_plan(
+            {
+                "task": "clinical-deterioration-prediction",
+                "domain": "healthcare-clinical-time-series",
+                "framework": "pytorch",
+                "model_id": "microsoft/biomednlp-pubmedbert-ts-clinical",
+                "model_revision": "main",
+                "required_packages": ["torch", "transformers"],
+            },
+            label="Model Training",
+            description=(
+                "Trains a clinical deterioration prediction model on "
+                "preprocessed patient vitals."
+            ),
+        )
+
+        self.assertEqual("classical_ml", plan["execution_profile"])
+        self.assertEqual("scikit-learn", plan["framework"])
+        self.assertNotIn("model_id", plan)
+        self.assertNotIn("torch", " ".join(plan["required_packages"]))
+        self.assertEqual(
+            "microsoft/biomednlp-pubmedbert-ts-clinical",
+            plan["resolution"]["replaced_proposed_model_id"],
+        )
+
+    def test_explicit_deep_learning_training_remains_custom_and_advisory(self):
+        plan = resolve_implementation_plan(
+            {"framework": "pytorch", "model_id": "owner/explicit-model"},
+            label="Model Training",
+            description="Train a PyTorch transformer requested by the user.",
+        )
+
+        self.assertEqual(
+            {"framework": "pytorch", "model_id": "owner/explicit-model"},
+            plan,
+        )
+
     def test_visible_action_node_serializes_model_plan(self):
         model_plan = {
             "framework": "transformers",
@@ -74,6 +112,12 @@ class ModelPlanPersistenceTest(unittest.TestCase):
             "edaa852ec7e145841d8ffdb056a99866b5f0a478",
             json.loads(nodes[0]["props"]["param_json"])["model_plan"][
                 "model_revision"
+            ],
+        )
+        self.assertEqual(
+            "trusted_heavy_model",
+            json.loads(nodes[0]["props"]["param_json"])["model_plan"][
+                "execution_profile"
             ],
         )
 

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-
 IMPLEMENTATION_PLAN_SCHEMA = "inlumen.implementation-plan@1"
 QUALITY_POLICY_SCHEMA = "inlumen.quality-policy@1"
 
 FASTER_WHISPER_PLAN: dict[str, Any] = {
     "schema_version": IMPLEMENTATION_PLAN_SCHEMA,
+    "execution_profile": "trusted_heavy_model",
+    "resource_class": "gpu_preferred",
     "task": "automatic-speech-recognition",
     "domain": "audio",
     "adapter_id": "faster-whisper",
@@ -73,6 +74,8 @@ FASTER_WHISPER_PLAN: dict[str, Any] = {
 
 ROBERTA_SENTIMENT_PLAN: dict[str, Any] = {
     "schema_version": IMPLEMENTATION_PLAN_SCHEMA,
+    "execution_profile": "trusted_heavy_model",
+    "resource_class": "heavy_cpu_or_gpu",
     "task": "text-classification",
     "domain": "sentiment-analysis",
     "adapter_id": "transformers-roberta-sentiment",
@@ -102,6 +105,37 @@ ROBERTA_SENTIMENT_PLAN: dict[str, Any] = {
     },
 }
 
+CLASSICAL_ML_PLAN: dict[str, Any] = {
+    "schema_version": IMPLEMENTATION_PLAN_SCHEMA,
+    "execution_profile": "classical_ml",
+    "resource_class": "lightweight_cpu",
+    "task": "supervised-learning",
+    "domain": "tabular",
+    "framework": "scikit-learn",
+    "estimator_family": "auto",
+    "selection_strategy": "cross_validation",
+    "required_packages": [
+        "scikit-learn>=1.4,<2",
+        "pandas>=2,<3",
+        "numpy>=1.26,<3",
+        "joblib>=1.3,<2",
+    ],
+    "inference_parameters": {
+        "random_state": 42,
+        "test_size": 0.2,
+    },
+    "quality_policy": {
+        "schema_version": QUALITY_POLICY_SCHEMA,
+        "require_non_empty_training_data": True,
+        "require_holdout_evaluation": True,
+        "require_serialized_estimator": True,
+    },
+    "resolution": {
+        "source": "inlumen-routing-policy",
+        "status": "resolved",
+    },
+}
+
 
 def resolve_implementation_plan(
     plan: Any,
@@ -111,6 +145,7 @@ def resolve_implementation_plan(
 ) -> dict[str, Any]:
     """Resolve recognized model tasks without rejecting unknown modalities."""
     candidate = dict(plan) if isinstance(plan, dict) else {}
+    node_text = " ".join((str(label or ""), str(description or ""))).lower()
     task_text = " ".join(
         str(value or "")
         for value in (
@@ -122,14 +157,92 @@ def resolve_implementation_plan(
             candidate.get("model_id"),
         )
     ).lower()
-    if not task_text.strip():
-        task_text = str(description or "").lower()
+    if _is_classical_training_task(node_text):
+        if _explicit_heavy_model_request(node_text):
+            return _proposed_custom_plan(candidate)
+        return _resolve_classical_ml_plan(candidate)
 
     if _is_asr_task(task_text):
         return _merge_runtime_preferences(FASTER_WHISPER_PLAN, candidate)
     if _is_sentiment_task(task_text):
         return _merge_runtime_preferences(ROBERTA_SENTIMENT_PLAN, candidate)
-    return candidate
+    return _proposed_custom_plan(candidate)
+
+
+def _is_classical_training_task(text: str) -> bool:
+    explicit_phrase = any(
+        token in text
+        for token in (
+            "model training",
+            "train model",
+            "trains a ",
+            "training a ",
+            "classifier training",
+            "regressor training",
+            "fit a model",
+            "fit the model",
+        )
+    )
+    training_intent = any(token in text for token in ("train", "training", "fit"))
+    learned_task = any(
+        token in text
+        for token in ("model", "classifier", "regressor", "prediction", "predictor")
+    )
+    return explicit_phrase or (training_intent and learned_task)
+
+
+def _explicit_heavy_model_request(text: str) -> bool:
+    return any(
+        token in text
+        for token in (
+            "transformer",
+            "neural network",
+            "deep learning",
+            "pytorch",
+            "tensorflow",
+            "fine-tun",
+            "pretrained model",
+            "pre-trained model",
+            "bert",
+        )
+    )
+
+
+def _resolve_classical_ml_plan(candidate: dict[str, Any]) -> dict[str, Any]:
+    resolved = {key: _copy_value(value) for key, value in CLASSICAL_ML_PLAN.items()}
+    for key in ("task", "domain"):
+        value = str(candidate.get(key) or "").strip()
+        if value:
+            resolved[key] = value
+    estimator_family = str(candidate.get("estimator_family") or "").strip().lower()
+    if estimator_family in {
+        "auto",
+        "linear",
+        "logistic_regression",
+        "random_forest",
+        "gradient_boosting",
+    }:
+        resolved["estimator_family"] = estimator_family
+    configured = candidate.get("inference_parameters")
+    if isinstance(configured, dict):
+        supported = set(resolved["inference_parameters"])
+        for key, value in configured.items():
+            if key in supported:
+                resolved["inference_parameters"][key] = _copy_value(value)
+    proposed_model_id = str(candidate.get("model_id") or "").strip()
+    if proposed_model_id:
+        resolved["resolution"]["replaced_proposed_model_id"] = proposed_model_id
+        resolved["resolution"]["reason"] = (
+            "Training intent and structured-data contract default to classical ML."
+        )
+    return resolved
+
+
+def _proposed_custom_plan(candidate: dict[str, Any]) -> dict[str, Any]:
+    # Preserve unsupported/custom implementation payloads byte-for-byte at the
+    # semantic level. They remain advisory because only registry-resolved plans
+    # receive a trusted execution profile.
+    return {key: _copy_value(value) for key, value in candidate.items()}
 
 
 def _is_asr_task(text: str) -> bool:
