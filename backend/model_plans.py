@@ -4,6 +4,17 @@ from typing import Any
 
 IMPLEMENTATION_PLAN_SCHEMA = "inlumen.implementation-plan@1"
 QUALITY_POLICY_SCHEMA = "inlumen.quality-policy@1"
+MODEL_ARTIFACT_POLICY_SCHEMA = "inlumen.model-artifact-policy@1"
+
+LOCAL_MODEL_ARTIFACT_POLICY: dict[str, Any] = {
+    "schema_version": MODEL_ARTIFACT_POLICY_SCHEMA,
+    "acquisition": "deployment-preflight",
+    "source": "huggingface",
+    "runtime_access": "verified-local-only",
+    "model_root_env": "INLUMEN_MODEL_ROOT",
+    "integrity": "sha256-tree",
+    "runtime_network": "disabled",
+}
 
 FASTER_WHISPER_PLAN: dict[str, Any] = {
     "schema_version": IMPLEMENTATION_PLAN_SCHEMA,
@@ -39,6 +50,7 @@ FASTER_WHISPER_PLAN: dict[str, Any] = {
     },
     "device": "auto",
     "precision": "auto",
+    "artifact_policy": LOCAL_MODEL_ARTIFACT_POLICY,
     "required_packages": [
         "faster-whisper==1.2.1",
         "ctranslate2==4.8.1",
@@ -85,6 +97,7 @@ ROBERTA_SENTIMENT_PLAN: dict[str, Any] = {
     "model_revision": "3216a57f2a0d9c45a2e6c20157c20c49fb4bf9c7",
     "device": "auto",
     "precision": "float32",
+    "artifact_policy": LOCAL_MODEL_ARTIFACT_POLICY,
     "required_packages": [
         "transformers==5.14.1",
         "torch==2.13.0",

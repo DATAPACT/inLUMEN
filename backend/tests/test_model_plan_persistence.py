@@ -120,6 +120,12 @@ class ModelPlanPersistenceTest(unittest.TestCase):
                 "execution_profile"
             ],
         )
+        self.assertEqual(
+            "verified-local-only",
+            json.loads(nodes[0]["props"]["param_json"])["model_plan"][
+                "artifact_policy"
+            ]["runtime_access"],
+        )
 
 
 if __name__ == "__main__":

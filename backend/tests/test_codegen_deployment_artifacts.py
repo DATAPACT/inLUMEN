@@ -3,20 +3,24 @@ import hashlib
 import json
 import sys
 import tempfile
+import types
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from deployment_artifacts import (
     DeploymentArtifactValidationError,
     _dagster_shell_command_component_source,
+    _model_prefetch_source,
     build_argo_workflow_object,
     build_argo_workflow_yaml,
     build_dagster_project_files,
     build_deployment_bundle_files,
 )
+from model_plans import FASTER_WHISPER_PLAN
 
 
 def dockerfile_content():
@@ -32,9 +36,8 @@ def dockerfile_content():
     ])
 
 
-def node_manifest_content():
-    return json.dumps(
-        {
+def node_manifest_content(implementation_plan=None):
+    manifest = {
             "data_contract": {
                 "inputs": [
                     {
@@ -50,10 +53,11 @@ def node_manifest_content():
                         "format": "wav",
                     },
                 ]
-            }
-        },
-        indent=2,
-    ) + "\n"
+            },
+        }
+    if implementation_plan:
+        manifest["implementation_plan"] = implementation_plan
+    return json.dumps(manifest, indent=2) + "\n"
 
 
 def codegen_payload():
@@ -311,15 +315,15 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         )
         self.assertNotIn("find /workspace/nodes", by_path["dagster/Dockerfile"])
         self.assertIn("INLUMEN_ACCELERATOR", by_path["docker-compose.yml"])
-        self.assertIn("inlumen_model_cache", by_path["docker-compose.yml"])
-        self.assertIn(
-            'name: "${INLUMEN_MODEL_CACHE_VOLUME:-inlumen_model_cache}"',
-            by_path["docker-compose.yml"],
-        )
-        self.assertIn('HF_TOKEN: "${HF_TOKEN:-}"', by_path["docker-compose.yml"])
+        self.assertNotIn("model-prefetch:", by_path["docker-compose.yml"])
+        self.assertNotIn("inlumen_model_store", by_path["docker-compose.yml"])
         self.assertIn("dagster-postgres:", by_path["docker-compose.yml"])
+        self.assertIn("dagster-code:", by_path["docker-compose.yml"])
         self.assertIn("dagster-webserver:", by_path["docker-compose.yml"])
         self.assertIn("dagster-daemon:", by_path["docker-compose.yml"])
+        self.assertIn("internal: true", by_path["docker-compose.yml"])
+        self.assertIn('HF_HUB_OFFLINE: "1"', by_path["docker-compose.yml"])
+        self.assertIn("dagster/workspace.yaml", by_path)
         self.assertIn("dagster_postgres_data:", by_path["docker-compose.yml"])
         self.assertIn(
             "dagster_postgres.run_storage",
@@ -359,6 +363,125 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             base64.b64decode(binary_file["content"]),
         )
         self.assertEqual("README.md", bundle["manifest"]["readme"])
+
+    def test_reviewed_models_are_prefetched_and_runtime_is_local_only(self):
+        payload = codegen_payload()
+        payload["deployment_files"] = [
+            {
+                **item,
+                "content": node_manifest_content(deepcopy(FASTER_WHISPER_PLAN)),
+            }
+            if item["flow_id"] == "2" and item["filename"] == "node-manifest.json"
+            else item
+            for item in payload["deployment_files"]
+        ]
+
+        bundle = build_deployment_bundle_files(
+            self.graph(),
+            payload,
+            targets={"argo": False, "dagster": True},
+        )
+        by_path = {item["path"]: item["content"] for item in bundle["files"]}
+        compose = by_path["docker-compose.yml"]
+
+        self.assertIn("model-prefetch:", compose)
+        self.assertIn("condition: service_completed_successfully", compose)
+        self.assertIn("inlumen_model_store:/models", compose)
+        self.assertIn("inlumen_model_store:/models:ro", compose)
+        self.assertIn('HF_HUB_DISABLE_XET: "${HF_HUB_DISABLE_XET:-1}"', compose)
+        self.assertIn('HF_TOKEN: "${HF_TOKEN:-}"', compose)
+        self.assertIn("model-download:", compose)
+        self.assertIn("dagster/model-requirements.json", by_path)
+        self.assertIn("dagster/model_prefetch.py", by_path)
+        requirements = json.loads(by_path["dagster/model-requirements.json"])
+        self.assertEqual("inlumen.model-requirements@1", requirements["schema_version"])
+        self.assertEqual("faster-whisper", requirements["models"][0]["adapter_id"])
+        namespace = {}
+        exec(
+            compile(by_path["dagster/model_prefetch.py"], "model_prefetch.py", "exec"),
+            namespace,
+        )
+        with patch.dict(
+            "os.environ",
+            {
+                "INLUMEN_ACCELERATOR": "cpu",
+                "INLUMEN_ASR_DEVICE": "auto",
+                "INLUMEN_ASR_PROFILE": "auto",
+            },
+            clear=False,
+        ):
+            selected = namespace["_selected_specs"](requirements)
+        self.assertEqual("Systran/faster-whisper-medium", selected[0]["model_id"])
+        with patch.dict(
+            "os.environ",
+            {"INLUMEN_ASR_PROFILE": "accuracy"},
+            clear=False,
+        ):
+            selected = namespace["_selected_specs"](requirements)
+        self.assertEqual("Systran/faster-whisper-large-v3", selected[0]["model_id"])
+        self.assertIn("_snapshot_integrity", by_path["dagster/model_prefetch.py"])
+        self.assertIn("tree_sha256", by_path["dagster/model_prefetch.py"])
+        self.assertEqual(1, bundle["manifest"]["dagster"]["model_artifact_count"])
+
+    def test_model_prefetch_hashes_once_and_reuses_verified_cache(self):
+        calls = []
+        namespace = {}
+        exec(compile(_model_prefetch_source(), "model_prefetch.py", "exec"), namespace)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "models"
+            requirements_path = Path(tmp) / "model-requirements.json"
+            requirements_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "inlumen.model-requirements@1",
+                        "models": [
+                            {
+                                "adapter_id": "test-adapter",
+                                "model_id": "reviewed/model",
+                                "model_revision": "0123456789abcdef",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_snapshot_download(**kwargs):
+                calls.append(kwargs)
+                snapshot = Path(kwargs["cache_dir"]) / "snapshot"
+                snapshot.mkdir(parents=True, exist_ok=True)
+                (snapshot / "model.bin").write_bytes(b"verified model bytes")
+                (snapshot / "config.json").write_text("{}", encoding="utf-8")
+                return str(snapshot)
+
+            fake_hub = types.SimpleNamespace(
+                snapshot_download=fake_snapshot_download
+            )
+            environment = {
+                "INLUMEN_MODEL_ROOT": str(root),
+                "INLUMEN_MODEL_REQUIREMENTS": str(requirements_path),
+            }
+            with patch.dict(sys.modules, {"huggingface_hub": fake_hub}), patch.dict(
+                "os.environ", environment, clear=False
+            ):
+                namespace["main"]()
+                namespace["main"]()
+
+            self.assertEqual(1, len(calls))
+            spec_sha256 = hashlib.sha256(
+                b"reviewed/model@0123456789abcdef"
+            ).hexdigest()
+            artifact_dir = root / "artifacts" / spec_sha256
+            manifest_path = artifact_dir / "inlumen-model-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual("inlumen.model-artifact@1", manifest["schema_version"])
+            self.assertEqual(64, len(manifest["tree_sha256"]))
+            self.assertEqual(2, len(manifest["files"]))
+            self.assertEqual(
+                hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+                (artifact_dir / "VERIFIED").read_text(encoding="utf-8").strip(),
+            )
 
     def test_explicit_multimodal_inputs_are_separate_from_runtime_files(self):
         payload = codegen_payload()

@@ -1958,6 +1958,7 @@ def _dagster_readme(
     asset_names: Sequence[str],
     has_sample_inputs: bool,
     bundle_layout: bool = False,
+    has_model_requirements: bool = False,
 ) -> str:
     input_dir = "inputs" if bundle_layout else "storage/inputs"
     input_manifest = f"{input_dir}/input_manifest.json"
@@ -1971,13 +1972,23 @@ def _dagster_readme(
         "docker compose up\n"
         "```\n\n"
         "From the exported bundle root, the compose file builds the generated Dagster image, "
-        "starts the Dagster webserver and daemon with PostgreSQL-backed storage, exposes "
+        "starts the Dagster webserver, daemon, and isolated code service with PostgreSQL-backed storage, exposes "
         "the UI on port `3000`, and writes materialized task outputs to `outputs/`."
         if bundle_layout
         else "```bash\n"
         "pip install -e .\n"
         "dagster dev -m inlumen_dagster_project.definitions\n"
         "```"
+    )
+    model_note = (
+        "\n\nBefore Dagster starts, the generated `model-prefetch` service acquires "
+        "each reviewed model revision into the persistent `inlumen_model_store` "
+        "volume, computes a SHA-256 tree manifest, and exits successfully. The "
+        "Dagster code service mounts that store read-only and runs model adapters "
+        "with external model access disabled. Set `HF_TOKEN` in the launching "
+        "environment for authenticated acquisition."
+        if has_model_requirements
+        else ""
     )
     return f"""# InLumen Dagster Deployment
 
@@ -1999,6 +2010,7 @@ The reusable component in `src/inlumen_dagster_project/components/shell_command.
 - `INLUMEN_CONTEXT_PATH`
 
 {sample_note}
+{model_note}
 """
 
 
@@ -2072,6 +2084,308 @@ def _parse_requirements_for_dagster_project(content: str) -> List[str]:
         if line:
             requirements.append(line)
     return requirements
+
+
+def _model_requirements_for_dagster(
+    steps: Sequence[dict],
+    dockerfiles_payload: Any,
+) -> dict:
+    models: List[dict] = []
+    seen: set[Tuple[str, str, str]] = set()
+    for step in steps:
+        flow_id = _clean_string(step.get("flow_id"))
+        manifest_content = _deployment_file_content(
+            dockerfiles_payload,
+            flow_id,
+            "node-manifest.json",
+        )
+        manifest = _json_object(manifest_content)
+        plan = (
+            manifest.get("implementation_plan")
+            if isinstance(manifest.get("implementation_plan"), dict)
+            else {}
+        )
+        artifact_policy = (
+            plan.get("artifact_policy")
+            if isinstance(plan.get("artifact_policy"), dict)
+            else {}
+        )
+        resolution = (
+            plan.get("resolution")
+            if isinstance(plan.get("resolution"), dict)
+            else {}
+        )
+        model_id = _clean_string(plan.get("model_id"))
+        model_revision = _clean_string(plan.get("model_revision"))
+        if not (
+            model_id
+            and model_revision
+            and plan.get("execution_profile") == "trusted_heavy_model"
+            and resolution.get("status") == "resolved"
+            and artifact_policy.get("schema_version")
+            == "inlumen.model-artifact-policy@1"
+            and artifact_policy.get("acquisition") == "deployment-preflight"
+            and artifact_policy.get("runtime_access") == "verified-local-only"
+        ):
+            continue
+        adapter_id = _clean_string(plan.get("adapter_id"))
+        key = (adapter_id, model_id, model_revision)
+        if key in seen:
+            continue
+        seen.add(key)
+        variants = (
+            plan.get("model_variants")
+            if isinstance(plan.get("model_variants"), dict)
+            else {}
+        )
+        runtime_selection = (
+            plan.get("runtime_selection")
+            if isinstance(plan.get("runtime_selection"), dict)
+            else {}
+        )
+        models.append(
+            {
+                "flow_id": flow_id,
+                "adapter_id": adapter_id,
+                "model_id": model_id,
+                "model_revision": model_revision,
+                "model_variants": variants,
+                "runtime_selection": runtime_selection,
+                "profile_env": (
+                    "INLUMEN_ASR_PROFILE"
+                    if adapter_id == "faster-whisper" and variants
+                    else ""
+                ),
+                "device_env": (
+                    "INLUMEN_ASR_DEVICE"
+                    if adapter_id == "faster-whisper" and variants
+                    else ""
+                ),
+                "artifact_policy": artifact_policy,
+            }
+        )
+    return {
+        "schema_version": "inlumen.model-requirements@1",
+        "models": models,
+    }
+
+
+def _model_prefetch_source() -> str:
+    return '''from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+
+MODEL_MANIFEST_SCHEMA = "inlumen.model-artifact@1"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _snapshot_integrity(snapshot: Path) -> tuple[list[dict], str]:
+    files = []
+    tree = hashlib.sha256()
+    for path in sorted(snapshot.rglob("*"), key=lambda item: item.as_posix()):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(snapshot).as_posix()
+        size = path.stat().st_size
+        sha256 = _sha256_file(path)
+        files.append({"path": relative, "size_bytes": size, "sha256": sha256})
+        tree.update(f"{sha256} {size} {relative}\\n".encode("utf-8"))
+    if not files:
+        raise RuntimeError(f"Downloaded model snapshot is empty: {snapshot}")
+    return files, tree.hexdigest()
+
+
+def _safe_snapshot(model_root: Path, relative_path: str) -> Path:
+    candidate = Path(relative_path)
+    if not relative_path or candidate.is_absolute():
+        raise RuntimeError("Model manifest contains an unsafe snapshot path.")
+    snapshot = (model_root / candidate).resolve()
+    try:
+        snapshot.relative_to(model_root)
+    except ValueError as exc:
+        raise RuntimeError("Model snapshot escapes the configured model root.") from exc
+    if not snapshot.is_dir():
+        raise RuntimeError(f"Model snapshot is missing: {snapshot}")
+    return snapshot
+
+
+def _existing_verified_artifact(
+    model_root: Path,
+    model_id: str,
+    revision: str,
+    spec_sha256: str,
+) -> Path | None:
+    artifact_dir = model_root / "artifacts" / spec_sha256
+    manifest_path = artifact_dir / "inlumen-model-manifest.json"
+    verified_path = artifact_dir / "VERIFIED"
+    if not manifest_path.is_file() or not verified_path.is_file():
+        return None
+    manifest_bytes = manifest_path.read_bytes()
+    if verified_path.read_text(encoding="utf-8").strip() != hashlib.sha256(
+        manifest_bytes
+    ).hexdigest():
+        return None
+    manifest = json.loads(manifest_bytes.decode("utf-8"))
+    if (
+        manifest.get("schema_version") != MODEL_MANIFEST_SCHEMA
+        or manifest.get("model_id") != model_id
+        or manifest.get("model_revision") != revision
+        or manifest.get("spec_sha256") != spec_sha256
+    ):
+        return None
+    snapshot = _safe_snapshot(model_root, str(manifest.get("snapshot_path") or ""))
+    if str(os.getenv("INLUMEN_MODEL_VERIFY_ON_START") or "manifest").lower() == "full":
+        _, tree_sha256 = _snapshot_integrity(snapshot)
+        if tree_sha256 != manifest.get("tree_sha256"):
+            return None
+    return snapshot
+
+
+def _selected_specs(requirements: dict) -> list[dict]:
+    selected = {}
+    accelerator = str(os.getenv("INLUMEN_ACCELERATOR") or "cpu").lower()
+    for requirement in requirements.get("models") or []:
+        if not isinstance(requirement, dict):
+            continue
+        model_id = str(requirement.get("model_id") or "").strip()
+        revision = str(requirement.get("model_revision") or "").strip()
+        variants = requirement.get("model_variants") or {}
+        if isinstance(variants, dict) and variants:
+            profile_env = str(requirement.get("profile_env") or "")
+            requested_profile = str(
+                os.getenv(profile_env) if profile_env else ""
+            ).strip().lower()
+            runtime_selection = requirement.get("runtime_selection") or {}
+            if not requested_profile:
+                requested_profile = str(
+                    runtime_selection.get("default_profile") or "auto"
+                ).lower()
+            if requested_profile == "auto":
+                device_env = str(requirement.get("device_env") or "")
+                device = str(os.getenv(device_env) if device_env else "").lower()
+                if not device or device == "auto":
+                    device = "cuda" if accelerator == "gpu" else "cpu"
+                requested_profile = str(
+                    (runtime_selection.get("auto_profile_by_device") or {}).get(
+                        device,
+                        "accuracy",
+                    )
+                ).lower()
+            if requested_profile not in variants:
+                raise RuntimeError(
+                    f"Unsupported model profile {requested_profile!r} for "
+                    f"{requirement.get('adapter_id') or model_id}."
+                )
+            selected_variant = variants[requested_profile]
+            model_id = str(selected_variant.get("model_id") or "").strip()
+            revision = str(selected_variant.get("model_revision") or "").strip()
+        if not model_id or not revision:
+            raise RuntimeError("Reviewed model requirement is missing id or revision.")
+        selected[f"{model_id}@{revision}"] = {
+            "model_id": model_id,
+            "model_revision": revision,
+        }
+    return [selected[key] for key in sorted(selected)]
+
+
+def _acquire(model_root: Path, model_id: str, revision: str) -> Path:
+    spec_sha256 = hashlib.sha256(f"{model_id}@{revision}".encode("utf-8")).hexdigest()
+    existing = _existing_verified_artifact(
+        model_root,
+        model_id,
+        revision,
+        spec_sha256,
+    )
+    if existing is not None:
+        print(f"[inlumen:model-prefetch] verified cache hit {model_id}@{revision}", flush=True)
+        return existing
+
+    from huggingface_hub import snapshot_download
+
+    print(f"[inlumen:model-prefetch] downloading {model_id}@{revision}", flush=True)
+    snapshot = Path(
+        snapshot_download(
+            repo_id=model_id,
+            revision=revision,
+            cache_dir=str(model_root / "huggingface"),
+            token=os.getenv("HF_TOKEN") or None,
+        )
+    ).resolve()
+    try:
+        relative_snapshot = snapshot.relative_to(model_root).as_posix()
+    except ValueError as exc:
+        raise RuntimeError("Downloaded model snapshot is outside the model root.") from exc
+    files, tree_sha256 = _snapshot_integrity(snapshot)
+    manifest = {
+        "schema_version": MODEL_MANIFEST_SCHEMA,
+        "model_id": model_id,
+        "model_revision": revision,
+        "spec_sha256": spec_sha256,
+        "snapshot_path": relative_snapshot,
+        "tree_sha256": tree_sha256,
+        "files": files,
+    }
+    artifact_dir = model_root / "artifacts" / spec_sha256
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = artifact_dir / "inlumen-model-manifest.json"
+    temporary_manifest = artifact_dir / "inlumen-model-manifest.json.tmp"
+    manifest_bytes = (
+        json.dumps(manifest, indent=2, sort_keys=True) + "\\n"
+    ).encode("utf-8")
+    temporary_manifest.write_bytes(manifest_bytes)
+    temporary_manifest.replace(manifest_path)
+    temporary_verified = artifact_dir / "VERIFIED.tmp"
+    temporary_verified.write_text(
+        hashlib.sha256(manifest_bytes).hexdigest() + "\\n",
+        encoding="utf-8",
+    )
+    temporary_verified.replace(artifact_dir / "VERIFIED")
+    print(
+        f"[inlumen:model-prefetch] verified {model_id}@{revision} "
+        f"tree_sha256={tree_sha256}",
+        flush=True,
+    )
+    return snapshot
+
+
+def main() -> None:
+    model_root = Path(os.getenv("INLUMEN_MODEL_ROOT") or "/models").resolve()
+    model_root.mkdir(parents=True, exist_ok=True)
+    requirements_path = Path(os.environ["INLUMEN_MODEL_REQUIREMENTS"])
+    requirements = json.loads(requirements_path.read_text(encoding="utf-8"))
+    if requirements.get("schema_version") != "inlumen.model-requirements@1":
+        raise RuntimeError("Unsupported InLUMEN model requirements schema.")
+    specs = _selected_specs(requirements)
+    for spec in specs:
+        _acquire(model_root, spec["model_id"], spec["model_revision"])
+    print(
+        f"[inlumen:model-prefetch] ready ({len(specs)} model artifact(s))",
+        flush=True,
+    )
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def _dagster_workspace_content() -> str:
+    return """load_from:
+  - grpc_server:
+      host: dagster-code
+      port: 4000
+      location_name: inlumen_dagster_project.definitions
+"""
 
 
 def _dagster_dockerfile_content(*, bundle_layout: bool = False) -> str:
@@ -2179,8 +2493,56 @@ def _dagster_compose_content(
     output_mount: str,
     input_mount: str,
     dagster_home: str,
+    workspace_path: str,
+    model_prefetch_script: str,
+    model_requirements_path: str,
+    has_model_requirements: bool,
 ) -> str:
     input_volume_line = f"  - {input_mount}\n" if input_mount else ""
+    model_volume_line = (
+        "  - inlumen_model_store:/models:ro\n"
+        if has_model_requirements
+        else ""
+    )
+    model_prefetch_service = ""
+    model_prefetch_dependency = ""
+    model_volume_declaration = ""
+    model_download_network = ""
+    if has_model_requirements:
+        model_prefetch_dependency = """      model-prefetch:
+        condition: service_completed_successfully
+"""
+        model_prefetch_service = f"""
+  model-prefetch:
+    build: *dagster-build
+    command:
+      - python
+      - {model_prefetch_script}
+    init: true
+    restart: "no"
+    environment:
+      HF_HOME: /models/huggingface
+      HF_TOKEN: "${{HF_TOKEN:-}}"
+      HF_HUB_ETAG_TIMEOUT: "${{HF_HUB_ETAG_TIMEOUT:-30}}"
+      HF_HUB_DOWNLOAD_TIMEOUT: "${{HF_HUB_DOWNLOAD_TIMEOUT:-600}}"
+      HF_HUB_DISABLE_XET: "${{HF_HUB_DISABLE_XET:-1}}"
+      INLUMEN_ACCELERATOR: "${{INLUMEN_ACCELERATOR:-cpu}}"
+      INLUMEN_ASR_DEVICE: "${{INLUMEN_ASR_DEVICE:-auto}}"
+      INLUMEN_ASR_PROFILE: "${{INLUMEN_ASR_PROFILE:-auto}}"
+      INLUMEN_MODEL_ROOT: /models
+      INLUMEN_MODEL_REQUIREMENTS: {model_requirements_path}
+      INLUMEN_MODEL_VERIFY_ON_START: "${{INLUMEN_MODEL_VERIFY_ON_START:-manifest}}"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - inlumen_model_store:/models
+    networks:
+      - model-download
+"""
+        model_volume_declaration = """  inlumen_model_store:
+    name: "${INLUMEN_MODEL_STORE_VOLUME:-inlumen_model_store}"
+"""
+        model_download_network = """  model-download:
+"""
     return f"""x-dagster-build: &dagster-build
   context: {build_context}
   dockerfile: {dockerfile}
@@ -2194,10 +2556,11 @@ x-dagster-environment: &dagster-environment
   DAGSTER_POSTGRES_USER: "${{DAGSTER_POSTGRES_USER:-dagster}}"
   DAGSTER_POSTGRES_PASSWORD: "${{DAGSTER_POSTGRES_PASSWORD:-dagster}}"
   DAGSTER_POSTGRES_DB: "${{DAGSTER_POSTGRES_DB:-dagster}}"
-  HF_HOME: /model-cache
-  HF_TOKEN: "${{HF_TOKEN:-}}"
-  HF_HUB_ETAG_TIMEOUT: "${{HF_HUB_ETAG_TIMEOUT:-30}}"
-  HF_HUB_DOWNLOAD_TIMEOUT: "${{HF_HUB_DOWNLOAD_TIMEOUT:-120}}"
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  INLUMEN_ACCELERATOR: "${{INLUMEN_ACCELERATOR:-cpu}}"
+  INLUMEN_MODEL_ROOT: /models
+  INLUMEN_ASR_DEVICE: "${{INLUMEN_ASR_DEVICE:-auto}}"
   INLUMEN_ASR_PROFILE: "${{INLUMEN_ASR_PROFILE:-auto}}"
   INLUMEN_ASR_CPU_THREADS: "${{INLUMEN_ASR_CPU_THREADS:-2}}"
   INLUMEN_ASR_NUM_WORKERS: "${{INLUMEN_ASR_NUM_WORKERS:-1}}"
@@ -2206,7 +2569,7 @@ x-dagster-environment: &dagster-environment
 x-dagster-volumes: &dagster-volumes
   - {output_mount}
 {input_volume_line}\
-  - inlumen_model_cache:/model-cache
+{model_volume_line}\
   - dagster_compute_logs:{dagster_home}/storage
 
 services:
@@ -2224,13 +2587,46 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
+    networks:
+      - orchestration
+{model_prefetch_service}
+
+  dagster-code:
+    build: *dagster-build
+    command:
+      - dagster
+      - api
+      - grpc
+      - -m
+      - inlumen_dagster_project.definitions
+      - -h
+      - 0.0.0.0
+      - -p
+      - "4000"
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      dagster-postgres:
+        condition: service_healthy
+{model_prefetch_dependency}\
+    volumes: *dagster-volumes
+    environment: *dagster-environment
+    networks:
+      - orchestration
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 4000), timeout=3).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
 
   dagster-webserver:
     build: *dagster-build
     command:
       - dagster-webserver
-      - -m
-      - inlumen_dagster_project.definitions
+      - -w
+      - {workspace_path}
       - -h
       - 0.0.0.0
       - -p
@@ -2241,10 +2637,15 @@ services:
     depends_on:
       dagster-postgres:
         condition: service_healthy
+      dagster-code:
+        condition: service_healthy
     ports:
       - "3000:3000"
     volumes: *dagster-volumes
     environment: *dagster-environment
+    networks:
+      - orchestration
+      - ui
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3000', timeout=3)"]
       interval: 10s
@@ -2257,26 +2658,39 @@ services:
     command:
       - dagster-daemon
       - run
-      - -m
-      - inlumen_dagster_project.definitions
+      - -w
+      - {workspace_path}
     init: true
     restart: unless-stopped
     stop_grace_period: 30s
     depends_on:
       dagster-postgres:
         condition: service_healthy
+      dagster-code:
+        condition: service_healthy
     volumes: *dagster-volumes
     environment: *dagster-environment
+    networks:
+      - orchestration
 
 volumes:
   dagster_postgres_data:
   dagster_compute_logs:
-  inlumen_model_cache:
-    name: "${{INLUMEN_MODEL_CACHE_VOLUME:-inlumen_model_cache}}"
+{model_volume_declaration}\
+
+networks:
+  orchestration:
+    internal: true
+  ui:
+{model_download_network}\
 """
 
 
-def _dagster_docker_compose_content(*, bundle_layout: bool = False) -> str:
+def _dagster_docker_compose_content(
+    *,
+    bundle_layout: bool = False,
+    has_model_requirements: bool = False,
+) -> str:
     if bundle_layout:
         return _dagster_compose_content(
             build_context="..",
@@ -2284,6 +2698,10 @@ def _dagster_docker_compose_content(*, bundle_layout: bool = False) -> str:
             output_mount="../outputs:/workspace/outputs",
             input_mount="../inputs:/workspace/inputs:ro",
             dagster_home="/workspace/dagster/.dagster_home",
+            workspace_path="/workspace/dagster/workspace.yaml",
+            model_prefetch_script="/workspace/dagster/model_prefetch.py",
+            model_requirements_path="/workspace/dagster/model-requirements.json",
+            has_model_requirements=has_model_requirements,
         )
     return _dagster_compose_content(
         build_context=".",
@@ -2291,22 +2709,46 @@ def _dagster_docker_compose_content(*, bundle_layout: bool = False) -> str:
         output_mount="./storage:/app/storage",
         input_mount="",
         dagster_home="/app/.dagster_home",
+        workspace_path="/app/workspace.yaml",
+        model_prefetch_script="/app/model_prefetch.py",
+        model_requirements_path="/app/model-requirements.json",
+        has_model_requirements=has_model_requirements,
     )
 
 
-def _bundle_root_docker_compose_content() -> str:
+def _bundle_root_docker_compose_content(
+    *,
+    has_model_requirements: bool = False,
+) -> str:
     return _dagster_compose_content(
         build_context=".",
         dockerfile="dagster/Dockerfile",
         output_mount="./outputs:/workspace/outputs",
         input_mount="./inputs:/workspace/inputs:ro",
         dagster_home="/workspace/dagster/.dagster_home",
+        workspace_path="/workspace/dagster/workspace.yaml",
+        model_prefetch_script="/workspace/dagster/model_prefetch.py",
+        model_requirements_path="/workspace/dagster/model-requirements.json",
+        has_model_requirements=has_model_requirements,
     )
 
 
-def _deployment_bundle_readme_content(*, targets: Dict[str, bool]) -> str:
+def _deployment_bundle_readme_content(
+    *,
+    targets: Dict[str, bool],
+    has_model_requirements: bool = False,
+) -> str:
     dagster_section = ""
     if targets.get("dagster"):
+        model_note = (
+            " A generated model-prefetch service acquires reviewed model revisions "
+            "before Dagster starts, verifies a SHA-256 tree manifest, and stores them "
+            "in the persistent `inlumen_model_store` volume. Runtime model adapters "
+            "load only from that read-only local store with Hub access disabled. Set "
+            "`HF_TOKEN` before `docker compose up` for authenticated acquisition."
+            if has_model_requirements
+            else ""
+        )
         dagster_section = f"""
 ## Dagster
 
@@ -2316,7 +2758,7 @@ Run the exported bundle directly from this directory:
 docker compose up
 ```
 
-Then open Dagster at `http://localhost:3000`. The generated image pins Dagster to `{DAGSTER_PINNED_VERSION}`, installs one consolidated dependency set, mounts `outputs/`, and executes node scripts through the manifest contract. The Compose topology separates the webserver and daemon and uses PostgreSQL for concurrent orchestration writes. CPU-only PyTorch is the default; set `INLUMEN_ACCELERATOR=gpu` only for a GPU-capable runtime. ASR defaults to `INLUMEN_ASR_PROFILE=auto`, which selects the pinned multilingual `balanced` model on CPU and the pinned `accuracy` model on CUDA. Set the profile explicitly to `accuracy`, `balanced`, or `fast` when the runtime trade-off is known. Model downloads are retained in the shared `inlumen_model_cache` volume across regenerated bundles. A first run may download several gigabytes; subsequent runs reuse the cache and node logs report download, load, and inference progress.
+Then open Dagster at `http://localhost:3000`. The generated image pins Dagster to `{DAGSTER_PINNED_VERSION}`, installs one consolidated dependency set, mounts `outputs/`, and executes node scripts through the manifest contract. The Compose topology separates the webserver, daemon, and user-code execution service and uses PostgreSQL for concurrent orchestration writes. CPU-only PyTorch is the default; set `INLUMEN_ACCELERATOR=gpu` only for a GPU-capable runtime. ASR defaults to `INLUMEN_ASR_PROFILE=auto`, which selects the pinned multilingual `balanced` model on CPU and the pinned `accuracy` model on CUDA. Set the profile explicitly to `accuracy`, `balanced`, or `fast` when the runtime trade-off is known.{model_note}
 """
 
     argo_section = ""
@@ -2617,6 +3059,11 @@ def build_dagster_project_files(
 
     steps_by_id = {step["flow_id"]: step for step in steps}
     asset_names = _dagster_asset_names([steps_by_id[step_id] for step_id in ordered_ids])
+    model_requirements = _model_requirements_for_dagster(
+        [steps_by_id[step_id] for step_id in ordered_ids],
+        dockerfiles_payload,
+    )
+    has_model_requirements = bool(model_requirements["models"])
     output_files: List[dict] = []
     aggregate_requirements: List[str] = []
     project_dir = _sanitize_fragment(project_dir, "dagster_project")
@@ -2771,7 +3218,10 @@ def build_dagster_project_files(
             ),
             _dagster_file(
                 f"{project_dir}/docker-compose.yml",
-                _dagster_docker_compose_content(bundle_layout=bundle_layout),
+                _dagster_docker_compose_content(
+                    bundle_layout=bundle_layout,
+                    has_model_requirements=has_model_requirements,
+                ),
                 "dagster-project",
             ),
             _dagster_file(
@@ -2780,7 +3230,13 @@ def build_dagster_project_files(
                     asset_names=asset_name_list,
                     has_sample_inputs=bool(root_input_files),
                     bundle_layout=bundle_layout,
+                    has_model_requirements=has_model_requirements,
                 ),
+                "dagster-project",
+            ),
+            _dagster_file(
+                f"{project_dir}/workspace.yaml",
+                _dagster_workspace_content(),
                 "dagster-project",
             ),
             _dagster_file(
@@ -2816,6 +3272,7 @@ def build_dagster_project_files(
                         "asset_order": asset_name_list,
                         "source": "inlumen deployment artifacts",
                         "bundle_layout": bundle_layout,
+                        "model_artifact_count": len(model_requirements["models"]),
                     },
                     indent=2,
                 )
@@ -2824,6 +3281,21 @@ def build_dagster_project_files(
             ),
         ]
     )
+    if has_model_requirements:
+        output_files.extend(
+            [
+                _dagster_file(
+                    f"{project_dir}/model-requirements.json",
+                    json.dumps(model_requirements, indent=2, sort_keys=True) + "\n",
+                    "dagster-model-requirements",
+                ),
+                _dagster_file(
+                    f"{project_dir}/model_prefetch.py",
+                    _model_prefetch_source(),
+                    "dagster-model-prefetch",
+                ),
+            ]
+        )
     return output_files
 
 
@@ -3009,6 +3481,11 @@ def build_deployment_bundle_files(
         )
 
     dagster_project_path = None
+    model_requirements = _model_requirements_for_dagster(
+        [steps_by_id[step_id] for step_id in ordered_ids],
+        dockerfiles_payload,
+    )
+    has_model_requirements = bool(model_requirements["models"])
     if selected_targets["dagster"]:
         dagster_project_path = "dagster"
         bundle_files.extend(
@@ -3023,7 +3500,9 @@ def build_deployment_bundle_files(
         bundle_files.append(
             _bundle_file(
                 "docker-compose.yml",
-                _bundle_root_docker_compose_content(),
+                _bundle_root_docker_compose_content(
+                    has_model_requirements=has_model_requirements,
+                ),
                 role="dagster-compose",
                 content_type="application/x-yaml;charset=utf-8",
             )
@@ -3032,7 +3511,10 @@ def build_deployment_bundle_files(
     bundle_files.append(
         _bundle_file(
             "README.md",
-            _deployment_bundle_readme_content(targets=selected_targets),
+            _deployment_bundle_readme_content(
+                targets=selected_targets,
+                has_model_requirements=has_model_requirements,
+            ),
             role="bundle-readme",
             content_type="text/markdown;charset=utf-8",
         )
@@ -3061,6 +3543,7 @@ def build_deployment_bundle_files(
                 "compose": "docker-compose.yml",
                 "project_compose": "dagster/docker-compose.yml",
                 "dagster_version": DAGSTER_PINNED_VERSION,
+                "model_artifact_count": len(model_requirements["models"]),
             }
             if dagster_project_path
             else None
