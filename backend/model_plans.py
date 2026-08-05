@@ -159,6 +159,7 @@ def resolve_implementation_plan(
     """Resolve recognized model tasks without rejecting unknown modalities."""
     candidate = dict(plan) if isinstance(plan, dict) else {}
     node_text = " ".join((str(label or ""), str(description or ""))).lower()
+    responsibility_text = str(label or description or "").strip().lower()
     task_text = " ".join(
         str(value or "")
         for value in (
@@ -175,10 +176,17 @@ def resolve_implementation_plan(
             return _proposed_custom_plan(candidate)
         return _resolve_classical_ml_plan(candidate)
 
-    if _is_asr_task(task_text):
+    if _is_report_task(responsibility_text):
+        return _without_mismatched_trusted_adapter(candidate)
+    if _is_sentiment_task(responsibility_text):
+        return _merge_runtime_preferences(ROBERTA_SENTIMENT_PLAN, candidate)
+    if _is_asr_task(responsibility_text):
         return _merge_runtime_preferences(FASTER_WHISPER_PLAN, candidate)
+
     if _is_sentiment_task(task_text):
         return _merge_runtime_preferences(ROBERTA_SENTIMENT_PLAN, candidate)
+    if _is_asr_task(task_text):
+        return _merge_runtime_preferences(FASTER_WHISPER_PLAN, candidate)
     return _proposed_custom_plan(candidate)
 
 
@@ -264,15 +272,36 @@ def _is_asr_task(text: str) -> bool:
         for token in (
             "speech-to-text",
             "speech to text",
-            "transcri",
             "automatic-speech-recognition",
+            "automatic speech recognition",
             "whisper",
+            "audio transcription",
+            "speech transcription",
+            "transcribe audio",
+            "transcribe speech",
+            "transcribe recording",
+            "transcription model",
+            "transcription inference",
         )
     )
 
 
 def _is_sentiment_task(text: str) -> bool:
     return "sentiment" in text or "twitter-roberta-base-sentiment" in text
+
+
+def _is_report_task(text: str) -> bool:
+    return any(token in text for token in ("report", "result compilation"))
+
+
+def _without_mismatched_trusted_adapter(candidate: dict[str, Any]) -> dict[str, Any]:
+    if (
+        candidate.get("schema_version") == IMPLEMENTATION_PLAN_SCHEMA
+        and str(candidate.get("adapter_id") or "")
+        in {"faster-whisper", "transformers-roberta-sentiment"}
+    ):
+        return {}
+    return _proposed_custom_plan(candidate)
 
 
 def _merge_runtime_preferences(

@@ -6,10 +6,29 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import neo4j_api  # noqa: E402
-from model_plans import resolve_implementation_plan  # noqa: E402
+from model_plans import FASTER_WHISPER_PLAN, resolve_implementation_plan  # noqa: E402
 
 
 class ModelPlanPersistenceTest(unittest.TestCase):
+    def test_transcript_consumers_do_not_inherit_the_asr_adapter(self):
+        sentiment = resolve_implementation_plan(
+            FASTER_WHISPER_PLAN,
+            label="Transcript Sentiment Analysis",
+            description="Analyze the generated transcript.",
+        )
+        report = resolve_implementation_plan(
+            FASTER_WHISPER_PLAN,
+            label="Transcription Sentiment Report",
+            description="Compile upstream transcription and sentiment outputs.",
+        )
+
+        self.assertEqual("transformers-roberta-sentiment", sentiment["adapter_id"])
+        self.assertEqual(
+            "cardiffnlp/twitter-roberta-base-sentiment-latest",
+            sentiment["model_id"],
+        )
+        self.assertEqual({}, report)
+
     def test_tabular_model_training_replaces_unverified_neural_plan(self):
         plan = resolve_implementation_plan(
             {
