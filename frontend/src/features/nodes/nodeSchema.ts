@@ -23,6 +23,12 @@ export type GeneratedArtifact = {
     content_type?: string;
   }>;
   data_contract?: Record<string, unknown>;
+  validation_report?: {
+    status?: string;
+    errors?: string[];
+    warnings?: string[];
+    [key: string]: unknown;
+  };
   [key: string]: unknown;
 };
 

@@ -17,7 +17,7 @@ export interface ChatbotConfig {
   temperature?: number;
 }
 
-export interface LLMRequestConfig {
+export interface LLMRequestConfig extends Record<string, unknown> {
   provider: LLMProvider;
   model: string;
   base_url: string;

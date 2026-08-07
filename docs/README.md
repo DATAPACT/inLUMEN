@@ -66,6 +66,38 @@ inLUMEN's core functionality is provided by LLM-powered agents that serve as hel
 | Software GitHub Repository --> MADT4BC/LUMEN software <https://github.com/SINTEF-9012/madt-neodash> |
 | Software GitHub Repository --> inSwitch software <https://github.com/INTEND-Project/inSwitch> |
 
+## **Development and test suite**
+
+The consolidated regression suite covers backend units and gateway APIs,
+deployment bundle validation, frontend graph and configuration behavior,
+frontend lint/type/build checks, and both Docker Compose configurations.
+
+Install the test dependencies from the repository root:
+
+```bash
+# Python 3.11 or newer
+python -m pip install -r requirements-test.txt
+npm ci --prefix frontend
+```
+
+Run every check with one command:
+
+```bash
+python scripts/run_tests.py
+```
+
+During development, run a smaller part of the suite by selecting a component:
+
+```bash
+python scripts/run_tests.py --component backend
+python scripts/run_tests.py --component deployment-validation
+python scripts/run_tests.py --component frontend
+python scripts/run_tests.py --component compose
+```
+
+The same component checks run automatically for pushes to `main` and for pull
+requests through GitHub Actions.
+
 ## **How To Install**
 Tool is provided as a service.
 
