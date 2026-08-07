@@ -46,7 +46,8 @@ inLUMEN's core functionality is provided by LLM-powered agents that serve as hel
 ## **Commercial Information**
 
 | Organisation (s) | License Nature | License |
-| SINTEF | Open Source | TBD |
+|------------------|----------------|---------|
+| SINTEF | Open Source | [Apache License 2.0](../LICENSE) |
 
 ## **Expected KPIs**
 
