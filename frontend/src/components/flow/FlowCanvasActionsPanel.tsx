@@ -9,7 +9,6 @@ type FlowCanvasActionsPanelProps = {
   onUndo: () => void;
   onRedo: () => void;
   onExportJson: () => void;
-  onExportYaml: () => void;
   onImportClick: () => void;
   onImport: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onGenerateScripts: () => void;
@@ -26,7 +25,6 @@ export const FlowCanvasActionsPanel = ({
   onUndo,
   onRedo,
   onExportJson,
-  onExportYaml,
   onImportClick,
   onImport,
   onGenerateScripts,
@@ -67,10 +65,6 @@ export const FlowCanvasActionsPanel = ({
       <Button size="sm" variant="outline" onClick={onExportJson} className="flex items-center gap-1 h-7">
         <Download className="h-3.5 w-3.5" />
         JSON
-      </Button>
-      <Button size="sm" variant="outline" onClick={onExportYaml} className="flex items-center gap-1 h-7">
-        <Download className="h-3.5 w-3.5" />
-        YAML
       </Button>
       <Button
         size="sm"

@@ -30,7 +30,6 @@ import {
   fetchPipelineGraph,
   fetchPipelineUpdatedAt,
   generatePipelineScripts,
-  generatePipelineYaml,
   prepareExternalRuntimePrompt,
   restoreBackendGraphHistory,
   resumePipelineScriptGenerationRun,
@@ -46,7 +45,6 @@ import {
 import {
   createAgentGraphSnapshot,
   downloadJsonFile,
-  downloadTextFile,
   getNextNumericNodeId,
   normalizeGraph,
   type AgentGraphSnapshot,
@@ -1046,25 +1044,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     }
   };
 
-  const exportFlowYAML = async () => {
-    try {
-      const yamlText = await generatePipelineYaml(activeChatbotConfig);
-      downloadTextFile(
-        yamlText,
-        `ai-pipeline-${Date.now()}.yaml`,
-        "application/x-yaml;charset=utf-8",
-      );
-      toast.success("Flow exported successfully", {
-        description: "Your AI pipeline has been exported as YAML",
-      });
-    } catch (error) {
-      console.error("Error exporting flow:", error);
-      toast.error("Failed to export flow", {
-        description: "There was an error exporting your pipeline",
-      });
-    }
-  };
-
   const handleGeneratePipelineScripts = () => {
     if (isGeneratingScripts) return;
     setScriptGenerationPrompt(String(pipelinePrompt || "").trim());
@@ -1382,7 +1361,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           onUndo={() => { void undoGraphChange(); }}
           onRedo={() => { void redoGraphChange(); }}
           onExportJson={exportFlow}
-          onExportYaml={exportFlowYAML}
           onImportClick={triggerImport}
           onImport={importFlow}
           onGenerateScripts={handleGeneratePipelineScripts}
