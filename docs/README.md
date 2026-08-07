@@ -237,6 +237,14 @@ Dagster runtime disables keyboard input and stops a node after 300 seconds by
 default instead of leaving a run stuck indefinitely. Set
 `INLUMEN_NODE_TIMEOUT_SECONDS` when starting the bundle to change that limit.
 
+For registry-reviewed heavyweight models, exported Dagster bundles generate a
+separate model-prefetch service. It acquires the pinned revision before the code
+service starts, records a SHA-256 manifest in a persistent Docker volume, and
+mounts that volume read-only for node execution. The isolated Dagster code
+service then runs with Hugging Face and Transformers offline modes enabled, so a
+pipeline run cannot stall on a model-hub download. Set `HF_TOKEN` in the shell
+that launches `docker compose up`; it is used only by model prefetch.
+
 API key handling:
 - Provider API keys are entered only in the UI, kept in browser localStorage so they survive refreshes, browser restarts, and container restarts, sent to the backend only inside the specific LLM request payload, and are not saved by the backend `/api/chatbot-configs` endpoints.
 - Do not run this browser-supplied key flow over plain HTTP outside local development; terminate TLS before the backend gateway in shared or production deployments.
