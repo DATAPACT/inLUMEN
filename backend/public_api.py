@@ -1843,6 +1843,7 @@ def _ui_api_openapi_paths(
                                 "required": ["file"],
                                 "properties": {
                                     "file": {"type": "string", "format": "binary"},
+                                    "role": {"type": "string", "enum": ["code", "data"]},
                                 },
                             }
                         }
@@ -2114,6 +2115,39 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
             "properties": {"deleted_id": {"type": "string"}},
             "additionalProperties": True,
         },
+        "PipelineNodeKind": {
+            "type": "string",
+            "enum": ["source", "task", "destination", "flow", "subpipeline"],
+        },
+        "NodePort": {
+            "type": "object",
+            "required": ["id", "name", "type", "required", "description"],
+            "properties": {
+                "id": {"type": "string"},
+                "name": {"type": "string"},
+                "type": {"type": "string"},
+                "required": {"type": "boolean"},
+                "description": {"type": "string"},
+                "format": {"type": "string"},
+                "schema": {"type": "object", "additionalProperties": True},
+            },
+            "additionalProperties": False,
+        },
+        "NodePorts": {
+            "type": "object",
+            "required": ["inputs", "outputs"],
+            "properties": {
+                "inputs": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/NodePort"},
+                },
+                "outputs": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/NodePort"},
+                },
+            },
+            "additionalProperties": False,
+        },
         "ReactFlowNode": {
             "type": "object",
             "required": ["id"],
@@ -2137,6 +2171,8 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                 "id": {"type": "string"},
                 "source": {"type": "string"},
                 "target": {"type": "string"},
+                "sourceHandle": {"type": "string", "nullable": True},
+                "targetHandle": {"type": "string", "nullable": True},
             },
         },
         "ReactFlowGraph": {
@@ -2160,8 +2196,22 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                     "properties": {
                         "flow_id": {"type": "string"},
                         "label": {"type": "string"},
-                        "type": {"type": "string"},
+                        "type": {"$ref": "#/components/schemas/PipelineNodeKind"},
                         "description": {"type": "string"},
+                        "template_label": {"type": "string"},
+                        "template": {"type": "object", "additionalProperties": True},
+                        "ports": {"$ref": "#/components/schemas/NodePorts"},
+                        "param": {"type": "object", "additionalProperties": True},
+                        "secret_params": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "implementation": {
+                            "type": "object",
+                            "additionalProperties": True,
+                        },
+                        "source_config": {"type": "object", "additionalProperties": True},
+                        "subpipeline": {"type": "object", "additionalProperties": True},
                         "x": {"type": "number"},
                         "y": {"type": "number"},
                     },
@@ -2341,6 +2391,7 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                 "filename": {"type": "string"},
                 "bucket": {"type": "string"},
                 "step_id": {"type": "string"},
+                "role": {"type": "string", "enum": ["code", "data"]},
             },
             "additionalProperties": True,
         },

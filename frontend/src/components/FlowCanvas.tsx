@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
+import React, { useState, useCallback, useRef, useEffect, forwardRef, useImperativeHandle, useMemo } from 'react';
 import { ChatbotConfig } from '@/services/chatbotService';
 import ReactFlow, {
   Node,
@@ -10,12 +10,15 @@ import ReactFlow, {
   NodeChange,
   EdgeChange,
   Connection,
+  ConnectionLineType,
+  MarkerType,
   addEdge,
   applyNodeChanges,
   applyEdgeChanges,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { nodeTypes } from './NodeTypes';
+import { PortDisplayContext } from '@/features/nodes/PortDisplayContext';
 import { toast } from 'sonner';
 import { cn } from "@/lib/utils";
 import { FlowCanvasActionsPanel } from '@/components/flow/FlowCanvasActionsPanel';
@@ -50,6 +53,9 @@ import {
   type AgentGraphSnapshot,
   type NormalizedGraph,
 } from '@/features/flow/flowGraph';
+import { createProjectDocument, projectDocumentToGraph } from '@/features/flow/projectIr';
+import { validateGraph, type ValidationIssue } from '@/features/flow/flowValidation';
+import { normalizeNodePorts, normalizeType } from '@/features/nodes/nodeSchema';
 import {
   Dialog,
   DialogContent,
@@ -86,6 +92,7 @@ interface FlowCanvasProps {
   onActiveVersionChange?: (versionUid: string) => void;
   onActiveVersionNameChange?: (versionName: string) => void;
   onPipelineDescriptionChange?: (description: string) => void;
+  onDisplayModeChange?: (advanced: boolean) => void;
 }
 
 export interface FlowCanvasRef {
@@ -288,7 +295,7 @@ const getSnapshotFileRef = (file: unknown, nodeIdValue: string) => {
   if (typeof file === "string") return file;
   if (typeof File !== "undefined" && file instanceof File) return file.name;
   if (file && typeof file === "object") {
-    const entry = file as { filename?: unknown; name?: unknown; bucket?: unknown };
+    const entry = file as { filename?: unknown; name?: unknown; bucket?: unknown; role?: unknown };
     const filename = typeof entry.filename === "string"
       ? entry.filename
       : typeof entry.name === "string"
@@ -298,7 +305,8 @@ const getSnapshotFileRef = (file: unknown, nodeIdValue: string) => {
     const bucket = typeof entry.bucket === "string" && entry.bucket.trim()
       ? entry.bucket.trim()
       : `files-step-id-${nodeIdValue}`.toLowerCase();
-    return { filename, bucket };
+    const role = entry.role === "code" || entry.role === "data" ? entry.role : undefined;
+    return { filename, bucket, ...(role ? { role } : {}) };
   }
   return null;
 };
@@ -433,6 +441,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   onActiveVersionChange,
   onActiveVersionNameChange,
   onPipelineDescriptionChange,
+  onDisplayModeChange,
 }, ref) => {
   const [nodes, setNodes] = useState<Node[]>(() => {
     const savedNodes = localStorage.getItem('ai-flow-nodes');
@@ -443,6 +452,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     return savedEdges ? JSON.parse(savedEdges) : [];
   });
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
+  const [showPortDetails, setShowPortDetails] = useState(
+    () => localStorage.getItem('inlumen-show-port-details') === 'true',
+  );
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
   const lastSeenUpdatedAtRef = useRef<string | null>(null);
@@ -465,12 +477,56 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const [isCancellingScripts, setIsCancellingScripts] = useState(false);
   const generationCancelRequestedRef = useRef(false);
   const [isScriptGenerationOpen, setIsScriptGenerationOpen] = useState(false);
+  const [isValidationOpen, setIsValidationOpen] = useState(false);
   const [scriptGenerationPrompt, setScriptGenerationPrompt] = useState("");
   const [scriptGenerationMode, setScriptGenerationMode] =
     useState<PipelineScriptGenerationMode>("full");
   const [isPreparingExternalPrompt, setIsPreparingExternalPrompt] = useState(false);
   const [generationJob, setGenerationJob] = useState<PipelineGenerationJob | null>(null);
   const uploadedSampleDataAvailable = hasUploadedSampleData(nodes);
+  const designValidation = useMemo(() => validateGraph(nodes, edges), [edges, nodes]);
+  const displayedNodes = useMemo(() => nodes.map((node) => ({
+    ...node,
+    data: {
+      ...node.data,
+      validation_issues: designValidation.byNode[String(node.id)] || [],
+      connected_ports: {
+        inputs: edges
+          .filter((edge) => String(edge.target) === String(node.id) && edge.targetHandle)
+          .map((edge) => String(edge.targetHandle)),
+        outputs: edges
+          .filter((edge) => String(edge.source) === String(node.id) && edge.sourceHandle)
+          .map((edge) => String(edge.sourceHandle)),
+      },
+    },
+  })), [designValidation.byNode, edges, nodes]);
+  const displayedEdges = useMemo(() => edges.map((edge) => {
+    const issues = designValidation.issues.filter((issue) => issue.edgeId === String(edge.id || ""));
+    const hasError = issues.some((issue) => issue.severity === "error");
+    const hasWarning = issues.some((issue) => issue.severity === "warning");
+    if (!hasError && !hasWarning) return edge;
+    const color = hasError ? "#ef4444" : "#f59e0b";
+    return {
+      ...edge,
+      style: { ...edge.style, stroke: color, strokeWidth: 2.5 },
+      markerEnd: {
+        type: MarkerType.ArrowClosed,
+        width: 12,
+        height: 12,
+        color,
+      },
+    };
+  }), [designValidation.issues, edges]);
+  const validationErrors = designValidation.issues.filter((issue) => issue.severity === "error").length;
+  const validationWarnings = designValidation.issues.filter((issue) => issue.severity === "warning").length;
+
+  useEffect(() => {
+    const selectedNodeId = selectedNodeIdRef.current;
+    if (!selectedNodeId) return;
+    const refreshedSelection = displayedNodes.find((node) => node.id === selectedNodeId) || null;
+    setSelectedNode(refreshedSelection);
+    onNodeSelect(refreshedSelection, { openInspector: false });
+  }, [displayedNodes, onNodeSelect]);
 
   useEffect(() => {
     if (!uploadedSampleDataAvailable && scriptGenerationMode === "full") {
@@ -698,6 +754,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       updated_at: lastSeenUpdatedAtRef.current,
       nodes: nodes.map((node) => {
         const data = { ...(node.data || {}) };
+        delete data.file_buckets;
+        delete data.validation_issues;
+        delete data.connected_ports;
         if (Array.isArray(data.files)) {
           data.files = data.files
             .map((file) => getSnapshotFileRef(file, node.id))
@@ -829,6 +888,11 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   }, [nodes, edges]);
 
   useEffect(() => {
+    localStorage.setItem('inlumen-show-port-details', String(showPortDetails));
+    onDisplayModeChange?.(showPortDetails);
+  }, [onDisplayModeChange, showPortDetails]);
+
+  useEffect(() => {
     if (onNodesChange) onNodesChange(nodes);
   }, [nodes, onNodesChange]);
 
@@ -879,28 +943,46 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         .map((c) => c.id);
       if (removedEdgeIds.length > 0) {
         pushHistorySnapshot();
-        setEdges((eds) => {
-          const removedEdges = eds.filter((e) => removedEdgeIds.includes(e.id));
-          removedEdges.forEach((edge) => {
+        const removedEdges = edges.filter((edge) => removedEdgeIds.includes(edge.id));
+        setEdges((currentEdges) => applyEdgeChanges(changes, currentEdges));
+        markLocalWrite(5000);
+        void Promise.all(
+          removedEdges.map(async (edge) => {
             const sourceNode = nodes.find((n) => n.id === edge.source);
             const targetNode = nodes.find((n) => n.id === edge.target);
             if (!sourceNode || !targetNode) {
-              console.warn(
-                "[FlowCanvas.tsx] Could not find source/target nodes for edge removal:",
-                edge.id
-              );
-              return;
+              throw new Error(`Could not resolve the endpoints for connection ${edge.id}.`);
             }
-            markLocalWrite(800);
-            deleteEdgeFromBackend(sourceNode, targetNode);
+            await deleteEdgeFromBackend(sourceNode, targetNode, edge);
+            onRemoveEdge?.(edge.id);
+          }),
+        ).then(() => {
+          markLocalWrite(1000);
+        }).catch(async (error) => {
+          console.error("[FlowCanvas.tsx] Connection deletion failed:", error);
+          toast.error("Could not remove connection", {
+            description: error instanceof Error ? error.message : "The backend did not accept the deletion.",
           });
-          return applyEdgeChanges(changes, eds);
+          try {
+            await fetchGraphAndApply();
+          } catch (syncError) {
+            scheduleSyncRetry("Connection deletion recovery failed", syncError);
+          }
         });
         return;
       }
       setEdges((eds) => applyEdgeChanges(changes, eds));
     },
-    [nodes, markLocalWrite, onCanvasEdited, pushHistorySnapshot]
+    [
+      edges,
+      fetchGraphAndApply,
+      markLocalWrite,
+      nodes,
+      onCanvasEdited,
+      onRemoveEdge,
+      pushHistorySnapshot,
+      scheduleSyncRetry,
+    ]
   );
 
   const onConnect = useCallback(
@@ -912,7 +994,45 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         return;
       }
 
-      const duplicate = edges.some((edge) => edge.source === params.source && edge.target === params.target);
+      if (!params.sourceHandle || !params.targetHandle) {
+        toast.error("Select explicit ports", {
+          description: "Connections must link an output port to an input port.",
+        });
+        return;
+      }
+
+      const sourceNode = nodes.find((node) => node.id === params.source);
+      const targetNode = nodes.find((node) => node.id === params.target);
+      const sourcePort = sourceNode
+        ? normalizeNodePorts(sourceNode.data?.ports, normalizeType(sourceNode.data?.type)).outputs
+          .find((port) => port.id === params.sourceHandle)
+        : undefined;
+      const targetPort = targetNode
+        ? normalizeNodePorts(targetNode.data?.ports, normalizeType(targetNode.data?.type)).inputs
+          .find((port) => port.id === params.targetHandle)
+        : undefined;
+      if (!sourcePort || !targetPort) {
+        toast.error("Invalid port connection", {
+          description: "The selected source or target port no longer exists.",
+        });
+        return;
+      }
+      const sourceType = sourcePort.type.toLowerCase();
+      const targetType = targetPort.type.toLowerCase();
+      const wildcard = (value: string) => ["", "any", "unknown", "*"].includes(value);
+      if (!wildcard(sourceType) && !wildcard(targetType) && sourceType !== targetType) {
+        toast.error("Incompatible port contracts", {
+          description: `${sourcePort.name} (${sourcePort.type}) cannot connect to ${targetPort.name} (${targetPort.type}).`,
+        });
+        return;
+      }
+
+      const duplicate = edges.some((edge) =>
+        edge.source === params.source &&
+        edge.target === params.target &&
+        (edge.sourceHandle ?? null) === (params.sourceHandle ?? null) &&
+        (edge.targetHandle ?? null) === (params.targetHandle ?? null)
+      );
       if (duplicate) {
         toast("Connection already exists", { description: "This connection is already in place" });
         return;
@@ -922,14 +1042,12 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       onCanvasEdited?.();
 
       // Find the actual Node objects
-      const sourceNode = nodes.find((n) => n.id === params.source);
-      const targetNode = nodes.find((n) => n.id === params.target);
       if (!sourceNode || !targetNode) {
         console.warn("[FlowCanvas.tsx] Could not find source/target nodes for edge creation.");
         return;
       }
       markLocalWrite(800);
-      await addEdgeToBackend(sourceNode, targetNode);
+      await addEdgeToBackend(sourceNode, targetNode, params);
     },
     [edges, nodes, markLocalWrite, onCanvasEdited, pushHistorySnapshot]
   );
@@ -939,6 +1057,29 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     setSelectedNode(node);
     onNodeSelect(node);
   }, [onNodeSelect]);
+
+  const openValidationIssue = useCallback((issue: ValidationIssue) => {
+    const edge = issue.edgeId
+      ? edges.find((candidate) => String(candidate.id || "") === issue.edgeId)
+      : undefined;
+    const nodeId = issue.nodeId || edge?.target || edge?.source;
+    const node = displayedNodes.find((candidate) => String(candidate.id) === String(nodeId || ""));
+    if (node) {
+      selectedNodeIdRef.current = node.id;
+      setSelectedNode(node);
+      onNodeSelect(node);
+      window.setTimeout(() => {
+        const section = ["unknown-edge-port", "missing-edge-port"].includes(issue.code)
+          ? "ports"
+          : issue.category;
+        document.getElementById(`inspector-${section}`)?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      }, 150);
+    }
+    setIsValidationOpen(false);
+  }, [displayedNodes, edges, onNodeSelect]);
 
   const onPaneClick = useCallback(() => {
     selectedNodeIdRef.current = null;
@@ -971,7 +1112,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         position,
         data: {
           ...nodeData.data,
-          ...(nodeData.data.type === 'input' ? { content: '{input}' } : {}),
+          ...(nodeData.data.type === 'source' ? { content: '{input}' } : {}),
         },
       };
 
@@ -1029,11 +1170,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const exportFlow = () => {
     try {
       if (reactFlowInstance) {
-        const flow = reactFlowInstance.toObject();
-        downloadJsonFile(flow, 'inlumen-flow.json');
+        const project = createProjectDocument(normalizeGraph(createSerializableFlow()));
+        downloadJsonFile(project, 'inlumen-project.json');
 
-        toast.success('Flow exported successfully', {
-          description: 'Your AI pipeline has been exported as JSON',
+        toast.success('Project JSON exported', {
+          description: designValidation.valid
+            ? 'The canonical Pipeline IR is valid.'
+            : `Exported with ${designValidation.issues.length} validation issue${designValidation.issues.length === 1 ? '' : 's'}.`,
         });
       }
     } catch (error) {
@@ -1233,18 +1376,10 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       const file = e.target.files?.[0];
       if (!file) return;
       const text = await file.text();
-      const flowData = JSON.parse(text) as {
-        nodes?: Node[];
-        edges?: Edge[];
-      };
-      if (!Array.isArray(flowData.nodes) || !Array.isArray(flowData.edges)) {
-        toast.error('Invalid flow file', {
-          description: 'The selected file does not contain a valid flow',
-        });
-        return;
-      }
-      const importedNodes = flowData.nodes;
-      const importedEdges = flowData.edges;
+      const flowData = JSON.parse(text);
+      const normalizedImport = projectDocumentToGraph(flowData);
+      const importedNodes = normalizedImport.nodes;
+      const importedEdges = normalizedImport.edges;
       pushHistorySnapshot();
       onCanvasEdited?.();
       markLocalWrite(1200); // avoid immediate poll-refresh
@@ -1252,8 +1387,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       setNodes(importedNodes);
       setEdges(importedEdges);
       nodeId = getNextNumericNodeId(importedNodes, 1);
-      toast.success('Flow imported successfully', {
-        description: 'Imported flow and backend state reconstructed',
+      toast.success('Project JSON imported', {
+        description: 'The Pipeline IR was migrated and the design state was reconstructed.',
       });
     } catch (error) {
       console.error('Error importing flow:', error);
@@ -1298,9 +1433,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
   return (
     <div ref={reactFlowWrapper} className="h-full w-full">
+      <PortDisplayContext.Provider value={{
+        advanced: showPortDetails,
+        validationByNode: designValidation.byNode,
+      }}>
       <ReactFlow
-        nodes={nodes}
-        edges={edges}
+        nodes={displayedNodes}
+        edges={displayedEdges}
         onNodesChange={onNodesChangeInternal}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
@@ -1330,7 +1469,18 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           updateNodePositionInBackend(node);
         }}
         nodeTypes={nodeTypes}
+        defaultEdgeOptions={{
+          type: 'smoothstep',
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            width: 12,
+            height: 12,
+            color: 'hsl(var(--muted-foreground))',
+          },
+        }}
+        connectionLineType={ConnectionLineType.SmoothStep}
         fitView
+        fitViewOptions={{ padding: 0.28 }}
         className={cn(
           "flow-canvas transition-colors duration-300",
           isLightMode ? "bg-stone-50" : "bg-[#0F1C0F]"
@@ -1341,13 +1491,11 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         <MiniMap
           nodeColor={n => {
             switch (n.data.type) {
-              case 'config': return '#0EA5E9';
-              case 'input': return '#3B82F6';
-              case 'action': return '#84CC16';
-              case 'output': return '#10B981';
-              case 'api': return '#F43F5E';
-              case 'storage': return '#14B8A6';
-              case 'custom': return '#8B5CF6';
+              case 'source': return '#3B82F6';
+              case 'task': return '#F59E0B';
+              case 'destination': return '#10B981';
+              case 'flow': return '#A855F7';
+              case 'subpipeline': return '#06B6D4';
               default: return '#6B7280';
             }
           }}
@@ -1365,12 +1513,62 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           onImport={importFlow}
           onGenerateScripts={handleGeneratePipelineScripts}
           isGeneratingScripts={isGeneratingScripts}
+          showPortDetails={showPortDetails}
+          onTogglePortDetails={() => setShowPortDetails((current) => !current)}
+          validationErrors={validationErrors}
+          validationWarnings={validationWarnings}
+          onValidationClick={() => setIsValidationOpen(true)}
           onClear={clearCanvas}
           canUndo={historyAvailability.canUndo}
           canRedo={historyAvailability.canRedo}
           isHistoryRestoring={isHistoryRestoring}
         />
       </ReactFlow>
+      </PortDisplayContext.Provider>
+
+      <Dialog open={isValidationOpen} onOpenChange={setIsValidationOpen}>
+        <DialogContent className="max-h-[80vh] overflow-y-auto sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Pipeline validation</DialogTitle>
+            <DialogDescription>
+              {designValidation.issues.length === 0
+                ? "The pipeline contract is valid."
+                : `${validationErrors} error${validationErrors === 1 ? "" : "s"} and ${validationWarnings} warning${validationWarnings === 1 ? "" : "s"} need attention.`}
+            </DialogDescription>
+          </DialogHeader>
+          {designValidation.issues.length === 0 ? (
+            <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-600">
+              <CheckCircle2 className="h-4 w-4" />
+              No validation issues found.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {designValidation.issues.map((issue, index) => (
+                <button
+                  key={`${issue.code}-${issue.nodeId || issue.edgeId || index}`}
+                  type="button"
+                  onClick={() => openValidationIssue(issue)}
+                  className={cn(
+                    "flex w-full items-start gap-2 rounded-lg border p-3 text-left text-sm transition-colors hover:bg-muted/60",
+                    issue.severity === "error"
+                      ? "border-red-500/30 bg-red-500/5"
+                      : "border-amber-500/30 bg-amber-500/5",
+                  )}
+                >
+                  <AlertCircle className={cn(
+                    "mt-0.5 h-4 w-4 shrink-0",
+                    issue.severity === "error" ? "text-red-500" : "text-amber-500",
+                  )} />
+                  <span>
+                    <span className="block font-medium capitalize">{issue.severity} · {issue.category}</span>
+                    <span className="text-muted-foreground">{issue.message}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={isScriptGenerationOpen}
@@ -1393,14 +1591,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
               <div className="grid gap-1 text-muted-foreground">
                 <p><code className="text-foreground">main.py</code> — the node script</p>
                 <p><code className="text-foreground">requirements.txt</code> — only when packages are needed</p>
-                <p><span className="text-foreground">Input files</span> — upload them to the first node that reads them</p>
               </div>
               <p className="text-xs text-muted-foreground">
                 That is all. inLUMEN builds the Dagster setup and passes files
                 between connected nodes automatically.
               </p>
               <p className="text-xs text-muted-foreground">
-                To upload: select a node, open Inspector, and choose Upload Files.
+                To attach generated code: select a node, open Inspector, and use Runtime Package. Actual input files belong in the Run tab; Test Fixtures are only for repeatable design-time tests.
               </p>
             </div>
 
@@ -1646,6 +1843,7 @@ export const WrappedFlowCanvas = ({
   onActiveVersionChange,
   onActiveVersionNameChange,
   onPipelineDescriptionChange,
+  onDisplayModeChange,
   flowCanvasRef,
 }: WrappedFlowCanvasProps) => (
   <ReactFlowProvider>
@@ -1663,6 +1861,7 @@ export const WrappedFlowCanvas = ({
       onActiveVersionChange={onActiveVersionChange}
       onActiveVersionNameChange={onActiveVersionNameChange}
       onPipelineDescriptionChange={onPipelineDescriptionChange}
+      onDisplayModeChange={onDisplayModeChange}
     />
   </ReactFlowProvider>
 );

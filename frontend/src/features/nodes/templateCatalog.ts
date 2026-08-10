@@ -1,0 +1,149 @@
+import type { NodePorts, StepType } from '@/features/nodes/nodeSchema';
+
+export type ComponentTemplate = {
+  id: string;
+  value: string;
+  label: string;
+  category: string;
+  description?: string;
+  ports?: NodePorts;
+  requiredParameters?: string[];
+};
+
+const port = (name: string, type: string, description: string, required = true) => ({
+  id: name.toLowerCase().replace(/[^a-z0-9_.-]+/g, "-"),
+  name,
+  type,
+  required,
+  description,
+});
+
+const taskPorts = (
+  inputName: string,
+  inputType: string,
+  outputName: string,
+  outputType: string,
+): NodePorts => ({
+  inputs: [port(inputName, inputType, `Input ${inputName.replace(/_/g, " ")}.`)],
+  outputs: [port(outputName, outputType, `Produced ${outputName.replace(/_/g, " ")}.`)],
+});
+
+const sourcePorts = (outputName: string, outputType: string): NodePorts => ({
+  inputs: [],
+  outputs: [port(outputName, outputType, `Data emitted by this source.`)],
+});
+
+const destinationPorts = (inputName: string, inputType: string): NodePorts => ({
+  inputs: [port(inputName, inputType, `Data consumed by this destination.`)],
+  outputs: [],
+});
+
+const categorized = (
+  category: string,
+  templates: Array<Omit<ComponentTemplate, "category">>,
+): ComponentTemplate[] => templates.map((template) => ({ ...template, category }));
+
+export const COMPONENT_TEMPLATE_CATALOG: Record<StepType, ComponentTemplate[]> = {
+  source: categorized("Sources", [
+    { id: "source.generic", value: "Source", label: "Generic source" },
+    { id: "source.file", value: "File", label: "File", ports: sourcePorts("file", "File") },
+    { id: "source.folder", value: "Folder", label: "Folder", ports: sourcePorts("files", "File[]") },
+    { id: "source.database", value: "Database", label: "Database", ports: sourcePorts("rows", "Dataset") },
+    { id: "source.object-storage", value: "Object Storage", label: "Object Storage", ports: sourcePorts("objects", "Object[]") },
+    { id: "source.rest-api", value: "REST API", label: "REST API", ports: sourcePorts("response", "Object") },
+    { id: "source.kafka", value: "Kafka", label: "Kafka", ports: sourcePorts("messages", "Message[]") },
+    { id: "source.message-queue", value: "Message Queue", label: "Message Queue", ports: sourcePorts("messages", "Message[]") },
+    { id: "source.user-upload", value: "User Upload", label: "User Upload", ports: sourcePorts("uploaded_files", "File[]") },
+  ]),
+  task: [
+    ...categorized("General", [
+      { id: "task.blank", value: "Blank Task", label: "Blank Task" },
+    ]),
+    ...categorized("Data", [
+      { id: "task.data-cleaning", value: "Data Cleaning", label: "Data Cleaning", ports: taskPorts("data", "Dataset", "cleaned_data", "Dataset") },
+      { id: "task.validation", value: "Validation", label: "Validation", ports: taskPorts("data", "Dataset", "validated_data", "Dataset") },
+      { id: "task.aggregation", value: "Aggregation", label: "Aggregation", ports: taskPorts("records", "Dataset", "aggregates", "Dataset") },
+      { id: "task.feature-engineering", value: "Feature Engineering", label: "Feature Engineering", ports: taskPorts("records", "Dataset", "features", "FeatureSet") },
+    ]),
+    ...categorized("Document & media", [
+      { id: "task.ocr", value: "OCR", label: "OCR", ports: taskPorts("document_image", "Image", "extracted_text", "Text") },
+      { id: "task.speech-to-text", value: "Speech-to-Text", label: "Speech-to-Text", ports: taskPorts("audio", "Audio", "transcript", "Text") },
+      { id: "task.image-processing", value: "Image Processing", label: "Image Processing", ports: taskPorts("images", "Image[]", "processed_images", "Image[]") },
+    ]),
+    ...categorized("AI & machine learning", [
+      { id: "task.sentiment-analysis", value: "Sentiment Analysis", label: "Sentiment Analysis", ports: taskPorts("text", "Text", "sentiment", "Classification") },
+      { id: "task.embeddings", value: "Embeddings", label: "Embeddings", ports: taskPorts("documents", "Document[]", "embeddings", "Vector[]") },
+      { id: "task.entity-linking", value: "Entity Linking", label: "Entity Linking", ports: taskPorts("documents", "Document[]", "linked_entities", "Entity[]") },
+      { id: "task.classification", value: "Classification", label: "Classification", ports: taskPorts("features", "FeatureSet", "predictions", "Prediction[]") },
+      { id: "task.model-training", value: "Model Training", label: "Model Training", ports: taskPorts("training_data", "Dataset", "model_artifact", "Model") },
+      { id: "task.llm", value: "LLM", label: "LLM", ports: taskPorts("prompt", "Text", "response", "Text"), requiredParameters: ["model"] },
+    ]),
+    ...categorized("Integration", [
+      { id: "task.api-call", value: "API Call", label: "API Call", ports: taskPorts("request", "Object", "response", "Object") },
+    ]),
+  ],
+  destination: categorized("Destinations", [
+    { id: "destination.generic", value: "Destination", label: "Generic destination" },
+    { id: "destination.file", value: "File", label: "File", ports: destinationPorts("data", "any") },
+    { id: "destination.database", value: "Database", label: "Database", ports: destinationPorts("rows", "Dataset") },
+    { id: "destination.object-storage", value: "Object Storage", label: "Object Storage", ports: destinationPorts("objects", "Object[]") },
+    { id: "destination.rest-api", value: "REST API", label: "REST API", ports: destinationPorts("request", "Object") },
+    { id: "destination.kafka", value: "Kafka", label: "Kafka", ports: destinationPorts("messages", "Message[]") },
+    { id: "destination.report", value: "Report", label: "Report", ports: destinationPorts("report_data", "Dataset") },
+    { id: "destination.notification", value: "Notification", label: "Notification", ports: destinationPorts("notification", "Message") },
+  ]),
+  flow: categorized("Flow control", [
+    { id: "flow.generic", value: "Flow", label: "Generic flow" },
+    {
+      id: "flow.condition",
+      value: "Condition",
+      label: "Condition",
+      ports: {
+        inputs: [port("value", "any", "Value evaluated by the condition.")],
+        outputs: [
+          port("when_true", "any", "Value routed when the condition is true."),
+          port("when_false", "any", "Value routed when the condition is false.", false),
+        ],
+      },
+      requiredParameters: ["expression"],
+    },
+    {
+      id: "flow.parallel-map",
+      value: "Parallel Map",
+      label: "Parallel Map",
+      ports: taskPorts("items", "any[]", "mapped_items", "any[]"),
+    },
+  ]),
+  subpipeline: categorized("Subpipelines", [
+    { id: "subpipeline.pipeline", value: "Subpipeline", label: "Subpipeline" },
+  ]),
+};
+
+export const LEGACY_TASK_TEMPLATE_NAMES = new Set([
+  "Preprocessing",
+  "Document Processing",
+  "Custom Logic",
+]);
+
+export const defaultTemplateForType = (type: StepType) =>
+  COMPONENT_TEMPLATE_CATALOG[type][0].value;
+
+export const templateOptionsForType = (type: StepType, current?: unknown) => {
+  const options = COMPONENT_TEMPLATE_CATALOG[type];
+  const currentValue = typeof current === "string" ? current.trim() : "";
+  if (!currentValue || options.some((option) => option.value === currentValue)) return options;
+  const legacy = type === "task" && LEGACY_TASK_TEMPLATE_NAMES.has(currentValue);
+  return [{
+    id: `${legacy ? "legacy" : "custom"}.${currentValue.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+    value: currentValue,
+    label: `${currentValue} (${legacy ? "legacy" : "custom"})`,
+    category: legacy ? "Legacy" : "Custom",
+  }, ...options];
+};
+
+export const findTemplateForType = (type: StepType, value: unknown) => {
+  const normalized = String(value ?? "").trim();
+  return COMPONENT_TEMPLATE_CATALOG[type].find((template) =>
+    template.value === normalized || template.id === normalized
+  );
+};

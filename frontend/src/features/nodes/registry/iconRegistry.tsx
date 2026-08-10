@@ -1,11 +1,13 @@
 import React from "react";
 import {
   Brain,
+  Boxes,
   Clipboard,
   Database,
   FileOutput,
   FileText,
   GitCompare,
+  GitBranch,
   Info,
   Key,
   ListPlus,
@@ -22,11 +24,13 @@ import {
 
 const ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   brain: Brain,
+  boxes: Boxes,
   clipboard: Clipboard,
   database: Database,
   "file-output": FileOutput,
   "file-text": FileText,
   "git-compare": GitCompare,
+  "git-branch": GitBranch,
   info: Info,
   key: Key,
   "list-plus": ListPlus,

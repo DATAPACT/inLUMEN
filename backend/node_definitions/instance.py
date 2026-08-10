@@ -15,14 +15,11 @@ VALID_CONFIGURATION_STATUSES = {"unconfigured", "valid", "invalid"}
 
 
 def definition_properties_from_data(data: Any) -> dict[str, Any]:
-    """Convert a React Flow node definition payload to Neo4j-safe properties."""
+    """Convert template and implementation metadata to Neo4j-safe properties."""
     if not isinstance(data, dict):
         return {}
 
     definition_id = str(data.get("definition_id") or "").strip()
-    if not definition_id:
-        return {}
-
     try:
         definition_version = int(data.get("definition_version") or 1)
     except (TypeError, ValueError):
@@ -37,15 +34,30 @@ def definition_properties_from_data(data: Any) -> dict[str, Any]:
         description=str(data.get("description") or ""),
     )
 
-    properties: dict[str, Any] = {
-        "definition_id": definition_id,
-        "definition_version": max(definition_version, 1),
-        "implementation_json": json.dumps(
+    properties: dict[str, Any] = {}
+    template = data.get("template")
+    if isinstance(template, dict):
+        template_name = str(template.get("name") or "").strip()
+        template_id = str(template.get("id") or "").strip()
+        if template_name and template_id:
+            properties["template_json"] = json.dumps(
+                template,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+    if definition_id:
+        properties.update(
+            {
+                "definition_id": definition_id,
+                "definition_version": max(definition_version, 1),
+            }
+        )
+    if implementation:
+        properties["implementation_json"] = json.dumps(
             implementation,
             ensure_ascii=False,
             sort_keys=True,
-        ),
-    }
+        )
     configuration_status = str(
         data.get("configuration_status") or ""
     ).strip().lower()
@@ -55,6 +67,20 @@ def definition_properties_from_data(data: Any) -> dict[str, Any]:
     if isinstance(generated_artifact, dict):
         properties["generated_artifact_json"] = json.dumps(
             generated_artifact,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    source_config = data.get("source_config")
+    if isinstance(source_config, dict):
+        properties["source_config_json"] = json.dumps(
+            source_config,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    subpipeline = data.get("subpipeline")
+    if isinstance(subpipeline, dict):
+        properties["subpipeline_json"] = json.dumps(
+            subpipeline,
             ensure_ascii=False,
             sort_keys=True,
         )
@@ -69,13 +95,17 @@ def normalize_definition_properties(properties: dict[str, Any]) -> None:
     properties.pop("configuration_status", None)
     properties.pop("generated_artifact", None)
     properties.pop("generated_artifact_json", None)
+    properties.pop("template", None)
+    properties.pop("template_json", None)
+    properties.pop("source_config", None)
+    properties.pop("source_config_json", None)
+    properties.pop("subpipeline", None)
+    properties.pop("subpipeline_json", None)
 
-    if definition_properties:
-        properties.update(definition_properties)
-        return
-
-    properties.pop("definition_id", None)
-    properties.pop("definition_version", None)
+    properties.update(definition_properties)
+    if not str(properties.get("definition_id") or "").strip():
+        properties.pop("definition_id", None)
+        properties.pop("definition_version", None)
 
 
 def definition_data_from_properties(properties: Any) -> dict[str, Any]:
@@ -111,6 +141,13 @@ def definition_data_from_properties(properties: Any) -> dict[str, Any]:
         )
 
     data: dict[str, Any] = {}
+    template_json = properties.get("template_json")
+    try:
+        template = json.loads(template_json) if isinstance(template_json, str) else {}
+    except (TypeError, ValueError):
+        template = {}
+    if isinstance(template, dict) and template.get("id") and template.get("name"):
+        data["template"] = template
     if definition_id:
         data.update(
             {
@@ -158,4 +195,15 @@ def definition_data_from_properties(properties: Any) -> dict[str, Any]:
             "current" if artifact_hash and artifact_hash == current_hash else "stale"
         )
         data["generated_artifact"] = generated_artifact
+    for property_name, data_name in (
+        ("source_config_json", "source_config"),
+        ("subpipeline_json", "subpipeline"),
+    ):
+        encoded = properties.get(property_name)
+        try:
+            decoded = json.loads(encoded) if isinstance(encoded, str) else {}
+        except (TypeError, ValueError):
+            decoded = {}
+        if isinstance(decoded, dict) and decoded:
+            data[data_name] = decoded
     return data

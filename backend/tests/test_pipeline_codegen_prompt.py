@@ -120,8 +120,8 @@ class PipelineCodegenPromptTests(unittest.TestCase):
         self.assertIn("Never create or return input data", prompt)
         self.assertIn("must not call input()", prompt)
         self.assertIn("invalid inputs must fail immediately", prompt)
-        self.assertIn("INPUT UPLOAD MAP", prompt)
-        self.assertIn("first consumer node", prompt)
+        self.assertIn("RUN INPUT MAP", prompt)
+        self.assertIn("ephemeral files in the Run tab", prompt)
         self.assertIn("Design the entire pipeline as one coherent program", prompt)
         self.assertIn("source chunks or records alongside vectors", prompt)
 

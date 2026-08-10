@@ -13,7 +13,7 @@ In DATAPACT, the **intent** translates to the pipeline goal: both in terms of st
 
 The user remains in control of the design, however supported by dedidated agents whose role is to make these visions come to life. inLUMEN materializes their intents by generating the pipeline steps as a directed graph, and gives recommandations on compliance-strengthening design choices.
 
-Additionally, it generates deployment artifacts such as containers and workflow blueprints needed to simulate/run the pipeline. Provenance is given via tracking reports on decisions taken by the user and agents during the design process. 
+Additionally, it generates deployment artifacts such as containers and workflow blueprints for external execution targets. inLUMEN designs, validates, and exports pipelines; it does not execute them. Provenance is given via tracking reports on decisions taken by the user and agents during the design process.
 
 ## **Related Compliance aspects**
 - Compliance by design
@@ -23,6 +23,59 @@ Additionally, it generates deployment artifacts such as containers and workflow 
 - Co-design Intelligent Pipeline Design Editor (GUI with chat dialog window)
 - Deployment Artifact Generation (Dockerfiles, YAML)
 - Agentic AI Backend (agents assist with compliance-strenghtening design refinements)
+
+## **Pipeline component model**
+
+The graph has exactly five structural node kinds. This small set is intended to
+remain stable:
+
+| Kind | Purpose |
+| --- | --- |
+| `source` | Adapt an external system into logical pipeline data. |
+| `task` | Process, transform, validate, or analyze data. |
+| `destination` | Write or publish results outside the pipeline. |
+| `flow` | Model conditions and parallel maps. |
+| `subpipeline` | Reuse another pipeline as one composable component. |
+
+The initial Flow template catalog contains Condition and Parallel Map. Wait,
+Retry, and Human Approval remain planned templates and do not require new graph
+kinds when introduced.
+
+Definitions such as File, PostgreSQL, Data Cleaning, OCR, Speech-to-Text,
+Embeddings, LLM, Report, or Kafka are templates built on these kinds; they are
+not new graph types. The hierarchy is:
+
+```text
+Pipeline component -> Template -> Implementation
+```
+
+A task template can be implemented by Python (the default), SQL, a container,
+an existing Git repository, REST API, shell, or a future runtime without changing
+the graph. Generated code is another supported implementation source. Source and
+destination templates are adapters: downstream tasks consume
+logical values such as `Table`, `Stream<Message>`, or `Collection<Document>`
+rather than depending on the external technology.
+
+Every node stores explicit input and output ports. Compact canvas mode keeps port
+contracts out of the way; Advanced mode shows their names and logical data types.
+Static parameters belong in the node inspector and are never represented as
+configuration nodes. Configuration is graph data only when another node produces
+it dynamically through a port. Credential-like parameters such as API keys,
+tokens, client secrets, and passwords are masked by default in the inspector;
+each field can be marked secret and revealed locally with its eye control.
+
+Legacy `input`, `action`, `sink`, `output`, `config`, `storage`, `api`, and `custom`
+values are normalized at the persistence boundary into the five structural kinds
+so existing saved graphs remain loadable.
+
+The canonical Pipeline IR is JSON: nodes contain their structural kind, template,
+implementation metadata, parameters, explicit ports, and project-file references;
+edges identify both endpoint nodes and port IDs. This JSON contract drives version
+storage, project import/export, agent context, and deployment generation. Executable
+bundles add an engine-neutral `inlumen.run-spec@1`; the Dagster project (including
+Docker Compose) and optional Argo Workflow are adapters derived from that contract.
+YAML is not an internal representation and the canvas deliberately accepts
+JSON project imports only; generated YAML remains export-only.
 
 ## **Architecture**
 The picture below shows the component in the DATAPACT architecture.
@@ -239,28 +292,38 @@ LLM configuration metadata is also saved through the gateway by default (`VITE_E
 
 LLM agents use OpenAI-compatible Chat Completions endpoints. Configure OpenRouter, Ollama Cloud, or a custom on-prem endpoint in the Settings dialog. The backend rejects LLM requests that do not include a browser-supplied LLM configuration.
 
-### Bring your own node scripts
+### Run Python pipelines and bring your own task scripts
 
-Dagster deployment generation accepts files from any external source through the
-normal node **Upload Files** control. The simple node-file rule is:
+Source and Destination components are boundary adapters managed by inLUMEN. A
+File Source, for example, publishes the selected run input into the pipeline;
+a Notification Destination captures or delivers the final result. They do not
+ask the user for `main.py` and never require an LLM during export.
+
+Only Task components have a **Runtime Package** section. The simple Python rule
+is:
 
 1. Attach `main.py`.
-2. Attach `requirements.txt` only when the script needs third-party packages.
-3. Attach each real input file to the first node that reads it.
+2. Attach `requirements.txt` only when the script needs third-party packages
+   (`requirements.py` is not a Python dependency format).
+3. Attach small repeatable data only as **Test Fixtures**.
+4. Supply actual input files from the **Run** tab. Run inputs are ephemeral and
+   replace fixtures for that execution; their filenames must match the root node
+   contract.
 
-At runtime, the node's attachments and upstream outputs are placed in the
-script's working directory. Ordinary scripts can read files such as `input.csv`
-and write result files there. inLUMEN automatically passes new or changed files
-to the next node and creates all Dagster packaging. No Dagster code, manifest, or
-Dockerfile is required from the user.
+inLUMEN enriches a manually attached Task `main.py` into the node manifest and
+Dockerfile contract. Generated packages already include those files. Python
+dependency installation uses pinned `uv`. At execution time each Task reads
+`INLUMEN_INPUT_MANIFEST`, writes files under `INLUMEN_OUTPUT_DIR`, and writes an
+`inlumen.output-manifest@1` document to `INLUMEN_OUTPUT_MANIFEST`. Dagster and
+Argo use that same handoff contract.
 
 The **Generate Runtime Scripts** action reuses the high-level prompt that created
 the pipeline. Users can either select **Generate and attach**, or select
 **Copy prompt** and paste the ready-made request into any external AI. Both paths
 produce the same simple node files. The external AI is asked to return code only;
-input data always comes from the user. Its response includes an input upload map
-with the correct node ID for each input. Bundle generation also catches clear
-cases where an input was attached to a later node instead of its first consumer.
+input data always comes from the user. Its response includes a Run Input Map with
+the exact filename and root consumer for each input. Bundle generation rejects
+inputs that do not match the declared root contract.
 Clearly malformed or placeholder inputs
 (for example a text placeholder renamed to `.wav`) are rejected before a bundle
 is generated.
@@ -277,6 +340,15 @@ mounts that volume read-only for node execution. The isolated Dagster code
 service then runs with Hugging Face and Transformers offline modes enabled, so a
 pipeline run cannot stall on a model-hub download. Set `HF_TOKEN` in the shell
 that launches `docker compose up`; it is used only by model prefetch.
+
+The Run tab uses Dagster as the primary local execution adapter. A generated
+bundle runs with `docker compose up --build` and exposes Dagster at
+`http://localhost:3000`. Runs return `inlumen.run-result@1`, and materialized
+output files are included under `outputs/` in the downloaded bundle. Argo is an
+optional Kubernetes export. Its bundle builds
+one content-addressed shared pipeline image from `argo/Dockerfile`; it does not
+require an image per step unless incompatible dependency environments are split
+explicitly in a future export.
 
 API key handling:
 - Provider API keys are entered only in the UI, kept in browser localStorage so they survive refreshes, browser restarts, and container restarts, sent to the backend only inside the specific LLM request payload, and are not saved by the backend `/api/chatbot-configs` endpoints.
@@ -344,7 +416,7 @@ curl -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
 curl -X POST http://localhost:5000/api/graph/nodes \
   -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
   -H "Content-Type: application/json" \
-  -d '{"properties":{"flow_id":"retrieve","label":"Retrieve","type":"input","x":100,"y":120}}'
+  -d '{"properties":{"flow_id":"retrieve","label":"Retrieve","type":"source","x":100,"y":120}}'
 
 curl -X POST http://localhost:5000/simple_chat \
   -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
@@ -355,7 +427,7 @@ curl -X POST http://localhost:5000/simple_chat \
 Available gateway endpoint groups:
 
 - `Pipelines`: create, list, fetch, and list versions for the current design pipeline
-- `Artifacts`: generate Dockerfiles with the configured LLM, then assemble Argo Workflow YAML deterministically from the pipeline graph and Dockerfile metadata
+- `Artifacts`: generate the engine-neutral Run Spec, a runnable Dagster Docker Compose bundle, and an optional shared-image Argo Workflow export
 - `Workflows`: list available workflow metadata, associated pipeline IDs, version metadata, and temporary MinIO signed access URLs when files are available
 - `Canvas Graph`: replicate UI node and edge creation, deletion, property updates, and position changes through the gateway API
 - `Pipeline State`: fetch the current graph, overview metadata, and saved UI pipeline versions

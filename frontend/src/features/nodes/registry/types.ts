@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { StepType } from "@/features/nodes/nodeSchema";
+import type { NodePorts, StepType } from "@/features/nodes/nodeSchema";
 
 export const nodePaletteMetadataSchema = z.object({
   label: z.string().min(1),
@@ -24,13 +24,11 @@ export const nodeDefinitionSchema = z.object({
   id: z.string().min(1),
   version: z.number().int().positive(),
   base_type: z.enum([
-    "action",
-    "input",
-    "output",
-    "config",
-    "storage",
-    "api",
-    "custom",
+    "source",
+    "task",
+    "destination",
+    "flow",
+    "subpipeline",
   ]),
   family: z.string().min(1),
   operation: z.string().min(1).nullable().optional(),
@@ -60,5 +58,8 @@ export type NodeDefinitionData = {
   definition_id: string;
   definition_version: number;
   implementation: NodeInstanceImplementation;
+  template_label: string;
+  template: { id: string; name: string; version?: number };
+  ports: NodePorts;
   configuration_status?: "unconfigured" | "valid" | "invalid";
 };

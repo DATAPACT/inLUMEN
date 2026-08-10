@@ -231,6 +231,8 @@ def _explicit_heavy_model_request(text: str) -> bool:
 
 def _resolve_classical_ml_plan(candidate: dict[str, Any]) -> dict[str, Any]:
     resolved = {key: _copy_value(value) for key, value in CLASSICAL_ML_PLAN.items()}
+    if str(candidate.get("kind") or "").strip():
+        resolved["kind"] = str(candidate["kind"]).strip()
     for key in ("task", "domain"):
         value = str(candidate.get(key) or "").strip()
         if value:
@@ -309,6 +311,8 @@ def _merge_runtime_preferences(
     candidate: dict[str, Any],
 ) -> dict[str, Any]:
     resolved = {key: _copy_value(value) for key, value in trusted.items()}
+    if str(candidate.get("kind") or "").strip():
+        resolved["kind"] = str(candidate["kind"]).strip()
     if str(candidate.get("device") or "").lower() in {"auto", "cpu", "cuda"}:
         resolved["device"] = str(candidate["device"]).lower()
 

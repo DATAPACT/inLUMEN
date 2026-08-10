@@ -23,17 +23,17 @@
       "minimum": 1
     },
     "base_type": {
+      "description": "Stable structural pipeline kind. Templates and runtime implementations are separate metadata.",
       "enum": [
-        "action",
-        "input",
-        "output",
-        "config",
-        "storage",
-        "api",
-        "custom"
+        "source",
+        "task",
+        "destination",
+        "flow",
+        "subpipeline"
       ]
     },
     "family": {
+      "description": "Palette grouping used to organize related node roles.",
       "type": "string",
       "minLength": 1
     },
@@ -94,6 +94,7 @@
       }
     },
     "runtime": {
+      "description": "Implementation-generation metadata, independent of the node's pipeline role.",
       "type": "object",
       "additionalProperties": false,
       "required": [

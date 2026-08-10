@@ -1,4 +1,4 @@
-import { Edge, Node } from 'reactflow';
+import { Connection, Edge, Node } from 'reactflow';
 import { apiFetch } from '@/utils/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
 import {
@@ -169,7 +169,11 @@ export const updateNodePositionInBackend = async (node: Node) => {
   }
 };
 
-export const addEdgeToBackend = async (sourceNode: Node, targetNode: Node) => {
+export const addEdgeToBackend = async (
+  sourceNode: Node,
+  targetNode: Node,
+  connection?: Pick<Edge, "sourceHandle" | "targetHandle"> | Connection,
+) => {
   try {
     const response = await apiFetch(`${INLUMEN_API_URL}/api/graph/edges`, {
       method: 'POST',
@@ -178,6 +182,8 @@ export const addEdgeToBackend = async (sourceNode: Node, targetNode: Node) => {
         properties: {
           flow_id_source: sourceNode.id,
           flow_id_target: targetNode.id,
+          source_port: connection?.sourceHandle ?? null,
+          target_port: connection?.targetHandle ?? null,
         },
       }),
     });
@@ -190,25 +196,34 @@ export const addEdgeToBackend = async (sourceNode: Node, targetNode: Node) => {
   }
 };
 
-export const deleteEdgeFromBackend = async (sourceNode: Node, targetNode: Node) => {
-  try {
-    const response = await apiFetch(`${INLUMEN_API_URL}/api/graph/edges`, {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        properties: {
-          flow_id_source: sourceNode.id,
-          flow_id_target: targetNode.id,
-        },
-      }),
-    });
+export const deleteEdgeFromBackend = async (
+  sourceNode: Node,
+  targetNode: Node,
+  connection?: Pick<Edge, "sourceHandle" | "targetHandle">,
+) => {
+  const response = await apiFetch(`${INLUMEN_API_URL}/api/graph/edges`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      properties: {
+        flow_id_source: sourceNode.id,
+        flow_id_target: targetNode.id,
+        source_port: connection?.sourceHandle ?? null,
+        target_port: connection?.targetHandle ?? null,
+      },
+    }),
+  });
 
-    if (!response.ok) throw new Error('Failed to delete edge');
-    const result = await response.json();
-    console.log("[flowPersistence.ts] Graph deleting edge:", result);
-  } catch (err) {
-    console.error("[flowPersistence.ts] Graph delete edge error:", err);
+  if (!response.ok) {
+    const message = await response.text().catch(() => "");
+    throw new Error(message || 'Failed to delete edge');
   }
+  const result = await response.json();
+  if (Number(result?.deleted_count) < 1) {
+    throw new Error("The backend did not find the selected connection.");
+  }
+  console.log("[flowPersistence.ts] Graph deleting edge:", result);
+  return result;
 };
 
 export const deleteNodeFromBackend = async (nodeId: string) => {
@@ -512,7 +527,7 @@ export const rebuildBackendFromFlow = async (
       );
       continue;
     }
-    await addEdgeToBackend(sourceNode, targetNode);
+    await addEdgeToBackend(sourceNode, targetNode, edge);
   }
 };
 

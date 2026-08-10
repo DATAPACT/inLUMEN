@@ -278,6 +278,7 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         by_path = {item["path"]: item["content"] for item in bundle["files"]}
         self.assertIn("README.md", by_path)
         self.assertIn("bundle-manifest.json", by_path)
+        self.assertIn("run-spec.json", by_path)
         self.assertIn("inputs/input_manifest.json", by_path)
         self.assertIn("inputs/vital_signs_short.csv", by_path)
         self.assertIn("inputs/sample.wav", by_path)
@@ -285,6 +286,8 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertIn("nodes/node-1-ingestion/Dockerfile.1", by_path)
         self.assertIn("outputs/node-2-preprocessing/.gitkeep", by_path)
         self.assertIn("argo/workflow.yaml", by_path)
+        self.assertIn("argo/Dockerfile", by_path)
+        self.assertIn("argo/requirements.txt", by_path)
         self.assertIn("dagster/pyproject.toml", by_path)
         self.assertIn("dagster/requirements.txt", by_path)
         self.assertIn("dagster/.dagster_home/dagster.yaml", by_path)
@@ -310,9 +313,11 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             by_path["dagster/Dockerfile"],
         )
         self.assertIn(
-            "--mount=type=cache,target=/root/.cache/pip",
+            "--mount=type=cache,target=/root/.cache/uv",
             by_path["dagster/Dockerfile"],
         )
+        self.assertIn("ghcr.io/astral-sh/uv:0.11.32", by_path["dagster/Dockerfile"])
+        self.assertIn("uv pip install --system", by_path["dagster/Dockerfile"])
         self.assertNotIn("find /workspace/nodes", by_path["dagster/Dockerfile"])
         self.assertIn("INLUMEN_ACCELERATOR", by_path["docker-compose.yml"])
         self.assertNotIn("model-prefetch:", by_path["docker-compose.yml"])
@@ -363,6 +368,21 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             base64.b64decode(binary_file["content"]),
         )
         self.assertEqual("README.md", bundle["manifest"]["readme"])
+        self.assertEqual("run-spec.json", bundle["manifest"]["run_spec"])
+        self.assertEqual("shared", bundle["manifest"]["argo"]["image_strategy"])
+        self.assertIn("COPY nodes /workspace/nodes", by_path["argo/Dockerfile"])
+        argo_workflow = by_path["argo/workflow.yaml"]
+        self.assertEqual(1, argo_workflow.count('name: "pipeline-image"'))
+        self.assertNotIn("name: image-1", argo_workflow)
+        run_spec = json.loads(by_path["run-spec.json"])
+        self.assertEqual("inlumen.run-spec@1", run_spec["schema_version"])
+        self.assertEqual("uv", run_spec["runtime"]["package_manager"])
+        self.assertEqual("dagster", run_spec["runtime"]["default_engine"])
+        self.assertEqual("managed-adapter", run_spec["nodes"][0]["execution"]["kind"])
+        self.assertNotIn("package", run_spec["nodes"][0])
+        self.assertEqual("python-package", run_spec["nodes"][1]["execution"]["kind"])
+        self.assertEqual("user", run_spec["nodes"][1]["execution"]["ownership"])
+        self.assertIn("package", run_spec["nodes"][1])
 
     def test_reviewed_models_are_prefetched_and_runtime_is_local_only(self):
         payload = codegen_payload()
@@ -521,7 +541,8 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertIn("inputs/vital_signs_short.csv", by_path)
         self.assertIn("inputs/sample.wav", by_path)
         self.assertNotIn("nodes/node-1-ingestion/sample.wav", by_path)
-        self.assertEqual(2, bundle["manifest"]["inputs"]["sample_file_count"])
+        self.assertEqual(2, bundle["manifest"]["inputs"]["file_count"])
+        self.assertEqual("per-run", bundle["manifest"]["inputs"]["lifecycle"])
         self.assertIn(
             "./inputs:/workspace/inputs:ro",
             by_path["docker-compose.yml"]["content"],

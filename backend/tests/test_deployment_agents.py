@@ -88,7 +88,7 @@ class DeploymentAgentsTest(unittest.TestCase):
                     "id": "1",
                     "data": {
                         "label": "Ingest",
-                        "type": "input",
+                        "type": "task",
                         "generated_artifact": {
                             "status": "current",
                             "generator": "inlumen-codegen-service",
@@ -174,6 +174,126 @@ class DeploymentAgentsTest(unittest.TestCase):
         self.assertEqual(wav_bytes, base64.b64decode(audio_file["content"]))
         self.assertEqual(len(wav_bytes), audio_file["size_bytes"])
         self.assertTrue(audio_file["sha256"].startswith("sha256:"))
+
+    @unittest.skipIf(
+        generate_dockerfiles_with_agent is None,
+        f"deployment agent dependencies are unavailable: {IMPORT_ERROR}",
+    )
+    def test_enriches_attached_main_py_without_llm_for_any_export_target(self):
+        stored = {
+            ("files-step-id-1", "main.py"): b"print('ok')\n",
+            ("files-step-id-1", "patients.csv"): b"patient_id\n1\n",
+        }
+
+        async def read_object(bucket, filename):
+            return stored[(bucket, filename)]
+
+        graph = {
+            "nodes": [
+                {
+                    "id": "1",
+                    "data": {
+                        "label": "Load patients",
+                        "type": "task",
+                        "file_buckets": [
+                            {
+                                "filename": "main.py",
+                                "bucket": "files-step-id-1",
+                                "role": "code",
+                            },
+                            {
+                                "filename": "patients.csv",
+                                "bucket": "files-step-id-1",
+                                "role": "data",
+                            },
+                        ],
+                    },
+                }
+            ],
+            "edges": [],
+        }
+
+        with patch(
+            "deployment_agents.read_minio_object_bytes",
+            side_effect=read_object,
+        ), patch(
+            "deployment_agents.resolve_llm_config",
+            side_effect=AssertionError("LLM fallback should not be used"),
+        ):
+            payload = run_async(
+                generate_dockerfiles_with_agent(
+                    [],
+                    [],
+                    None,
+                    pipeline_graph=graph,
+                )
+            )
+
+        result = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        artifact = result["runtime_artifacts"][0]
+        filenames = {item["filename"] for item in artifact["files"]}
+        self.assertEqual("inlumen-attached-runtime", artifact["generator"])
+        self.assertTrue(
+            {"main.py", "requirements.txt", "node-manifest.json", "Dockerfile.1"}
+            <= filenames
+        )
+        self.assertIn("uv pip install --system", result["dockerfiles"][0]["content"])
+        self.assertEqual("patients.csv", result["input_files"][0]["filename"])
+        self.assertEqual("table", result["input_files"][0]["kind"])
+        self.assertEqual(["1"], result["root_flow_ids"])
+
+    @unittest.skipIf(
+        generate_dockerfiles_with_agent is None,
+        f"deployment agent dependencies are unavailable: {IMPORT_ERROR}",
+    )
+    def test_source_and_destination_use_managed_adapters_without_llm_or_user_code(self):
+        graph = {
+            "nodes": [
+                {
+                    "id": "1",
+                    "data": {
+                        "label": "Upload",
+                        "type": "source",
+                        "template_label": "File",
+                    },
+                },
+                {
+                    "id": "2",
+                    "data": {
+                        "label": "Capture",
+                        "type": "destination",
+                        "template_label": "Notification",
+                    },
+                },
+            ],
+            "edges": [{"source": "1", "target": "2"}],
+        }
+
+        with patch(
+            "deployment_agents.resolve_llm_config",
+            side_effect=AssertionError("managed adapters must not use the LLM"),
+        ):
+            payload = run_async(
+                generate_dockerfiles_with_agent(
+                    [],
+                    [],
+                    pipeline_graph=graph,
+                    require_attached_runtime=True,
+                )
+            )
+
+        result = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        self.assertEqual(["1", "2"], [item["flow_id"] for item in result["dockerfiles"]])
+        self.assertEqual(
+            {"inlumen-managed-adapter"},
+            {item["generator"] for item in result["runtime_artifacts"]},
+        )
+        self.assertTrue(
+            all(
+                "main.py" in {file_item["filename"] for file_item in artifact["files"]}
+                for artifact in result["runtime_artifacts"]
+            )
+        )
 
 
 if __name__ == "__main__":

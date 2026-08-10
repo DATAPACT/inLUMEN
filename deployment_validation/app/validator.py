@@ -84,18 +84,26 @@ def _run(
 def _ensure_venv(project_root: Path, *, reinstall: bool, timeout_seconds: int) -> tuple[Path, list[dict[str, Any]]]:
     venv_dir = project_root / ".inlumen_dagster_validation_venv"
     steps: list[dict[str, Any]] = []
+    uv = shutil.which("uv")
     if reinstall and venv_dir.exists():
         shutil.rmtree(venv_dir)
     if not venv_dir.exists():
-        steps.append(_run([sys.executable, "-m", "venv", str(venv_dir)], cwd=project_root, timeout_seconds=timeout_seconds))
+        create_command = (
+            [uv, "venv", "--python", sys.executable, str(venv_dir)]
+            if uv
+            else [sys.executable, "-m", "venv", str(venv_dir)]
+        )
+        steps.append(_run(create_command, cwd=project_root, timeout_seconds=timeout_seconds))
         if not steps[-1]["ok"]:
             return venv_dir, steps
 
     python = venv_dir / "bin" / "python"
-    steps.append(_run([str(python), "-m", "pip", "install", "--upgrade", "pip"], cwd=project_root, timeout_seconds=timeout_seconds))
-    if not steps[-1]["ok"]:
-        return venv_dir, steps
-    steps.append(_run([str(python), "-m", "pip", "install", "-e", "."], cwd=project_root, timeout_seconds=timeout_seconds))
+    install_command = (
+        [uv, "pip", "install", "--python", str(python), "-e", "."]
+        if uv
+        else [str(python), "-m", "pip", "install", "-e", "."]
+    )
+    steps.append(_run(install_command, cwd=project_root, timeout_seconds=timeout_seconds))
     return venv_dir, steps
 
 
@@ -138,6 +146,7 @@ def validate_dagster_project(
     project_root = _dagster_project_root(path)
     report: dict[str, Any] = {
         "project_root": str(project_root),
+        "package_manager": "uv" if shutil.which("uv") else "pip-fallback",
         "ok": False,
         "steps": [],
     }
@@ -453,7 +462,11 @@ def _validate_bundle_structure(bundle_root: Path, targets: dict[str, Any]) -> di
         "outputs",
     ]
     if targets.get("argo"):
-        required_paths.append("argo/workflow.yaml")
+        required_paths.extend([
+            "argo/workflow.yaml",
+            "argo/Dockerfile",
+            "argo/requirements.txt",
+        ])
     if targets.get("dagster"):
         required_paths.extend([
             "dagster/pyproject.toml",
@@ -469,6 +482,9 @@ def _validate_bundle_structure(bundle_root: Path, targets: dict[str, Any]) -> di
             missing.append(item)
 
     manifest = _load_json(bundle_root / "bundle-manifest.json")
+    run_spec_path = str(manifest.get("run_spec") or "").strip()
+    if run_spec_path and not (bundle_root / run_spec_path).is_file():
+        missing.append(run_spec_path)
     node_entries = manifest.get("nodes") if isinstance(manifest.get("nodes"), list) else []
     missing_node_outputs = []
     for node in node_entries:
@@ -485,6 +501,38 @@ def _validate_bundle_structure(bundle_root: Path, targets: dict[str, Any]) -> di
     errors.extend(f"Missing node output directory: {item}" for item in missing_node_outputs)
     if not missing and (bundle_root / "inputs" / "input_manifest.json").is_file():
         errors.extend(_input_contract_errors(bundle_root, manifest))
+    run_spec = _load_json(bundle_root / run_spec_path) if run_spec_path else {}
+    if run_spec_path and run_spec.get("schema_version") != "inlumen.run-spec@1":
+        errors.append(f"{run_spec_path} must use schema_version inlumen.run-spec@1.")
+    elif run_spec_path:
+        run_nodes = run_spec.get("nodes") if isinstance(run_spec.get("nodes"), list) else []
+        run_node_ids = {
+            str(node.get("id") or "")
+            for node in run_nodes
+            if isinstance(node, dict) and str(node.get("id") or "")
+        }
+        manifest_node_ids = {
+            str(node.get("flow_id") or "")
+            for node in node_entries
+            if isinstance(node, dict) and str(node.get("flow_id") or "")
+        }
+        if run_node_ids != manifest_node_ids:
+            errors.append(
+                "run-spec.json node ids do not match bundle-manifest.json nodes."
+            )
+        runtime = run_spec.get("runtime") if isinstance(run_spec.get("runtime"), dict) else {}
+        if runtime.get("package_manager") != "uv":
+            errors.append("run-spec.json runtime.package_manager must be uv.")
+        for connection in run_spec.get("connections") or []:
+            if not isinstance(connection, dict):
+                errors.append("run-spec.json connections must be objects.")
+                continue
+            source = str(connection.get("source") or "")
+            target = str(connection.get("target") or "")
+            if source not in run_node_ids or target not in run_node_ids:
+                errors.append(
+                    f"run-spec.json connection {source}->{target} references an unknown node."
+                )
     return {
         "ok": not errors,
         "bundle_root": str(bundle_root),
@@ -587,7 +635,7 @@ def _normalize_input_manifest(bundle_root: Path, actions: list[str]) -> None:
                 kind=descriptor.get("kind"),
                 file_format=descriptor.get("format"),
             ),
-            "description": "Sample input file copied from InLumen.",
+            "description": "Input file supplied for this execution.",
         })
 
     repaired = {
@@ -729,7 +777,8 @@ def repair_deployment_bundle(
     manifest["inputs"] = {
         "path": "inputs",
         "manifest": "inputs/input_manifest.json",
-        "sample_file_count": len(_load_json(bundle_root / "inputs" / "input_manifest.json").get("inputs") or []),
+        "file_count": len(_load_json(bundle_root / "inputs" / "input_manifest.json").get("inputs") or []),
+        "lifecycle": "per-run",
     }
     manifest["outputs"] = {
         "path": "outputs",

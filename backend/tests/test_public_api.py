@@ -151,6 +151,12 @@ class PublicApiTest(unittest.TestCase):
         self.assertIn("/openapi.json", schema["paths"])
         self.assertEqual(["Health"], schema["paths"]["/health"]["get"]["tags"])
         self.assertEqual(["Canvas Graph"], schema["paths"]["/api/graph/nodes"]["post"]["tags"])
+        self.assertEqual(
+            ["source", "task", "destination", "flow", "subpipeline"],
+            schema["components"]["schemas"]["PipelineNodeKind"]["enum"],
+        )
+        self.assertIn("ports", schema["components"]["schemas"]["NodeCreateRequest"]
+                      ["properties"]["properties"]["properties"])
 
     @patch("public_api.check_object_health")
     @patch("public_api.check_graph_health")

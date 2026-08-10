@@ -9,6 +9,13 @@ from typing import Any
 from urllib.parse import quote
 from runtime_config import add_cors_headers, get_neo4j_settings
 from step_types import normalize_step_type
+from node_ports import (
+    default_input_port_id,
+    default_output_port_id,
+    normalize_node_ports,
+    ports_json,
+)
+from node_parameters import normalize_secret_param_keys, secret_params_json
 from minio_access import create_bucket, list_objects, read_object_bytes, remove_object, upload_object
 from model_plans import resolve_implementation_plan
 from node_definitions.instance import (
@@ -111,6 +118,7 @@ def _file_refs_from_graph_node(flow_id: str, data: dict) -> list[dict]:
         bucket = default_bucket
         snapshot_bucket = ""
         snapshot_object = ""
+        role = ""
         if isinstance(item, str):
             filename = item.strip()
         elif isinstance(item, dict):
@@ -118,6 +126,8 @@ def _file_refs_from_graph_node(flow_id: str, data: dict) -> list[dict]:
             bucket = str(item.get("bucket") or default_bucket).strip().lower()
             snapshot_bucket = str(item.get("snapshot_bucket") or "").strip().lower()
             snapshot_object = str(item.get("snapshot_object") or "").strip()
+            candidate_role = str(item.get("role") or "").strip().lower()
+            role = candidate_role if candidate_role in {"code", "data"} else ""
         if not filename:
             continue
         key = (filename, bucket)
@@ -125,6 +135,8 @@ def _file_refs_from_graph_node(flow_id: str, data: dict) -> list[dict]:
             continue
         seen.add(key)
         file_ref = {"filename": filename, "bucket": bucket}
+        if role:
+            file_ref["role"] = role
         if snapshot_bucket and snapshot_object:
             file_ref["snapshot_bucket"] = snapshot_bucket
             file_ref["snapshot_object"] = snapshot_object
@@ -157,13 +169,15 @@ def _parse_visible_graph(graph: dict) -> tuple[list[dict], list[dict]]:
         except Exception:
             y = 0.0
 
-        step_type = normalize_step_type(data.get("type"), default="custom")
+        step_type = normalize_step_type(data.get("type"), default="task")
         files = _file_refs_from_graph_node(flow_id, data)
         props = {
             "flow_id": flow_id,
             "type": step_type,
             "label": str(data.get("label") or ""),
             "description": str(data.get("description") or ""),
+            "template_label": str(data.get("template_label") or ""),
+            "ports_json": ports_json(data.get("ports"), step_type),
             "x": x,
             "y": y,
         }
@@ -189,27 +203,25 @@ def _parse_visible_graph(graph: dict) -> tuple[list[dict], list[dict]]:
                 label=str(data.get("label") or ""),
                 description=str(data.get("description") or ""),
             )
-        if param_obj or isinstance(data.get("param"), dict):
-            # Model-backed action nodes persist their reviewed implementation
-            # plan in param.model_plan, not only configuration nodes.
-            props["param_json"] = json.dumps(
-                param_obj,
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-        if step_type in ("input", "output"):
+        # Parameters are inspector metadata for every structural node kind.
+        props["param_json"] = json.dumps(
+            param_obj,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        props["secret_params_json"] = secret_params_json(
+            data.get("secret_params"),
+            param_obj,
+        )
+        if step_type in ("source", "destination"):
             props["content"] = str(data.get("content") or "")
-            props["has_files"] = "yes" if files else str(data.get("has_files") or "no").lower().strip()
-        elif step_type in ("action", "custom"):
-            props["has_files"] = "yes" if files else str(data.get("has_files") or "no").lower().strip()
-        elif step_type == "config":
-            props.setdefault("param_json", "{}")
-        elif step_type == "storage":
+        props["has_files"] = "yes" if files else str(data.get("has_files") or "no").lower().strip()
+        # Preserve legacy adapter fields during migration without treating them
+        # as structural kinds.
+        if "endpoint" in data:
             props["endpoint"] = str(data.get("endpoint") or "")
-            db = str(data.get("database") or "minio").lower().strip()
-            props["database"] = db if db in ("minio", "sqlite", "chromadb") else "minio"
-        elif step_type == "api":
-            props["endpoint"] = str(data.get("endpoint") or "")
+        if "database" in data:
+            props["database"] = str(data.get("database") or "").lower().strip()
         nodes.append({"props": props, "files": files})
 
     visible_ids = {node["props"]["flow_id"] for node in nodes}
@@ -220,7 +232,9 @@ def _parse_visible_graph(graph: dict) -> tuple[list[dict], list[dict]]:
             continue
         source = str(raw_edge.get("source") or "").strip()
         target = str(raw_edge.get("target") or "").strip()
-        edge_key = (source, target)
+        source_port = str(raw_edge.get("sourceHandle") or raw_edge.get("source_port") or "").strip()
+        target_port = str(raw_edge.get("targetHandle") or raw_edge.get("target_port") or "").strip()
+        edge_key = (source, target, source_port, target_port)
         if (
             not source
             or not target
@@ -231,7 +245,12 @@ def _parse_visible_graph(graph: dict) -> tuple[list[dict], list[dict]]:
         ):
             continue
         seen_edges.add(edge_key)
-        edges.append({"source": source, "target": target})
+        edges.append({
+            "source": source,
+            "target": target,
+            "source_port": source_port,
+            "target_port": target_port,
+        })
     return nodes, edges
 
 
@@ -358,8 +377,9 @@ def _sync_graph_to_session(
             MATCH (s:STEP {flow_id: $flow_id})
             MERGE (f:FILE {filename: $filename, bucket: $bucket})
             ON CREATE SET f.uid = randomUUID(), f.added_at = datetime()
+            SET f.role = CASE WHEN $role = '' THEN f.role ELSE $role END
             MERGE (s)-[:HAS_FILE]->(f)
-            """, flow_id=props["flow_id"], filename=file_ref["filename"], bucket=file_ref["bucket"])
+            """, flow_id=props["flow_id"], filename=file_ref["filename"], bucket=file_ref["bucket"], role=file_ref.get("role", ""))
 
     session.run("""
     MATCH (:STEP)-[r:FLOWS_TO]->(:STEP)
@@ -370,8 +390,12 @@ def _sync_graph_to_session(
         session.run("""
         MATCH (source:STEP {flow_id: $source})
         MATCH (target:STEP {flow_id: $target})
-        MERGE (source)-[:FLOWS_TO]->(target)
-        """, source=edge["source"], target=edge["target"])
+        MERGE (source)-[r:FLOWS_TO {
+          source_port: $source_port,
+          target_port: $target_port
+        }]->(target)
+        """, source=edge["source"], target=edge["target"],
+             source_port=edge["source_port"], target_port=edge["target_port"])
 
     record = session.run("""
     MATCH (p:PIPELINE {uid: $pipeline_uid})
@@ -506,6 +530,7 @@ def _iter_graph_file_entries(graph: dict):
             bucket = default_bucket
             snapshot_bucket = ""
             snapshot_object = ""
+            role = ""
             if isinstance(item, str):
                 filename = item.strip()
             elif isinstance(item, dict):
@@ -513,6 +538,8 @@ def _iter_graph_file_entries(graph: dict):
                 bucket = str(item.get("bucket") or default_bucket).strip().lower()
                 snapshot_bucket = str(item.get("snapshot_bucket") or "").strip().lower()
                 snapshot_object = str(item.get("snapshot_object") or "").strip()
+                candidate_role = str(item.get("role") or "").strip().lower()
+                role = candidate_role if candidate_role in {"code", "data"} else ""
             if not filename:
                 continue
             yield file_list, index, item, {
@@ -520,6 +547,7 @@ def _iter_graph_file_entries(graph: dict):
                 "bucket": bucket,
                 "snapshot_bucket": snapshot_bucket,
                 "snapshot_object": snapshot_object,
+                "role": role,
             }
 
 
@@ -772,7 +800,7 @@ def _provenance_graph_snapshot(session, pipeline_uid: str) -> dict:
     RETURN
       toString(step.flow_id) AS id,
       coalesce(step.label, '') AS label,
-      coalesce(step.type, 'custom') AS type,
+      coalesce(step.type, 'task') AS type,
       coalesce(step.x, 0.0) AS x,
       coalesce(step.y, 0.0) AS y
     ORDER BY
@@ -780,10 +808,13 @@ def _provenance_graph_snapshot(session, pipeline_uid: str) -> dict:
       toString(step.flow_id)
     """, pipeline_uid=pipeline_uid))
     edge_records = list(session.run("""
-    MATCH (p:PIPELINE {uid: $pipeline_uid})-[:HAS_STEP]->(source:STEP)-[:FLOWS_TO]->(target:STEP)
+    MATCH (p:PIPELINE {uid: $pipeline_uid})-[:HAS_STEP]->(source:STEP)-[r:FLOWS_TO]->(target:STEP)
     WHERE (p)-[:HAS_STEP]->(target)
-    RETURN toString(source.flow_id) AS source, toString(target.flow_id) AS target
-    ORDER BY source, target
+    RETURN toString(source.flow_id) AS source,
+           toString(target.flow_id) AS target,
+           coalesce(r.source_port, '') AS source_port,
+           coalesce(r.target_port, '') AS target_port
+    ORDER BY source, target, source_port, target_port
     """, pipeline_uid=pipeline_uid))
 
     node_limit = 60
@@ -795,7 +826,7 @@ def _provenance_graph_snapshot(session, pipeline_uid: str) -> dict:
             {
                 "id": record["id"],
                 "label": _short_text(record["label"], 80),
-                "type": record["type"],
+                "type": normalize_step_type(record["type"]),
                 "x": float(record["x"] or 0.0),
                 "y": float(record["y"] or 0.0),
             }
@@ -805,6 +836,8 @@ def _provenance_graph_snapshot(session, pipeline_uid: str) -> dict:
             {
                 "source": record["source"],
                 "target": record["target"],
+                "source_port": record["source_port"],
+                "target_port": record["target_port"],
             }
             for record in edge_records[:edge_limit]
         ],
@@ -823,7 +856,7 @@ def _provenance_graph_snapshot_from_graph(graph: dict) -> dict:
             {
                 "id": node["props"]["flow_id"],
                 "label": _short_text(node["props"].get("label"), 80),
-                "type": node["props"].get("type", "custom"),
+                "type": node["props"].get("type", "task"),
                 "x": float(node["props"].get("x") or 0.0),
                 "y": float(node["props"].get("y") or 0.0),
             }
@@ -833,6 +866,8 @@ def _provenance_graph_snapshot_from_graph(graph: dict) -> dict:
             {
                 "source": edge["source"],
                 "target": edge["target"],
+                "source_port": edge["source_port"],
+                "target_port": edge["target_port"],
             }
             for edge in edges[:edge_limit]
         ],
@@ -1017,6 +1052,17 @@ def neo4j_add_node():
         properties.pop("position", None)
     properties.setdefault("x", 0)
     properties.setdefault("y", 0)
+    properties["ports_json"] = ports_json(properties.pop("ports", None), step_type)
+    param_obj = properties.pop("param", {})
+    properties["param_json"] = json.dumps(
+        param_obj if isinstance(param_obj, dict) else {},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    properties["secret_params_json"] = secret_params_json(
+        properties.pop("secret_params", None),
+        param_obj,
+    )
     normalize_definition_properties(properties)
     # Normalize to floats (Neo4j-friendly)
     try:
@@ -1027,25 +1073,9 @@ def neo4j_add_node():
         properties["y"] = float(properties.get("y", 0) or 0)
     except Exception:
         properties["y"] = 0.0
-    # Add type-specific properties:
-    if step_type == "input":
+    if step_type in ("source", "destination"):
         properties.setdefault("content", "")
-        properties.setdefault("has_files", "no")
-    elif step_type == "config":
-        properties.setdefault("param_json", json.dumps(properties.get("param", {})))
-        properties.pop("param", None)
-    elif step_type == "action":
-        properties.setdefault("has_files", "no")
-    elif step_type == "storage":
-        properties.setdefault("endpoint", "")
-        properties.setdefault("database", "minio")
-    elif step_type == "api":
-        properties.setdefault("endpoint", "")
-    elif step_type == "output":
-        properties.setdefault("content", "")
-        properties.setdefault("has_files", "no")
-    elif step_type == "custom":
-        properties.setdefault("has_files", "no")
+    properties.setdefault("has_files", "no")
     # Construct the Cypher query
     query = """
     WITH $props AS props
@@ -1098,7 +1128,7 @@ def neo4j_add_node():
                     session,
                     "node_created",
                     "manual",
-                    f"Created {step.get('type', 'custom')} step '{step.get('label', '')}'.",
+                    f"Created {step.get('type', 'task')} step '{step.get('label', '')}'.",
                     {
                         "flow_id": step.get("flow_id"),
                         "label": step.get("label"),
@@ -1122,6 +1152,9 @@ def neo4j_add_file():
     # TODO: Use uid instead of flow_id
     flow_id = str(properties.get("flow_id") or "")
     filename = str(properties.get("filename") or "")
+    role = str(properties.get("role") or "").strip().lower()
+    if role not in {"code", "data"}:
+        role = ""
     query = """
     MATCH (n:STEP {flow_id: $flow_id})
     OPTIONAL MATCH (p:PIPELINE)-[:HAS_STEP]->(n)
@@ -1132,12 +1165,13 @@ def neo4j_add_file():
     })
     SET f.added_at = datetime()
     SET f.uid = randomUUID()
+    SET f.role = CASE WHEN $role = '' THEN f.role ELSE $role END
     MERGE (n)-[:HAS_FILE]->(f)
     RETURN n
     """
     try:
         with driver.session() as session:
-            result = session.run(query, {"flow_id": flow_id, "filename": filename})
+            result = session.run(query, {"flow_id": flow_id, "filename": filename, "role": role})
             record = result.single()
             if record:
                 _record_provenance_event(
@@ -1207,33 +1241,21 @@ def neo4j_update_node():
     # Changes in label/description
     properties["label"] = properties.get("label", "")
     properties["description"] = properties.get("description", "")
+    properties["ports_json"] = ports_json(properties.pop("ports", None), step_type)
+    param_obj = properties.pop("param", {})
+    properties["param_json"] = json.dumps(
+        param_obj if isinstance(param_obj, dict) else {},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    properties["secret_params_json"] = secret_params_json(
+        properties.pop("secret_params", None),
+        param_obj,
+    )
     normalize_definition_properties(properties)
-    # Changes specific to config step type:
-    if step_type == "config":
-        # Convert param dict -> JSON string
-        param_obj = properties.get("param")
-        if not isinstance(param_obj, dict):
-            param_obj = {}
-        properties["param_json"] = json.dumps(param_obj)
-        properties.pop("param", None)
-    # Changes specific to input/output step type:
-    elif step_type in ("input", "output"):
+    if step_type in ("source", "destination"):
         properties["content"] =  properties.get("content", "")
-        properties["has_files"] = str(properties.get("has_files")).lower().strip()
-    # Changes specific to action/custom step type:
-    elif step_type in ("action", "custom"):
-        properties["has_files"] = str(properties.get("has_files")).lower().strip()
-    # Changes specific to storage step type:
-    elif step_type == "storage":
-        properties["endpoint"] = properties.get("endpoint", "")
-        # Database (lowercase)
-        db = str(properties.get("database", "minio")).lower().strip()
-        if db not in ("minio", "sqlite", "chromadb"):
-            db = "minio"
-        properties["database"] = db
-    # Changes specific to api step type:
-    elif step_type == "api":
-        properties["endpoint"] = properties.get("endpoint", "")
+    properties["has_files"] = str(properties.get("has_files") or "no").lower().strip()
     # Ensure we never attempt to store maps / File objects
     properties.pop("files", None)
     # ---- Cypher update ----
@@ -1478,14 +1500,21 @@ def neo4j_add_edge():
     properties = data.get("properties", {})
     from_flow_id = properties.get("flow_id_source")
     to_flow_id = properties.get("flow_id_target")
+    source_port = str(properties.get("source_port") or "").strip()
+    target_port = str(properties.get("target_port") or "").strip()
     if not from_flow_id or not to_flow_id:
         return jsonify({"error": "Missing from_flow_id or to_flow_id"}), 400
+    if not source_port or not target_port:
+        return jsonify({"error": "source_port and target_port are required"}), 400
     if str(from_flow_id) == str(to_flow_id):
         return jsonify({"error": "Cannot relate a node to itself"}), 400
     query = """
     MATCH (prev:STEP {flow_id: $from_flow_id})
     MATCH (next:STEP {flow_id: $to_flow_id})
-    MERGE (prev)-[:FLOWS_TO]->(next)
+    MERGE (prev)-[r:FLOWS_TO {
+      source_port: $source_port,
+      target_port: $target_port
+    }]->(next)
     WITH prev, next
     OPTIONAL MATCH (p:PIPELINE)-[:HAS_STEP]->(prev)
     SET p.updated_at = datetime()
@@ -1495,7 +1524,9 @@ def neo4j_add_edge():
         with driver.session() as session:
             record = session.run(query, {
                 "from_flow_id": str(from_flow_id),
-                "to_flow_id": str(to_flow_id)
+                "to_flow_id": str(to_flow_id),
+                "source_port": source_port,
+                "target_port": target_port,
             }).single()
             if not record:
                 return jsonify({"error": "STEP node(s) not found for given flow_id(s)"}), 404
@@ -1504,11 +1535,18 @@ def neo4j_add_edge():
                 "edge_created",
                 "manual",
                 f"Connected step {from_flow_id} to step {to_flow_id}.",
-                {"from_flow_id": from_flow_id, "to_flow_id": to_flow_id},
+                {
+                    "from_flow_id": from_flow_id,
+                    "to_flow_id": to_flow_id,
+                    "source_port": source_port,
+                    "target_port": target_port,
+                },
             )
             return jsonify({
                 "from_flow_id": record["from_flow_id"],
                 "to_flow_id": record["to_flow_id"],
+                "source_port": source_port or None,
+                "target_port": target_port or None,
                 "rel_type": "FLOWS_TO"
             }), 200
     except Exception as e:
@@ -1526,23 +1564,35 @@ def neo4j_delete_edge():
     properties = data.get("properties", {})
     from_flow_id = properties.get("flow_id_source")
     to_flow_id = properties.get("flow_id_target")
+    source_port = str(properties.get("source_port") or "").strip()
+    target_port = str(properties.get("target_port") or "").strip()
     if not from_flow_id or not to_flow_id:
         return jsonify({"error": "Missing from_flow_id or to_flow_id"}), 400
     query = """
     MATCH (prev:STEP {flow_id: $from_flow_id})
     MATCH (next:STEP {flow_id: $to_flow_id})
-    OPTIONAL MATCH (prev)-[r]->(next)
-    DELETE r
-    WITH prev, next
+    OPTIONAL MATCH (prev)-[r:FLOWS_TO]->(next)
+    WHERE ($source_port = '' AND $target_port = '')
+       OR (coalesce(r.source_port, '') = $source_port
+           AND coalesce(r.target_port, '') = $target_port)
+       OR (coalesce(r.source_port, '') = ''
+           AND coalesce(r.target_port, '') = '')
+    WITH prev, next, collect(r) AS relationships, count(r) AS deleted_count
+    FOREACH (relationship IN relationships | DELETE relationship)
+    WITH prev, next, deleted_count
     OPTIONAL MATCH (p:PIPELINE)-[:HAS_STEP]->(prev)
     SET p.updated_at = datetime()
-    RETURN prev.flow_id AS from_flow_id, next.flow_id AS to_flow_id
+    RETURN prev.flow_id AS from_flow_id,
+           next.flow_id AS to_flow_id,
+           deleted_count AS deleted_count
     """
     try:
         with driver.session() as session:
             record = session.run(query, {
                 "from_flow_id": str(from_flow_id),
-                "to_flow_id": str(to_flow_id)
+                "to_flow_id": str(to_flow_id),
+                "source_port": source_port,
+                "target_port": target_port,
             }).single()
             if not record:
                 return jsonify({"error": "STEP node(s) not found for given flow_id(s)"}), 404
@@ -1551,11 +1601,17 @@ def neo4j_delete_edge():
                 "edge_deleted",
                 "manual",
                 f"Removed connection from step {from_flow_id} to step {to_flow_id}.",
-                {"from_flow_id": from_flow_id, "to_flow_id": to_flow_id},
+                {
+                    "from_flow_id": from_flow_id,
+                    "to_flow_id": to_flow_id,
+                    "source_port": source_port,
+                    "target_port": target_port,
+                },
             )
             return jsonify({
                 "from_flow_id": record["from_flow_id"],
                 "to_flow_id": record["to_flow_id"],
+                "deleted_count": record["deleted_count"],
                 "rel_type": "FLOWS_TO"
             }), 200
     except Exception as e:
@@ -1568,7 +1624,7 @@ def neo4j_get_all_files():
     print("[neo4j_api.py] Received request to get all filenames and buckets.")
     query = """
     MATCH (n:STEP)-[:HAS_FILE]->(f:FILE)
-    RETURN f.filename AS filename, f.bucket AS bucket
+    RETURN f.filename AS filename, f.bucket AS bucket, f.role AS role
     """
     try:
         with driver.session() as session:
@@ -1576,7 +1632,8 @@ def neo4j_get_all_files():
             files = [
                 {
                     "filename": record["filename"],
-                    "bucket": record["bucket"]
+                    "bucket": record["bucket"],
+                    **({"role": record["role"]} if record["role"] in {"code", "data"} else {}),
                 }
                 for record in result
             ]
@@ -2527,7 +2584,7 @@ def neo4j_get_graph():
          ranked[0].step_count AS pipeline_step_count,
          design_pipeline_count
     OPTIONAL MATCH (p)-[:HAS_STEP]->(s:STEP)
-    OPTIONAL MATCH (s)-[:FLOWS_TO]->(t:STEP)
+    OPTIONAL MATCH (s)-[r:FLOWS_TO]->(t:STEP)
     OPTIONAL MATCH (s)-[:HAS_FILE]->(f:FILE)
     WITH
       p,
@@ -2535,7 +2592,8 @@ def neo4j_get_graph():
       pipeline_step_count,
       s,
       t,
-      collect(DISTINCT f { .filename, .bucket, added_at: toString(f.added_at) }) AS files_for_step
+      r,
+      collect(DISTINCT f { .filename, .bucket, .role, added_at: toString(f.added_at) }) AS files_for_step
     RETURN
       toString(p.updated_at) AS updated_at,
       p {
@@ -2558,7 +2616,9 @@ def neo4j_get_graph():
       }) AS step_rows,
       collect(DISTINCT {
         source: s.flow_id,
-        target: t.flow_id
+        target: t.flow_id,
+        source_port: r.source_port,
+        target_port: r.target_port
       }) AS flows
     """
 
@@ -2626,7 +2686,7 @@ def neo4j_get_graph():
                 except Exception:
                     y = 0.0
 
-                step_kind = normalize_step_type(props.get("type"), default="custom")
+                step_kind = normalize_step_type(props.get("type"), default="task")
 
                 files_for_step = row.get("files") or []
                 # filenames list (simple)
@@ -2640,6 +2700,8 @@ def neo4j_get_graph():
                     "label": props.get("label", ""),
                     "description": props.get("description", ""),
                     "type": step_kind,
+                    "template_label": props.get("template_label", ""),
+                    "ports": normalize_node_ports(props.get("ports_json"), step_kind),
 
                     # add files so polling doesn't wipe them
                     "files": filenames,
@@ -2664,6 +2726,10 @@ def neo4j_get_graph():
                     except Exception:
                         parsed_param = {}
                     data["param"] = parsed_param if isinstance(parsed_param, dict) else {}
+                    data["secret_params"] = normalize_secret_param_keys(
+                        props.get("secret_params_json"),
+                        data["param"],
+                    )
                 data.update(definition_data_from_properties(props))
 
                 nodes.append({
@@ -2674,6 +2740,10 @@ def neo4j_get_graph():
                 })
 
             edges = []
+            node_types_by_id = {
+                node["id"]: node["data"]["type"]
+                for node in nodes
+            }
             for f in flows:
                 src = f.get("source") if isinstance(f, dict) else None
                 tgt = f.get("target") if isinstance(f, dict) else None
@@ -2681,12 +2751,21 @@ def neo4j_get_graph():
                     continue
                 src = str(src)
                 tgt = str(tgt)
+                source_port = f.get("source_port") or default_output_port_id(
+                    node_types_by_id.get(src)
+                )
+                target_port = f.get("target_port") or default_input_port_id(
+                    node_types_by_id.get(tgt)
+                )
                 edges.append({
-                    "id": f"reactflow__edge-{src}-{tgt}",
+                    "id": (
+                        f"reactflow__edge-{src}-{source_port or 'default'}-"
+                        f"{tgt}-{target_port or 'default'}"
+                    ),
                     "source": src,
                     "target": tgt,
-                    "sourceHandle": None,
-                    "targetHandle": None,
+                    "sourceHandle": source_port or None,
+                    "targetHandle": target_port or None,
                 })
 
             return jsonify({
