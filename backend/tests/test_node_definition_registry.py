@@ -36,7 +36,7 @@ class NodeDefinitionRegistryTest(unittest.TestCase):
             {
                 "core.source",
                 "core.task",
-                "core.sink",
+                "core.destination",
                 "core.flow",
                 "core.subpipeline",
             },
@@ -63,6 +63,10 @@ class NodeDefinitionRegistryTest(unittest.TestCase):
         )
         self.assertIn(
             "core.model-training",
+            {definition.id for definition in registry.list(include_disabled=True)},
+        )
+        self.assertIn(
+            "core.sink",
             {definition.id for definition in registry.list(include_disabled=True)},
         )
 

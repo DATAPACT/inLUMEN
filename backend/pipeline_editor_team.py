@@ -96,7 +96,7 @@ def build_pipeline_editing_team(
         (:STEP) represents a single node in the pipeline graph. Properties:
             - uid: string (generated via randomUUID)
             - flow_id: string (unique int: number of step generated: 1,2 ... N)
-            - type: string ("source"|"task"|"sink"|"flow"|"subpipeline")
+            - type: string ("source"|"task"|"destination"|"flow"|"subpipeline")
               This is the stable structural kind. Templates, business operations,
               static parameters, and implementation technologies are metadata.
             - label: string
@@ -312,7 +312,7 @@ def build_pipeline_editing_team(
         default_template_labels = {
             "source": "Source",
             "task": "Blank Task",
-            "sink": "Destination",
+            "destination": "Destination",
             "flow": "Flow",
             "subpipeline": "Subpipeline",
         }
@@ -326,7 +326,7 @@ def build_pipeline_editing_team(
         ]
         default_ports = ports_json(None, step_type).replace("\\", "\\\\").replace("'", "\\'")
         props_lines.append(f"ports_json: '{default_ports}'")
-        if step_type in ("source", "sink"):
+        if step_type in ("source", "destination"):
             props_lines.append("content: ''")
         param_obj = dict(parameters) if isinstance(parameters, dict) else {}
         if isinstance(implementation, dict) and implementation:
@@ -349,7 +349,7 @@ def build_pipeline_editing_team(
 
         params JSON:
         {
-          "type": "source|task|sink|flow|subpipeline",
+          "type": "source|task|destination|flow|subpipeline",
           "label": "step label",
           "description": "step description",
           "template": "optional template name such as Speech-to-Text",
@@ -372,7 +372,7 @@ def build_pipeline_editing_team(
         }
         Include implementation for analytical steps. For ordinary structured
         model training, specify task/domain and classical_ml but omit model_id.
-        Use source/sink templates for external adapters, task templates for
+        Use source/destination templates for external adapters, task templates for
         domain operations, flow for execution control, and subpipeline for a
         reusable pipeline reference. Never create configuration nodes.
         """
@@ -466,7 +466,7 @@ def build_pipeline_editing_team(
 
         params JSON:
         {
-          "type": "source|task|sink|flow|subpipeline",
+          "type": "source|task|destination|flow|subpipeline",
           "label": "step label",
           "description": "step description",
           "template": "optional template name",
@@ -697,9 +697,9 @@ def build_pipeline_editing_team(
                         - [delete_all_steps]: calling this tool will remove every step from the current design pipeline while keeping the pipeline itself. Use it only when the user asks to clear, empty, reset, delete all steps, remove everything from, or remove all nodes/steps in the pipeline.
                         Tool calls MUST use a single string argument named params. The value of params MUST be a JSON-encoded string matching the "params JSON" schema in the docstring.
                         When creating, designing, regenerating, or rebuilding a pipeline, call create_pipeline first with a concise generated name and a fresh 1-2 sentence description that summarizes the full intended pipeline. Do this before creating steps so the UI pipeline description is updated.
-                        The create_step and insert_step type MUST be one of: source, task, sink, flow, subpipeline. This set is structural and must not grow for technologies or business operations. Use source for external ingress adapters; task for processing and templates such as cleaning, OCR, speech-to-text, LLM, SQL, or API calls; sink for external delivery adapters; flow for conditions, parallel maps, merges, retries, waits, and approvals; and subpipeline for reusable pipelines.
+                        The create_step and insert_step type MUST be one of: source, task, destination, flow, subpipeline. This set is structural and must not grow for technologies or business operations. Use source for external ingress adapters; task for processing and templates such as cleaning, OCR, speech-to-text, LLM, SQL, or API calls; destination for external delivery adapters; flow for conditions and parallel maps; and subpipeline for reusable pipelines.
                         Templates are metadata on a structural kind. Implementations are separate metadata and may be generated code, Python, SQL, a container, a Git repository, REST API, shell, custom, or a future runtime.
-                        Always pass the most specific useful template for each step. Do not use generic template names such as Source, Task, Sink, or Destination when the requested capability identifies an adapter or operation. For example, remote-device REST ingestion uses source + REST API, preprocessing uses task + Data Cleaning, model training uses task + Model Training, and clinician email/SMS alerts use sink + Notification.
+                        Always pass the most specific useful template for each step. Do not use generic template names such as Source, Task, or Destination when the requested capability identifies an adapter or operation. For example, remote-device REST ingestion uses source + REST API, preprocessing uses task + Data Cleaning, model training uses task + Model Training, and clinician email/SMS alerts use destination + Notification.
                         Static configuration belongs in the node's parameters object. Never create a configuration node unless configuration is dynamically produced as pipeline data, in which case model it through ordinary ports.
                         Mark credentials such as API keys, access tokens, client secrets, and passwords in secret_parameters. Never invent or place a real credential in the graph.
                         Use overview to find the relevant flow_id values before calling insert_step unless the flow_id values are already provided by the user.

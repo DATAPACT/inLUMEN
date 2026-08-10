@@ -40,12 +40,15 @@ describe("flow graph normalization", () => {
       position: { x: 12.5, y: 0 },
       data: {
         type: "source",
-        ports: { inputs: [], outputs: [{ id: "data", label: "data" }] },
+        ports: {
+          inputs: [],
+          outputs: [{ id: "data", name: "data", type: "any", required: true, description: "Source data." }],
+        },
       },
     });
-    expect(graph.nodes[1].data.type).toBe("sink");
+    expect(graph.nodes[1].data.type).toBe("destination");
     expect(graph.edges).toEqual([
-      expect.objectContaining({ id: "e-1-2", source: "1", target: "2" }),
+      expect.objectContaining({ id: "e-1-data-2-data", source: "1", target: "2" }),
     ]);
     expect(graph.settings).toEqual({ version: "1.0" });
   });
@@ -93,9 +96,9 @@ describe("flow graph normalization", () => {
           template: "File",
           ports: {
             inputs: [],
-            outputs: [{ id: "data", label: "data" }],
+            outputs: [{ id: "data", name: "data", type: "any", required: true, description: "Source data." }],
           },
-          implementation: { parser: "csv" },
+          implementation: { kind: "python", parser: "csv" },
           secret_params: [],
           configuration_status: "valid",
           generated_artifact: { status: "current" },

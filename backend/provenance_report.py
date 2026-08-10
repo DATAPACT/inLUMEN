@@ -36,7 +36,7 @@ MAX_DIAGRAM_NODES = 24
 NODE_COLORS = {
     "source": colors.HexColor("#D8E8FF"),
     "task": colors.HexColor("#FFF0C7"),
-    "sink": colors.HexColor("#D8F3DC"),
+    "destination": colors.HexColor("#D8F3DC"),
     "flow": colors.HexColor("#E7E2F7"),
     "subpipeline": colors.HexColor("#D7F1EF"),
 }

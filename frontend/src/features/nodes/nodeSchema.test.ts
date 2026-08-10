@@ -25,7 +25,7 @@ describe("node schema compatibility", () => {
     expect(normalizeType("feature-engineering")).toBe("task");
     expect(normalizeType("storage")).toBe("task");
     expect(normalizeType("API call")).toBe("task");
-    expect(normalizeType("quality_report_writer")).toBe("sink");
+    expect(normalizeType("quality_report_writer")).toBe("destination");
     expect(normalizeType("human approval")).toBe("flow");
     expect(normalizeType("nested pipeline")).toBe("subpipeline");
     expect(normalizeType("unrecognized step")).toBe("task");
@@ -34,15 +34,15 @@ describe("node schema compatibility", () => {
   it("uses structural, implementation-neutral labels", () => {
     expect(getStepTypeLabel("source")).toBe("Source");
     expect(getStepTypeLabel("task")).toBe("Task");
-    expect(getStepTypeLabel("sink")).toBe("Destination");
+    expect(getStepTypeLabel("destination")).toBe("Destination");
     expect(getStepTypeLabel("flow")).toBe("Flow");
     expect(getStepTypeLabel("subpipeline")).toBe("Subpipeline");
   });
 
-  it("normalizes explicit ports and enforces source/sink directionality", () => {
+  it("normalizes explicit port contracts and enforces source/destination directionality", () => {
     expect(normalizeNodePorts(undefined, "source")).toEqual({
       inputs: [],
-      outputs: [{ id: "data", label: "data" }],
+      outputs: [{ id: "data", name: "data", type: "any", required: true, description: "Source data." }],
     });
     expect(normalizeNodePorts({
       inputs: [{ id: "ignored", label: "ignored" }],
@@ -53,17 +53,20 @@ describe("node schema compatibility", () => {
     }, "source")).toEqual({
       inputs: [],
       outputs: [
-        { id: "embeddings", label: "embeddings", data_type: "Collection<Vector>" },
-        { id: "embeddings-2", label: "scores" },
+        { id: "embeddings", name: "embeddings", type: "Collection<Vector>", required: true, description: "" },
+        { id: "embeddings-2", name: "scores", type: "any", required: true, description: "" },
       ],
     });
-    expect(normalizeNodePorts(undefined, "sink").outputs).toEqual([]);
+    expect(normalizeNodePorts(undefined, "destination").outputs).toEqual([]);
+    expect(normalizeNodePorts({
+      outputs: [{ id: "response", name: "response", description: "Data emitted by this adapter." }],
+    }, "source").outputs[0].description).toBe("Data emitted by this source.");
   });
 
   it("keeps runtime implementation selection independent", () => {
     expect(normalizeImplementationKind("Python")).toBe("python");
-    expect(normalizeImplementationKind("git repository")).toBe("git-repository");
-    expect(normalizeImplementationKind("future-runtime")).toBe("generated-code");
+    expect(normalizeImplementationKind("git repository")).toBe("repository");
+    expect(normalizeImplementationKind("future-runtime")).toBe("python");
   });
 
   it("infers secret parameters while preserving explicit visibility choices", () => {
@@ -118,8 +121,8 @@ describe("node schema compatibility", () => {
       param: { language: "en" },
       secret_params: [],
       ports: {
-        inputs: [{ id: "audio", label: "audio", data_type: "Audio" }],
-        outputs: [{ id: "transcript", label: "transcript", data_type: "Document" }],
+        inputs: [{ id: "audio", name: "audio", type: "Audio", required: true, description: "" }],
+        outputs: [{ id: "transcript", name: "transcript", type: "Document", required: true, description: "" }],
       },
       has_files: "no",
       template_label: "Speech-to-Text",

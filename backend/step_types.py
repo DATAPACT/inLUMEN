@@ -1,7 +1,7 @@
 CANONICAL_STEP_TYPES = {
     "source",
     "task",
-    "sink",
+    "destination",
     "flow",
     "subpipeline",
 }
@@ -19,17 +19,17 @@ STEP_TYPE_ALIASES = {
     "sensors": "source",
     "collect": "source",
     "collection": "source",
-    "destination": "sink",
-    "output": "sink",
-    "alert": "sink",
-    "alerting": "sink",
-    "notification": "sink",
-    "notify": "sink",
-    "report": "sink",
-    "reporting": "sink",
-    "dashboard": "sink",
-    "result": "sink",
-    "results": "sink",
+    "sink": "destination",
+    "output": "destination",
+    "alert": "destination",
+    "alerting": "destination",
+    "notification": "destination",
+    "notify": "destination",
+    "report": "destination",
+    "reporting": "destination",
+    "dashboard": "destination",
+    "result": "destination",
+    "results": "destination",
     "action": "task",
     "config": "task",
     "configuration": "task",
@@ -109,5 +109,5 @@ def normalize_step_type(raw_type: object, default: str = "task") -> str:
     if any(token in normalized for token in ("ingest", "input", "source", "sensor", "upload")):
         return "source"
     if any(token in normalized for token in ("sink", "destination", "alert", "output", "report", "publish", "notification")):
-        return "sink"
+        return "destination"
     return default if default in CANONICAL_STEP_TYPES else "task"

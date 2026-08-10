@@ -8,24 +8,24 @@ from step_types import normalize_step_type
 
 
 DEFAULT_NODE_PORTS = {
-    "source": {"inputs": [], "outputs": [{"id": "data", "label": "data"}]},
+    "source": {"inputs": [], "outputs": [{"id": "data", "name": "data", "type": "any", "required": True, "description": "Source data."}]},
     "task": {
-        "inputs": [{"id": "input", "label": "input"}],
-        "outputs": [{"id": "output", "label": "output"}],
+        "inputs": [{"id": "input", "name": "input", "type": "any", "required": True, "description": "Task input."}],
+        "outputs": [{"id": "output", "name": "output", "type": "any", "required": True, "description": "Task output."}],
     },
-    "sink": {"inputs": [{"id": "data", "label": "data"}], "outputs": []},
+    "destination": {"inputs": [{"id": "data", "name": "data", "type": "any", "required": True, "description": "Data to deliver."}], "outputs": []},
     "flow": {
-        "inputs": [{"id": "input", "label": "input"}],
-        "outputs": [{"id": "output", "label": "output"}],
+        "inputs": [{"id": "input", "name": "input", "type": "any", "required": True, "description": "Flow input."}],
+        "outputs": [{"id": "output", "name": "output", "type": "any", "required": True, "description": "Flow output."}],
     },
     "subpipeline": {
-        "inputs": [{"id": "input", "label": "input"}],
-        "outputs": [{"id": "output", "label": "output"}],
+        "inputs": [{"id": "input", "name": "input", "type": "any", "required": True, "description": "Nested pipeline input."}],
+        "outputs": [{"id": "output", "name": "output", "type": "any", "required": True, "description": "Nested pipeline output."}],
     },
 }
 
 
-def _copy_ports(ports: list[dict[str, str]]) -> list[dict[str, str]]:
+def _copy_ports(ports: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [dict(port) for port in ports]
 
 
@@ -34,31 +34,39 @@ def _port_id(value: Any, fallback: str) -> str:
     return normalized.strip("-") or fallback
 
 
-def _normalize_port_list(value: Any, fallback: list[dict[str, str]]) -> list[dict[str, str]]:
+def _normalize_port_list(value: Any, fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return _copy_ports(fallback)
-    normalized: list[dict[str, str]] = []
+    normalized: list[dict[str, Any]] = []
     used: set[str] = set()
     for index, entry in enumerate(value, start=1):
         if not isinstance(entry, dict):
             continue
-        label = str(entry.get("label") or entry.get("id") or "").strip()
-        base_id = _port_id(entry.get("id") or label, f"port-{index}")
+        name = str(entry.get("name") or entry.get("label") or entry.get("id") or "").strip()
+        base_id = _port_id(entry.get("id") or name, f"port-{index}")
         port_id = base_id
         suffix = 2
         while port_id in used:
             port_id = f"{base_id}-{suffix}"
             suffix += 1
         used.add(port_id)
-        port = {"id": port_id, "label": label or port_id}
-        data_type = str(entry.get("data_type") or "").strip()
-        if data_type:
-            port["data_type"] = data_type
+        port = {
+            "id": port_id,
+            "name": name or port_id,
+            "type": str(entry.get("type") or entry.get("data_type") or "any").strip() or "any",
+            "required": entry.get("required") if isinstance(entry.get("required"), bool) else True,
+            "description": str(entry.get("description") or "").strip(),
+        }
+        port_format = str(entry.get("format") or "").strip()
+        if port_format:
+            port["format"] = port_format
+        if isinstance(entry.get("schema"), dict):
+            port["schema"] = dict(entry["schema"])
         normalized.append(port)
     return normalized
 
 
-def normalize_node_ports(value: Any, step_type: object) -> dict[str, list[dict[str, str]]]:
+def normalize_node_ports(value: Any, step_type: object) -> dict[str, list[dict[str, Any]]]:
     kind = normalize_step_type(step_type)
     if isinstance(value, str):
         try:
@@ -72,7 +80,7 @@ def normalize_node_ports(value: Any, step_type: object) -> dict[str, list[dict[s
         if kind == "source"
         else _normalize_port_list(candidate.get("inputs"), defaults["inputs"]),
         "outputs": []
-        if kind == "sink"
+        if kind == "destination"
         else _normalize_port_list(candidate.get("outputs"), defaults["outputs"]),
     }
 

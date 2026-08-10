@@ -213,7 +213,7 @@ def _parse_visible_graph(graph: dict) -> tuple[list[dict], list[dict]]:
             data.get("secret_params"),
             param_obj,
         )
-        if step_type in ("source", "sink"):
+        if step_type in ("source", "destination"):
             props["content"] = str(data.get("content") or "")
         props["has_files"] = "yes" if files else str(data.get("has_files") or "no").lower().strip()
         # Preserve legacy adapter fields during migration without treating them
@@ -1073,7 +1073,7 @@ def neo4j_add_node():
         properties["y"] = float(properties.get("y", 0) or 0)
     except Exception:
         properties["y"] = 0.0
-    if step_type in ("source", "sink"):
+    if step_type in ("source", "destination"):
         properties.setdefault("content", "")
     properties.setdefault("has_files", "no")
     # Construct the Cypher query
@@ -1253,7 +1253,7 @@ def neo4j_update_node():
         param_obj,
     )
     normalize_definition_properties(properties)
-    if step_type in ("source", "sink"):
+    if step_type in ("source", "destination"):
         properties["content"] =  properties.get("content", "")
     properties["has_files"] = str(properties.get("has_files") or "no").lower().strip()
     # Ensure we never attempt to store maps / File objects
@@ -1504,6 +1504,8 @@ def neo4j_add_edge():
     target_port = str(properties.get("target_port") or "").strip()
     if not from_flow_id or not to_flow_id:
         return jsonify({"error": "Missing from_flow_id or to_flow_id"}), 400
+    if not source_port or not target_port:
+        return jsonify({"error": "source_port and target_port are required"}), 400
     if str(from_flow_id) == str(to_flow_id):
         return jsonify({"error": "Cannot relate a node to itself"}), 400
     query = """

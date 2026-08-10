@@ -6,6 +6,7 @@ import {
   type NodeDefinitionData,
 } from "@/features/nodes/registry/types";
 import { normalizeNodePorts } from "@/features/nodes/nodeSchema";
+import { defaultTemplateForType, findTemplateForType } from "@/features/nodes/templateCatalog";
 
 const CORE_FALLBACK_DEFINITIONS: NodeDefinition[] = [
   {
@@ -32,7 +33,7 @@ const CORE_FALLBACK_DEFINITIONS: NodeDefinition[] = [
     family: "tasks",
     enabled: true,
     palette: {
-      label: "Blank Task",
+      label: "Task",
       description: "Process, transform, validate, or analyze pipeline data.",
       icon: "zap",
       color: "amber",
@@ -40,12 +41,12 @@ const CORE_FALLBACK_DEFINITIONS: NodeDefinition[] = [
     },
     editor: { kind: "default" },
     runtime: { generator: "generic" },
-    default_implementation: { kind: "generated-code" },
+    default_implementation: { kind: "python", language: "python" },
   },
   {
-    id: "core.sink",
+    id: "core.destination",
     version: 1,
-    base_type: "sink",
+    base_type: "destination",
     family: "destinations",
     enabled: true,
     palette: {
@@ -67,7 +68,7 @@ const CORE_FALLBACK_DEFINITIONS: NodeDefinition[] = [
     enabled: true,
     palette: {
       label: "Flow",
-      description: "Control branching, parallelism, retries, waits, or approvals.",
+      description: "Model conditions and parallel maps without an execution-engine-specific node.",
       icon: "git-branch",
       color: "purple",
       order: 40,
@@ -145,19 +146,27 @@ export const fetchNodeDefinitions = async (force = false): Promise<NodeDefinitio
 
 export const createNodeDataFromDefinition = (
   definition: NodeDefinition,
-): NodeDefinitionData => ({
-  label: definition.palette.label,
-  description: definition.palette.description,
-  type: definition.base_type,
-  definition_id: definition.id,
-  definition_version: definition.version,
-  implementation: cloneImplementation(definition.default_implementation),
-  template_label: definition.palette.label,
-  ports: normalizeNodePorts(undefined, definition.base_type),
-  ...(definition.editor.kind !== "default"
-    ? { configuration_status: "unconfigured" as const }
-    : {}),
-});
+): NodeDefinitionData => {
+  const templateName = defaultTemplateForType(definition.base_type);
+  const template = findTemplateForType(definition.base_type, templateName);
+  return {
+    label: definition.palette.label,
+    description: definition.palette.description,
+    type: definition.base_type,
+    definition_id: definition.id,
+    definition_version: definition.version,
+    implementation: cloneImplementation(definition.default_implementation),
+    template_label: templateName,
+    template: {
+      id: template?.id || `core.${definition.base_type}`,
+      name: templateName,
+    },
+    ports: normalizeNodePorts(template?.ports, definition.base_type),
+    ...(definition.editor.kind !== "default"
+      ? { configuration_status: "unconfigured" as const }
+      : {}),
+  };
+};
 
 export const getNodeDefinitionEditorKind = (definitionId: string | undefined) => {
   if (!definitionId) return "default";

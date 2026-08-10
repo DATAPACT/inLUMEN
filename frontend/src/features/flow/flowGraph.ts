@@ -101,11 +101,22 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
   const edges: Edge[] = [];
 
   incomingEdges.forEach((edgeEntry) => {
-    const edge = (edgeEntry && typeof edgeEntry === "object" ? edgeEntry : {}) as Edge;
+    const edge = (edgeEntry && typeof edgeEntry === "object" ? edgeEntry : {}) as Edge & {
+      source_port?: unknown;
+      target_port?: unknown;
+    };
     const source = String(edge.source || "");
     const target = String(edge.target || "");
-    const sourceHandle = typeof edge.sourceHandle === "string" ? edge.sourceHandle : "";
-    const targetHandle = typeof edge.targetHandle === "string" ? edge.targetHandle : "";
+    const sourceNode = nodes.find((node) => node.id === source);
+    const targetNode = nodes.find((node) => node.id === target);
+    const sourcePorts = sourceNode
+      ? normalizeNodePorts(sourceNode.data?.ports, normalizeType(sourceNode.data?.type))
+      : null;
+    const targetPorts = targetNode
+      ? normalizeNodePorts(targetNode.data?.ports, normalizeType(targetNode.data?.type))
+      : null;
+    const sourceHandle = String(edge.sourceHandle || edge.source_port || sourcePorts?.outputs[0]?.id || "");
+    const targetHandle = String(edge.targetHandle || edge.target_port || targetPorts?.inputs[0]?.id || "");
     const edgeKey = `${source}:${sourceHandle}->${target}:${targetHandle}`;
 
     if (!source || !target || source === target) return;
@@ -115,9 +126,13 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
 
     edges.push({
       ...edge,
-      id: edge?.id ? String(edge.id) : `e-${String(edge.source)}-${String(edge.target)}`,
+      id: edge?.id
+        ? String(edge.id)
+        : `e-${source}-${sourceHandle || "default"}-${target}-${targetHandle || "default"}`,
       source,
       target,
+      sourceHandle,
+      targetHandle,
     });
   });
 
@@ -198,7 +213,7 @@ export const getNextNumericNodeId = (nodes: Node[], fallback = 1) => {
 };
 
 export const downloadJsonFile = (data: unknown, fileName: string) => {
-  const dataStr = JSON.stringify(data);
+  const dataStr = JSON.stringify(data, null, 2);
   const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr);
   const linkElement = document.createElement('a');
   linkElement.setAttribute('href', dataUri);

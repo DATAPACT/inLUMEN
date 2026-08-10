@@ -17,7 +17,7 @@ from node_ports import (  # noqa: E402
 class NodePortsTest(unittest.TestCase):
     def test_uses_defaults_for_each_structural_kind(self):
         self.assertEqual([], normalize_node_ports(None, "source")["inputs"])
-        self.assertEqual([], normalize_node_ports(None, "sink")["outputs"])
+        self.assertEqual([], normalize_node_ports(None, "destination")["outputs"])
         self.assertEqual("input", normalize_node_ports(None, "task")["inputs"][0]["id"])
 
     def test_normalizes_explicit_ports_and_unique_ids(self):
@@ -35,7 +35,9 @@ class NodePortsTest(unittest.TestCase):
         self.assertEqual("audio-input", ports["inputs"][0]["id"])
         self.assertEqual("result", ports["outputs"][0]["id"])
         self.assertEqual("result-2", ports["outputs"][1]["id"])
-        self.assertEqual("Document", ports["outputs"][0]["data_type"])
+        self.assertEqual("Document", ports["outputs"][0]["type"])
+        self.assertEqual("transcript", ports["outputs"][0]["name"])
+        self.assertTrue(ports["outputs"][0]["required"])
 
     def test_parses_and_serializes_json_at_the_storage_boundary(self):
         source = normalize_node_ports(
@@ -48,8 +50,8 @@ class NodePortsTest(unittest.TestCase):
     def test_resolves_default_connection_handles(self):
         self.assertEqual("data", default_output_port_id("source"))
         self.assertEqual("input", default_input_port_id("task"))
-        self.assertEqual("data", default_input_port_id("sink"))
-        self.assertEqual("", default_output_port_id("sink"))
+        self.assertEqual("data", default_input_port_id("destination"))
+        self.assertEqual("", default_output_port_id("destination"))
 
 
 if __name__ == "__main__":

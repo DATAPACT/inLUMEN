@@ -21,7 +21,7 @@
       "base_type": "task",
       "family": "tasks",
       "palette": {
-        "label": "Blank Task",
+        "label": "Task",
         "description": "Process, transform, validate, or analyze pipeline data.",
         "icon": "zap",
         "color": "amber",
@@ -29,12 +29,12 @@
       },
       "editor": { "kind": "default" },
       "runtime": { "generator": "generic" },
-      "default_implementation": { "kind": "generated-code" }
+      "default_implementation": { "kind": "python", "language": "python" }
     },
     {
-      "id": "core.sink",
+      "id": "core.destination",
       "version": 1,
-      "base_type": "sink",
+      "base_type": "destination",
       "family": "destinations",
       "palette": {
         "label": "Destination",
@@ -53,7 +53,7 @@
       "family": "flow",
       "palette": {
         "label": "Flow",
-        "description": "Control branching, parallelism, retries, waits, or approvals.",
+        "description": "Model conditions and parallel maps without an execution-engine-specific node.",
         "icon": "git-branch",
         "color": "purple",
         "order": 40
@@ -83,6 +83,16 @@
       "family": "legacy",
       "enabled": false,
       "palette": { "label": "Model Configuration", "description": "Legacy template retained for saved graphs.", "icon": "settings", "color": "sky", "order": 1010 },
+      "editor": { "kind": "default" },
+      "runtime": { "generator": "generic" }
+    },
+    {
+      "id": "core.sink",
+      "version": 1,
+      "base_type": "destination",
+      "family": "legacy",
+      "enabled": false,
+      "palette": { "label": "Destination", "description": "Legacy destination identifier retained for saved graphs.", "icon": "file-output", "color": "emerald", "order": 1015 },
       "editor": { "kind": "default" },
       "runtime": { "generator": "generic" }
     },
@@ -139,7 +149,7 @@
     {
       "id": "core.output",
       "version": 1,
-      "base_type": "sink",
+      "base_type": "destination",
       "family": "legacy",
       "enabled": false,
       "palette": { "label": "AI/ML Output", "description": "Legacy destination template retained for saved graphs.", "icon": "message-circle", "color": "emerald", "order": 1070 },

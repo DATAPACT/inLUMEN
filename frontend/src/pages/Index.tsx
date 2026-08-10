@@ -194,6 +194,7 @@ type ChatApiResponse = {
 
 const Index = () => {
   const [selectedNode, setSelectedNode] = useState<FlowNode | null>(null);
+  const [isCanvasAdvanced, setIsCanvasAdvanced] = useState(false);
   const [activeTab, setActiveTab] = useState('lab'); // 'lab', 'overview', or 'simulate'
   const [userInput, setUserInput] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -1102,6 +1103,7 @@ const Index = () => {
                   onActiveVersionChange={updateActiveVersion}
                   onActiveVersionNameChange={handleActiveVersionNameChange}
                   onPipelineDescriptionChange={setActivePipelineDescription}
+                  onDisplayModeChange={setIsCanvasAdvanced}
                   flowCanvasRef={flowCanvasRef}
                 />
               </div>
@@ -1118,6 +1120,7 @@ const Index = () => {
                       onNodeUpdate={onNodeUpdate}
                       onRemoveNode={handleRemoveNode}
                       activeChatbotConfig={activeConfig}
+                      isAdvancedMode={isCanvasAdvanced}
                     />
                   ) : rightPanel === 'chat' ? (
                     <ChatPanel

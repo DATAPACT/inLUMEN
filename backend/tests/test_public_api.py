@@ -152,7 +152,7 @@ class PublicApiTest(unittest.TestCase):
         self.assertEqual(["Health"], schema["paths"]["/health"]["get"]["tags"])
         self.assertEqual(["Canvas Graph"], schema["paths"]["/api/graph/nodes"]["post"]["tags"])
         self.assertEqual(
-            ["source", "task", "sink", "flow", "subpipeline"],
+            ["source", "task", "destination", "flow", "subpipeline"],
             schema["components"]["schemas"]["PipelineNodeKind"]["enum"],
         )
         self.assertIn("ports", schema["components"]["schemas"]["NodeCreateRequest"]

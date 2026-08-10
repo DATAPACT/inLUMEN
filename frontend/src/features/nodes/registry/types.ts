@@ -26,7 +26,7 @@ export const nodeDefinitionSchema = z.object({
   base_type: z.enum([
     "source",
     "task",
-    "sink",
+    "destination",
     "flow",
     "subpipeline",
   ]),
@@ -59,6 +59,7 @@ export type NodeDefinitionData = {
   definition_version: number;
   implementation: NodeInstanceImplementation;
   template_label: string;
+  template: { id: string; name: string; version?: number };
   ports: NodePorts;
   configuration_status?: "unconfigured" | "valid" | "invalid";
 };

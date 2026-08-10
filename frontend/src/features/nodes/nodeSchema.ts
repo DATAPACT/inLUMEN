@@ -1,14 +1,14 @@
 export type StepType =
   | "source"
   | "task"
-  | "sink"
+  | "destination"
   | "flow"
   | "subpipeline";
 
 export const STEP_TYPE_LABELS: Record<StepType, string> = {
   source: "Source",
   task: "Task",
-  sink: "Destination",
+  destination: "Destination",
   flow: "Flow",
   subpipeline: "Subpipeline",
 };
@@ -17,8 +17,12 @@ export const getStepTypeLabel = (type: StepType) => STEP_TYPE_LABELS[type];
 
 export type NodePort = {
   id: string;
-  label: string;
-  data_type?: string;
+  name: string;
+  type: string;
+  required: boolean;
+  description: string;
+  format?: string;
+  schema?: Record<string, unknown>;
 };
 
 export type NodePorts = {
@@ -29,23 +33,23 @@ export type NodePorts = {
 export const DEFAULT_NODE_PORTS: Record<StepType, NodePorts> = {
   source: {
     inputs: [],
-    outputs: [{ id: "data", label: "data" }],
+    outputs: [{ id: "data", name: "data", type: "any", required: true, description: "Source data." }],
   },
   task: {
-    inputs: [{ id: "input", label: "input" }],
-    outputs: [{ id: "output", label: "output" }],
+    inputs: [{ id: "input", name: "input", type: "any", required: true, description: "Task input." }],
+    outputs: [{ id: "output", name: "output", type: "any", required: true, description: "Task output." }],
   },
-  sink: {
-    inputs: [{ id: "data", label: "data" }],
+  destination: {
+    inputs: [{ id: "data", name: "data", type: "any", required: true, description: "Data to deliver." }],
     outputs: [],
   },
   flow: {
-    inputs: [{ id: "input", label: "input" }],
-    outputs: [{ id: "output", label: "output" }],
+    inputs: [{ id: "input", name: "input", type: "any", required: true, description: "Flow input." }],
+    outputs: [{ id: "output", name: "output", type: "any", required: true, description: "Flow output." }],
   },
   subpipeline: {
-    inputs: [{ id: "input", label: "input" }],
-    outputs: [{ id: "output", label: "output" }],
+    inputs: [{ id: "input", name: "input", type: "any", required: true, description: "Nested pipeline input." }],
+    outputs: [{ id: "output", name: "output", type: "any", required: true, description: "Nested pipeline output." }],
   },
 };
 
@@ -55,8 +59,8 @@ const normalizePortList = (value: unknown, fallback: NodePort[]) => {
   return value.flatMap((entry, index) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
     const candidate = entry as Record<string, unknown>;
-    const label = String(candidate.label ?? candidate.id ?? "").trim();
-    const baseId = String(candidate.id ?? label ?? `port-${index + 1}`)
+    const name = String(candidate.name ?? candidate.label ?? candidate.id ?? "").trim();
+    const baseId = String(candidate.id ?? name ?? `port-${index + 1}`)
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9_.-]+/g, "-")
@@ -68,12 +72,20 @@ const normalizePortList = (value: unknown, fallback: NodePort[]) => {
       suffix += 1;
     }
     ids.add(id);
+    const contractType = String(candidate.type ?? candidate.data_type ?? "any").trim() || "any";
+    const description = String(candidate.description ?? "").trim();
+    const format = String(candidate.format ?? "").trim();
+    const schema = candidate.schema && typeof candidate.schema === "object" && !Array.isArray(candidate.schema)
+      ? candidate.schema as Record<string, unknown>
+      : undefined;
     return [{
       id,
-      label: label || id,
-      ...(typeof candidate.data_type === "string" && candidate.data_type.trim()
-        ? { data_type: candidate.data_type.trim() }
-        : {}),
+      name: name || id,
+      type: contractType,
+      required: typeof candidate.required === "boolean" ? candidate.required : true,
+      description,
+      ...(format ? { format } : {}),
+      ...(schema ? { schema } : {}),
     }];
   });
 };
@@ -82,37 +94,54 @@ export const normalizeNodePorts = (value: unknown, type: StepType): NodePorts =>
   const candidate = value && typeof value === "object" && !Array.isArray(value)
     ? value as Partial<NodePorts>
     : {};
+  const inputs = type === "source"
+    ? []
+    : normalizePortList(candidate.inputs, DEFAULT_NODE_PORTS[type].inputs);
+  const outputs = type === "destination"
+    ? []
+    : normalizePortList(candidate.outputs, DEFAULT_NODE_PORTS[type].outputs);
   return {
-    inputs: type === "source"
-      ? []
-      : normalizePortList(candidate.inputs, DEFAULT_NODE_PORTS[type].inputs),
-    outputs: type === "sink"
-      ? []
-      : normalizePortList(candidate.outputs, DEFAULT_NODE_PORTS[type].outputs),
+    inputs: inputs.map((port) => ({
+      ...port,
+      description: type === "destination" && port.description === "Data consumed by this adapter."
+        ? "Data consumed by this destination."
+        : port.description,
+    })),
+    outputs: outputs.map((port) => ({
+      ...port,
+      description: type === "source" && port.description === "Data emitted by this adapter."
+        ? "Data emitted by this source."
+        : port.description,
+    })),
   };
 };
 
 export const IMPLEMENTATION_KIND_OPTIONS = [
-  { value: "generated-code", label: "Generated code" },
   { value: "python", label: "Python" },
   { value: "sql", label: "SQL" },
   { value: "container", label: "Container" },
-  { value: "git-repository", label: "Git repository" },
+  { value: "repository", label: "Repository" },
   { value: "rest-api", label: "REST API" },
   { value: "shell", label: "Shell" },
-  { value: "custom", label: "Custom" },
+  { value: "generated-code", label: "Generated code" },
 ] as const;
 
 export type ImplementationKind = (typeof IMPLEMENTATION_KIND_OPTIONS)[number]["value"];
 
 export const normalizeImplementationKind = (value: unknown): ImplementationKind => {
-  const normalized = String(value ?? "").trim().toLowerCase().replace(/\s+/g, "-");
+  const raw = String(value ?? "").trim().toLowerCase().replace(/\s+/g, "-");
+  const normalized = raw === "git-repository" ? "repository" : raw;
   return IMPLEMENTATION_KIND_OPTIONS.some((option) => option.value === normalized)
     ? normalized as ImplementationKind
-    : "generated-code";
+    : "python";
 };
 
-export type NodeImplementation = Record<string, unknown>;
+export type NodeImplementation = Record<string, unknown> & {
+  kind?: ImplementationKind;
+  language?: string;
+  dependencies?: string[];
+  entrypoint?: string;
+};
 
 const SENSITIVE_PARAMETER_PATTERN =
   /(^|[_\-.])(api[_\-.]?key|access[_\-.]?key|client[_\-.]?secret|private[_\-.]?key|password|passphrase|secret|token|credential|authorization)($|[_\-.])/i;
@@ -215,7 +244,7 @@ export const getNodeFileRole = (file: NodeFileReference): NodeFileRole => {
 const CANONICAL_STEP_TYPES = new Set<StepType>([
   "source",
   "task",
-  "sink",
+  "destination",
   "flow",
   "subpipeline",
 ]);
@@ -229,13 +258,13 @@ const STEP_TYPE_ALIASES: Record<string, StepType> = {
   ingestion: "source",
   sensor: "source",
   collect: "source",
-  output: "sink",
-  destination: "sink",
-  alert: "sink",
-  notification: "sink",
-  report: "sink",
-  reporting: "sink",
-  result: "sink",
+  sink: "destination",
+  output: "destination",
+  alert: "destination",
+  notification: "destination",
+  report: "destination",
+  reporting: "destination",
+  result: "destination",
   action: "task",
   config: "task",
   configuration: "task",
@@ -286,7 +315,7 @@ export const normalizeType = (type: unknown): StepType => {
   if (normalized.includes("subpipeline") || normalized.includes("sub_pipeline") || normalized.includes("nested_pipeline")) return "subpipeline";
   if (["condition", "branch", "parallel", "merge", "retry", "wait", "approval"].some((token) => normalized.includes(token))) return "flow";
   if (["ingest", "input", "source", "sensor", "upload"].some((token) => normalized.includes(token))) return "source";
-  if (["sink", "destination", "alert", "output", "report", "publish", "notification"].some((token) => normalized.includes(token))) return "sink";
+  if (["sink", "destination", "alert", "output", "report", "publish", "notification"].some((token) => normalized.includes(token))) return "destination";
   return "task";
 };
 
@@ -300,7 +329,10 @@ export const normalizeDefinitionVersion = (value: unknown) => {
 
 export const normalizeNodeImplementation = (value: unknown): NodeImplementation =>
   value && typeof value === "object" && !Array.isArray(value)
-    ? value as NodeImplementation
+    ? {
+        ...(value as NodeImplementation),
+        kind: normalizeImplementationKind((value as NodeImplementation).kind),
+      }
     : {};
 
 export const normalizeGeneratedArtifact = (
@@ -322,7 +354,7 @@ export const normalizeConfigurationStatus = (
 export const typeHasFiles = (_type: StepType) => true;
 
 export const typeHasContent = (type: StepType) =>
-  type === "source" || type === "sink";
+  type === "source" || type === "destination";
 
 export const pickBackendUpdatableProps = (
   nodeId: string,
@@ -344,6 +376,15 @@ export const pickBackendUpdatableProps = (
 
   if (typeof nodeData.template_label === "string" && nodeData.template_label.trim()) {
     props.template_label = nodeData.template_label.trim();
+  }
+  if (nodeData.template && typeof nodeData.template === "object" && !Array.isArray(nodeData.template)) {
+    props.template = nodeData.template;
+  }
+  if (nodeType === "source" && nodeData.source_config && typeof nodeData.source_config === "object" && !Array.isArray(nodeData.source_config)) {
+    props.source_config = nodeData.source_config;
+  }
+  if (nodeType === "subpipeline" && nodeData.subpipeline && typeof nodeData.subpipeline === "object" && !Array.isArray(nodeData.subpipeline)) {
+    props.subpipeline = nodeData.subpipeline;
   }
 
   const definitionId = normalizeDefinitionId(nodeData.definition_id);

@@ -11,7 +11,6 @@ import {
 } from 'lucide-react';
 import {
   getStepTypeLabel,
-  normalizeImplementationKind,
   normalizeNodePorts,
   normalizeType,
   type NodePorts,
@@ -19,6 +18,7 @@ import {
 import { PortDisplayContext } from '@/features/nodes/PortDisplayContext';
 
 interface NodeProps {
+  id: string;
   data: {
     label: string;
     description?: string;
@@ -28,6 +28,10 @@ interface NodeProps {
     ports?: Partial<NodePorts>;
     template_label?: string;
     implementation?: Record<string, unknown>;
+    subpipeline?: {
+      expanded?: boolean;
+      graph?: { nodes?: unknown[]; edges?: unknown[] };
+    };
   };
   selected: boolean;
 }
@@ -35,7 +39,7 @@ interface NodeProps {
 const icons = {
   source: FileInput,
   task: Zap,
-  sink: FileOutput,
+  destination: FileOutput,
   flow: GitBranch,
   subpipeline: Boxes,
 };
@@ -53,7 +57,7 @@ const TYPE_STYLES = {
     border: 'border-amber-400/20',
     selected: 'border-amber-400/70 shadow-[0_0_0_1px_rgba(251,191,36,0.35),0_8px_30px_rgba(217,119,6,0.14)]',
   },
-  sink: {
+  destination: {
     accent: 'bg-emerald-400',
     icon: 'bg-emerald-500/15 text-emerald-300 ring-emerald-400/20',
     border: 'border-emerald-400/20',
@@ -98,16 +102,23 @@ const PortList = ({
             align === 'right' && 'justify-end',
           )}
         >
-          <span className="truncate font-medium text-slate-300">{port.label}</span>
-          <span className="shrink-0 text-slate-500">{port.data_type || 'any'}</span>
+          <span className="truncate font-medium text-slate-300">{port.name}</span>
+          {port.type !== 'any' && (
+            <span className="shrink-0 text-slate-500">{port.type}</span>
+          )}
+          {port.required && <span className="shrink-0 text-amber-400" title="Required">*</span>}
         </div>
       ))}
     </div>
   </div>
 );
 
-export const CustomNode: React.FC<NodeProps> = ({ data, selected }) => {
-  const showPortDetails = useContext(PortDisplayContext);
+export const CustomNode: React.FC<NodeProps> = ({ id, data, selected }) => {
+  const display = useContext(PortDisplayContext);
+  const showPortDetails = display.advanced;
+  const validationIssues = display.validationByNode[id] || [];
+  const validationErrors = validationIssues.filter((issue) => issue.severity === 'error').length;
+  const validationWarnings = validationIssues.filter((issue) => issue.severity === 'warning').length;
   const visualType = normalizeType(data.type);
   const ports = normalizeNodePorts(data.ports, visualType);
   const style = TYPE_STYLES[visualType];
@@ -123,9 +134,6 @@ export const CustomNode: React.FC<NodeProps> = ({ data, selected }) => {
     'Subpipeline',
   ]);
   const showTemplate = templateLabel && !structuralDefaults.has(templateLabel);
-  const implementationLabel = visualType === 'task'
-    ? normalizeImplementationKind(data.implementation?.kind).replace(/-/g, ' ')
-    : '';
 
   return (
     <div
@@ -134,6 +142,8 @@ export const CustomNode: React.FC<NodeProps> = ({ data, selected }) => {
         showPortDetails ? 'w-[218px] px-3 py-2.5' : 'w-[184px] px-3 py-2.5',
         style.border,
         selected ? style.selected : 'shadow-[0_5px_18px_rgba(0,0,0,0.2)]',
+        validationErrors > 0 && 'border-red-500/80 shadow-[0_0_0_1px_rgba(239,68,68,0.35),0_8px_28px_rgba(239,68,68,0.16)]',
+        validationErrors === 0 && validationWarnings > 0 && 'border-amber-400/80 shadow-[0_0_0_1px_rgba(251,191,36,0.3),0_8px_28px_rgba(245,158,11,0.12)]',
         data.active && 'animate-pulse',
       )}
     >
@@ -145,9 +155,12 @@ export const CustomNode: React.FC<NodeProps> = ({ data, selected }) => {
           id={port.id}
           type="target"
           position={Position.Left}
-          title={`${port.label}${port.data_type ? ` · ${port.data_type}` : ''}`}
+          title={`${port.name}${port.type !== 'any' ? ` · ${port.type}` : ''}${port.description ? ` — ${port.description}` : ''}`}
           style={{ top: portPosition(index, ports.inputs.length) }}
-          className="node-port-handle node-port-handle-input"
+          className={cn(
+            "node-port-handle node-port-handle-input",
+            !showPortDetails && "pointer-events-none opacity-0",
+          )}
         />
       ))}
 
@@ -171,9 +184,6 @@ export const CustomNode: React.FC<NodeProps> = ({ data, selected }) => {
 
           <div className="mt-1 flex items-baseline justify-between gap-2">
             <div className="truncate text-[13px] font-semibold leading-4 text-slate-100">{data.label}</div>
-            {showPortDetails && implementationLabel && (
-              <span className="shrink-0 text-[8px] capitalize text-slate-500">{implementationLabel}</span>
-            )}
           </div>
 
           {data.description && (
@@ -182,6 +192,15 @@ export const CustomNode: React.FC<NodeProps> = ({ data, selected }) => {
               showPortDetails ? 'line-clamp-2' : 'line-clamp-1',
             )}>
               {data.description}
+            </div>
+          )}
+
+          {showPortDetails && validationIssues.length > 0 && (
+            <div className={cn(
+              'mt-1 text-[9px]',
+              validationErrors > 0 ? 'text-red-300' : 'text-amber-300',
+            )}>
+              {validationErrors > 0 ? `${validationErrors} validation error${validationErrors === 1 ? '' : 's'}` : `${validationIssues.length} validation warning${validationIssues.length === 1 ? '' : 's'}`}
             </div>
           )}
         </div>
@@ -198,15 +217,24 @@ export const CustomNode: React.FC<NodeProps> = ({ data, selected }) => {
         </div>
       )}
 
+      {visualType === 'subpipeline' && data.subpipeline?.expanded && (
+        <div className="mt-2 rounded-md border border-cyan-400/15 bg-cyan-950/20 px-2 py-1.5 text-[9px] text-cyan-200">
+          Expanded nested graph · {Array.isArray(data.subpipeline.graph?.nodes) ? data.subpipeline.graph?.nodes.length : 0} components
+        </div>
+      )}
+
       {ports.outputs.map((port, index) => (
         <Handle
           key={`output-${port.id}`}
           id={port.id}
           type="source"
           position={Position.Right}
-          title={`${port.label}${port.data_type ? ` · ${port.data_type}` : ''}`}
+          title={`${port.name}${port.type !== 'any' ? ` · ${port.type}` : ''}${port.description ? ` — ${port.description}` : ''}`}
           style={{ top: portPosition(index, ports.outputs.length) }}
-          className="node-port-handle node-port-handle-output"
+          className={cn(
+            "node-port-handle node-port-handle-output",
+            !showPortDetails && "pointer-events-none opacity-0",
+          )}
         />
       ))}
     </div>

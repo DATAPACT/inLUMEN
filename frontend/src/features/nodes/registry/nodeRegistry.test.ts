@@ -12,13 +12,13 @@ describe("core node registry", () => {
     expect(definitions.map((definition) => definition.id)).toEqual([
       "core.source",
       "core.task",
-      "core.sink",
+      "core.destination",
       "core.flow",
       "core.subpipeline",
     ]);
     expect(definitions.map((definition) => definition.palette.label)).toEqual([
       "Source",
-      "Blank Task",
+      "Task",
       "Destination",
       "Flow",
       "Subpipeline",

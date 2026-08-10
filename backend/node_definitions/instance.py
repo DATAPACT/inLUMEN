@@ -35,6 +35,16 @@ def definition_properties_from_data(data: Any) -> dict[str, Any]:
     )
 
     properties: dict[str, Any] = {}
+    template = data.get("template")
+    if isinstance(template, dict):
+        template_name = str(template.get("name") or "").strip()
+        template_id = str(template.get("id") or "").strip()
+        if template_name and template_id:
+            properties["template_json"] = json.dumps(
+                template,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
     if definition_id:
         properties.update(
             {
@@ -60,6 +70,20 @@ def definition_properties_from_data(data: Any) -> dict[str, Any]:
             ensure_ascii=False,
             sort_keys=True,
         )
+    source_config = data.get("source_config")
+    if isinstance(source_config, dict):
+        properties["source_config_json"] = json.dumps(
+            source_config,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    subpipeline = data.get("subpipeline")
+    if isinstance(subpipeline, dict):
+        properties["subpipeline_json"] = json.dumps(
+            subpipeline,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
     return properties
 
 
@@ -71,6 +95,12 @@ def normalize_definition_properties(properties: dict[str, Any]) -> None:
     properties.pop("configuration_status", None)
     properties.pop("generated_artifact", None)
     properties.pop("generated_artifact_json", None)
+    properties.pop("template", None)
+    properties.pop("template_json", None)
+    properties.pop("source_config", None)
+    properties.pop("source_config_json", None)
+    properties.pop("subpipeline", None)
+    properties.pop("subpipeline_json", None)
 
     properties.update(definition_properties)
     if not str(properties.get("definition_id") or "").strip():
@@ -111,6 +141,13 @@ def definition_data_from_properties(properties: Any) -> dict[str, Any]:
         )
 
     data: dict[str, Any] = {}
+    template_json = properties.get("template_json")
+    try:
+        template = json.loads(template_json) if isinstance(template_json, str) else {}
+    except (TypeError, ValueError):
+        template = {}
+    if isinstance(template, dict) and template.get("id") and template.get("name"):
+        data["template"] = template
     if definition_id:
         data.update(
             {
@@ -158,4 +195,15 @@ def definition_data_from_properties(properties: Any) -> dict[str, Any]:
             "current" if artifact_hash and artifact_hash == current_hash else "stale"
         )
         data["generated_artifact"] = generated_artifact
+    for property_name, data_name in (
+        ("source_config_json", "source_config"),
+        ("subpipeline_json", "subpipeline"),
+    ):
+        encoded = properties.get(property_name)
+        try:
+            decoded = json.loads(encoded) if isinstance(encoded, str) else {}
+        except (TypeError, ValueError):
+            decoded = {}
+        if isinstance(decoded, dict) and decoded:
+            data[data_name] = decoded
     return data

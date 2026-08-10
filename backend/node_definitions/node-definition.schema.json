@@ -27,7 +27,7 @@
       "enum": [
         "source",
         "task",
-        "sink",
+        "destination",
         "flow",
         "subpipeline"
       ]

@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
+import React, { useState, useCallback, useRef, useEffect, forwardRef, useImperativeHandle, useMemo } from 'react';
 import { ChatbotConfig } from '@/services/chatbotService';
 import ReactFlow, {
   Node,
@@ -53,6 +53,9 @@ import {
   type AgentGraphSnapshot,
   type NormalizedGraph,
 } from '@/features/flow/flowGraph';
+import { createProjectDocument, projectDocumentToGraph } from '@/features/flow/projectIr';
+import { validateGraph, type ValidationIssue } from '@/features/flow/flowValidation';
+import { normalizeNodePorts, normalizeType } from '@/features/nodes/nodeSchema';
 import {
   Dialog,
   DialogContent,
@@ -89,6 +92,7 @@ interface FlowCanvasProps {
   onActiveVersionChange?: (versionUid: string) => void;
   onActiveVersionNameChange?: (versionName: string) => void;
   onPipelineDescriptionChange?: (description: string) => void;
+  onDisplayModeChange?: (advanced: boolean) => void;
 }
 
 export interface FlowCanvasRef {
@@ -437,6 +441,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   onActiveVersionChange,
   onActiveVersionNameChange,
   onPipelineDescriptionChange,
+  onDisplayModeChange,
 }, ref) => {
   const [nodes, setNodes] = useState<Node[]>(() => {
     const savedNodes = localStorage.getItem('ai-flow-nodes');
@@ -472,12 +477,56 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const [isCancellingScripts, setIsCancellingScripts] = useState(false);
   const generationCancelRequestedRef = useRef(false);
   const [isScriptGenerationOpen, setIsScriptGenerationOpen] = useState(false);
+  const [isValidationOpen, setIsValidationOpen] = useState(false);
   const [scriptGenerationPrompt, setScriptGenerationPrompt] = useState("");
   const [scriptGenerationMode, setScriptGenerationMode] =
     useState<PipelineScriptGenerationMode>("full");
   const [isPreparingExternalPrompt, setIsPreparingExternalPrompt] = useState(false);
   const [generationJob, setGenerationJob] = useState<PipelineGenerationJob | null>(null);
   const uploadedSampleDataAvailable = hasUploadedSampleData(nodes);
+  const designValidation = useMemo(() => validateGraph(nodes, edges), [edges, nodes]);
+  const displayedNodes = useMemo(() => nodes.map((node) => ({
+    ...node,
+    data: {
+      ...node.data,
+      validation_issues: designValidation.byNode[String(node.id)] || [],
+      connected_ports: {
+        inputs: edges
+          .filter((edge) => String(edge.target) === String(node.id) && edge.targetHandle)
+          .map((edge) => String(edge.targetHandle)),
+        outputs: edges
+          .filter((edge) => String(edge.source) === String(node.id) && edge.sourceHandle)
+          .map((edge) => String(edge.sourceHandle)),
+      },
+    },
+  })), [designValidation.byNode, edges, nodes]);
+  const displayedEdges = useMemo(() => edges.map((edge) => {
+    const issues = designValidation.issues.filter((issue) => issue.edgeId === String(edge.id || ""));
+    const hasError = issues.some((issue) => issue.severity === "error");
+    const hasWarning = issues.some((issue) => issue.severity === "warning");
+    if (!hasError && !hasWarning) return edge;
+    const color = hasError ? "#ef4444" : "#f59e0b";
+    return {
+      ...edge,
+      style: { ...edge.style, stroke: color, strokeWidth: 2.5 },
+      markerEnd: {
+        type: MarkerType.ArrowClosed,
+        width: 12,
+        height: 12,
+        color,
+      },
+    };
+  }), [designValidation.issues, edges]);
+  const validationErrors = designValidation.issues.filter((issue) => issue.severity === "error").length;
+  const validationWarnings = designValidation.issues.filter((issue) => issue.severity === "warning").length;
+
+  useEffect(() => {
+    const selectedNodeId = selectedNodeIdRef.current;
+    if (!selectedNodeId) return;
+    const refreshedSelection = displayedNodes.find((node) => node.id === selectedNodeId) || null;
+    setSelectedNode(refreshedSelection);
+    onNodeSelect(refreshedSelection, { openInspector: false });
+  }, [displayedNodes, onNodeSelect]);
 
   useEffect(() => {
     if (!uploadedSampleDataAvailable && scriptGenerationMode === "full") {
@@ -706,6 +755,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       nodes: nodes.map((node) => {
         const data = { ...(node.data || {}) };
         delete data.file_buckets;
+        delete data.validation_issues;
+        delete data.connected_ports;
         if (Array.isArray(data.files)) {
           data.files = data.files
             .map((file) => getSnapshotFileRef(file, node.id))
@@ -838,7 +889,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
   useEffect(() => {
     localStorage.setItem('inlumen-show-port-details', String(showPortDetails));
-  }, [showPortDetails]);
+    onDisplayModeChange?.(showPortDetails);
+  }, [onDisplayModeChange, showPortDetails]);
 
   useEffect(() => {
     if (onNodesChange) onNodesChange(nodes);
@@ -924,6 +976,39 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         return;
       }
 
+      if (!params.sourceHandle || !params.targetHandle) {
+        toast.error("Select explicit ports", {
+          description: "Connections must link an output port to an input port.",
+        });
+        return;
+      }
+
+      const sourceNode = nodes.find((node) => node.id === params.source);
+      const targetNode = nodes.find((node) => node.id === params.target);
+      const sourcePort = sourceNode
+        ? normalizeNodePorts(sourceNode.data?.ports, normalizeType(sourceNode.data?.type)).outputs
+          .find((port) => port.id === params.sourceHandle)
+        : undefined;
+      const targetPort = targetNode
+        ? normalizeNodePorts(targetNode.data?.ports, normalizeType(targetNode.data?.type)).inputs
+          .find((port) => port.id === params.targetHandle)
+        : undefined;
+      if (!sourcePort || !targetPort) {
+        toast.error("Invalid port connection", {
+          description: "The selected source or target port no longer exists.",
+        });
+        return;
+      }
+      const sourceType = sourcePort.type.toLowerCase();
+      const targetType = targetPort.type.toLowerCase();
+      const wildcard = (value: string) => ["", "any", "unknown", "*"].includes(value);
+      if (!wildcard(sourceType) && !wildcard(targetType) && sourceType !== targetType) {
+        toast.error("Incompatible port contracts", {
+          description: `${sourcePort.name} (${sourcePort.type}) cannot connect to ${targetPort.name} (${targetPort.type}).`,
+        });
+        return;
+      }
+
       const duplicate = edges.some((edge) =>
         edge.source === params.source &&
         edge.target === params.target &&
@@ -939,8 +1024,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       onCanvasEdited?.();
 
       // Find the actual Node objects
-      const sourceNode = nodes.find((n) => n.id === params.source);
-      const targetNode = nodes.find((n) => n.id === params.target);
       if (!sourceNode || !targetNode) {
         console.warn("[FlowCanvas.tsx] Could not find source/target nodes for edge creation.");
         return;
@@ -956,6 +1039,29 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     setSelectedNode(node);
     onNodeSelect(node);
   }, [onNodeSelect]);
+
+  const openValidationIssue = useCallback((issue: ValidationIssue) => {
+    const edge = issue.edgeId
+      ? edges.find((candidate) => String(candidate.id || "") === issue.edgeId)
+      : undefined;
+    const nodeId = issue.nodeId || edge?.target || edge?.source;
+    const node = displayedNodes.find((candidate) => String(candidate.id) === String(nodeId || ""));
+    if (node) {
+      selectedNodeIdRef.current = node.id;
+      setSelectedNode(node);
+      onNodeSelect(node);
+      window.setTimeout(() => {
+        const section = ["unknown-edge-port", "missing-edge-port"].includes(issue.code)
+          ? "ports"
+          : issue.category;
+        document.getElementById(`inspector-${section}`)?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      }, 150);
+    }
+    setIsValidationOpen(false);
+  }, [displayedNodes, edges, onNodeSelect]);
 
   const onPaneClick = useCallback(() => {
     selectedNodeIdRef.current = null;
@@ -1046,11 +1152,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const exportFlow = () => {
     try {
       if (reactFlowInstance) {
-        const flow = reactFlowInstance.toObject();
-        downloadJsonFile(flow, 'inlumen-flow.json');
+        const project = createProjectDocument(normalizeGraph(createSerializableFlow()));
+        downloadJsonFile(project, 'inlumen-project.json');
 
-        toast.success('Flow exported successfully', {
-          description: 'Your AI pipeline has been exported as JSON',
+        toast.success('Project JSON exported', {
+          description: designValidation.valid
+            ? 'The canonical Pipeline IR is valid.'
+            : `Exported with ${designValidation.issues.length} validation issue${designValidation.issues.length === 1 ? '' : 's'}.`,
         });
       }
     } catch (error) {
@@ -1250,17 +1358,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       const file = e.target.files?.[0];
       if (!file) return;
       const text = await file.text();
-      const flowData = JSON.parse(text) as {
-        nodes?: Node[];
-        edges?: Edge[];
-      };
-      if (!Array.isArray(flowData.nodes) || !Array.isArray(flowData.edges)) {
-        toast.error('Invalid flow file', {
-          description: 'The selected file does not contain a valid flow',
-        });
-        return;
-      }
-      const normalizedImport = normalizeGraph(flowData);
+      const flowData = JSON.parse(text);
+      const normalizedImport = projectDocumentToGraph(flowData);
       const importedNodes = normalizedImport.nodes;
       const importedEdges = normalizedImport.edges;
       pushHistorySnapshot();
@@ -1270,8 +1369,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       setNodes(importedNodes);
       setEdges(importedEdges);
       nodeId = getNextNumericNodeId(importedNodes, 1);
-      toast.success('Flow imported successfully', {
-        description: 'Imported flow and backend state reconstructed',
+      toast.success('Project JSON imported', {
+        description: 'The Pipeline IR was migrated and the design state was reconstructed.',
       });
     } catch (error) {
       console.error('Error importing flow:', error);
@@ -1316,10 +1415,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
   return (
     <div ref={reactFlowWrapper} className="h-full w-full">
-      <PortDisplayContext.Provider value={showPortDetails}>
+      <PortDisplayContext.Provider value={{
+        advanced: showPortDetails,
+        validationByNode: designValidation.byNode,
+      }}>
       <ReactFlow
-        nodes={nodes}
-        edges={edges}
+        nodes={displayedNodes}
+        edges={displayedEdges}
         onNodesChange={onNodesChangeInternal}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
@@ -1373,7 +1475,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
             switch (n.data.type) {
               case 'source': return '#3B82F6';
               case 'task': return '#F59E0B';
-              case 'sink': return '#10B981';
+              case 'destination': return '#10B981';
               case 'flow': return '#A855F7';
               case 'subpipeline': return '#06B6D4';
               default: return '#6B7280';
@@ -1395,6 +1497,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           isGeneratingScripts={isGeneratingScripts}
           showPortDetails={showPortDetails}
           onTogglePortDetails={() => setShowPortDetails((current) => !current)}
+          validationErrors={validationErrors}
+          validationWarnings={validationWarnings}
+          onValidationClick={() => setIsValidationOpen(true)}
           onClear={clearCanvas}
           canUndo={historyAvailability.canUndo}
           canRedo={historyAvailability.canRedo}
@@ -1402,6 +1507,50 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         />
       </ReactFlow>
       </PortDisplayContext.Provider>
+
+      <Dialog open={isValidationOpen} onOpenChange={setIsValidationOpen}>
+        <DialogContent className="max-h-[80vh] overflow-y-auto sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Pipeline validation</DialogTitle>
+            <DialogDescription>
+              {designValidation.issues.length === 0
+                ? "The pipeline contract is valid."
+                : `${validationErrors} error${validationErrors === 1 ? "" : "s"} and ${validationWarnings} warning${validationWarnings === 1 ? "" : "s"} need attention.`}
+            </DialogDescription>
+          </DialogHeader>
+          {designValidation.issues.length === 0 ? (
+            <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-600">
+              <CheckCircle2 className="h-4 w-4" />
+              No validation issues found.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {designValidation.issues.map((issue, index) => (
+                <button
+                  key={`${issue.code}-${issue.nodeId || issue.edgeId || index}`}
+                  type="button"
+                  onClick={() => openValidationIssue(issue)}
+                  className={cn(
+                    "flex w-full items-start gap-2 rounded-lg border p-3 text-left text-sm transition-colors hover:bg-muted/60",
+                    issue.severity === "error"
+                      ? "border-red-500/30 bg-red-500/5"
+                      : "border-amber-500/30 bg-amber-500/5",
+                  )}
+                >
+                  <AlertCircle className={cn(
+                    "mt-0.5 h-4 w-4 shrink-0",
+                    issue.severity === "error" ? "text-red-500" : "text-amber-500",
+                  )} />
+                  <span>
+                    <span className="block font-medium capitalize">{issue.severity} · {issue.category}</span>
+                    <span className="text-muted-foreground">{issue.message}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={isScriptGenerationOpen}
@@ -1677,6 +1826,7 @@ export const WrappedFlowCanvas = ({
   onActiveVersionChange,
   onActiveVersionNameChange,
   onPipelineDescriptionChange,
+  onDisplayModeChange,
   flowCanvasRef,
 }: WrappedFlowCanvasProps) => (
   <ReactFlowProvider>
@@ -1694,6 +1844,7 @@ export const WrappedFlowCanvas = ({
       onActiveVersionChange={onActiveVersionChange}
       onActiveVersionNameChange={onActiveVersionNameChange}
       onPipelineDescriptionChange={onPipelineDescriptionChange}
+      onDisplayModeChange={onDisplayModeChange}
     />
   </ReactFlowProvider>
 );

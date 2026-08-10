@@ -13,7 +13,7 @@ In DATAPACT, the **intent** translates to the pipeline goal: both in terms of st
 
 The user remains in control of the design, however supported by dedidated agents whose role is to make these visions come to life. inLUMEN materializes their intents by generating the pipeline steps as a directed graph, and gives recommandations on compliance-strengthening design choices.
 
-Additionally, it generates deployment artifacts such as containers and workflow blueprints needed to simulate/run the pipeline. Provenance is given via tracking reports on decisions taken by the user and agents during the design process. 
+Additionally, it generates deployment artifacts such as containers and workflow blueprints for external execution targets. inLUMEN designs, validates, and exports pipelines; it does not execute them. Provenance is given via tracking reports on decisions taken by the user and agents during the design process.
 
 ## **Related Compliance aspects**
 - Compliance by design
@@ -33,9 +33,13 @@ remain stable:
 | --- | --- |
 | `source` | Adapt an external system into logical pipeline data. |
 | `task` | Process, transform, validate, or analyze data. |
-| `sink` | Write or publish results outside the pipeline. |
-| `flow` | Control branching, parallelism, merging, retries, waits, or approvals. |
+| `destination` | Write or publish results outside the pipeline. |
+| `flow` | Model conditions and parallel maps. |
 | `subpipeline` | Reuse another pipeline as one composable component. |
+
+The initial Flow template catalog contains Condition and Parallel Map. Wait,
+Retry, and Human Approval remain planned templates and do not require new graph
+kinds when introduced.
 
 Definitions such as File, PostgreSQL, Data Cleaning, OCR, Speech-to-Text,
 Embeddings, LLM, Report, or Kafka are templates built on these kinds; they are
@@ -45,9 +49,10 @@ not new graph types. The hierarchy is:
 Pipeline component -> Template -> Implementation
 ```
 
-A task template can be implemented by generated code, Python, SQL, a container,
+A task template can be implemented by Python (the default), SQL, a container,
 an existing Git repository, REST API, shell, or a future runtime without changing
-the graph. Source and sink templates are adapters: downstream tasks consume
+the graph. Generated code is another supported implementation source. Source and
+destination templates are adapters: downstream tasks consume
 logical values such as `Table`, `Stream<Message>`, or `Collection<Document>`
 rather than depending on the external technology.
 
@@ -59,7 +64,7 @@ it dynamically through a port. Credential-like parameters such as API keys,
 tokens, client secrets, and passwords are masked by default in the inspector;
 each field can be marked secret and revealed locally with its eye control.
 
-Legacy `input`, `action`, `output`, `config`, `storage`, `api`, and `custom`
+Legacy `input`, `action`, `sink`, `output`, `config`, `storage`, `api`, and `custom`
 values are normalized at the persistence boundary into the five structural kinds
 so existing saved graphs remain loadable.
 

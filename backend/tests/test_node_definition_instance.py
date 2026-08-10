@@ -84,6 +84,22 @@ class NodeDefinitionInstanceTest(unittest.TestCase):
             definition_data_from_properties(properties),
         )
 
+    def test_round_trips_template_source_and_nested_graph_metadata(self):
+        data = {
+            "template": {"id": "source.rest-api", "name": "REST API"},
+            "source_config": {"base_url": "https://example.test"},
+            "subpipeline": {
+                "expanded": False,
+                "graph": {"nodes": [], "edges": []},
+            },
+        }
+
+        properties = definition_properties_from_data(data)
+        restored = definition_data_from_properties(properties)
+
+        self.assertEqual(data, restored)
+        self.assertTrue(all(key.endswith("_json") for key in properties))
+
     def test_dynamic_model_plan_marks_artifact_stale_when_revision_changes(self):
         model_plan = {
             "framework": "transformers",
