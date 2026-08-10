@@ -1,194 +1,180 @@
 {
   "definitions": [
     {
-      "id": "core.model-configuration",
+      "id": "core.source",
       "version": 1,
-      "base_type": "config",
-      "family": "core",
+      "base_type": "source",
+      "family": "sources",
       "palette": {
-        "label": "Model Configuration",
-        "description": "Adjust model parameters, system prompt and more",
-        "icon": "settings",
-        "color": "sky",
+        "label": "Source",
+        "description": "Adapt an external system into logical pipeline data.",
+        "icon": "file-text",
+        "color": "blue",
         "order": 10
       },
-      "editor": {
-        "kind": "default"
+      "editor": { "kind": "default" },
+      "runtime": { "generator": "generic" }
+    },
+    {
+      "id": "core.task",
+      "version": 1,
+      "base_type": "task",
+      "family": "tasks",
+      "palette": {
+        "label": "Blank Task",
+        "description": "Process, transform, validate, or analyze pipeline data.",
+        "icon": "zap",
+        "color": "amber",
+        "order": 20
       },
-      "runtime": {
-        "generator": "generic"
-      }
+      "editor": { "kind": "default" },
+      "runtime": { "generator": "generic" },
+      "default_implementation": { "kind": "generated-code" }
+    },
+    {
+      "id": "core.sink",
+      "version": 1,
+      "base_type": "sink",
+      "family": "destinations",
+      "palette": {
+        "label": "Destination",
+        "description": "Write or publish pipeline results outside the pipeline.",
+        "icon": "file-output",
+        "color": "emerald",
+        "order": 30
+      },
+      "editor": { "kind": "default" },
+      "runtime": { "generator": "generic" }
+    },
+    {
+      "id": "core.flow",
+      "version": 1,
+      "base_type": "flow",
+      "family": "flow",
+      "palette": {
+        "label": "Flow",
+        "description": "Control branching, parallelism, retries, waits, or approvals.",
+        "icon": "git-branch",
+        "color": "purple",
+        "order": 40
+      },
+      "editor": { "kind": "default" },
+      "runtime": { "generator": "generic" }
+    },
+    {
+      "id": "core.subpipeline",
+      "version": 1,
+      "base_type": "subpipeline",
+      "family": "subpipeline",
+      "palette": {
+        "label": "Subpipeline",
+        "description": "Reuse another pipeline as one composable component.",
+        "icon": "boxes",
+        "color": "cyan",
+        "order": 50
+      },
+      "editor": { "kind": "default" },
+      "runtime": { "generator": "generic" }
+    },
+    {
+      "id": "core.model-configuration",
+      "version": 1,
+      "base_type": "task",
+      "family": "legacy",
+      "enabled": false,
+      "palette": { "label": "Model Configuration", "description": "Legacy template retained for saved graphs.", "icon": "settings", "color": "sky", "order": 1010 },
+      "editor": { "kind": "default" },
+      "runtime": { "generator": "generic" }
     },
     {
       "id": "core.input-data",
       "version": 1,
-      "base_type": "input",
-      "family": "core",
-      "palette": {
-        "label": "Input Data",
-        "description": "Raw data from sensors, APIs, files or user message.",
-        "icon": "database",
-        "color": "blue",
-        "order": 20
-      },
-      "editor": {
-        "kind": "default"
-      },
-      "runtime": {
-        "generator": "generic"
-      }
+      "base_type": "source",
+      "family": "legacy",
+      "enabled": false,
+      "palette": { "label": "Input Data", "description": "Legacy source template retained for saved graphs.", "icon": "database", "color": "blue", "order": 1020 },
+      "editor": { "kind": "default" },
+      "runtime": { "generator": "generic" }
     },
     {
       "id": "core.data-preprocessing",
       "version": 1,
-      "base_type": "action",
-      "family": "core",
-      "palette": {
-        "label": "Data Preprocessing",
-        "description": "Clean, normalize, and transform input data",
-        "icon": "file-text",
-        "color": "lime",
-        "order": 30
-      },
-      "editor": {
-        "kind": "default"
-      },
-      "runtime": {
-        "generator": "generic"
-      }
+      "base_type": "task",
+      "family": "legacy",
+      "enabled": false,
+      "palette": { "label": "Data Preprocessing", "description": "Legacy task template retained for saved graphs.", "icon": "file-text", "color": "lime", "order": 1030 },
+      "editor": { "kind": "default" },
+      "runtime": { "generator": "generic" }
     },
     {
       "id": "core.feature-engineering",
       "version": 1,
-      "base_type": "action",
-      "family": "core",
-      "palette": {
-        "label": "Feature Engineering",
-        "description": "Generate or select features for model input",
-        "icon": "info",
-        "color": "yellow",
-        "order": 40
-      },
-      "editor": {
-        "kind": "default"
-      },
-      "runtime": {
-        "generator": "generic"
-      }
+      "base_type": "task",
+      "family": "legacy",
+      "enabled": false,
+      "palette": { "label": "Feature Engineering", "description": "Legacy task template retained for saved graphs.", "icon": "info", "color": "yellow", "order": 1040 },
+      "editor": { "kind": "default" },
+      "runtime": { "generator": "generic" }
     },
     {
       "id": "core.model-training",
       "version": 1,
-      "base_type": "action",
-      "family": "core",
-      "palette": {
-        "label": "Model Training",
-        "description": "Train machine learning or deep learning models",
-        "icon": "brain",
-        "color": "indigo",
-        "order": 50
-      },
-      "editor": {
-        "kind": "default"
-      },
-      "runtime": {
-        "generator": "generic"
-      }
+      "base_type": "task",
+      "family": "legacy",
+      "enabled": false,
+      "palette": { "label": "Model Training", "description": "Legacy task template retained for saved graphs.", "icon": "brain", "color": "indigo", "order": 1050 },
+      "editor": { "kind": "default" },
+      "runtime": { "generator": "generic" }
     },
     {
       "id": "core.model-evaluation",
       "version": 1,
-      "base_type": "action",
-      "family": "core",
-      "palette": {
-        "label": "Model Evaluation",
-        "description": "Assess model performance and metrics",
-        "icon": "zap",
-        "color": "purple",
-        "order": 60
-      },
-      "editor": {
-        "kind": "default"
-      },
-      "runtime": {
-        "generator": "generic"
-      }
+      "base_type": "task",
+      "family": "legacy",
+      "enabled": false,
+      "palette": { "label": "Model Evaluation", "description": "Legacy task template retained for saved graphs.", "icon": "zap", "color": "purple", "order": 1060 },
+      "editor": { "kind": "default" },
+      "runtime": { "generator": "generic" }
     },
     {
       "id": "core.output",
       "version": 1,
-      "base_type": "output",
-      "family": "core",
-      "palette": {
-        "label": "AI/ML Output",
-        "description": "AI/ML pipeline results",
-        "icon": "message-circle",
-        "color": "emerald",
-        "order": 70
-      },
-      "editor": {
-        "kind": "default"
-      },
-      "runtime": {
-        "generator": "generic"
-      }
+      "base_type": "sink",
+      "family": "legacy",
+      "enabled": false,
+      "palette": { "label": "AI/ML Output", "description": "Legacy destination template retained for saved graphs.", "icon": "message-circle", "color": "emerald", "order": 1070 },
+      "editor": { "kind": "default" },
+      "runtime": { "generator": "generic" }
     },
     {
       "id": "core.api-call",
       "version": 1,
-      "base_type": "api",
-      "family": "core",
-      "palette": {
-        "label": "API Call",
-        "description": "Connect to external services",
-        "icon": "network",
-        "color": "rose",
-        "order": 80
-      },
-      "editor": {
-        "kind": "default"
-      },
-      "runtime": {
-        "generator": "generic"
-      }
+      "base_type": "task",
+      "family": "legacy",
+      "enabled": false,
+      "palette": { "label": "API Call", "description": "Legacy task template retained for saved graphs.", "icon": "network", "color": "rose", "order": 1080 },
+      "editor": { "kind": "default" },
+      "runtime": { "generator": "generic" }
     },
     {
       "id": "core.clipboard",
       "version": 1,
-      "base_type": "storage",
-      "family": "core",
-      "palette": {
-        "label": "Clipboard",
-        "description": "Store and retrieve content",
-        "icon": "clipboard",
-        "color": "teal",
-        "order": 90
-      },
-      "editor": {
-        "kind": "default"
-      },
-      "runtime": {
-        "generator": "generic"
-      }
+      "base_type": "task",
+      "family": "legacy",
+      "enabled": false,
+      "palette": { "label": "Clipboard", "description": "Legacy task template retained for saved graphs.", "icon": "clipboard", "color": "teal", "order": 1090 },
+      "editor": { "kind": "default" },
+      "runtime": { "generator": "generic" }
     },
     {
       "id": "core.custom",
       "version": 1,
-      "base_type": "custom",
-      "family": "core",
-      "palette": {
-        "label": "Custom Node",
-        "description": "Add custom label and description",
-        "icon": "plus-circle",
-        "color": "violet",
-        "order": 100
-      },
-      "editor": {
-        "kind": "default"
-      },
-      "runtime": {
-        "generator": "generic"
-      }
+      "base_type": "task",
+      "family": "legacy",
+      "enabled": false,
+      "palette": { "label": "Custom Node", "description": "Legacy task template retained for saved graphs.", "icon": "plus-circle", "color": "violet", "order": 1100 },
+      "editor": { "kind": "default" },
+      "runtime": { "generator": "generic" }
     }
   ]
 }

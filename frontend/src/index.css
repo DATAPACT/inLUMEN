@@ -100,9 +100,18 @@
   
   /* Node connection line */
   .react-flow__edge-path {
+    stroke: hsl(var(--muted-foreground));
+    stroke-width: 1.35;
+    opacity: 0.72;
+    filter: drop-shadow(0 0 4px hsl(var(--accent) / 0.2));
+    transition: stroke 160ms ease, opacity 160ms ease, stroke-width 160ms ease;
+  }
+
+  .react-flow__edge:hover .react-flow__edge-path,
+  .react-flow__edge.selected .react-flow__edge-path {
     stroke: hsl(var(--accent));
-    stroke-width: 1.5;
-    filter: drop-shadow(0 0 8px rgba(var(--accent), 0.4));
+    stroke-width: 1.8;
+    opacity: 1;
   }
   
   /* Node customization */
@@ -113,8 +122,31 @@
   }
   
   .node-custom:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.3);
+  }
+
+  .node-port-handle {
+    width: 9px !important;
+    height: 9px !important;
+    border: 2px solid rgb(15 23 42) !important;
+    background: rgb(148 163 184) !important;
+    box-shadow: 0 0 0 1px rgb(148 163 184 / 0.45);
+    transition: transform 150ms ease, background-color 150ms ease, box-shadow 150ms ease;
+  }
+
+  .node-port-handle-input {
+    background: rgb(96 165 250) !important;
+    box-shadow: 0 0 0 1px rgb(96 165 250 / 0.4);
+  }
+
+  .node-port-handle-output {
+    background: rgb(52 211 153) !important;
+    box-shadow: 0 0 0 1px rgb(52 211 153 / 0.4);
+  }
+
+  .node-port-handle:hover {
+    transform: scale(1.35);
+    box-shadow: 0 0 0 3px hsl(var(--accent) / 0.2);
   }
   
   .flow-canvas {

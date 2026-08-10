@@ -5,30 +5,50 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
-import { Loader2, PlusCircle, Upload, Wand2, X, Eye } from 'lucide-react';
+import {
+  Eye,
+  EyeOff,
+  Loader2,
+  LockKeyhole,
+  PlusCircle,
+  Unlock,
+  Upload,
+  Wand2,
+  X,
+} from 'lucide-react';
 import { toast } from "sonner";
 import { FilePreviewDialog, PreviewType } from '@/components/properties/FilePreviewDialog';
 import { getTypeColor, getTypeIcon } from '@/components/properties/nodeAppearance';
 import { ChatbotConfig, buildCodegenLLMRequestConfig } from '@/services/chatbotService';
 import {
   normalizeType,
+  getStepTypeLabel,
   pickBackendUpdatableProps,
   StepType,
-  STORAGE_DATABASE_OPTIONS,
-  StorageDatabaseOption,
-  normalizeStorageDatabaseOption,
+  IMPLEMENTATION_KIND_OPTIONS,
+  normalizeImplementationKind,
+  normalizeNodePorts,
+  normalizeSecretParamKeys,
+  isSensitiveParameterName,
   getNodeFileBucket,
   getNodeFileName,
+  getNodeFileRole,
   isBrowserFile,
   typeHasContent,
-  typeHasEndpoint,
   typeHasFiles,
   isImagePreviewName,
   isTextPreviewName,
   isTextPreviewFile,
   NodeFileReference,
+  NodeFileRole,
   GeneratedArtifact,
+  NodePort,
+  NodePorts,
 } from '@/features/nodes/nodeSchema';
+import {
+  defaultTemplateForType,
+  templateOptionsForType,
+} from '@/features/nodes/templateCatalog';
 import {
   readNodeFile,
   removeNodeFile,
@@ -39,7 +59,8 @@ import {
 } from '@/features/nodes/nodePersistence';
 import { Node } from 'reactflow';
 
-type NodeParamMap = Record<string, string>;
+type NodeParamMap = Record<string, unknown>;
+type DraftKeyMap = Record<string, string>;
 
 export type PropertyNodeData = {
   label?: string;
@@ -49,8 +70,9 @@ export type PropertyNodeData = {
   files?: NodeFileReference[];
   has_files?: string;
   param?: NodeParamMap;
-  endpoint?: string;
-  database?: StorageDatabaseOption | string;
+  secret_params?: string[];
+  ports?: Partial<NodePorts>;
+  template_label?: string;
   definition_id?: string;
   definition_version?: number;
   implementation?: Record<string, unknown>;
@@ -66,10 +88,45 @@ const normalizeFileReferences = (value: unknown): NodeFileReference[] => {
   });
 };
 
-const uploadedFileReference = (nodeId: string, fileName: string): NodeFileReference => ({
+const uploadedFileReference = (
+  nodeId: string,
+  fileName: string,
+  role: NodeFileRole,
+): NodeFileReference => ({
   filename: fileName,
   bucket: `files-step-id-${nodeId}`.toLowerCase(),
+  role,
 });
+
+const withNodeFileRole = (
+  file: NodeFileReference,
+  role: NodeFileRole,
+): NodeFileReference => {
+  if (typeof file === "string" || isBrowserFile(file)) {
+    return { filename: getNodeFileName(file), role };
+  }
+  return { ...file, role };
+};
+
+const InspectorSection = ({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: string;
+  children: React.ReactNode;
+}) => (
+  <section className="space-y-3 rounded-lg border border-border bg-muted/10 p-3">
+    <div>
+      <h3 className="text-sm font-semibold">{title}</h3>
+      {description && (
+        <p className="mt-1 text-xs text-muted-foreground">{description}</p>
+      )}
+    </div>
+    {children}
+  </section>
+);
 
 interface PropertiesPanelProps {
   selectedNode: Node<PropertyNodeData> | null;
@@ -88,27 +145,42 @@ export function PropertiesPanel({
 }: PropertiesPanelProps) {
   const nodeType: StepType = normalizeType(selectedNode?.data?.type ?? selectedNode?.type);
   const canManageFiles = typeHasFiles(nodeType);
-  const canGenerateScript = canManageFiles;
+  const canGenerateScript = nodeType === "task";
 
   const [label, setLabel] = useState('');
   const [description, setDescription] = useState('');
 
-  // input/output only
+  // Source/destination boundary content.
   const [content, setContent] = useState('');
 
   // Every runtime node can carry its script, requirements, and input files.
   const [files, setFiles] = useState<NodeFileReference[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const codeFileInputRef = useRef<HTMLInputElement>(null);
+  const dataFileInputRef = useRef<HTMLInputElement>(null);
 
-  // config param state (config only)
+  // Parameters belong to the node inspector, never to separate graph nodes.
   const [param, setParam] = useState<NodeParamMap>({});
-  const [draftKeys, setDraftKeys] = useState<NodeParamMap>({});
-
-  // endpoint state (storage/api only)
-  const [endpoint, setEndpoint] = useState('');
-
-  // storage database dropdown
-  const [databaseName, setDatabaseName] = useState<StorageDatabaseOption>("MinIO");
+  const [secretParamKeys, setSecretParamKeys] = useState<string[]>([]);
+  const [revealedSecretParams, setRevealedSecretParams] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [draftKeys, setDraftKeys] = useState<DraftKeyMap>({});
+  const editableParamEntries = Object.entries(param).filter(([key]) => key !== "model_plan");
+  const [ports, setPorts] = useState<NodePorts>(() => normalizeNodePorts(undefined, nodeType));
+  const [implementationKind, setImplementationKind] = useState(() =>
+    normalizeImplementationKind(selectedNode?.data?.implementation?.kind),
+  );
+  const currentTemplate = String(
+    selectedNode?.data?.template_label || defaultTemplateForType(nodeType),
+  );
+  const templateOptions = templateOptionsForType(nodeType, currentTemplate);
+  const indexedCodeFiles = files
+    .map((file, index) => ({ file, index }))
+    .filter(({ file }) => getNodeFileRole(file) === "code");
+  const indexedDataFiles = files
+    .map((file, index) => ({ file, index }))
+    .filter(({ file }) => getNodeFileRole(file) === "data");
+  const activeNodeIdRef = useRef<string | null>(selectedNode?.id ?? null);
 
   // preview/edit file dialog state
   const [previewFile, setPreviewFile] = useState<File | null>(null);
@@ -143,7 +215,7 @@ export function PropertiesPanel({
 
     const next: PropertyNodeData = { ...selectedNode.data, ...patch, type: nodeType };
 
-    // Content only for input/output
+    // Content is boundary metadata only for sources and destinations.
     if (!typeHasContent(nodeType)) {
       delete next.content;
     } else {
@@ -160,28 +232,11 @@ export function PropertiesPanel({
       next.has_files = filesArr.length > 0 ? "yes" : "no"; // internal
     }
 
-    // Config: param editor and no content.
-    if (nodeType === "config") {
-      next.param = next.param ?? {};
-      if (typeof next.param !== "object" || Array.isArray(next.param) || next.param == null) next.param = {};
-      delete next.content;
-    } else {
-      delete next.param;
-    }
-
-    // Endpoint only for storage/api
-    if (!typeHasEndpoint(nodeType)) {
-      delete next.endpoint;
-    } else {
-      if (next.endpoint == null) next.endpoint = "";
-    }
-
-    // Storage database dropdown only for storage
-    if (nodeType === "storage") {
-      if (!next.database) next.database = "MinIO";
-    } else {
-      delete next.database;
-    }
+    next.param = next.param && typeof next.param === "object" && !Array.isArray(next.param)
+      ? next.param
+      : {};
+    next.secret_params = normalizeSecretParamKeys(next.secret_params, next.param);
+    next.ports = normalizeNodePorts(next.ports, nodeType);
 
     // 1) update local reactflow node
     onNodeUpdate(selectedNode.id, next);
@@ -192,33 +247,29 @@ export function PropertiesPanel({
   };
 
   useEffect(() => {
+    const nextNodeId = selectedNode?.id ?? null;
+    if (activeNodeIdRef.current !== nextNodeId) {
+      setRevealedSecretParams(new Set());
+      activeNodeIdRef.current = nextNodeId;
+    }
     if (selectedNode) {
       setLabel(selectedNode.data.label || '');
       setDescription(selectedNode.data.description || '');
 
-      // content only for input/output
+      // content only for source/destination boundaries
       setContent(typeHasContent(nodeType) ? (selectedNode.data.content || '') : '');
 
-      // files only for input/output/action/custom
+      // Runtime artifacts can be attached to any structural component.
       setFiles(typeHasFiles(nodeType) ? normalizeFileReferences(selectedNode.data.files) : []);
 
-      // param only for config
-      if (nodeType === "config") {
-        const p = selectedNode.data.param;
-        setParam((p && typeof p === "object" && !Array.isArray(p)) ? p as NodeParamMap : {});
-      } else {
-        setParam({});
-      }
-
-      // endpoint only for storage/api
-      setEndpoint(typeHasEndpoint(nodeType) ? (selectedNode.data.endpoint || "") : "");
-
-      // database only for storage
-      if (nodeType === "storage") {
-        setDatabaseName(normalizeStorageDatabaseOption(selectedNode.data.database));
-      } else {
-        setDatabaseName("MinIO");
-      }
+      const p = selectedNode.data.param;
+      const nextParam = (p && typeof p === "object" && !Array.isArray(p))
+        ? p as NodeParamMap
+        : {};
+      setParam(nextParam);
+      setSecretParamKeys(normalizeSecretParamKeys(selectedNode.data.secret_params, nextParam));
+      setPorts(normalizeNodePorts(selectedNode.data.ports, nodeType));
+      setImplementationKind(normalizeImplementationKind(selectedNode.data.implementation?.kind));
 
     } else {
       setLabel('');
@@ -226,8 +277,9 @@ export function PropertiesPanel({
       setContent('');
       setFiles([]);
       setParam({});
-      setEndpoint("");
-      setDatabaseName("MinIO");
+      setSecretParamKeys([]);
+      setPorts(normalizeNodePorts(undefined, nodeType));
+      setImplementationKind("generated-code");
     }
 
     // reset preview dialog
@@ -257,18 +309,26 @@ export function PropertiesPanel({
     pushNodeUpdate({ content: e.target.value });
   };
 
-  const handleEndpointChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setEndpoint(e.target.value);
-    pushNodeUpdate({ endpoint: e.target.value });
+  const handleImplementationKindChange = (kind: string) => {
+    const normalized = normalizeImplementationKind(kind);
+    setImplementationKind(normalized);
+    pushNodeUpdate({
+      implementation: {
+        ...(selectedNode?.data.implementation || {}),
+        kind: normalized,
+      },
+    });
   };
 
-  const handleDatabaseChange = (val: StorageDatabaseOption) => {
-    setDatabaseName(val);
-    pushNodeUpdate({ database: val });
+  const handleTemplateChange = (templateLabel: string) => {
+    pushNodeUpdate({ template_label: templateLabel });
   };
 
   // Upload newly added files through the backend. Same filename replaces older entry.
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+    role: NodeFileRole,
+  ) => {
     if (!canManageFiles) return;
     if (!selectedNode) return;
     const picked = e.target.files ? Array.from(e.target.files) : [];
@@ -284,8 +344,8 @@ export function PropertiesPanel({
     let changedCount = 0;
     for (const f of picked) {
       try {
-        await uploadNodeFile(selectedNode.id, f);
-        const uploadedRef = uploadedFileReference(selectedNode.id, f.name);
+        await uploadNodeFile(selectedNode.id, f, role);
+        const uploadedRef = uploadedFileReference(selectedNode.id, f.name, role);
         const idx = nameToIndex.get(f.name);
         if (idx != null) {
           uploadedFiles[idx] = uploadedRef;
@@ -395,6 +455,7 @@ export function PropertiesPanel({
     const currentFile = files[previewFileIndex];
     if (!currentFile) return;
     const currentFileName = getNodeFileName(currentFile);
+    const currentFileRole = getNodeFileRole(currentFile);
     if (!currentFileName) return;
     const fileType = previewFile?.type || "text/plain";
     const newFile = new File([new Blob([editedContent], { type: fileType })], currentFileName, {
@@ -405,14 +466,19 @@ export function PropertiesPanel({
     try {
       const updatedFiles = [...files];
       if (isBrowserFile(currentFile)) {
-        await uploadNodeFile(selectedNode.id, newFile);
-        updatedFiles[previewFileIndex] = uploadedFileReference(selectedNode.id, currentFileName);
+        await uploadNodeFile(selectedNode.id, newFile, currentFileRole);
+        updatedFiles[previewFileIndex] = uploadedFileReference(
+          selectedNode.id,
+          currentFileName,
+          currentFileRole,
+        );
         setPreviewFile(newFile);
       } else {
         await updateNodeTextFile(selectedNode.id, currentFile, editedContent);
         updatedFiles[previewFileIndex] = {
           filename: currentFileName,
           bucket: getNodeFileBucket(currentFile, selectedNode.id),
+          role: currentFileRole,
         };
       }
 
@@ -447,7 +513,7 @@ export function PropertiesPanel({
       });
       const generatedArtifact = result?.generated_artifact as GeneratedArtifact | undefined;
       const generatedFiles = Array.isArray(result?.files)
-        ? normalizeFileReferences(result.files)
+        ? normalizeFileReferences(result.files).map((file) => withNodeFileRole(file, "code"))
         : [];
       const mergedFiles = [...files];
       const indexByName = new Map<string, number>();
@@ -484,7 +550,7 @@ export function PropertiesPanel({
     }
   };
 
-  // Config param helpers
+  // Static node parameter helpers.
   const addParamRow = () => {
     let i = 1;
     let key = `key_${i}`;
@@ -494,19 +560,31 @@ export function PropertiesPanel({
     }
     const next = { ...param, [key]: "" };
     setParam(next);
-    pushNodeUpdate({ param: next });
+    pushNodeUpdate({ param: next, secret_params: secretParamKeys });
   };
 
   const renameParamKey = (oldKey: string, newKeyRaw: string) => {
     const newKey = newKeyRaw.trim();
     if (!newKey || newKey === oldKey) return;
-    const next: Record<string, string> = {};
+    const next: NodeParamMap = {};
     Object.entries(param).forEach(([k, v]) => {
       if (k === oldKey) next[newKey] = v ?? "";
       else next[k] = v ?? "";
     });
     setParam(next);
-    pushNodeUpdate({ param: next });
+    const renamedSecrets = secretParamKeys
+      .map((key) => key === oldKey ? newKey : key)
+      .filter((key) => key in next);
+    if (isSensitiveParameterName(newKey) && !renamedSecrets.includes(newKey)) {
+      renamedSecrets.push(newKey);
+    }
+    setSecretParamKeys(renamedSecrets);
+    setRevealedSecretParams((current) => {
+      const nextRevealed = new Set(current);
+      if (nextRevealed.delete(oldKey)) nextRevealed.add(newKey);
+      return nextRevealed;
+    });
+    pushNodeUpdate({ param: next, secret_params: renamedSecrets });
     setDraftKeys((prev) => {
       const copy = { ...prev };
       delete copy[oldKey];
@@ -517,20 +595,157 @@ export function PropertiesPanel({
   const setParamValue = (key: string, value: string) => {
     const next = { ...param, [key]: value };
     setParam(next);
-    pushNodeUpdate({ param: next });
+    pushNodeUpdate({ param: next, secret_params: secretParamKeys });
   };
 
   const removeParamKey = (key: string) => {
     const next = { ...param };
     delete next[key];
     setParam(next);
-    pushNodeUpdate({ param: next });
+    const nextSecrets = secretParamKeys.filter((secretKey) => secretKey !== key);
+    setSecretParamKeys(nextSecrets);
+    setRevealedSecretParams((current) => {
+      const nextRevealed = new Set(current);
+      nextRevealed.delete(key);
+      return nextRevealed;
+    });
+    pushNodeUpdate({ param: next, secret_params: nextSecrets });
     setDraftKeys((prev) => {
       const copy = { ...prev };
       delete copy[key];
       return copy;
     });
   };
+
+  const toggleSecretParam = (key: string) => {
+    const isSecret = secretParamKeys.includes(key);
+    const nextSecrets = isSecret
+      ? secretParamKeys.filter((secretKey) => secretKey !== key)
+      : [...secretParamKeys, key];
+    setSecretParamKeys(nextSecrets);
+    if (isSecret) {
+      setRevealedSecretParams((current) => {
+        const nextRevealed = new Set(current);
+        nextRevealed.delete(key);
+        return nextRevealed;
+      });
+    }
+    pushNodeUpdate({ secret_params: nextSecrets });
+  };
+
+  const toggleSecretVisibility = (key: string) => {
+    setRevealedSecretParams((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const pushPorts = (next: NodePorts) => {
+    const normalized = normalizeNodePorts(next, nodeType);
+    setPorts(normalized);
+    pushNodeUpdate({ ports: normalized });
+  };
+
+  const addPort = (direction: keyof NodePorts) => {
+    const existing = ports[direction];
+    const stem = direction === "inputs" ? "input" : "output";
+    let index = existing.length + 1;
+    let id = `${stem}-${index}`;
+    const ids = new Set(existing.map((port) => port.id));
+    while (ids.has(id)) {
+      index += 1;
+      id = `${stem}-${index}`;
+    }
+    pushPorts({
+      ...ports,
+      [direction]: [...existing, { id, label: id }],
+    });
+  };
+
+  const updatePort = (
+    direction: keyof NodePorts,
+    portId: string,
+    patch: Partial<NodePort>,
+  ) => {
+    pushPorts({
+      ...ports,
+      [direction]: ports[direction].map((port) =>
+        port.id === portId ? { ...port, ...patch } : port
+      ),
+    });
+  };
+
+  const removePort = (direction: keyof NodePorts, portId: string) => {
+    pushPorts({
+      ...ports,
+      [direction]: ports[direction].filter((port) => port.id !== portId),
+    });
+  };
+
+  const renderFileArea = (
+    role: NodeFileRole,
+    indexedFiles: Array<{ file: NodeFileReference; index: number }>,
+    inputRef: React.RefObject<HTMLInputElement>,
+  ) => (
+    <div className="rounded-lg border border-dashed border-border p-3">
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        onChange={(event) => { void handleFileUpload(event, role); }}
+        className="hidden"
+      />
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => inputRef.current?.click()}
+        className="w-full"
+      >
+        <Upload className="mr-2 h-4 w-4" />
+        Upload {role === "code" ? "Code" : "Data"} Files
+      </Button>
+
+      {indexedFiles.length === 0 ? (
+        <p className="mt-3 text-center text-xs text-muted-foreground">
+          No {role === "code" ? "implementation" : "data"} files attached.
+        </p>
+      ) : (
+        <div className="mt-3 space-y-2">
+          {indexedFiles.map(({ file, index }) => (
+            <div key={`${getNodeFileName(file)}-${index}`} className="flex items-center justify-between rounded bg-muted/50 p-2">
+              <span className="min-w-0 flex-1 truncate text-xs">{getNodeFileName(file)}</span>
+              <div className="flex items-center gap-1">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => { void viewFile(file, index); }}
+                  aria-label={`Preview ${getNodeFileName(file)}`}
+                >
+                  <Eye className="h-3 w-3" />
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => { void removeFile(index); }}
+                  aria-label={`Remove ${getNodeFileName(file)}`}
+                >
+                  <X className="h-3 w-3" />
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  const validationReport = selectedNode?.data.generated_artifact?.validation_report;
+  const configurationStatus = selectedNode?.data.configuration_status || "unconfigured";
 
   return (
     <div className={cn("w-full border-l border-border bg-card text-card-foreground flex flex-col h-full", className)}>
@@ -548,111 +763,175 @@ export function PropertiesPanel({
       {selectedNode ? (
         <div className="p-4 flex-1 overflow-y-auto">
           <div className="space-y-4">
-            <div>
-              <div className="flex items-center justify-between mb-3">
-                <Label htmlFor="node-type" className="text-sm">Node Type</Label>
+            <InspectorSection
+              title="General"
+              description="Choose a stable graph component and specialize it with a template."
+            >
+              <div className="flex items-center justify-between">
+                <Label className="text-sm">Component kind</Label>
                 <Badge
                   variant="outline"
                   className={cn(
-                    "text-xs font-normal flex items-center gap-1 px-2",
-                    getTypeColor(nodeType)
+                    "flex items-center gap-1 px-2 text-xs font-normal",
+                    getTypeColor(nodeType),
                   )}
                 >
                   {getTypeIcon(nodeType)}
-                  {nodeType}
+                  {getStepTypeLabel(nodeType)}
                 </Badge>
               </div>
-            </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="node-label" className="text-sm">Label</Label>
-              <Input
-                id="node-label"
-                value={label}
-                onChange={handleLabelChange}
-                placeholder="Enter node label"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="node-description" className="text-sm">Description</Label>
-              <Input
-                id="node-description"
-                value={description}
-                onChange={handleDescriptionChange}
-                placeholder="Enter node description"
-              />
-            </div>
-
-            {canGenerateScript && (
-              <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="space-y-1">
-                    <Label className="text-sm">Runtime script</Label>
-                    <p className="text-xs text-muted-foreground">
-                      Generate a Python script, requirements file, Dockerfile, and runtime manifest.
-                    </p>
-                  </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => { void handleGenerateScript(); }}
-                    disabled={isGeneratingScript}
-                  >
-                    {isGeneratingScript ? (
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    ) : (
-                      <Wand2 className="w-4 h-4 mr-2" />
-                    )}
-                    Generate
-                  </Button>
-                </div>
-                {selectedNode.data.generated_artifact?.validation_report && (
-                  <p className="text-xs text-muted-foreground">
-                    Validation: {String(selectedNode.data.generated_artifact.validation_report.status || "unknown")}
-                  </p>
-                )}
-              </div>
-            )}
-
-            {/* Content ONLY for input/output */}
-            {typeHasContent(nodeType) && (
               <div className="space-y-2">
-                <Label htmlFor="node-content" className="text-sm">Content</Label>
-                <Textarea
-                  id="node-content"
-                  value={content}
-                  onChange={handleContentChange}
-                  placeholder={`Enter ${nodeType} content...`}
-                  className="h-32 resize-none"
-                />
-                <p className="text-xs text-muted-foreground mt-1">
-                  {nodeType === 'input'
-                    ? 'Content for input nodes.'
-                    : 'Content for output nodes.'}
+                <Label htmlFor="node-template" className="text-sm">
+                  {nodeType === "source" ? "Adapter template" : "Template"}
+                </Label>
+                <select
+                  id="node-template"
+                  className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  value={currentTemplate}
+                  onChange={(event) => handleTemplateChange(event.target.value)}
+                >
+                  {templateOptions.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+                <p className="text-xs text-muted-foreground">
+                  Changing this selection never changes the structural graph kind.
                 </p>
               </div>
-            )}
 
-            {/* Config ONLY: param editor */}
-            {nodeType === "config" && (
+              <div className="space-y-2">
+                <Label htmlFor="node-label" className="text-sm">Label</Label>
+                <Input
+                  id="node-label"
+                  value={label}
+                  onChange={handleLabelChange}
+                  placeholder="Enter component label"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="node-description" className="text-sm">Description</Label>
+                <Input
+                  id="node-description"
+                  value={description}
+                  onChange={handleDescriptionChange}
+                  placeholder="Describe this pipeline component"
+                />
+              </div>
+            </InspectorSection>
+
+            <InspectorSection
+              title="Inputs / Outputs"
+              description="Named ports are the logical data contract used by graph connections."
+            >
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <Label className="text-sm">Config parameters</Label>
-                  <Button type="button" variant="outline" size="sm" onClick={addParamRow}>
-                    <PlusCircle className="w-4 h-4 mr-2" />
-                    Add field
-                  </Button>
-                </div>
-
-                <div className="space-y-2">
-                  {Object.entries(param).length === 0 && (
-                    <p className="text-xs text-muted-foreground">No parameters yet.</p>
+                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">Inputs</Label>
+                  {nodeType !== "source" && (
+                    <Button type="button" variant="outline" size="sm" onClick={() => addPort("inputs")}>
+                      <PlusCircle className="mr-1 h-3.5 w-3.5" /> Add
+                    </Button>
                   )}
+                </div>
+                {ports.inputs.length === 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    {nodeType === "source" ? "Source adapters have no pipeline input." : "No inputs defined."}
+                  </p>
+                )}
+                {ports.inputs.map((port) => (
+                  <div key={port.id} className="grid grid-cols-[1fr_1fr_auto] gap-2">
+                    <Input
+                      value={port.label}
+                      onChange={(event) => updatePort("inputs", port.id, { label: event.target.value })}
+                      placeholder="name"
+                    />
+                    <Input
+                      value={port.data_type || ""}
+                      onChange={(event) => updatePort("inputs", port.id, { data_type: event.target.value })}
+                      placeholder="data type"
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => removePort("inputs", port.id)}
+                      aria-label={`Remove input ${port.label}`}
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
 
-                  {Object.entries(param).map(([k, v]) => (
-                    <div key={k} className="grid grid-cols-[1fr_1fr_auto] gap-2 items-center">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">Outputs</Label>
+                  {nodeType !== "sink" && (
+                    <Button type="button" variant="outline" size="sm" onClick={() => addPort("outputs")}>
+                      <PlusCircle className="mr-1 h-3.5 w-3.5" /> Add
+                    </Button>
+                  )}
+                </div>
+                {ports.outputs.length === 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    {nodeType === "sink" ? "Destinations have no pipeline output." : "No outputs defined."}
+                  </p>
+                )}
+                {ports.outputs.map((port) => (
+                  <div key={port.id} className="grid grid-cols-[1fr_1fr_auto] gap-2">
+                    <Input
+                      value={port.label}
+                      onChange={(event) => updatePort("outputs", port.id, { label: event.target.value })}
+                      placeholder="name"
+                    />
+                    <Input
+                      value={port.data_type || ""}
+                      onChange={(event) => updatePort("outputs", port.id, { data_type: event.target.value })}
+                      placeholder="data type"
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => removePort("outputs", port.id)}
+                      aria-label={`Remove output ${port.label}`}
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </InspectorSection>
+
+            <InspectorSection
+              title="Parameters"
+              description="Static configuration stays on this component; only dynamic values belong on ports."
+            >
+              <div className="flex items-center justify-between">
+                <Label className="text-sm">Configuration fields</Label>
+                <Button type="button" variant="outline" size="sm" onClick={addParamRow}>
+                  <PlusCircle className="mr-2 h-4 w-4" />
+                  Add field
+                </Button>
+              </div>
+
+              <div className="space-y-2">
+                {editableParamEntries.length === 0 && (
+                  <p className="text-xs text-muted-foreground">No static parameters configured.</p>
+                )}
+
+                {editableParamEntries.length > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    Secret values are masked by default. Use the lock to classify a field and the eye to reveal it locally.
+                  </p>
+                )}
+
+                {editableParamEntries.map(([k, v]) => {
+                  const isSecret = secretParamKeys.includes(k);
+                  const isRevealed = revealedSecretParams.has(k);
+                  return (
+                    <div key={k} className="grid grid-cols-[1fr_1fr_auto_auto] gap-2 items-center">
                       <Input
                         value={draftKeys[k] ?? k}
                         placeholder="key"
@@ -683,119 +962,145 @@ export function PropertiesPanel({
                           });
                         }}
                       />
-                      <Input
-                        value={v ?? ""}
-                        onChange={(e) => setParamValue(k, e.target.value)}
-                        placeholder="value"
-                      />
+                      <div className="relative">
+                        <Input
+                          type={isSecret && !isRevealed ? "password" : "text"}
+                          value={typeof v === "string" ? v : JSON.stringify(v ?? "")}
+                          onChange={(e) => setParamValue(k, e.target.value)}
+                          placeholder="value"
+                          className={isSecret ? "pr-9" : undefined}
+                        />
+                        {isSecret && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="absolute right-0 top-0 h-9 w-9"
+                            onClick={() => toggleSecretVisibility(k)}
+                            aria-label={isRevealed ? `Hide ${k}` : `Show ${k}`}
+                            title={isRevealed ? "Hide secret value" : "Show secret value"}
+                          >
+                            {isRevealed
+                              ? <EyeOff className="w-4 h-4" />
+                              : <Eye className="w-4 h-4" />}
+                          </Button>
+                        )}
+                      </div>
+                      <Button
+                        type="button"
+                        variant={isSecret ? "secondary" : "ghost"}
+                        size="sm"
+                        onClick={() => toggleSecretParam(k)}
+                        aria-label={isSecret ? `Make ${k} visible` : `Make ${k} secret`}
+                        title={isSecret ? "Treat as ordinary parameter" : "Mask as secret parameter"}
+                      >
+                        {isSecret
+                          ? <LockKeyhole className="w-4 h-4" />
+                          : <Unlock className="w-4 h-4" />}
+                      </Button>
                       <Button
                         type="button"
                         variant="ghost"
                         size="sm"
                         onClick={() => removeParamKey(k)}
+                        aria-label={`Remove parameter ${k}`}
                       >
                         <X className="w-4 h-4" />
                       </Button>
                     </div>
-                  ))}
-                </div>
+                  );
+                })}
               </div>
-            )}
+            </InspectorSection>
 
-            {/* Storage ONLY: endpoint + database dropdown */}
-            {nodeType === "storage" && (
-              <div className="space-y-3">
+            {canGenerateScript && (
+              <InspectorSection
+                title="Implementation"
+                description="Runtime technology is independent of the Task template and graph kind."
+              >
                 <div className="space-y-2">
-                  <Label className="text-sm">Endpoint</Label>
-                  <Input
-                    value={endpoint}
-                    onChange={handleEndpointChange}
-                    placeholder="http://..."
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <Label className="text-sm">Database</Label>
+                  <Label htmlFor="implementation-kind" className="text-sm">Runtime</Label>
                   <select
-                    className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
-                    value={databaseName}
-                    onChange={(e) => handleDatabaseChange(normalizeStorageDatabaseOption(e.target.value))}
+                    id="implementation-kind"
+                    className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                    value={implementationKind}
+                    onChange={(event) => handleImplementationKindChange(event.target.value)}
                   >
-                    {STORAGE_DATABASE_OPTIONS.map((opt) => (
-                      <option key={opt} value={opt}>{opt}</option>
+                    {IMPLEMENTATION_KIND_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
                     ))}
                   </select>
-                  <p className="text-xs text-muted-foreground">
-                    Stored as lowercase (e.g. <code>minio</code>, <code>sqlite</code>, <code>chromadb</code>).
-                  </p>
                 </div>
-              </div>
-            )}
 
-            {/* API ONLY: endpoint */}
-            {nodeType === "api" && (
-              <div className="space-y-2">
-                <Label className="text-sm">Endpoint</Label>
-                <Input
-                  value={endpoint}
-                  onChange={handleEndpointChange}
-                  placeholder="http://..."
-                />
-              </div>
-            )}
-
-            {canManageFiles && (
-              <div className="space-y-2">
-                <Label className="text-sm">Files</Label>
-                <div className="border border-dashed border-border rounded-lg p-4">
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    multiple
-                    onChange={handleFileUpload}
-                    className="hidden"
-                  />
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <Label className="text-sm">Code</Label>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Generate code or attach files from an upload, Git repository, or container workflow.
+                    </p>
+                  </div>
                   <Button
                     type="button"
                     variant="outline"
                     size="sm"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="w-full"
+                    onClick={() => { void handleGenerateScript(); }}
+                    disabled={isGeneratingScript}
                   >
-                    <Upload className="w-4 h-4 mr-2" />
-                    Upload Files
+                    {isGeneratingScript
+                      ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      : <Wand2 className="mr-2 h-4 w-4" />}
+                    Generate
                   </Button>
-
-                  {files.length > 0 && (
-                    <div className="mt-3 space-y-2">
-                      {files.map((file, index) => (
-                        <div key={index} className="flex items-center justify-between bg-muted/50 p-2 rounded">
-                          <span className="text-xs truncate flex-1">{getNodeFileName(file)}</span>
-                          <div className="flex items-center gap-1">
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => viewFile(file, index)}
-                            >
-                              <Eye className="w-3 h-3" />
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => { void removeFile(index); }}
-                            >
-                              <X className="w-3 h-3" />
-                            </Button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
                 </div>
-              </div>
+
+                {renderFileArea("code", indexedCodeFiles, codeFileInputRef)}
+              </InspectorSection>
             )}
+
+            <InspectorSection
+              title="Data"
+              description="Data artifacts are stored separately from Task implementation code."
+            >
+              {typeHasContent(nodeType) && (
+                <div className="space-y-2">
+                  <Label htmlFor="node-content" className="text-sm">Adapter notes</Label>
+                  <Textarea
+                    id="node-content"
+                    value={content}
+                    onChange={handleContentChange}
+                    placeholder={`Describe the ${nodeType === "source" ? "source" : "destination"} data contract...`}
+                    className="h-24 resize-none"
+                  />
+                </div>
+              )}
+              {canManageFiles && renderFileArea("data", indexedDataFiles, dataFileInputRef)}
+            </InspectorSection>
+
+            <InspectorSection
+              title="Validation"
+              description="Configuration and generated implementation checks are reported here."
+            >
+              <div className="flex items-center justify-between text-sm">
+                <span>Configuration</span>
+                <Badge variant="outline" className="capitalize">{configurationStatus}</Badge>
+              </div>
+              <div className="flex items-center justify-between text-sm">
+                <span>Implementation</span>
+                <Badge variant="outline" className="capitalize">
+                  {String(validationReport?.status || (canGenerateScript ? "not validated" : "not applicable"))}
+                </Badge>
+              </div>
+              {Array.isArray(validationReport?.errors) && validationReport.errors.length > 0 && (
+                <div className="rounded border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive">
+                  {validationReport.errors.join(" ")}
+                </div>
+              )}
+              {Array.isArray(validationReport?.warnings) && validationReport.warnings.length > 0 && (
+                <div className="rounded border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-200">
+                  {validationReport.warnings.join(" ")}
+                </div>
+              )}
+            </InspectorSection>
           </div>
         </div>
       ) : (

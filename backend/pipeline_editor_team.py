@@ -13,6 +13,8 @@ from pydantic import BaseModel
 from graph_client import run_neo4j_query
 from llm_config import LLMConfig, log_llm_selection, select_model_client
 from model_plans import resolve_implementation_plan
+from node_ports import ports_json
+from node_parameters import secret_params_json
 from step_types import normalize_step_type
 
 
@@ -94,19 +96,23 @@ def build_pipeline_editing_team(
         (:STEP) represents a single node in the pipeline graph. Properties:
             - uid: string (generated via randomUUID)
             - flow_id: string (unique int: number of step generated: 1,2 ... N)
-            - type: string ("input"|"config"|"output"|"action"|"storage"|"api")
+            - type: string ("source"|"task"|"sink"|"flow"|"subpipeline")
+              This is the stable structural kind. Templates, business operations,
+              static parameters, and implementation technologies are metadata.
             - label: string
             - description: string
             - content: string
             - has_files: string ("yes"|"no") - default: "no"
-            - endpoint: string
-            - database: string - default : "minio"
             - param_json: string - default "{}"
+            - secret_params_json: string - names of masked parameter fields
+            - ports_json: string - explicit logical inputs and outputs
+            - template_label: string
         (:FILE) represents a single file associated with a step. Properties:
             - uid: string (generated via randomUUID)
             - filename: string
             - added_at: datetime
             - bucket: string
+            - role: string ("code"|"data")
         Relationships:
         (:PIPELINE)-[:HAS_STEP]->(:STEP)
         (:STEP)-[:FLOWS_TO]->(:STEP)
@@ -297,48 +303,45 @@ def build_pipeline_editing_team(
         step_type: str,
         label: str,
         description: str,
+        template_label: str = "",
         implementation: Any = None,
+        parameters: Any = None,
+        secret_parameters: Any = None,
     ) -> List[str]:
         """Builds shared STEP properties for create and insert tools."""
+        default_template_labels = {
+            "source": "Source",
+            "task": "Blank Task",
+            "sink": "Destination",
+            "flow": "Flow",
+            "subpipeline": "Subpipeline",
+        }
         props_lines = [
             "uid:        randomUUID()",
             f"type:       '{step_type}'",
             f"label:      '{label}'",
             f"description:'{description}'",
+            f"template_label:'{template_label or default_template_labels[step_type]}'",
+            "has_files: 'no'",
         ]
-        if step_type == "input":
+        default_ports = ports_json(None, step_type).replace("\\", "\\\\").replace("'", "\\'")
+        props_lines.append(f"ports_json: '{default_ports}'")
+        if step_type in ("source", "sink"):
             props_lines.append("content: ''")
-            props_lines.append("has_files: 'no'")
-        elif step_type == "config":
-            props_lines.append("param_json: '{}'")
-        elif step_type == "action":
-            props_lines.append("has_files: 'no'")
-        elif step_type == "storage":
-            props_lines.append("endpoint: ''")
-            props_lines.append("database: 'minio'")
-        elif step_type == "api":
-            props_lines.append("endpoint: ''")
-        elif step_type == "output":
-            props_lines.append("content: ''")
-            props_lines.append("has_files: 'no'")
-        elif step_type == "custom":
-            props_lines.append("has_files: 'no'")
+        param_obj = dict(parameters) if isinstance(parameters, dict) else {}
         if isinstance(implementation, dict) and implementation:
             implementation = resolve_implementation_plan(
                 implementation,
                 label=label,
                 description=description,
             )
-            props_lines = [
-                line for line in props_lines if not line.lstrip().startswith("param_json:")
-            ]
-            param_json = json.dumps(
-                {"model_plan": implementation},
-                ensure_ascii=True,
-                sort_keys=True,
-            )
-            escaped_param_json = param_json.replace("\\", "\\\\").replace("'", "\\'")
-            props_lines.append(f"param_json: '{escaped_param_json}'")
+            param_obj["model_plan"] = implementation
+        param_json = json.dumps(param_obj, ensure_ascii=True, sort_keys=True)
+        escaped_param_json = param_json.replace("\\", "\\\\").replace("'", "\\'")
+        props_lines.append(f"param_json: '{escaped_param_json}'")
+        secret_json = secret_params_json(secret_parameters, param_obj)
+        escaped_secret_json = secret_json.replace("\\", "\\\\").replace("'", "\\'")
+        props_lines.append(f"secret_params_json: '{escaped_secret_json}'")
         return props_lines
 
     async def create_step(params: str) -> str:
@@ -346,10 +349,14 @@ def build_pipeline_editing_team(
 
         params JSON:
         {
-          "type": "input|action|output|config|storage|api|custom",
+          "type": "source|task|sink|flow|subpipeline",
           "label": "step label",
           "description": "step description",
+          "template": "optional template name such as Speech-to-Text",
+          "parameters": {"static_parameter": "value"},
+          "secret_parameters": ["api_key"],
           "implementation": {
+            "kind": "generated-code|python|sql|container|git-repository|rest-api|shell|custom",
             "task": "analytical or model-backed task",
             "domain": "inferred domain",
             "execution_profile": "classical_ml|trusted_heavy_model|custom_model",
@@ -365,8 +372,9 @@ def build_pipeline_editing_team(
         }
         Include implementation for analytical steps. For ordinary structured
         model training, specify task/domain and classical_ml but omit model_id.
-        Omit implementation for deterministic ingestion, formatting, storage,
-        and output assembly. Never invent a model repository identifier.
+        Use source/sink templates for external adapters, task templates for
+        domain operations, flow for execution control, and subpipeline for a
+        reusable pipeline reference. Never create configuration nodes.
         """
         try:
             query_type = "create_step"
@@ -378,7 +386,10 @@ def build_pipeline_editing_team(
                 step_type,
                 label,
                 description,
+                str(data.get("template") or "").replace("'", "\\'"),
                 data.get("implementation"),
+                data.get("parameters"),
+                data.get("secret_parameters"),
             )
             props_str = ",\n            ".join(props_lines)
             query = f"""
@@ -455,9 +466,12 @@ def build_pipeline_editing_team(
 
         params JSON:
         {
-          "type": "input|action|output|config|storage|api|custom",
+          "type": "source|task|sink|flow|subpipeline",
           "label": "step label",
           "description": "step description",
+          "template": "optional template name",
+          "parameters": {"static_parameter": "value"},
+          "secret_parameters": ["api_key"],
           "implementation": "optional model implementation object from create_step",
           "before_flow_id": "required target flow_id",
           "after_flow_id": "optional source flow_id for between-step insertion"
@@ -488,7 +502,10 @@ def build_pipeline_editing_team(
                     step_type,
                     label,
                     description,
+                    str(data.get("template") or "").replace("'", "\\'"),
                     data.get("implementation"),
+                    data.get("parameters"),
+                    data.get("secret_parameters"),
                 )
             )
 
@@ -680,10 +697,14 @@ def build_pipeline_editing_team(
                         - [delete_all_steps]: calling this tool will remove every step from the current design pipeline while keeping the pipeline itself. Use it only when the user asks to clear, empty, reset, delete all steps, remove everything from, or remove all nodes/steps in the pipeline.
                         Tool calls MUST use a single string argument named params. The value of params MUST be a JSON-encoded string matching the "params JSON" schema in the docstring.
                         When creating, designing, regenerating, or rebuilding a pipeline, call create_pipeline first with a concise generated name and a fresh 1-2 sentence description that summarizes the full intended pipeline. Do this before creating steps so the UI pipeline description is updated.
-                        The create_step and insert_step type MUST be one of: input, action, output, config, storage, api, custom.
+                        The create_step and insert_step type MUST be one of: source, task, sink, flow, subpipeline. This set is structural and must not grow for technologies or business operations. Use source for external ingress adapters; task for processing and templates such as cleaning, OCR, speech-to-text, LLM, SQL, or API calls; sink for external delivery adapters; flow for conditions, parallel maps, merges, retries, waits, and approvals; and subpipeline for reusable pipelines.
+                        Templates are metadata on a structural kind. Implementations are separate metadata and may be generated code, Python, SQL, a container, a Git repository, REST API, shell, custom, or a future runtime.
+                        Always pass the most specific useful template for each step. Do not use generic template names such as Source, Task, Sink, or Destination when the requested capability identifies an adapter or operation. For example, remote-device REST ingestion uses source + REST API, preprocessing uses task + Data Cleaning, model training uses task + Model Training, and clinician email/SMS alerts use sink + Notification.
+                        Static configuration belongs in the node's parameters object. Never create a configuration node unless configuration is dynamically produced as pipeline data, in which case model it through ordinary ports.
+                        Mark credentials such as API keys, access tokens, client secrets, and passwords in secret_parameters. Never invent or place a real credential in the graph.
                         Use overview to find the relevant flow_id values before calling insert_step unless the flow_id values are already provided by the user.
                         Use the label/description fields for domain-specific names such as ingestion, preprocessing, model training, or alerting.
-                        Represent every capability explicitly requested by the user in the graph before finishing. Do not stop after an intermediate storage or transformation step when the request also asks for a terminal behavior. For example, a request that says "answers questions" must include a connected output step that answers questions. Re-read the user's request after tool calls and add any missing capability as a connected STEP.
+                        Represent every capability explicitly requested by the user in the graph before finishing. Do not stop after an intermediate storage or transformation step when the request also asks for a terminal behavior. For example, a request that says "answers questions" must include a connected destination that publishes the answer. Re-read the user's request after tool calls and add any missing capability as a connected STEP.
                         This is a one-shot, quality-first design. Choose an implementation class for every analytical step: deterministic processing, classical ML training, trusted pretrained inference, or an explicitly requested custom model.
                         Default structured/tabular model-training tasks to a scikit-learn implementation unless the user explicitly requests deep learning, a pretrained model, or a named framework/model. Do not invent a pretrained model merely because the domain is specialized.
                         Use trusted pretrained inference for tasks that require it, including speech-to-text and transcript sentiment analysis. Put the task and runtime preferences in the create_step or insert_step implementation object; InLUMEN's routing and trusted-adapter registries resolve supported tasks to verified execution profiles, model IDs, revisions, packages, and quality policies before persistence and code generation.

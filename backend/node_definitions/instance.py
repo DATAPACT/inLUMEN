@@ -15,14 +15,11 @@ VALID_CONFIGURATION_STATUSES = {"unconfigured", "valid", "invalid"}
 
 
 def definition_properties_from_data(data: Any) -> dict[str, Any]:
-    """Convert a React Flow node definition payload to Neo4j-safe properties."""
+    """Convert template and implementation metadata to Neo4j-safe properties."""
     if not isinstance(data, dict):
         return {}
 
     definition_id = str(data.get("definition_id") or "").strip()
-    if not definition_id:
-        return {}
-
     try:
         definition_version = int(data.get("definition_version") or 1)
     except (TypeError, ValueError):
@@ -37,15 +34,20 @@ def definition_properties_from_data(data: Any) -> dict[str, Any]:
         description=str(data.get("description") or ""),
     )
 
-    properties: dict[str, Any] = {
-        "definition_id": definition_id,
-        "definition_version": max(definition_version, 1),
-        "implementation_json": json.dumps(
+    properties: dict[str, Any] = {}
+    if definition_id:
+        properties.update(
+            {
+                "definition_id": definition_id,
+                "definition_version": max(definition_version, 1),
+            }
+        )
+    if implementation:
+        properties["implementation_json"] = json.dumps(
             implementation,
             ensure_ascii=False,
             sort_keys=True,
-        ),
-    }
+        )
     configuration_status = str(
         data.get("configuration_status") or ""
     ).strip().lower()
@@ -70,12 +72,10 @@ def normalize_definition_properties(properties: dict[str, Any]) -> None:
     properties.pop("generated_artifact", None)
     properties.pop("generated_artifact_json", None)
 
-    if definition_properties:
-        properties.update(definition_properties)
-        return
-
-    properties.pop("definition_id", None)
-    properties.pop("definition_version", None)
+    properties.update(definition_properties)
+    if not str(properties.get("definition_id") or "").strip():
+        properties.pop("definition_id", None)
+        properties.pop("definition_version", None)
 
 
 def definition_data_from_properties(properties: Any) -> dict[str, Any]:

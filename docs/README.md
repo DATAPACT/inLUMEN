@@ -24,6 +24,53 @@ Additionally, it generates deployment artifacts such as containers and workflow 
 - Deployment Artifact Generation (Dockerfiles, YAML)
 - Agentic AI Backend (agents assist with compliance-strenghtening design refinements)
 
+## **Pipeline component model**
+
+The graph has exactly five structural node kinds. This small set is intended to
+remain stable:
+
+| Kind | Purpose |
+| --- | --- |
+| `source` | Adapt an external system into logical pipeline data. |
+| `task` | Process, transform, validate, or analyze data. |
+| `sink` | Write or publish results outside the pipeline. |
+| `flow` | Control branching, parallelism, merging, retries, waits, or approvals. |
+| `subpipeline` | Reuse another pipeline as one composable component. |
+
+Definitions such as File, PostgreSQL, Data Cleaning, OCR, Speech-to-Text,
+Embeddings, LLM, Report, or Kafka are templates built on these kinds; they are
+not new graph types. The hierarchy is:
+
+```text
+Pipeline component -> Template -> Implementation
+```
+
+A task template can be implemented by generated code, Python, SQL, a container,
+an existing Git repository, REST API, shell, or a future runtime without changing
+the graph. Source and sink templates are adapters: downstream tasks consume
+logical values such as `Table`, `Stream<Message>`, or `Collection<Document>`
+rather than depending on the external technology.
+
+Every node stores explicit input and output ports. Compact canvas mode keeps port
+contracts out of the way; Advanced mode shows their names and logical data types.
+Static parameters belong in the node inspector and are never represented as
+configuration nodes. Configuration is graph data only when another node produces
+it dynamically through a port. Credential-like parameters such as API keys,
+tokens, client secrets, and passwords are masked by default in the inspector;
+each field can be marked secret and revealed locally with its eye control.
+
+Legacy `input`, `action`, `output`, `config`, `storage`, `api`, and `custom`
+values are normalized at the persistence boundary into the five structural kinds
+so existing saved graphs remain loadable.
+
+The canonical Pipeline IR is JSON: nodes contain their structural kind, template,
+implementation metadata, parameters, explicit ports, and project-file references;
+edges identify both endpoint nodes and port IDs. This JSON contract drives version
+storage, project import/export, agent context, and deployment generation. Argo YAML,
+the Dagster project (including Docker Compose), and other future targets are derived
+artifacts. YAML is not an internal representation and the canvas deliberately accepts
+JSON project imports only; generated YAML remains export-only.
+
 ## **Architecture**
 The picture below shows the component in the DATAPACT architecture.
 
@@ -344,7 +391,7 @@ curl -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
 curl -X POST http://localhost:5000/api/graph/nodes \
   -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \
   -H "Content-Type: application/json" \
-  -d '{"properties":{"flow_id":"retrieve","label":"Retrieve","type":"input","x":100,"y":120}}'
+  -d '{"properties":{"flow_id":"retrieve","label":"Retrieve","type":"source","x":100,"y":120}}'
 
 curl -X POST http://localhost:5000/simple_chat \
   -H "Authorization: Bearer $API_AUTH_TOKEN_OR_KEYCLOAK_JWT" \

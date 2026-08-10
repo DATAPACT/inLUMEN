@@ -71,13 +71,18 @@ class NodeDefinitionInstanceTest(unittest.TestCase):
 
         self.assertEqual(data, restored)
 
-    def test_legacy_node_has_no_definition_properties(self):
-        properties = {"label": "Legacy", "implementation": {"ignored": True}}
+    def test_implementation_is_independent_of_a_registered_template(self):
+        properties = {"label": "Generic Task", "implementation": {"kind": "shell"}}
 
         normalize_definition_properties(properties)
 
-        self.assertEqual({"label": "Legacy"}, properties)
-        self.assertEqual({}, definition_data_from_properties(properties))
+        self.assertEqual("Generic Task", properties["label"])
+        self.assertNotIn("implementation", properties)
+        self.assertEqual({"kind": "shell"}, json.loads(properties["implementation_json"]))
+        self.assertEqual(
+            {"implementation": {"kind": "shell"}},
+            definition_data_from_properties(properties),
+        )
 
     def test_dynamic_model_plan_marks_artifact_stale_when_revision_changes(self):
         model_plan = {

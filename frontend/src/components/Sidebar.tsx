@@ -144,7 +144,11 @@ type DeploymentTargets = { argo: boolean; dagster: boolean };
 type DeploymentValidationMode = "fast" | "validate" | "repair";
 
 const FAMILY_LABELS: Record<string, string> = {
-  core: "Core",
+  sources: "Sources",
+  tasks: "Tasks",
+  destinations: "Destinations",
+  flow: "Flow",
+  subpipeline: "Subpipeline",
 };
 
 export function Sidebar({
@@ -616,7 +620,7 @@ export function Sidebar({
             <div>
               <h3 className="text-sm font-medium mb-3 flex items-center gap-2">
                 <Plus className="w-4 h-4" />
-                Node Types
+                Pipeline Components
               </h3>
               <div className="space-y-5">
                 {groupNodeDefinitions(nodeDefinitions).map(([family, definitions]) => (

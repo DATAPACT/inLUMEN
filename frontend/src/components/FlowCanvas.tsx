@@ -10,12 +10,15 @@ import ReactFlow, {
   NodeChange,
   EdgeChange,
   Connection,
+  ConnectionLineType,
+  MarkerType,
   addEdge,
   applyNodeChanges,
   applyEdgeChanges,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { nodeTypes } from './NodeTypes';
+import { PortDisplayContext } from '@/features/nodes/PortDisplayContext';
 import { toast } from 'sonner';
 import { cn } from "@/lib/utils";
 import { FlowCanvasActionsPanel } from '@/components/flow/FlowCanvasActionsPanel';
@@ -288,7 +291,7 @@ const getSnapshotFileRef = (file: unknown, nodeIdValue: string) => {
   if (typeof file === "string") return file;
   if (typeof File !== "undefined" && file instanceof File) return file.name;
   if (file && typeof file === "object") {
-    const entry = file as { filename?: unknown; name?: unknown; bucket?: unknown };
+    const entry = file as { filename?: unknown; name?: unknown; bucket?: unknown; role?: unknown };
     const filename = typeof entry.filename === "string"
       ? entry.filename
       : typeof entry.name === "string"
@@ -298,7 +301,8 @@ const getSnapshotFileRef = (file: unknown, nodeIdValue: string) => {
     const bucket = typeof entry.bucket === "string" && entry.bucket.trim()
       ? entry.bucket.trim()
       : `files-step-id-${nodeIdValue}`.toLowerCase();
-    return { filename, bucket };
+    const role = entry.role === "code" || entry.role === "data" ? entry.role : undefined;
+    return { filename, bucket, ...(role ? { role } : {}) };
   }
   return null;
 };
@@ -443,6 +447,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     return savedEdges ? JSON.parse(savedEdges) : [];
   });
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
+  const [showPortDetails, setShowPortDetails] = useState(
+    () => localStorage.getItem('inlumen-show-port-details') === 'true',
+  );
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
   const lastSeenUpdatedAtRef = useRef<string | null>(null);
@@ -698,6 +705,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       updated_at: lastSeenUpdatedAtRef.current,
       nodes: nodes.map((node) => {
         const data = { ...(node.data || {}) };
+        delete data.file_buckets;
         if (Array.isArray(data.files)) {
           data.files = data.files
             .map((file) => getSnapshotFileRef(file, node.id))
@@ -829,6 +837,10 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   }, [nodes, edges]);
 
   useEffect(() => {
+    localStorage.setItem('inlumen-show-port-details', String(showPortDetails));
+  }, [showPortDetails]);
+
+  useEffect(() => {
     if (onNodesChange) onNodesChange(nodes);
   }, [nodes, onNodesChange]);
 
@@ -892,7 +904,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
               return;
             }
             markLocalWrite(800);
-            deleteEdgeFromBackend(sourceNode, targetNode);
+            deleteEdgeFromBackend(sourceNode, targetNode, edge);
           });
           return applyEdgeChanges(changes, eds);
         });
@@ -912,7 +924,12 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         return;
       }
 
-      const duplicate = edges.some((edge) => edge.source === params.source && edge.target === params.target);
+      const duplicate = edges.some((edge) =>
+        edge.source === params.source &&
+        edge.target === params.target &&
+        (edge.sourceHandle ?? null) === (params.sourceHandle ?? null) &&
+        (edge.targetHandle ?? null) === (params.targetHandle ?? null)
+      );
       if (duplicate) {
         toast("Connection already exists", { description: "This connection is already in place" });
         return;
@@ -929,7 +946,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         return;
       }
       markLocalWrite(800);
-      await addEdgeToBackend(sourceNode, targetNode);
+      await addEdgeToBackend(sourceNode, targetNode, params);
     },
     [edges, nodes, markLocalWrite, onCanvasEdited, pushHistorySnapshot]
   );
@@ -971,7 +988,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         position,
         data: {
           ...nodeData.data,
-          ...(nodeData.data.type === 'input' ? { content: '{input}' } : {}),
+          ...(nodeData.data.type === 'source' ? { content: '{input}' } : {}),
         },
       };
 
@@ -1243,8 +1260,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         });
         return;
       }
-      const importedNodes = flowData.nodes;
-      const importedEdges = flowData.edges;
+      const normalizedImport = normalizeGraph(flowData);
+      const importedNodes = normalizedImport.nodes;
+      const importedEdges = normalizedImport.edges;
       pushHistorySnapshot();
       onCanvasEdited?.();
       markLocalWrite(1200); // avoid immediate poll-refresh
@@ -1298,6 +1316,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
   return (
     <div ref={reactFlowWrapper} className="h-full w-full">
+      <PortDisplayContext.Provider value={showPortDetails}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -1330,7 +1349,18 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           updateNodePositionInBackend(node);
         }}
         nodeTypes={nodeTypes}
+        defaultEdgeOptions={{
+          type: 'smoothstep',
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            width: 12,
+            height: 12,
+            color: 'hsl(var(--muted-foreground))',
+          },
+        }}
+        connectionLineType={ConnectionLineType.SmoothStep}
         fitView
+        fitViewOptions={{ padding: 0.28 }}
         className={cn(
           "flow-canvas transition-colors duration-300",
           isLightMode ? "bg-stone-50" : "bg-[#0F1C0F]"
@@ -1341,13 +1371,11 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         <MiniMap
           nodeColor={n => {
             switch (n.data.type) {
-              case 'config': return '#0EA5E9';
-              case 'input': return '#3B82F6';
-              case 'action': return '#84CC16';
-              case 'output': return '#10B981';
-              case 'api': return '#F43F5E';
-              case 'storage': return '#14B8A6';
-              case 'custom': return '#8B5CF6';
+              case 'source': return '#3B82F6';
+              case 'task': return '#F59E0B';
+              case 'sink': return '#10B981';
+              case 'flow': return '#A855F7';
+              case 'subpipeline': return '#06B6D4';
               default: return '#6B7280';
             }
           }}
@@ -1365,12 +1393,15 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           onImport={importFlow}
           onGenerateScripts={handleGeneratePipelineScripts}
           isGeneratingScripts={isGeneratingScripts}
+          showPortDetails={showPortDetails}
+          onTogglePortDetails={() => setShowPortDetails((current) => !current)}
           onClear={clearCanvas}
           canUndo={historyAvailability.canUndo}
           canRedo={historyAvailability.canRedo}
           isHistoryRestoring={isHistoryRestoring}
         />
       </ReactFlow>
+      </PortDisplayContext.Provider>
 
       <Dialog
         open={isScriptGenerationOpen}

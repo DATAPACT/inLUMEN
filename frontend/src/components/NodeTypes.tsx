@@ -1,19 +1,22 @@
-import React from 'react';
+import React, { useContext } from 'react';
 import { Handle, Position } from 'reactflow';
-import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
-import { 
-  Brain, 
-  MessageCircle, 
-  FileText, 
-  Zap, 
-  Settings, 
-  PanelLeft, 
-  Clipboard,
-  Database,
-  PlusCircle 
+import { cn } from '@/lib/utils';
+import {
+  Boxes,
+  FileInput,
+  FileOutput,
+  GitBranch,
+  PanelLeft,
+  Zap,
 } from 'lucide-react';
-import { normalizeType } from '@/features/nodes/nodeSchema';
+import {
+  getStepTypeLabel,
+  normalizeImplementationKind,
+  normalizeNodePorts,
+  normalizeType,
+  type NodePorts,
+} from '@/features/nodes/nodeSchema';
+import { PortDisplayContext } from '@/features/nodes/PortDisplayContext';
 
 interface NodeProps {
   data: {
@@ -22,102 +25,190 @@ interface NodeProps {
     type: string;
     content?: string;
     active?: boolean;
+    ports?: Partial<NodePorts>;
+    template_label?: string;
+    implementation?: Record<string, unknown>;
   };
   selected: boolean;
 }
 
 const icons = {
-  system: <Brain className="w-4 h-4" />,
-  input: <FileText className="w-4 h-4" />,
-  output: <MessageCircle className="w-4 h-4" />,
-  action: <Zap className="w-4 h-4" />,
-  api: <Database className="w-4 h-4" />,
-  config: <Settings className="w-4 h-4" />,
-  storage: <Clipboard className="w-4 h-4" />,
-  custom: <PlusCircle className="w-4 h-4" />,
+  source: FileInput,
+  task: Zap,
+  sink: FileOutput,
+  flow: GitBranch,
+  subpipeline: Boxes,
 };
 
-const getTypeColor = (type: string) => {
-  switch (type) {
-    case 'system':
-      return 'bg-purple-500/20 text-purple-300 border-purple-500/30';
-    case 'input':
-      return 'bg-blue-500/20 text-blue-300 border-blue-500/30';
-    case 'output':
-      return 'bg-green-500/20 text-green-300 border-green-500/30';
-    case 'action':
-      return 'bg-amber-500/20 text-amber-300 border-amber-500/30';
-    case 'api':
-      return 'bg-rose-500/20 text-rose-300 border-rose-500/30';
-    case 'config':
-      return 'bg-sky-500/20 text-sky-300 border-sky-500/30';
-    case 'storage':
-      return 'bg-teal-500/20 text-teal-300 border-teal-500/30';
-    case 'custom':
-      return 'bg-gray-500/20 text-gray-300 border-gray-500/30';
-    default:
-      return 'bg-gray-500/20 text-gray-300 border-gray-500/30';
-  }
+const TYPE_STYLES = {
+  source: {
+    accent: 'bg-blue-400',
+    icon: 'bg-blue-500/15 text-blue-300 ring-blue-400/20',
+    border: 'border-blue-400/20',
+    selected: 'border-blue-400/70 shadow-[0_0_0_1px_rgba(96,165,250,0.35),0_8px_30px_rgba(37,99,235,0.14)]',
+  },
+  task: {
+    accent: 'bg-amber-400',
+    icon: 'bg-amber-500/15 text-amber-300 ring-amber-400/20',
+    border: 'border-amber-400/20',
+    selected: 'border-amber-400/70 shadow-[0_0_0_1px_rgba(251,191,36,0.35),0_8px_30px_rgba(217,119,6,0.14)]',
+  },
+  sink: {
+    accent: 'bg-emerald-400',
+    icon: 'bg-emerald-500/15 text-emerald-300 ring-emerald-400/20',
+    border: 'border-emerald-400/20',
+    selected: 'border-emerald-400/70 shadow-[0_0_0_1px_rgba(52,211,153,0.35),0_8px_30px_rgba(5,150,105,0.14)]',
+  },
+  flow: {
+    accent: 'bg-purple-400',
+    icon: 'bg-purple-500/15 text-purple-300 ring-purple-400/20',
+    border: 'border-purple-400/20',
+    selected: 'border-purple-400/70 shadow-[0_0_0_1px_rgba(192,132,252,0.35),0_8px_30px_rgba(147,51,234,0.14)]',
+  },
+  subpipeline: {
+    accent: 'bg-cyan-400',
+    icon: 'bg-cyan-500/15 text-cyan-300 ring-cyan-400/20',
+    border: 'border-cyan-400/20',
+    selected: 'border-cyan-400/70 shadow-[0_0_0_1px_rgba(34,211,238,0.35),0_8px_30px_rgba(8,145,178,0.14)]',
+  },
 };
+
+const portPosition = (index: number, count: number) =>
+  `${((index + 1) / (count + 1)) * 100}%`;
+
+const PortList = ({
+  title,
+  ports,
+  align,
+}: {
+  title: string;
+  ports: NodePorts['inputs'];
+  align: 'left' | 'right';
+}) => (
+  <div className={cn('min-w-0', align === 'right' && 'text-right')}>
+    <div className="mb-0.5 text-[8px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+      {title}
+    </div>
+    <div className="space-y-0.5">
+      {ports.map((port) => (
+        <div
+          key={port.id}
+          className={cn(
+            'flex min-w-0 items-baseline gap-1 text-[9px] leading-3',
+            align === 'right' && 'justify-end',
+          )}
+        >
+          <span className="truncate font-medium text-slate-300">{port.label}</span>
+          <span className="shrink-0 text-slate-500">{port.data_type || 'any'}</span>
+        </div>
+      ))}
+    </div>
+  </div>
+);
 
 export const CustomNode: React.FC<NodeProps> = ({ data, selected }) => {
-  const visualType = data.type === 'system' ? 'system' : normalizeType(data.type);
-  const icon = icons[visualType as keyof typeof icons] || <PanelLeft className="w-4 h-4" />;
-  const typeColor = getTypeColor(visualType);
-  
+  const showPortDetails = useContext(PortDisplayContext);
+  const visualType = normalizeType(data.type);
+  const ports = normalizeNodePorts(data.ports, visualType);
+  const style = TYPE_STYLES[visualType];
+  const Icon = icons[visualType] || PanelLeft;
+  const templateLabel = String(data.template_label || '').trim();
+  const structuralDefaults = new Set([
+    'Source',
+    'Task',
+    'Blank Task',
+    'Sink',
+    'Destination',
+    'Flow',
+    'Subpipeline',
+  ]);
+  const showTemplate = templateLabel && !structuralDefaults.has(templateLabel);
+  const implementationLabel = visualType === 'task'
+    ? normalizeImplementationKind(data.implementation?.kind).replace(/-/g, ' ')
+    : '';
+
   return (
-    <div 
+    <div
       className={cn(
-        "node-custom px-3 py-2 rounded-lg border min-w-[160px] max-w-[240px] animate-fade-in text-slate-100",
-        selected ? "border-accent/80 shadow-[0_0_0_1px_hsl(var(--accent))]" : "border-border",
-        data.active ? "animate-pulse border-purple-500" : "",
-        visualType === 'system' ? "bg-purple-950/40" :
-        visualType === 'input' ? "bg-blue-950/40" :
-        visualType === 'output' ? "bg-green-950/40" :
-        visualType === 'action' ? "bg-amber-950/40" :
-        visualType === 'api' ? "bg-rose-950/40" :
-        visualType === 'config' ? "bg-sky-950/40" :
-        visualType === 'custom' ? "bg-gray-950/40" :
-        visualType === 'storage' ? "bg-teal-950/40" : "bg-gray-950/40"
+        'node-custom relative overflow-visible rounded-xl border bg-slate-950/90 text-slate-100',
+        showPortDetails ? 'w-[218px] px-3 py-2.5' : 'w-[184px] px-3 py-2.5',
+        style.border,
+        selected ? style.selected : 'shadow-[0_5px_18px_rgba(0,0,0,0.2)]',
+        data.active && 'animate-pulse',
       )}
     >
-      {/* Input handle on the top */}
-      <Handle 
-        type="target" 
-        position={Position.Top} 
-        className="w-2 h-2 bg-node-connector" 
-      />
-      
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center justify-between">
-          <Badge 
-            variant="outline" 
-            className={cn("text-xs font-normal flex items-center gap-1", typeColor)}
-          >
-            {icon}
-            {visualType}
-          </Badge>
-        </div>
-        
-        <div className="text-sm font-medium">{data.label}</div>
-        
-        {data.description && (
-          <div className="text-xs text-slate-300">{data.description}</div>
-        )}
+      <div className={cn('absolute inset-y-3 left-0 w-0.5 rounded-r-full opacity-80', style.accent)} />
 
-        {data.content && (
-          <div className="text-xs bg-slate-950/30 p-2 rounded border border-white/10 mt-1 max-h-20 overflow-y-auto">
-            <p className="line-clamp-3">{data.content}</p>
+      {ports.inputs.map((port, index) => (
+        <Handle
+          key={`input-${port.id}`}
+          id={port.id}
+          type="target"
+          position={Position.Left}
+          title={`${port.label}${port.data_type ? ` · ${port.data_type}` : ''}`}
+          style={{ top: portPosition(index, ports.inputs.length) }}
+          className="node-port-handle node-port-handle-input"
+        />
+      ))}
+
+      <div className="flex items-start gap-2.5">
+        <div className={cn('mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ring-1', style.icon)}>
+          <Icon className="h-3.5 w-3.5" />
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-1.5 text-[9px] leading-3 text-slate-400">
+            <span className="shrink-0 font-semibold uppercase tracking-[0.1em]">
+              {getStepTypeLabel(visualType)}
+            </span>
+            {showTemplate && (
+              <>
+                <span className="text-slate-600">/</span>
+                <span className="truncate">{templateLabel}</span>
+              </>
+            )}
           </div>
-        )}
+
+          <div className="mt-1 flex items-baseline justify-between gap-2">
+            <div className="truncate text-[13px] font-semibold leading-4 text-slate-100">{data.label}</div>
+            {showPortDetails && implementationLabel && (
+              <span className="shrink-0 text-[8px] capitalize text-slate-500">{implementationLabel}</span>
+            )}
+          </div>
+
+          {data.description && (
+            <div className={cn(
+              'mt-1 text-[10px] leading-3.5 text-slate-400',
+              showPortDetails ? 'line-clamp-2' : 'line-clamp-1',
+            )}>
+              {data.description}
+            </div>
+          )}
+        </div>
       </div>
-      
-      {/* Output handle on the bottom */}
-      <Handle 
-        type="source" 
-        position={Position.Bottom} 
-        className="w-2 h-2 bg-node-connector" 
-      />
+
+      {showPortDetails && (ports.inputs.length > 0 || ports.outputs.length > 0) && (
+        <div className="mt-2 grid grid-cols-2 gap-3 border-t border-white/[0.07] pt-1.5">
+          {ports.inputs.length > 0 ? (
+            <PortList title="In" ports={ports.inputs} align="left" />
+          ) : <div />}
+          {ports.outputs.length > 0 && (
+            <PortList title="Out" ports={ports.outputs} align="right" />
+          )}
+        </div>
+      )}
+
+      {ports.outputs.map((port, index) => (
+        <Handle
+          key={`output-${port.id}`}
+          id={port.id}
+          type="source"
+          position={Position.Right}
+          title={`${port.label}${port.data_type ? ` · ${port.data_type}` : ''}`}
+          style={{ top: portPosition(index, ports.outputs.length) }}
+          className="node-port-handle node-port-handle-output"
+        />
+      ))}
     </div>
   );
 };

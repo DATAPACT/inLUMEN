@@ -38,9 +38,12 @@ describe("flow graph normalization", () => {
     expect(graph.nodes[0]).toMatchObject({
       id: "1",
       position: { x: 12.5, y: 0 },
-      data: { type: "input" },
+      data: {
+        type: "source",
+        ports: { inputs: [], outputs: [{ id: "data", label: "data" }] },
+      },
     });
-    expect(graph.nodes[1].data.type).toBe("output");
+    expect(graph.nodes[1].data.type).toBe("sink");
     expect(graph.edges).toEqual([
       expect.objectContaining({ id: "e-1-2", source: "1", target: "2" }),
     ]);
@@ -64,7 +67,9 @@ describe("flow graph normalization", () => {
             ],
             definition_id: "core.input-data",
             definition_version: 1,
+            template_label: "File",
             implementation: { parser: "csv" },
+            secret_params: [],
             configuration_status: "valid",
             generated_artifact: { status: "current" },
           },
@@ -78,20 +83,75 @@ describe("flow graph normalization", () => {
       nodes: [
         {
           id: "4",
-          type: "input",
+          type: "source",
           label: "Input",
           description: "Load records",
           position: { x: 1, y: 2 },
           files: ["records.csv", "schema.json", "legacy.txt"],
           definition_id: "core.input-data",
           definition_version: 1,
+          template: "File",
+          ports: {
+            inputs: [],
+            outputs: [{ id: "data", label: "data" }],
+          },
           implementation: { parser: "csv" },
+          secret_params: [],
           configuration_status: "valid",
           generated_artifact: { status: "current" },
         },
       ],
       edges: [],
     });
+  });
+
+  it("preserves explicit port connections in agent snapshots", () => {
+    const graph = normalizeGraph({
+      nodes: [
+        { id: "1", position: { x: 0, y: 0 }, data: { type: "source" } },
+        { id: "2", position: { x: 1, y: 1 }, data: { type: "task" } },
+      ],
+      edges: [
+        {
+          source: "1",
+          target: "2",
+          sourceHandle: "documents",
+          targetHandle: "records",
+        },
+      ],
+    });
+
+    expect(createAgentGraphSnapshot(graph).edges).toEqual([
+      {
+        source: "1",
+        target: "2",
+        source_port: "documents",
+        target_port: "records",
+      },
+    ]);
+  });
+
+  it("prefers persisted file metadata so code and data roles survive polling", () => {
+    const graph = normalizeGraph({
+      nodes: [{
+        id: "7",
+        position: { x: 0, y: 0 },
+        data: {
+          type: "task",
+          files: ["main.py", "records.csv"],
+          file_buckets: [
+            { filename: "main.py", bucket: "files-step-id-7", role: "code" },
+            { filename: "records.csv", bucket: "files-step-id-7", role: "data" },
+          ],
+        },
+      }],
+      edges: [],
+    });
+
+    expect(graph.nodes[0].data.files).toEqual([
+      { filename: "main.py", bucket: "files-step-id-7", role: "code" },
+      { filename: "records.csv", bucket: "files-step-id-7", role: "data" },
+    ]);
   });
 
   it("increments the largest numeric node id and supports an empty graph", () => {

@@ -10,6 +10,8 @@ from deployment_artifacts import (  # noqa: E402
     build_argo_workflow_object,
     build_argo_workflow_yaml,
     build_dockerfile_artifacts,
+    extract_pipeline_edges,
+    extract_pipeline_steps,
     validate_argo_workflow_object,
     validate_dockerfile_artifacts,
 )
@@ -69,6 +71,50 @@ class DeploymentArtifactsTest(unittest.TestCase):
         )
         self.assertIn("RUN pip install --no-cache-dir -r requirements.txt", dockerfiles[0]["content"])
         self.assertIn('RUN find /app -type f -name "*.sh"', dockerfiles[0]["content"])
+
+    def test_preserves_structural_metadata_and_explicit_ports(self):
+        graph = {
+            "nodes": [
+                {
+                    "id": "1",
+                    "data": {
+                        "label": "Audio upload",
+                        "type": "input",
+                        "template_label": "User Upload",
+                        "ports": {
+                            "outputs": [
+                                {"id": "audio", "label": "audio", "data_type": "Audio"}
+                            ]
+                        },
+                    },
+                },
+                {"id": "2", "data": {"label": "Transcribe", "type": "action"}},
+            ],
+            "edges": [
+                {
+                    "source": "1",
+                    "target": "2",
+                    "sourceHandle": "audio",
+                    "targetHandle": "recording",
+                }
+            ],
+        }
+
+        steps = extract_pipeline_steps(graph)
+        self.assertEqual("source", steps[0]["type"])
+        self.assertEqual("User Upload", steps[0]["template"])
+        self.assertEqual("audio", steps[0]["ports"]["outputs"][0]["id"])
+        self.assertEqual(
+            [
+                {
+                    "source": "1",
+                    "target": "2",
+                    "source_port": "audio",
+                    "target_port": "recording",
+                }
+            ],
+            extract_pipeline_edges(graph),
+        )
 
     def test_dockerfile_guardrail_rejects_bad_format(self):
         with self.assertRaises(DeploymentArtifactValidationError) as ctx:

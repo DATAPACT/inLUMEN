@@ -1,4 +1,4 @@
-import { Edge, Node } from 'reactflow';
+import { Connection, Edge, Node } from 'reactflow';
 import { apiFetch } from '@/utils/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
 import {
@@ -169,7 +169,11 @@ export const updateNodePositionInBackend = async (node: Node) => {
   }
 };
 
-export const addEdgeToBackend = async (sourceNode: Node, targetNode: Node) => {
+export const addEdgeToBackend = async (
+  sourceNode: Node,
+  targetNode: Node,
+  connection?: Pick<Edge, "sourceHandle" | "targetHandle"> | Connection,
+) => {
   try {
     const response = await apiFetch(`${INLUMEN_API_URL}/api/graph/edges`, {
       method: 'POST',
@@ -178,6 +182,8 @@ export const addEdgeToBackend = async (sourceNode: Node, targetNode: Node) => {
         properties: {
           flow_id_source: sourceNode.id,
           flow_id_target: targetNode.id,
+          source_port: connection?.sourceHandle ?? null,
+          target_port: connection?.targetHandle ?? null,
         },
       }),
     });
@@ -190,7 +196,11 @@ export const addEdgeToBackend = async (sourceNode: Node, targetNode: Node) => {
   }
 };
 
-export const deleteEdgeFromBackend = async (sourceNode: Node, targetNode: Node) => {
+export const deleteEdgeFromBackend = async (
+  sourceNode: Node,
+  targetNode: Node,
+  connection?: Pick<Edge, "sourceHandle" | "targetHandle">,
+) => {
   try {
     const response = await apiFetch(`${INLUMEN_API_URL}/api/graph/edges`, {
       method: 'DELETE',
@@ -199,6 +209,8 @@ export const deleteEdgeFromBackend = async (sourceNode: Node, targetNode: Node) 
         properties: {
           flow_id_source: sourceNode.id,
           flow_id_target: targetNode.id,
+          source_port: connection?.sourceHandle ?? null,
+          target_port: connection?.targetHandle ?? null,
         },
       }),
     });
@@ -512,7 +524,7 @@ export const rebuildBackendFromFlow = async (
       );
       continue;
     }
-    await addEdgeToBackend(sourceNode, targetNode);
+    await addEdgeToBackend(sourceNode, targetNode, edge);
   }
 };
 

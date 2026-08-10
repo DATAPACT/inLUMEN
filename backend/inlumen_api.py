@@ -36,11 +36,13 @@ from node_definitions.artifacts import (
     configuration_hash,
     implementation_plan_from_data,
 )
+from node_ports import normalize_node_ports
 from object_client import dispatch_object_request
 from provenance_provo import build_prov_o_jsonld, provenance_prov_o_filename
 from provenance_report import build_provenance_pdf, provenance_report_filename
 from public_api import create_public_api_blueprint
 from runtime_config import add_cors_headers, get_service_port
+from step_types import normalize_step_type
 
 
 INLUMEN_API_PORT = get_service_port("INLUMEN_API_PORT", 5000)
@@ -525,8 +527,6 @@ def _node_descriptor(
     parameters = (
         dict(data.get("param"))
         if isinstance(data.get("param"), dict)
-        else dict(data.get("implementation"))
-        if isinstance(data.get("implementation"), dict)
         else {}
     )
     content = data.get("content")
@@ -537,9 +537,11 @@ def _node_descriptor(
         "flow_id": str(node.get("id") or data.get("flow_id") or data.get("id") or ""),
         "label": str(data.get("label") or ""),
         "description": str(data.get("description") or ""),
-        "type": str(data.get("type") or "custom"),
+        "type": normalize_step_type(data.get("type")),
+        "template": str(data.get("template_label") or data.get("definition_id") or ""),
         "parameters": parameters,
         "implementation": implementation,
+        "ports": normalize_node_ports(data.get("ports"), data.get("type")),
         "files": _node_file_entries(node, include_samples=include_samples),
     }
 
@@ -597,7 +599,12 @@ def _build_codegen_context(
         "graph": {
             "nodes": descriptors,
             "edges": [
-                {"source": str(edge.get("source")), "target": str(edge.get("target"))}
+                {
+                    "source": str(edge.get("source")),
+                    "target": str(edge.get("target")),
+                    "source_port": str(edge.get("sourceHandle") or edge.get("source_port") or ""),
+                    "target_port": str(edge.get("targetHandle") or edge.get("target_port") or ""),
+                }
                 for edge in edges
                 if isinstance(edge, dict) and edge.get("source") and edge.get("target")
             ],
@@ -1059,7 +1066,7 @@ def _pipeline_sample_data_summary(graph: dict[str, Any]) -> dict[str, Any]:
             {
                 "flow_id": flow_id,
                 "label": str(data.get("label") or ""),
-                "type": str(data.get("type") or "custom"),
+                "type": normalize_step_type(data.get("type")),
                 "files": [
                     {
                         "filename": str(item.get("filename") or ""),
@@ -2011,8 +2018,15 @@ def node_files(node_id: str):
         uploaded = request.files.get("file")
         if uploaded is None:
             return _json_error(400, "file is required")
+        file_role = str(request.form.get("role") or "").strip().lower()
+        if file_role not in {"code", "data"}:
+            file_role = ""
         uploaded_filename = str(uploaded.filename or "").strip()
-        if uploaded_filename and not _is_codegen_runtime_file(uploaded_filename):
+        if (
+            uploaded_filename
+            and file_role != "code"
+            and not _is_codegen_runtime_file(uploaded_filename)
+        ):
             try:
                 probe, size_bytes = read_attachment_probe(uploaded.stream)
             except (OSError, ValueError) as exc:
@@ -2061,6 +2075,7 @@ def node_files(node_id: str):
                 "properties": {
                     "flow_id": node_id,
                     "filename": uploaded.filename,
+                    **({"role": file_role} if file_role else {}),
                 }
             },
         )

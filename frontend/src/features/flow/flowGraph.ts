@@ -5,6 +5,8 @@ import {
   normalizeDefinitionVersion,
   normalizeGeneratedArtifact,
   normalizeNodeImplementation,
+  normalizeNodePorts,
+  normalizeSecretParamKeys,
   normalizeType,
 } from '@/features/nodes/nodeSchema';
 
@@ -29,15 +31,20 @@ export type AgentGraphSnapshot = {
     database?: string;
     files?: string[];
     param?: Record<string, unknown>;
+    secret_params?: string[];
     definition_id?: string;
     definition_version?: number;
     implementation?: Record<string, unknown>;
+    template?: string;
+    ports?: ReturnType<typeof normalizeNodePorts>;
     configuration_status?: string;
     generated_artifact?: Record<string, unknown>;
   }>;
   edges: Array<{
     source: string;
     target: string;
+    source_port?: string;
+    target_port?: string;
   }>;
 };
 
@@ -65,6 +72,12 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
     const node = (nodeEntry && typeof nodeEntry === "object" ? nodeEntry : {}) as Node;
     if (node.id == null || String(node.id).trim() === "") return [];
     const position = node.position || { x: 0, y: 0 };
+    const nodeType = normalizeType(node.data?.type);
+    const normalizedFiles = Array.isArray(node.data?.file_buckets)
+      ? node.data.file_buckets
+      : Array.isArray(node.data?.files)
+        ? node.data.files
+        : [];
     return [{
       ...node,
       id: String(node.id),
@@ -76,7 +89,9 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
         ...node.data,
         label: node.data?.label || "",
         description: node.data?.description || "",
-        type: normalizeType(node.data?.type),
+        type: nodeType,
+        ports: normalizeNodePorts(node.data?.ports, nodeType),
+        files: normalizedFiles,
       },
     }];
   });
@@ -89,7 +104,9 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
     const edge = (edgeEntry && typeof edgeEntry === "object" ? edgeEntry : {}) as Edge;
     const source = String(edge.source || "");
     const target = String(edge.target || "");
-    const edgeKey = `${source}->${target}`;
+    const sourceHandle = typeof edge.sourceHandle === "string" ? edge.sourceHandle : "";
+    const targetHandle = typeof edge.targetHandle === "string" ? edge.targetHandle : "";
+    const edgeKey = `${source}:${sourceHandle}->${target}:${targetHandle}`;
 
     if (!source || !target || source === target) return;
     if (!nodeIds.has(source) || !nodeIds.has(target)) return;
@@ -144,9 +161,16 @@ export const createAgentGraphSnapshot = (graph: NormalizedGraph): AgentGraphSnap
       ...(data.param && typeof data.param === "object" && !Array.isArray(data.param)
         ? { param: data.param as Record<string, unknown> }
         : {}),
+      ...(Array.isArray(data.secret_params)
+        ? { secret_params: normalizeSecretParamKeys(data.secret_params, data.param) }
+        : {}),
+      ...(typeof data.template_label === "string" && data.template_label.trim()
+        ? { template: data.template_label.trim() }
+        : {}),
+      ports: normalizeNodePorts(data.ports, normalizeType(data.type)),
       ...(definitionId ? { definition_id: definitionId } : {}),
       ...(definitionId && definitionVersion ? { definition_version: definitionVersion } : {}),
-      ...(definitionId
+      ...(Object.keys(normalizeNodeImplementation(data.implementation)).length > 0
         ? { implementation: normalizeNodeImplementation(data.implementation) }
         : {}),
       ...(configurationStatus ? { configuration_status: configurationStatus } : {}),
@@ -156,6 +180,12 @@ export const createAgentGraphSnapshot = (graph: NormalizedGraph): AgentGraphSnap
   edges: graph.edges.map((edge) => ({
     source: String(edge.source),
     target: String(edge.target),
+    ...(typeof edge.sourceHandle === "string" && edge.sourceHandle
+      ? { source_port: edge.sourceHandle }
+      : {}),
+    ...(typeof edge.targetHandle === "string" && edge.targetHandle
+      ? { target_port: edge.targetHandle }
+      : {}),
   })),
 });
 

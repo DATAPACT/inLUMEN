@@ -4,6 +4,7 @@ import {
   getNodeFileBucket,
   getNodeFileName,
   NodeFileReference,
+  NodeFileRole,
 } from '@/features/nodes/nodeSchema';
 
 export const updateNodePropertiesInBackend = async (
@@ -28,10 +29,11 @@ export const updateNodePropertiesInBackend = async (
   }
 };
 
-export const uploadNodeFile = async (nodeId: string, file: File) => {
+export const uploadNodeFile = async (nodeId: string, file: File, role?: NodeFileRole) => {
   try {
     const form = new FormData();
     form.append("file", file);
+    if (role) form.append("role", role);
     const res = await apiFetch(`${INLUMEN_API_URL}/api/nodes/${encodeURIComponent(nodeId)}/files`, {
       method: "POST",
       body: form,

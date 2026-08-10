@@ -32,18 +32,45 @@ class NodeDefinitionRegistryTest(unittest.TestCase):
         definitions = registry.list()
         ids = {definition.id for definition in definitions}
 
-        self.assertIn("core.input-data", ids)
-        self.assertIn("core.data-preprocessing", ids)
-        self.assertIn("core.model-training", ids)
-        input_data = registry.get("core.input-data")
-        self.assertEqual("input", input_data.base_type)
-        self.assertEqual("default", input_data.editor.kind)
+        self.assertEqual(
+            {
+                "core.source",
+                "core.task",
+                "core.sink",
+                "core.flow",
+                "core.subpipeline",
+            },
+            ids,
+        )
+        self.assertEqual(
+            ["sources", "tasks", "destinations", "flow", "subpipeline"],
+            [definition.family for definition in definitions],
+        )
+        source_node = registry.get("core.source")
+        self.assertEqual("source", source_node.base_type)
+        self.assertEqual("default", source_node.editor.kind)
+
+    def test_keeps_legacy_definitions_resolvable_but_out_of_the_palette(self):
+        registry = NodeDefinitionRegistry()
+
+        legacy = registry.get("core.model-training")
+
+        self.assertIsNotNone(legacy)
+        self.assertFalse(legacy.enabled)
+        self.assertNotIn(
+            "core.model-training",
+            {definition.id for definition in registry.list()},
+        )
+        self.assertIn(
+            "core.model-training",
+            {definition.id for definition in registry.list(include_disabled=True)},
+        )
 
     def test_rejects_duplicate_definition_ids(self):
         definition = {
             "id": "example.node",
             "version": 1,
-            "base_type": "action",
+            "base_type": "task",
             "family": "example",
             "palette": {
                 "label": "Example",

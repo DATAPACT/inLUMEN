@@ -6,6 +6,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from artifact_content import decode_artifact_content, verify_artifact_integrity
 from artifact_contract import classify_artifact
+from node_ports import normalize_node_ports
+from step_types import normalize_step_type
 
 try:
     import yaml
@@ -195,12 +197,18 @@ def extract_pipeline_steps(pipeline_graph: Optional[dict], files: Any = None) ->
         flow_id = _clean_string(step_data.get("flow_id"))
         if not flow_id:
             continue
+        step_type = normalize_step_type(step_data.get("type"))
         files_for_step = row.get("files") or []
         steps_by_id[flow_id] = {
             "flow_id": flow_id,
             "label": _clean_string(step_data.get("label")),
             "description": _clean_string(step_data.get("description")),
-            "type": _clean_string(step_data.get("type")) or "custom",
+            "type": step_type,
+            "template": _clean_string(step_data.get("template_label")),
+            "ports": normalize_node_ports(
+                step_data.get("ports") or step_data.get("ports_json"),
+                step_type,
+            ),
             "content": _clean_string(step_data.get("content")),
             "endpoint": _clean_string(step_data.get("endpoint")),
             "database": _clean_string(step_data.get("database")),
@@ -240,6 +248,7 @@ def extract_pipeline_steps(pipeline_graph: Optional[dict], files: Any = None) ->
         flow_id = _clean_string(data.get("flow_id") or node.get("id") or data.get("id"))
         if not flow_id:
             continue
+        step_type = normalize_step_type(data.get("type"))
 
         param = data.get("param") if isinstance(data.get("param"), dict) else {}
         if not param and isinstance(data.get("param_json"), str):
@@ -253,7 +262,12 @@ def extract_pipeline_steps(pipeline_graph: Optional[dict], files: Any = None) ->
             "flow_id": flow_id,
             "label": _clean_string(data.get("label")),
             "description": _clean_string(data.get("description")),
-            "type": _clean_string(data.get("type")) or "custom",
+            "type": step_type,
+            "template": _clean_string(data.get("template_label")),
+            "ports": normalize_node_ports(
+                data.get("ports") or data.get("ports_json"),
+                step_type,
+            ),
             "content": _clean_string(data.get("content")),
             "endpoint": _clean_string(data.get("endpoint")),
             "database": _clean_string(data.get("database")),
@@ -280,7 +294,9 @@ def extract_pipeline_steps(pipeline_graph: Optional[dict], files: Any = None) ->
                 "flow_id": step_id,
                 "label": "",
                 "description": "",
-                "type": "custom",
+                "type": "task",
+                "template": "Blank Task",
+                "ports": normalize_node_ports(None, "task"),
                 "content": "",
                 "endpoint": "",
                 "database": "",
@@ -315,7 +331,18 @@ def extract_pipeline_edges(pipeline_graph: Optional[dict]) -> List[dict]:
             source = _clean_string(edge.get("source"))
             target = _clean_string(edge.get("target"))
             if source and target and source != target:
-                edges.append({"source": source, "target": target})
+                edges.append(
+                    {
+                        "source": source,
+                        "target": target,
+                        "source_port": _clean_string(
+                            edge.get("sourceHandle") or edge.get("source_port")
+                        ),
+                        "target_port": _clean_string(
+                            edge.get("targetHandle") or edge.get("target_port")
+                        ),
+                    }
+                )
 
     raw_flows = graph.get("flows")
     if isinstance(raw_flows, list):
@@ -325,12 +352,24 @@ def extract_pipeline_edges(pipeline_graph: Optional[dict]) -> List[dict]:
             source = _clean_string(flow.get("source"))
             target = _clean_string(flow.get("target"))
             if source and target and source != target:
-                edges.append({"source": source, "target": target})
+                edges.append(
+                    {
+                        "source": source,
+                        "target": target,
+                        "source_port": _clean_string(flow.get("source_port")),
+                        "target_port": _clean_string(flow.get("target_port")),
+                    }
+                )
 
-    seen: set[Tuple[str, str]] = set()
+    seen: set[Tuple[str, str, str, str]] = set()
     deduped = []
     for edge in edges:
-        key = (edge["source"], edge["target"])
+        key = (
+            edge["source"],
+            edge["target"],
+            edge["source_port"],
+            edge["target_port"],
+        )
         if key in seen:
             continue
         seen.add(key)
@@ -921,7 +960,7 @@ def _build_codegen_argo_workflow_object(
 
         annotations = {
             "inlumen.ai/flow-id": step_id,
-            "inlumen.ai/type": step.get("type") or "custom",
+            "inlumen.ai/type": step.get("type") or "task",
             "inlumen.ai/generator": CODEGEN_GENERATOR,
             "inlumen.ai/dockerfile": dockerfile["dockerfile_filename"],
         }
@@ -1064,7 +1103,7 @@ def build_argo_workflow_object(
 
         env = [
             {"name": "INLUMEN_FLOW_ID", "value": step_id},
-            {"name": "INLUMEN_STEP_TYPE", "value": step.get("type") or "custom"},
+            {"name": "INLUMEN_STEP_TYPE", "value": step.get("type") or "task"},
         ]
         if step.get("label"):
             env.append({"name": "INLUMEN_STEP_LABEL", "value": step["label"]})
@@ -1089,7 +1128,7 @@ def build_argo_workflow_object(
 
         annotations = {
             "inlumen.ai/flow-id": step_id,
-            "inlumen.ai/type": step.get("type") or "custom",
+            "inlumen.ai/type": step.get("type") or "task",
         }
         if step.get("label"):
             annotations["inlumen.ai/label"] = step["label"]
@@ -3396,7 +3435,13 @@ def build_deployment_bundle_files(
             {
                 "flow_id": step_id,
                 "label": step.get("label") or "",
-                "type": step.get("type") or "custom",
+                "type": step.get("type") or "task",
+                "template": step.get("template") or "",
+                "ports": step.get("ports") or normalize_node_ports(
+                    None,
+                    step.get("type") or "task",
+                ),
+                "implementation": step.get("implementation") or {},
                 "path": f"nodes/{node_dir}",
                 "output_path": f"outputs/{node_dir}",
                 "parents": dependencies.get(step_id) or [],
@@ -3526,6 +3571,7 @@ def build_deployment_bundle_files(
         "readme": "README.md",
         "node_order": ordered_ids,
         "nodes": node_entries,
+        "connections": explicit_edges,
         "inputs": {
             "path": "inputs",
             "manifest": "inputs/input_manifest.json",

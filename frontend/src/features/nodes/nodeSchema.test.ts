@@ -3,29 +3,75 @@ import { describe, expect, it } from "vitest";
 import {
   getNodeFileBucket,
   getNodeFileName,
+  getNodeFileRole,
+  getStepTypeLabel,
   isImagePreviewName,
   isTextPreviewFile,
   isTextPreviewName,
-  normalizeStorageDatabaseOption,
+  normalizeImplementationKind,
+  normalizeNodePorts,
+  normalizeSecretParamKeys,
   normalizeType,
   pickBackendUpdatableProps,
 } from "@/features/nodes/nodeSchema";
 
 
 describe("node schema compatibility", () => {
-  it("normalizes canonical, aliased, and generated step types", () => {
-    expect(normalizeType(" INPUT ")).toBe("input");
-    expect(normalizeType("data source")).toBe("input");
-    expect(normalizeType("feature-engineering")).toBe("action");
-    expect(normalizeType("quality_report_writer")).toBe("output");
-    expect(normalizeType("external endpoint client")).toBe("api");
-    expect(normalizeType("unrecognized step")).toBe("action");
+  it("normalizes legacy and domain vocabulary into five structural kinds", () => {
+    expect(normalizeType(" SOURCE ")).toBe("source");
+    expect(normalizeType("data source")).toBe("source");
+    expect(normalizeType("input")).toBe("source");
+    expect(normalizeType("processing step")).toBe("task");
+    expect(normalizeType("feature-engineering")).toBe("task");
+    expect(normalizeType("storage")).toBe("task");
+    expect(normalizeType("API call")).toBe("task");
+    expect(normalizeType("quality_report_writer")).toBe("sink");
+    expect(normalizeType("human approval")).toBe("flow");
+    expect(normalizeType("nested pipeline")).toBe("subpipeline");
+    expect(normalizeType("unrecognized step")).toBe("task");
   });
 
-  it("normalizes supported storage database choices", () => {
-    expect(normalizeStorageDatabaseOption("sqlite")).toBe("SQLite");
-    expect(normalizeStorageDatabaseOption(" CHROMADB ")).toBe("ChromaDB");
-    expect(normalizeStorageDatabaseOption("unknown")).toBe("MinIO");
+  it("uses structural, implementation-neutral labels", () => {
+    expect(getStepTypeLabel("source")).toBe("Source");
+    expect(getStepTypeLabel("task")).toBe("Task");
+    expect(getStepTypeLabel("sink")).toBe("Destination");
+    expect(getStepTypeLabel("flow")).toBe("Flow");
+    expect(getStepTypeLabel("subpipeline")).toBe("Subpipeline");
+  });
+
+  it("normalizes explicit ports and enforces source/sink directionality", () => {
+    expect(normalizeNodePorts(undefined, "source")).toEqual({
+      inputs: [],
+      outputs: [{ id: "data", label: "data" }],
+    });
+    expect(normalizeNodePorts({
+      inputs: [{ id: "ignored", label: "ignored" }],
+      outputs: [
+        { id: "Embeddings", label: "embeddings", data_type: "Collection<Vector>" },
+        { id: "Embeddings", label: "scores" },
+      ],
+    }, "source")).toEqual({
+      inputs: [],
+      outputs: [
+        { id: "embeddings", label: "embeddings", data_type: "Collection<Vector>" },
+        { id: "embeddings-2", label: "scores" },
+      ],
+    });
+    expect(normalizeNodePorts(undefined, "sink").outputs).toEqual([]);
+  });
+
+  it("keeps runtime implementation selection independent", () => {
+    expect(normalizeImplementationKind("Python")).toBe("python");
+    expect(normalizeImplementationKind("git repository")).toBe("git-repository");
+    expect(normalizeImplementationKind("future-runtime")).toBe("generated-code");
+  });
+
+  it("infers secret parameters while preserving explicit visibility choices", () => {
+    const parameters = { api_key: "secret", threshold: 0.8, accessToken: "token" };
+
+    expect(normalizeSecretParamKeys(undefined, parameters)).toEqual(["api_key"]);
+    expect(normalizeSecretParamKeys(["accessToken"], parameters)).toEqual(["accessToken"]);
+    expect(normalizeSecretParamKeys([], parameters)).toEqual([]);
   });
 
   it("reads browser, persisted, and legacy file references", () => {
@@ -37,40 +83,49 @@ describe("node schema compatibility", () => {
     expect(getNodeFileBucket({ filename: "x", bucket: " Custom-Bucket " }, "7"))
       .toBe("Custom-Bucket");
     expect(getNodeFileBucket("legacy.txt", "7")).toBe("files-step-id-7");
+    expect(getNodeFileRole({ filename: "records.py", role: "data" })).toBe("data");
+    expect(getNodeFileRole({ filename: "main.py" })).toBe("code");
+    expect(getNodeFileRole("observations.csv")).toBe("data");
   });
 
-  it("selects only properties supported by a storage node", () => {
+  it("persists structural metadata without technology-specific graph types", () => {
     const properties = pickBackendUpdatableProps(
       "9",
       {
-        label: "Vector store",
-        description: "Persist embeddings",
-        database: "SQLite",
-        endpoint: "sqlite:///vectors.db",
-        content: "not applicable",
-        param: { ignored: true },
-        definition_id: " core.clipboard ",
+        label: "Speech transcription",
+        description: "Transcribe uploaded recordings",
+        param: { language: "en" },
+        secret_params: [],
+        ports: {
+          inputs: [{ id: "audio", label: "audio", data_type: "Audio" }],
+          outputs: [{ id: "transcript", label: "transcript", data_type: "Document" }],
+        },
+        definition_id: "core.speech-to-text",
         definition_version: 2,
-        implementation: { mode: "durable" },
-        configuration_status: "valid",
-        generated_artifact: { status: "current" },
+        template_label: "Speech-to-Text",
+        implementation: { kind: "container", image: "example/asr:1" },
+        endpoint: "legacy-field-is-not-structural",
+        database: "legacy-field-is-not-structural",
       },
-      "storage",
+      "task",
     );
 
     expect(properties).toEqual({
       flow_id: "9",
-      label: "Vector store",
-      type: "storage",
-      description: "Persist embeddings",
-      definition_id: "core.clipboard",
-      definition_version: 2,
-      implementation: { mode: "durable" },
-      configuration_status: "valid",
-      generated_artifact: { status: "current" },
+      label: "Speech transcription",
+      type: "task",
+      description: "Transcribe uploaded recordings",
+      param: { language: "en" },
+      secret_params: [],
+      ports: {
+        inputs: [{ id: "audio", label: "audio", data_type: "Audio" }],
+        outputs: [{ id: "transcript", label: "transcript", data_type: "Document" }],
+      },
       has_files: "no",
-      endpoint: "sqlite:///vectors.db",
-      database: "sqlite",
+      template_label: "Speech-to-Text",
+      definition_id: "core.speech-to-text",
+      definition_version: 2,
+      implementation: { kind: "container", image: "example/asr:1" },
     });
   });
 

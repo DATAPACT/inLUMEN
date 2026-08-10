@@ -34,13 +34,11 @@ MAX_DIAGRAM_NODES = 24
 
 
 NODE_COLORS = {
-    "input": colors.HexColor("#D8F3DC"),
-    "action": colors.HexColor("#DCEBFF"),
-    "output": colors.HexColor("#E7E2F7"),
-    "config": colors.HexColor("#E8ECEF"),
-    "storage": colors.HexColor("#FCE8CF"),
-    "api": colors.HexColor("#D7F1EF"),
-    "custom": colors.HexColor("#E8ECEF"),
+    "source": colors.HexColor("#D8E8FF"),
+    "task": colors.HexColor("#FFF0C7"),
+    "sink": colors.HexColor("#D8F3DC"),
+    "flow": colors.HexColor("#E7E2F7"),
+    "subpipeline": colors.HexColor("#D7F1EF"),
 }
 
 
@@ -95,6 +93,8 @@ def _snapshot_signature(snapshot: dict[str, Any]) -> str:
                 {
                     "source": _safe_text(edge.get("source")),
                     "target": _safe_text(edge.get("target")),
+                    "source_port": _safe_text(edge.get("source_port")),
+                    "target_port": _safe_text(edge.get("target_port")),
                 }
                 for edge in edges
                 if isinstance(edge, dict)
@@ -102,6 +102,8 @@ def _snapshot_signature(snapshot: dict[str, Any]) -> str:
             key=lambda edge: (
                 _flow_id_sort_key(edge["source"]),
                 _flow_id_sort_key(edge["target"]),
+                edge["source_port"],
+                edge["target_port"],
             ),
         ),
     }
@@ -342,8 +344,8 @@ class GraphSnapshotFlowable(Flowable):
             }
             for node_id, (x, y) in positions.items():
                 node = node_by_id[node_id]
-                node_type = _safe_text(node.get("type"), "custom").lower()
-                canvas.setFillColor(NODE_COLORS.get(node_type, NODE_COLORS["custom"]))
+                node_type = _safe_text(node.get("type"), "task").lower()
+                canvas.setFillColor(NODE_COLORS.get(node_type, NODE_COLORS["task"]))
                 canvas.setStrokeColor(colors.HexColor("#66727A"))
                 left = x + diagram_margin - node_width / 2
                 bottom = y + footer_height + diagram_margin - node_height / 2
