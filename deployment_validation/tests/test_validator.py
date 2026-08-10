@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -42,6 +43,62 @@ class DagsterRuntimeDependencyValidationTest(unittest.TestCase):
 
         self.assertFalse(report["ok"])
         self.assertIn("dagster-webserver", report["errors"][0])
+
+    def test_reviewed_models_are_prefetched_before_definition_load(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            (project_root / "src/inlumen_dagster_project/components").mkdir(
+                parents=True
+            )
+            (project_root / "src/inlumen_dagster_project/definitions.py").write_text(
+                "", encoding="utf-8"
+            )
+            (
+                project_root
+                / "src/inlumen_dagster_project/components/shell_command.py"
+            ).write_text("", encoding="utf-8")
+            (project_root / "pyproject.toml").write_text(
+                '[project]\ndependencies = ["dagster==1.13.12"]\n',
+                encoding="utf-8",
+            )
+            python = project_root / ".inlumen_dagster_validation_venv/bin/python"
+            python.parent.mkdir(parents=True)
+            python.write_text("", encoding="utf-8")
+            (project_root / "model-prefetch.py").write_text(
+                "print('prefetch')\n", encoding="utf-8"
+            )
+            (project_root / "model-requirements.json").write_text(
+                '{"schema_version":"inlumen.model-requirements@1","models":[]}',
+                encoding="utf-8",
+            )
+            model_root = project_root / "model-store"
+            calls = []
+
+            def fake_run(command, *, cwd, timeout_seconds, env=None):
+                calls.append({"command": command, "env": dict(env or {})})
+                output = (
+                    "prefetched"
+                    if str(project_root / "model-prefetch.py") in command
+                    else '{"asset_keys": []}'
+                )
+                return {"command": command, "returncode": 0, "output": output, "ok": True}
+
+            with mock.patch.dict(
+                "os.environ", {"INLUMEN_MODEL_ROOT": str(model_root)}, clear=False
+            ), mock.patch("app.validator._run", side_effect=fake_run):
+                report = validate_dagster_project(
+                    project_root,
+                    materialize=False,
+                    skip_install=True,
+                )
+
+        self.assertTrue(report["ok"], report)
+        self.assertEqual("model_prefetch", report["steps"][0]["name"])
+        self.assertEqual("0", calls[0]["env"]["HF_HUB_OFFLINE"])
+        self.assertEqual("1", calls[1]["env"]["HF_HUB_OFFLINE"])
+        self.assertEqual(
+            str(model_root.resolve()), calls[1]["env"]["INLUMEN_MODEL_ROOT"]
+        )
 
 
 class DeploymentInputContractValidationTest(unittest.TestCase):

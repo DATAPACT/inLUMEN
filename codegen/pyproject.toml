@@ -1,0 +1,30 @@
+[project]
+name = "inlumen-codegen-service"
+version = "0.1.0"
+description = "Standalone FastAPI service for InLumen node code generation."
+requires-python = ">=3.11"
+dependencies = [
+  "docker>=7.1.0",
+  "fastapi>=0.115.0",
+  "httpx>=0.27.0",
+  "packaging>=24.0",
+  "pydantic>=2.7.0",
+  "uvicorn[standard]>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.6.0",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

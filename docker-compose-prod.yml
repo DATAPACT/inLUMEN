@@ -6,6 +6,7 @@ networks:
 
 volumes:
   frontend_node_modules:
+  codegen_state:
 
 services:
   neo4j:
@@ -63,6 +64,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_started
+      codegen:
+        condition: service_healthy
     working_dir: /usr/inlumen
     ports:
       - "${INLUMEN_API_PORT:-5000}:${INLUMEN_API_PORT:-5000}"
@@ -80,10 +83,11 @@ services:
       KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-}
       KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-}
       KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:-}
-      INLUMEN_CODEGEN_SERVICE_URL: ${INLUMEN_CODEGEN_SERVICE_URL:-http://host.docker.internal:8010}
-      INLUMEN_CODEGEN_SERVICE_API_KEY: ${INLUMEN_CODEGEN_SERVICE_API_KEY:-}
+      INLUMEN_CODEGEN_SERVICE_URL: ${INLUMEN_CODEGEN_SERVICE_URL:-http://codegen:8010}
+      INLUMEN_CODEGEN_SERVICE_API_KEY: ${INLUMEN_CODEGEN_SERVICE_API_KEY:?INLUMEN_CODEGEN_SERVICE_API_KEY is required}
       INLUMEN_CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS:-300}
       INLUMEN_CODEGEN_PIPELINE_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_CODEGEN_PIPELINE_REQUEST_TIMEOUT_SECONDS:-1200}
+      INLUMEN_CODEGEN_RUN_DB_PATH: ${INLUMEN_CODEGEN_RUN_DB_PATH:-/usr/inlumen/state/codegen-runs.sqlite3}
       WATCH_INTERVAL_SECONDS: ${WATCH_INTERVAL_SECONDS:-1.0}
     command:
       - python
@@ -99,6 +103,46 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
+    networks:
+      - datapact_network
+
+  codegen:
+    build:
+      context: ./codegen
+    image: ${INLUMEN_CODEGEN_IMAGE:-inlumen-codegen-service:local}
+    hostname: codegen
+    restart: unless-stopped
+    expose:
+      - "8010"
+    volumes:
+      - codegen_state:/app/state
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${CODEGEN_VALIDATION_HOST_WORKDIR:-/var/lib/inlumen/codegen-workspaces}:${CODEGEN_VALIDATION_WORKDIR:-/var/lib/inlumen/codegen-workspaces}
+    environment:
+      PYTHONUNBUFFERED: "1"
+      CODEGEN_SERVICE_API_KEY: ${INLUMEN_CODEGEN_SERVICE_API_KEY:?INLUMEN_CODEGEN_SERVICE_API_KEY is required}
+      CODEGEN_JOB_DB_PATH: ${CODEGEN_JOB_DB_PATH:-/app/state/codegen-jobs.sqlite3}
+      CODEGEN_DOCKER_VALIDATION_ENABLED: ${CODEGEN_DOCKER_VALIDATION_ENABLED:-true}
+      CODEGEN_VALIDATION_WORKDIR: ${CODEGEN_VALIDATION_WORKDIR:-/var/lib/inlumen/codegen-workspaces}
+      CODEGEN_VALIDATION_MEMORY_LIMIT: ${CODEGEN_VALIDATION_MEMORY_LIMIT:-1g}
+      CODEGEN_VALIDATION_CPU_LIMIT: ${CODEGEN_VALIDATION_CPU_LIMIT:-1}
+      CODEGEN_PIPELINE_CACHE_TTL_SECONDS: ${CODEGEN_PIPELINE_CACHE_TTL_SECONDS:-3600}
+      CODEGEN_PIPELINE_CACHE_MAX_ENTRIES: ${CODEGEN_PIPELINE_CACHE_MAX_ENTRIES:-32}
+      CODEGEN_ALLOW_DETERMINISTIC_FALLBACK: "false"
+      CODEGEN_DEPENDENCY_INSTALL_TIMEOUT_SECONDS: ${CODEGEN_DEPENDENCY_INSTALL_TIMEOUT_SECONDS:-600}
+      CODEGEN_INPUT_FILE_BASE_URL: ${CODEGEN_INPUT_FILE_BASE_URL:-http://backend:${INLUMEN_API_PORT:-5000}/api/files/content}
+      CODEGEN_INPUT_FILE_ALLOW_INSECURE_HTTP: ${CODEGEN_INPUT_FILE_ALLOW_INSECURE_HTTP:-true}
+      CODEGEN_INPUT_FILE_MAX_BYTES: ${CODEGEN_INPUT_FILE_MAX_BYTES:-52428800}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/ready', timeout=5)"
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
     networks:
       - datapact_network
 

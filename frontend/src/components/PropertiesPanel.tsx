@@ -19,7 +19,7 @@ import {
 import { toast } from "sonner";
 import { FilePreviewDialog, PreviewType } from '@/components/properties/FilePreviewDialog';
 import { getTypeColor, getTypeIcon } from '@/components/properties/nodeAppearance';
-import { ChatbotConfig, buildCodegenLLMRequestConfig } from '@/services/chatbotService';
+import { ChatbotConfig } from '@/services/chatbotService';
 import {
   normalizeType,
   getStepTypeLabel,
@@ -660,23 +660,8 @@ export function PropertiesPanel({
   const handleGenerateScript = async () => {
     if (!selectedNode || !canGenerateScript || isGeneratingScript) return;
     setIsGeneratingScript(true);
-    let llmConfig: Record<string, unknown> | undefined;
     try {
-      if (activeChatbotConfig) {
-        llmConfig = buildCodegenLLMRequestConfig(activeChatbotConfig);
-      }
-    } catch (error) {
-      toast("Code generation model required", {
-        description: error instanceof Error ? error.message : "LLM settings are incomplete.",
-      });
-      setIsGeneratingScript(false);
-      return;
-    }
-
-    try {
-      const result = await generateNodeScript(selectedNode.id, {
-        ...(llmConfig ? { llm_config: llmConfig } : {}),
-      });
+      const result = await generateNodeScript(selectedNode.id, activeChatbotConfig);
       const generatedArtifact = result?.generated_artifact as GeneratedArtifact | undefined;
       const generatedFiles = Array.isArray(result?.files)
         ? normalizeFileReferences(result.files).map((file) => withNodeFileRole(file, "code"))
@@ -1342,6 +1327,9 @@ export function PropertiesPanel({
                     value={implementationKind}
                     onChange={(event) => handleImplementationKindChange(event.target.value)}
                   >
+                    {!IMPLEMENTATION_KIND_OPTIONS.some((option) => option.value === implementationKind) && (
+                      <option value={implementationKind}>Custom runtime ({implementationKind})</option>
+                    )}
                     {IMPLEMENTATION_KIND_OPTIONS.map((option) => (
                       <option key={option.value} value={option.value}>{option.label}</option>
                     ))}

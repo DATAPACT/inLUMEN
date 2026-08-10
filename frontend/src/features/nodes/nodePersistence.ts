@@ -1,6 +1,10 @@
 import { apiFetch } from '@/utils/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
 import {
+  buildCodegenLLMRequestConfig,
+  ChatbotConfig,
+} from '@/services/chatbotService';
+import {
   getNodeFileBucket,
   getNodeFileName,
   NodeFileReference,
@@ -147,16 +151,22 @@ export const updateNodeTextFile = async (
 
 export const generateNodeScript = async (
   nodeId: string,
+  activeChatbotConfig?: ChatbotConfig | null,
   payload: {
-    llm_config?: Record<string, unknown>;
     user_instruction?: string;
     include_sample_data?: boolean;
   } = {},
 ) => {
+  if (!activeChatbotConfig) {
+    throw new Error("Select an LLM configuration before generating code.");
+  }
   const res = await apiFetch(`${INLUMEN_API_URL}/api/nodes/${encodeURIComponent(nodeId)}/generate-script`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      ...payload,
+      llm_config: buildCodegenLLMRequestConfig(activeChatbotConfig),
+    }),
   });
   if (!res.ok) {
     const txt = await res.text().catch(() => "");

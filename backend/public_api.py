@@ -673,7 +673,6 @@ def _build_dockerfile_artifacts_or_error(graph: dict[str, Any]) -> dict[str, Any
             generate_dockerfiles_with_agent(
                 filenames,
                 ids,
-                None,
                 pipeline_graph=graph,
                 file_refs=file_refs,
             )
@@ -2066,7 +2065,7 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
         },
         "ChatbotConfig": {
             "type": "object",
-            "required": ["id", "name", "provider", "model", "baseUrl"],
+            "required": ["id", "name", "provider", "model", "codegenModel", "baseUrl"],
             "properties": {
                 "id": {"type": "string"},
                 "name": {"type": "string"},
@@ -2085,7 +2084,7 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
         },
         "ChatbotConfigUpsertRequest": {
             "type": "object",
-            "required": ["name", "model", "baseUrl"],
+            "required": ["name", "model", "codegenModel", "baseUrl"],
             "properties": {
                 "name": {"type": "string"},
                 "provider": {"type": "string"},

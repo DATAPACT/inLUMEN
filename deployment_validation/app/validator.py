@@ -205,6 +205,57 @@ def validate_dagster_project(
     }
     Path(env["DAGSTER_HOME"]).mkdir(parents=True, exist_ok=True)
 
+    model_prefetch_script = project_root / "model-prefetch.py"
+    model_requirements_path = project_root / "model-requirements.json"
+    if model_prefetch_script.is_file() and model_requirements_path.is_file():
+        model_root = Path(
+            os.getenv("INLUMEN_MODEL_ROOT") or project_root / ".inlumen-models"
+        ).resolve()
+        model_root.mkdir(parents=True, exist_ok=True)
+        prefetch_env = {
+            **env,
+            "HF_HOME": str(model_root / "huggingface"),
+            "HF_HUB_DISABLE_XET": os.getenv("HF_HUB_DISABLE_XET", "1"),
+            "HF_HUB_ETAG_TIMEOUT": os.getenv("HF_HUB_ETAG_TIMEOUT", "30"),
+            "HF_HUB_DOWNLOAD_TIMEOUT": os.getenv(
+                "HF_HUB_DOWNLOAD_TIMEOUT", "600"
+            ),
+            "HF_HUB_OFFLINE": "0",
+            "TRANSFORMERS_OFFLINE": "0",
+            "INLUMEN_ACCELERATOR": os.getenv("INLUMEN_ACCELERATOR", "cpu"),
+            "INLUMEN_ASR_DEVICE": os.getenv("INLUMEN_ASR_DEVICE", "auto"),
+            "INLUMEN_ASR_PROFILE": os.getenv("INLUMEN_ASR_PROFILE", "auto"),
+            "INLUMEN_MODEL_ROOT": str(model_root),
+            "INLUMEN_MODEL_REQUIREMENTS": str(model_requirements_path),
+            "INLUMEN_MODEL_VERIFY_ON_START": os.getenv(
+                "INLUMEN_MODEL_VERIFY_ON_START", "manifest"
+            ),
+        }
+        prefetch_step = _run(
+            [str(python), str(model_prefetch_script)],
+            cwd=project_root,
+            timeout_seconds=timeout_seconds,
+            env=prefetch_env,
+        )
+        prefetch_step["name"] = "model_prefetch"
+        report["steps"].append(prefetch_step)
+        if not prefetch_step["ok"]:
+            report["errors"] = [
+                "Reviewed model prefetch or verification failed."
+            ]
+            return report
+        env.update(
+            {
+                "HF_HOME": prefetch_env["HF_HOME"],
+                "HF_HUB_OFFLINE": "1",
+                "TRANSFORMERS_OFFLINE": "1",
+                "INLUMEN_ACCELERATOR": prefetch_env["INLUMEN_ACCELERATOR"],
+                "INLUMEN_ASR_DEVICE": prefetch_env["INLUMEN_ASR_DEVICE"],
+                "INLUMEN_ASR_PROFILE": prefetch_env["INLUMEN_ASR_PROFILE"],
+                "INLUMEN_MODEL_ROOT": prefetch_env["INLUMEN_MODEL_ROOT"],
+            }
+        )
+
     load_step = _run(
         [str(python), "-c", _validation_script()],
         cwd=project_root,

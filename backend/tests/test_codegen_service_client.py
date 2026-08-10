@@ -35,7 +35,7 @@ class CodegenServiceClientTest(unittest.TestCase):
         clear=False,
     )
     @patch("inlumen_api.urlopen")
-    def test_generation_uses_service_auth_and_header_only_llm_key(self, urlopen):
+    def test_generation_uses_service_auth_and_ephemeral_llm_key(self, urlopen):
         urlopen.return_value = FakeResponse({"status": "ok"})
         payload = {
             "context": {},
@@ -57,7 +57,6 @@ class CodegenServiceClientTest(unittest.TestCase):
         outbound_payload = json.loads(outbound_request.data.decode("utf-8"))
         self.assertEqual("test-model", outbound_payload["llm_config"]["model"])
         self.assertNotIn("api_key", outbound_payload["llm_config"])
-        self.assertNotIn("apiKey", outbound_payload["llm_config"])
         self.assertEqual("provider-token", payload["llm_config"]["api_key"])
 
     @patch.dict(
@@ -66,13 +65,15 @@ class CodegenServiceClientTest(unittest.TestCase):
         clear=False,
     )
     @patch("inlumen_api.urlopen")
-    def test_resume_resends_provider_key_in_header(self, urlopen):
+    def test_resume_sends_sanitized_llm_configuration(self, urlopen):
         urlopen.return_value = FakeResponse({"run_id": "resumed"})
         payload = {
             "flow_id": "node-2",
             "repair_attempts": 4,
             "llm_config": {
+                "provider": "openrouter",
                 "model": "test-model",
+                "base_url": "https://llm.example/v1",
                 "apiKey": "provider-token",
             },
         }
@@ -84,6 +85,7 @@ class CodegenServiceClientTest(unittest.TestCase):
         self.assertEqual("Bearer service-token", headers["authorization"])
         self.assertEqual("provider-token", headers["x-llm-api-key"])
         outbound_payload = json.loads(outbound_request.data.decode("utf-8"))
+        self.assertEqual("test-model", outbound_payload["llm_config"]["model"])
         self.assertNotIn("apiKey", outbound_payload["llm_config"])
 
     @patch.dict(
@@ -122,7 +124,7 @@ class CodegenServiceClientTest(unittest.TestCase):
         self.assertEqual("Bearer service-token", headers["authorization"])
         self.assertNotIn("x-llm-api-key", headers)
 
-    def test_node_descriptor_carries_llm_model_plan_to_codegen(self):
+    def test_node_descriptor_carries_runtime_model_plan_to_codegen(self):
         model_plan = {
             "task": "automatic_speech_recognition",
             "domain": "customer conversation",
@@ -225,6 +227,21 @@ class CodegenServiceClientTest(unittest.TestCase):
         self.assertTrue(constraints["network_allowed"])
         self.assertEqual(900, constraints["max_runtime_seconds"])
         self.assertEqual(payload["options"], metadata["options"])
+
+    def test_codegen_context_fingerprint_detects_background_graph_changes(self):
+        context = {
+            "graph": {
+                "nodes": [{"flow_id": "1", "parameters": {"threshold": 0.5}}],
+                "edges": [],
+            }
+        }
+
+        first = inlumen_api._codegen_context_fingerprint(context)
+        context["graph"]["nodes"][0]["parameters"]["threshold"] = 0.8
+        second = inlumen_api._codegen_context_fingerprint(context)
+
+        self.assertTrue(first.startswith("sha256:"))
+        self.assertNotEqual(first, second)
 
 
 if __name__ == "__main__":

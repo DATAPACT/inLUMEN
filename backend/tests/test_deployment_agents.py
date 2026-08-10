@@ -41,7 +41,7 @@ class DeploymentAgentsTest(unittest.TestCase):
         generate_dockerfiles_with_agent is None,
         f"deployment agent dependencies are unavailable: {IMPORT_ERROR}",
     )
-    def test_reuses_persisted_codegen_runtime_artifacts_before_llm_fallback(self):
+    def test_reuses_persisted_codegen_runtime_and_derives_build_definition(self):
         configuration_hash = "sha256:" + ("a" * 64)
         dockerfile_content = "\n".join(
             [
@@ -66,7 +66,6 @@ class DeploymentAgentsTest(unittest.TestCase):
         stored = {
             ("files-step-id-1", "main.py"): b"print('ok')\n",
             ("files-step-id-1", "requirements.txt"): b"pandas\n",
-            ("files-step-id-1", "Dockerfile.1"): dockerfile_content.encode("utf-8"),
             (
                 "files-step-id-1",
                 "node-manifest.json",
@@ -109,7 +108,6 @@ class DeploymentAgentsTest(unittest.TestCase):
                             "files": [
                                 {"filename": "main.py", "bucket": "files-step-id-1"},
                                 {"filename": "requirements.txt", "bucket": "files-step-id-1"},
-                                {"filename": "Dockerfile.1", "bucket": "files-step-id-1"},
                                 {"filename": "node-manifest.json", "bucket": "files-step-id-1"},
                                 {"filename": "validation-report.json", "bucket": "files-step-id-1"},
                             ],
@@ -123,15 +121,11 @@ class DeploymentAgentsTest(unittest.TestCase):
         with patch(
             "deployment_agents.read_minio_object_bytes",
             side_effect=read_object,
-        ), patch(
-            "deployment_agents.resolve_llm_config",
-            side_effect=AssertionError("LLM fallback should not be used"),
         ):
             payload = run_async(
                 generate_dockerfiles_with_agent(
                     [],
                     [],
-                    None,
                     pipeline_graph=graph,
                     file_refs=[
                         {
@@ -147,12 +141,12 @@ class DeploymentAgentsTest(unittest.TestCase):
         result = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
         dockerfile = result["dockerfiles"][0]
         self.assertEqual("Dockerfile.1", dockerfile["dockerfile_filename"])
-        self.assertEqual(dockerfile_content, dockerfile["content"])
+        self.assertIn("uv pip install --system -r requirements.txt", dockerfile["content"])
         self.assertEqual(["python", "/app/main.py"], dockerfile["command"])
         self.assertTrue(dockerfile["image"].startswith("ghcr.io/inlumen/codegen-1:"))
         self.assertIn("main.py", result["runtime_artifacts"][0]["files"][0]["filename"])
         self.assertIn(
-            "persisted codegen runtime artifacts were reused before Dockerfile fallback",
+            "persisted runtime artifacts were reused before deployment packaging",
             result["guardrails"]["checks"],
         )
         self.assertEqual(
@@ -216,15 +210,11 @@ class DeploymentAgentsTest(unittest.TestCase):
         with patch(
             "deployment_agents.read_minio_object_bytes",
             side_effect=read_object,
-        ), patch(
-            "deployment_agents.resolve_llm_config",
-            side_effect=AssertionError("LLM fallback should not be used"),
         ):
             payload = run_async(
                 generate_dockerfiles_with_agent(
                     [],
                     [],
-                    None,
                     pipeline_graph=graph,
                 )
             )
@@ -234,9 +224,9 @@ class DeploymentAgentsTest(unittest.TestCase):
         filenames = {item["filename"] for item in artifact["files"]}
         self.assertEqual("inlumen-attached-runtime", artifact["generator"])
         self.assertTrue(
-            {"main.py", "requirements.txt", "node-manifest.json", "Dockerfile.1"}
-            <= filenames
+            {"main.py", "requirements.txt", "node-manifest.json"} <= filenames
         )
+        self.assertFalse(any(name.startswith("Dockerfile.") for name in filenames))
         self.assertIn("uv pip install --system", result["dockerfiles"][0]["content"])
         self.assertEqual("patients.csv", result["input_files"][0]["filename"])
         self.assertEqual("table", result["input_files"][0]["kind"])
@@ -269,18 +259,14 @@ class DeploymentAgentsTest(unittest.TestCase):
             "edges": [{"source": "1", "target": "2"}],
         }
 
-        with patch(
-            "deployment_agents.resolve_llm_config",
-            side_effect=AssertionError("managed adapters must not use the LLM"),
-        ):
-            payload = run_async(
-                generate_dockerfiles_with_agent(
-                    [],
-                    [],
-                    pipeline_graph=graph,
-                    require_attached_runtime=True,
-                )
+        payload = run_async(
+            generate_dockerfiles_with_agent(
+                [],
+                [],
+                pipeline_graph=graph,
+                require_attached_runtime=True,
             )
+        )
 
         result = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
         self.assertEqual(["1", "2"], [item["flow_id"] for item in result["dockerfiles"]])

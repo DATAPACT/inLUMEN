@@ -52,6 +52,7 @@ describe("chatbot configuration contracts", () => {
       name: "OpenRouter",
       provider: "openrouter",
       model: "gpt-oss-120b",
+      codegenModel: "",
       baseUrl: "https://openrouter.ai/api/v1",
       apiKey: "",
     });
@@ -71,13 +72,13 @@ describe("chatbot configuration contracts", () => {
     });
   });
 
-  it("uses the dedicated code generation model and timeout", () => {
+  it("uses the dedicated code generation model", () => {
     expect(buildCodegenLLMRequestConfig(completeConfig())).toMatchObject({
       provider: "openrouter",
       model: "openai/gpt-5.2-codex",
       base_url: "https://openrouter.ai/api/v1",
       api_key: "secret-key",
-      timeout_seconds: 90,
+      timeout_seconds: 180,
     });
   });
 

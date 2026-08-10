@@ -7,7 +7,7 @@ import inlumen_api
 
 
 class CodegenRequestSecurityTests(unittest.TestCase):
-    def test_codegen_headers_are_added_and_llm_key_is_removed_from_json(self):
+    def test_codegen_separates_service_auth_from_provider_credentials(self):
         payload = {
             "context": {"graph": {"nodes": [], "edges": []}},
             "llm_config": {
@@ -20,18 +20,14 @@ class CodegenRequestSecurityTests(unittest.TestCase):
             os.environ,
             {"INLUMEN_CODEGEN_SERVICE_API_KEY": "service-secret"},
         ):
-            encoded, headers = inlumen_api._codegen_request_parts(
-                payload,
-                include_llm_key=True,
-            )
+            encoded, headers = inlumen_api._codegen_request_parts(payload)
 
         self.assertEqual("Bearer service-secret", headers["Authorization"])
         self.assertEqual("provider-secret", headers["X-LLM-API-Key"])
         self.assertNotIn("provider-secret", encoded.decode("utf-8"))
-        self.assertEqual(
-            {"model": "test-model"},
-            json.loads(encoded)["llm_config"],
-        )
+        outbound_config = json.loads(encoded)["llm_config"]
+        self.assertEqual("test-model", outbound_config["model"])
+        self.assertNotIn("api_key", outbound_config)
 
     def test_poll_request_only_sends_service_authentication(self):
         with patch.dict(
@@ -44,23 +40,23 @@ class CodegenRequestSecurityTests(unittest.TestCase):
         self.assertEqual("Bearer service-secret", headers["Authorization"])
         self.assertNotIn("X-LLM-API-Key", headers)
 
-    def test_resume_can_forward_a_fresh_llm_key_without_adding_it_to_json(self):
+    def test_resume_payload_uses_ephemeral_llm_transport(self):
         payload = {
             "flow_id": "clean",
             "repair_attempts": 4,
+            "llm_config": {
+                "provider": "openrouter",
+                "model": "code-model",
+                "base_url": "https://llm.example/v1",
+                "api_key": "provider-secret",
+            },
         }
 
-        encoded, headers = inlumen_api._codegen_request_parts(
-            payload,
-            include_llm_key=True,
-            llm_api_key="fresh-provider-secret",
-        )
+        encoded, headers = inlumen_api._codegen_request_parts(payload)
 
-        self.assertEqual(
-            "fresh-provider-secret",
-            headers["X-LLM-API-Key"],
-        )
-        self.assertNotIn("fresh-provider-secret", encoded.decode("utf-8"))
+        self.assertEqual("provider-secret", headers["X-LLM-API-Key"])
+        self.assertEqual("clean", json.loads(encoded)["flow_id"])
+        self.assertNotIn("api_key", json.loads(encoded)["llm_config"])
 
     def test_pipeline_codegen_payload_maps_single_pass_to_pipeline_first(self):
         codegen_payload, metadata = inlumen_api._build_pipeline_codegen_payload(
@@ -94,29 +90,6 @@ class CodegenRequestSecurityTests(unittest.TestCase):
             "node_first",
             metadata["options"]["generation_strategy"],
         )
-
-    def test_codegen_llm_config_uses_the_settings_payload(self):
-        config = inlumen_api._codegen_llm_config_from_payload(
-            {
-                "llm_config": {
-                    "model": "coding-model",
-                    "base_url": "https://provider.example/v1",
-                    "api_key": "same-provider-token",
-                    "timeout_seconds": 90,
-                },
-            },
-        )
-
-        self.assertEqual(
-            {
-                "model": "coding-model",
-                "base_url": "https://provider.example/v1",
-                "api_key": "same-provider-token",
-                "timeout_seconds": 90,
-            },
-            config,
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

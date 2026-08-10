@@ -9,6 +9,7 @@ import {
   isTextPreviewFile,
   isTextPreviewName,
   normalizeImplementationKind,
+  normalizeNodeImplementation,
   normalizeNodePorts,
   normalizeSecretParamKeys,
   normalizeType,
@@ -66,7 +67,15 @@ describe("node schema compatibility", () => {
   it("keeps runtime implementation selection independent", () => {
     expect(normalizeImplementationKind("Python")).toBe("python");
     expect(normalizeImplementationKind("git repository")).toBe("repository");
-    expect(normalizeImplementationKind("future-runtime")).toBe("python");
+    expect(normalizeImplementationKind("future-runtime")).toBe("future-runtime");
+    expect(normalizeNodeImplementation({
+      kind: "trusted-pretrained-inference",
+      execution_profile: "trusted_heavy_model",
+    })).toEqual({
+      kind: "trusted-pretrained-inference",
+      execution_profile: "trusted_heavy_model",
+    });
+    expect(normalizeNodeImplementation({ parser: "csv" })).toEqual({ parser: "csv" });
   });
 
   it("infers secret parameters while preserving explicit visibility choices", () => {

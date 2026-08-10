@@ -268,7 +268,6 @@ const buildRunInputArtifacts = async (
   }));
 };
 
-type DockerfileDownload = { name: string; url: string };
 type RuntimeArtifactDownload = { name: string; url: string };
 type YamlDownload = { name: string; url: string };
 type DeploymentBundleDownload = { name: string; url: string };
@@ -334,9 +333,8 @@ export function Sidebar({
   const [isSavingOverview, setIsSavingOverview] = useState(false);
   const [overviewSaveError, setOverviewSaveError] = useState("");
 
-  // --- Dockerfiles state
+  // --- Deployment artifact state
   const [isGeneratingDeployment, setIsGeneratingDeployment] = useState(false);
-  const [dockerfileDownloads, setDockerfileDownloads] = useState<DockerfileDownload[]>([]);
   const [runtimeArtifactDownloads, setRuntimeArtifactDownloads] = useState<RuntimeArtifactDownload[]>([]);
   const [yamlDownload, setYamlDownload] = useState<YamlDownload | null>(null);
   const [deploymentBundleDownload, setDeploymentBundleDownload] = useState<DeploymentBundleDownload | null>(null);
@@ -346,7 +344,7 @@ export function Sidebar({
   const [pipelineRunResult, setPipelineRunResult] = useState<PipelineRunResult | null>(null);
   const [deploymentValidationMode, setDeploymentValidationMode] = useState<DeploymentValidationMode>("validate");
   const [deploymentTargets, setDeploymentTargets] = useState<DeploymentTargets>({
-    argo: false,
+    argo: true,
     dagster: true,
   });
   const [runInputFiles, setRunInputFiles] = useState<File[]>([]);
@@ -373,20 +371,12 @@ export function Sidebar({
   // Cleanup blob URLs on unmount
   useEffect(() => {
     return () => {
-      dockerfileDownloads.forEach((d) => URL.revokeObjectURL(d.url));
       runtimeArtifactDownloads.forEach((d) => URL.revokeObjectURL(d.url));
       if (yamlDownload?.url) URL.revokeObjectURL(yamlDownload.url);
       if (deploymentBundleDownload?.url) URL.revokeObjectURL(deploymentBundleDownload.url);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const clearDockerfileDownloads = () => {
-    setDockerfileDownloads((prev) => {
-      prev.forEach((d) => URL.revokeObjectURL(d.url));
-      return [];
-    });
-  };
 
   const clearRuntimeArtifactDownloads = () => {
     setRuntimeArtifactDownloads((prev) => {
@@ -410,7 +400,6 @@ export function Sidebar({
   };
 
   useEffect(() => {
-    clearDockerfileDownloads();
     clearRuntimeArtifactDownloads();
     clearYamlDownload();
     clearDeploymentBundleDownload();
@@ -498,14 +487,14 @@ export function Sidebar({
     });
   };
 
-  const generateDockerfiles = async (): Promise<DockerfileGenerationResponse> => {
+  const prepareDeploymentRuntime = async (): Promise<DockerfileGenerationResponse> => {
     const genRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_dockerfiles`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        // Dagster accepts either a generated runtime bundle or an attached main.py;
-        // the backend enriches simple Python packages into the canonical contract.
-        require_attached_runtime: deploymentTargets.dagster,
+        // Both exporters require reviewed/generated runtime code. Deployment build
+        // definitions are derived deterministically on the backend.
+        require_attached_runtime: true,
       }),
     });
 
@@ -619,26 +608,16 @@ export function Sidebar({
         throw new Error("Select at least one deployment target.");
       }
       setIsGeneratingDeployment(true);
-      clearDockerfileDownloads();
       clearRuntimeArtifactDownloads();
       clearYamlDownload();
       clearDeploymentBundleDownload();
 
-      const dockerfile_json = await generateDockerfiles();
+      const dockerfile_json = await prepareDeploymentRuntime();
 
       const dockerfiles = dockerfile_json?.dockerfiles ?? [];
       if (!Array.isArray(dockerfiles) || dockerfiles.length === 0) {
-        throw new Error("No Dockerfiles were generated (dockerfiles array is empty).");
+        throw new Error("No deterministic deployment build definitions were generated.");
       }
-
-      const links: DockerfileDownload[] = dockerfiles.map(
-        (df, idx: number) => {
-          const name = df?.dockerfile_filename || `Dockerfile_${idx + 1}`;
-          const blob = new Blob([df?.content ?? ""], { type: "text/plain;charset=utf-8" });
-          const url = URL.createObjectURL(blob);
-          return { name, url };
-        }
-      );
 
       const runtimeLinks = (dockerfile_json.runtime_artifacts ?? []).flatMap((artifact) =>
         (artifact.files ?? [])
@@ -687,7 +666,6 @@ export function Sidebar({
         deploymentTargets.dagster ? "dagster" : "",
       ].filter(Boolean).join("-");
 
-      setDockerfileDownloads(links);
       setRuntimeArtifactDownloads(deploymentRuntimeLinks.length > 0 ? deploymentRuntimeLinks : runtimeLinks);
       setYamlDownload(yamlDownloadLink);
       setDeploymentValidationReport(bundle.validation_report || null);
@@ -698,7 +676,6 @@ export function Sidebar({
         url: bundleUrl,
       });
     } catch (e: unknown) {
-      clearDockerfileDownloads();
       clearRuntimeArtifactDownloads();
       clearDeploymentBundleDownload();
       setDeploymentValidationReport(null);
@@ -1145,37 +1122,6 @@ export function Sidebar({
                     Remove bundle link
                   </Button>
                 </div>
-              )}
-
-              {dockerfileDownloads.length > 0 && (
-                <details className="mt-3 min-w-0 rounded-md border border-border">
-                  <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-2 py-2 text-xs font-medium [&::-webkit-details-marker]:hidden">
-                    <span>Dockerfiles</span>
-                    <span className="shrink-0 text-muted-foreground">{dockerfileDownloads.length}</span>
-                  </summary>
-                  <div className="min-w-0 space-y-1 border-t border-border p-2">
-                    {dockerfileDownloads.map((d) => (
-                      <a
-                        key={d.url}
-                        href={d.url}
-                        download={d.name}
-                        title={d.name}
-                        className="flex min-w-0 items-center gap-2 overflow-hidden text-xs underline"
-                      >
-                        <Download className="h-3.5 w-3.5 shrink-0" />
-                        <span className="min-w-0 truncate">{d.name}</span>
-                      </a>
-                    ))}
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="mt-2 h-auto w-full whitespace-normal px-2 py-1.5 text-xs"
-                      onClick={clearDockerfileDownloads}
-                    >
-                      Remove Dockerfile links
-                    </Button>
-                  </div>
-                </details>
               )}
 
               {runtimeArtifactDownloads.length > 0 && (

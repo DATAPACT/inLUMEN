@@ -519,9 +519,8 @@ def build_dockerfile_artifacts(
 ) -> dict:
     """Build baseline Dockerfile artifacts for tests and non-agent guardrail fixtures.
 
-    Runtime Dockerfile generation uses the LLM-backed generator in
-    deployment_agents.py so attached files and step semantics can be interpreted
-    with natural-language context.
+    Deployment Dockerfiles are derived deterministically from registered runtime
+    profiles and attached package metadata.
     """
     all_steps = extract_pipeline_steps(pipeline_graph, files)
     steps = select_runtime_steps(all_steps)
@@ -1502,22 +1501,10 @@ def _deployment_files_for_step(dockerfiles_payload: Any, flow_id: str) -> List[d
         item
         for item in _payload_deployment_files(dockerfiles_payload)
         if _clean_string(item.get("flow_id")) == flow_id
+        and _clean_string(item.get("role")).lower() != "dockerfile"
+        and not _clean_string(item.get("filename")).startswith("Dockerfile.")
     ]
     if files:
-        filenames = {_clean_string(item.get("filename")) for item in files}
-        dockerfile = _dockerfile_lookup(dockerfiles_payload).get(flow_id)
-        if dockerfile is not None:
-            dockerfile_filename = _clean_string(dockerfile.get("dockerfile_filename"))
-            if dockerfile_filename and dockerfile_filename not in filenames:
-                files.append(
-                    {
-                        "filename": dockerfile_filename,
-                        "flow_id": flow_id,
-                        "content": dockerfile.get("content") or "",
-                        "content_type": "text/x-dockerfile",
-                        "role": "dockerfile",
-                    }
-                )
         return files
 
     output = []
@@ -1525,7 +1512,10 @@ def _deployment_files_for_step(dockerfiles_payload: Any, flow_id: str) -> List[d
         if _clean_string(artifact.get("flow_id")) != flow_id:
             continue
         for file_entry in artifact.get("files") or []:
-            if isinstance(file_entry, dict):
+            if (
+                isinstance(file_entry, dict)
+                and not _clean_string(file_entry.get("filename")).startswith("Dockerfile.")
+            ):
                 output.append(
                     {
                         "filename": file_entry.get("filename"),
@@ -2900,7 +2890,7 @@ This bundle was generated deterministically from persisted InLumen runtime artif
 ## Layout
 
 - `inputs/`: inputs for this execution and `input_manifest.json`
-- `nodes/`: per-node runtime files, requirements, Dockerfiles, and manifests
+- `nodes/`: per-node runtime source, requirements, and manifests (no node Dockerfiles)
 - `outputs/`: per-node output folders used during local Dagster execution
 - `run-spec.json`: engine-neutral node, port, input, output, and runtime contract
 - `bundle-manifest.json`: machine-readable bundle index

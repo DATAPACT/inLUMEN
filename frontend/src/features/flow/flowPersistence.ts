@@ -2,9 +2,8 @@ import { Connection, Edge, Node } from 'reactflow';
 import { apiFetch } from '@/utils/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
 import {
-  ChatbotConfig,
   buildCodegenLLMRequestConfig,
-  buildLLMRequestConfig,
+  ChatbotConfig,
 } from '@/services/chatbotService';
 import {
   normalizeType,
@@ -121,6 +120,8 @@ export type PipelineGenerationJob = {
     result?: unknown;
     warning?: string;
   };
+  created_at?: string | null;
+  updated_at?: string | null;
 };
 
 export type ExternalRuntimePrompt = {
@@ -535,11 +536,11 @@ const buildPipelineGenerationPayload = (
   activeChatbotConfig?: ChatbotConfig,
   options: PipelineScriptGenerationOptions = {},
 ) => {
-  let llm_config: ReturnType<typeof buildLLMRequestConfig> | undefined;
-  if (activeChatbotConfig) {
-    llm_config = buildCodegenLLMRequestConfig(activeChatbotConfig);
+  if (!activeChatbotConfig) {
+    throw new Error("Select an LLM configuration before generating code.");
   }
   return {
+    llm_config: buildCodegenLLMRequestConfig(activeChatbotConfig),
     include_sample_data: options.includeSampleData ?? true,
     validation_mode: options.validationMode ?? "pipeline_sample",
     generation_strategy: options.generationStrategy ?? "auto",
@@ -547,7 +548,6 @@ const buildPipelineGenerationPayload = (
     allow_deterministic_fallback: options.allowDeterministicFallback ?? false,
     repair_attempts: options.repairAttempts ?? 7,
     high_level_prompt: options.userInstruction?.trim() || "",
-    ...(llm_config ? { llm_config } : {}),
   };
 };
 
@@ -635,6 +635,29 @@ export const startPipelineScriptGenerationRun = async (
   return response.json();
 };
 
+export const listPipelineScriptGenerationRuns = async (
+  limit = 20,
+): Promise<PipelineGenerationJob[]> => {
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/pipeline/generation-runs?limit=${encodeURIComponent(limit)}`,
+    { method: "GET" },
+  );
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(async () => ({
+      error: await response.text().catch(() => ""),
+    }));
+    throw new Error(
+      formatPipelineGenerationError(
+        errorPayload,
+        response.status,
+        response.statusText,
+      ),
+    );
+  }
+  const payload = await response.json().catch(() => ({ runs: [] }));
+  return Array.isArray(payload?.runs) ? payload.runs : [];
+};
+
 export const fetchPipelineScriptGenerationRun = async (
   runId: string,
 ): Promise<PipelineGenerationJob> => {
@@ -690,9 +713,9 @@ export const resumePipelineScriptGenerationRun = async (
     userInstruction?: string;
   } = {},
 ): Promise<PipelineGenerationJob> => {
-  const llm_config = activeChatbotConfig
-    ? buildCodegenLLMRequestConfig(activeChatbotConfig)
-    : undefined;
+  if (!activeChatbotConfig) {
+    throw new Error("Select an LLM configuration before repairing generated code.");
+  }
   const response = await apiFetch(
     `${INLUMEN_API_URL}/api/pipeline/generation-runs/${encodeURIComponent(runId)}/resume`,
     {
@@ -701,10 +724,10 @@ export const resumePipelineScriptGenerationRun = async (
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
+        llm_config: buildCodegenLLMRequestConfig(activeChatbotConfig),
         flow_id: options.flowId || "",
         repair_attempts: options.repairAttempts ?? 7,
         user_instruction: options.userInstruction || "",
-        ...(llm_config ? { llm_config } : {}),
       }),
     },
   );

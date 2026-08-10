@@ -6,6 +6,9 @@ networks:
 
 volumes:
   frontend_node_modules:
+  codegen_state:
+  inlumen_model_store:
+    name: ${INLUMEN_MODEL_STORE_VOLUME:-inlumen_model_store}
 
 services:
   neo4j:
@@ -80,6 +83,8 @@ services:
         condition: service_started
       deployment-validation:
         condition: service_healthy
+      codegen:
+        condition: service_healthy
     working_dir: /usr/inlumen
     ports:
       - "${INLUMEN_API_PORT:-5000}:${INLUMEN_API_PORT:-5000}"
@@ -97,10 +102,11 @@ services:
       KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-}
       KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-}
       KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:-}
-      INLUMEN_CODEGEN_SERVICE_URL: ${INLUMEN_CODEGEN_SERVICE_URL:-http://host.docker.internal:8010}
-      INLUMEN_CODEGEN_SERVICE_API_KEY: ${INLUMEN_CODEGEN_SERVICE_API_KEY:-}
+      INLUMEN_CODEGEN_SERVICE_URL: ${INLUMEN_CODEGEN_SERVICE_URL:-http://codegen:8010}
+      INLUMEN_CODEGEN_SERVICE_API_KEY: ${INLUMEN_CODEGEN_SERVICE_API_KEY:-inlumen-local-codegen-token}
       INLUMEN_CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS:-300}
       INLUMEN_CODEGEN_PIPELINE_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_CODEGEN_PIPELINE_REQUEST_TIMEOUT_SECONDS:-1200}
+      INLUMEN_CODEGEN_RUN_DB_PATH: ${INLUMEN_CODEGEN_RUN_DB_PATH:-/usr/inlumen/state/codegen-runs.sqlite3}
       INLUMEN_DEPLOYMENT_VALIDATION_SERVICE_URL: ${INLUMEN_DEPLOYMENT_VALIDATION_SERVICE_URL:-http://deployment-validation:8020}
       INLUMEN_DEPLOYMENT_VALIDATION_WORK_DIR: ${INLUMEN_DEPLOYMENT_VALIDATION_WORK_DIR:-/usr/inlumen/state/deployment-validation}
       INLUMEN_DEPLOYMENT_VALIDATION_LOCAL_ROOT: ${INLUMEN_DEPLOYMENT_VALIDATION_LOCAL_ROOT:-/usr/inlumen}
@@ -124,6 +130,48 @@ services:
     networks:
       - datapact_network
 
+  codegen:
+    build:
+      context: ./codegen
+    image: inlumen-codegen-service:local
+    hostname: codegen
+    restart: unless-stopped
+    expose:
+      - "8010"
+    volumes:
+      - ./codegen/app:/app/app
+      - codegen_state:/app/state
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${CODEGEN_VALIDATION_HOST_WORKDIR:-/tmp/inlumen-codegen-workspaces}:${CODEGEN_VALIDATION_WORKDIR:-/tmp/inlumen-codegen-workspaces}
+    environment:
+      PYTHONUNBUFFERED: "1"
+      CODEGEN_SERVICE_API_KEY: ${INLUMEN_CODEGEN_SERVICE_API_KEY:-inlumen-local-codegen-token}
+      CODEGEN_JOB_DB_PATH: ${CODEGEN_JOB_DB_PATH:-/app/state/codegen-jobs.sqlite3}
+      CODEGEN_DOCKER_VALIDATION_ENABLED: ${CODEGEN_DOCKER_VALIDATION_ENABLED:-true}
+      CODEGEN_VALIDATION_WORKDIR: ${CODEGEN_VALIDATION_WORKDIR:-/tmp/inlumen-codegen-workspaces}
+      CODEGEN_VALIDATION_MEMORY_LIMIT: ${CODEGEN_VALIDATION_MEMORY_LIMIT:-1g}
+      CODEGEN_VALIDATION_CPU_LIMIT: ${CODEGEN_VALIDATION_CPU_LIMIT:-1}
+      CODEGEN_PIPELINE_CACHE_TTL_SECONDS: ${CODEGEN_PIPELINE_CACHE_TTL_SECONDS:-3600}
+      CODEGEN_PIPELINE_CACHE_MAX_ENTRIES: ${CODEGEN_PIPELINE_CACHE_MAX_ENTRIES:-32}
+      CODEGEN_ALLOW_DETERMINISTIC_FALLBACK: "false"
+      CODEGEN_DEPENDENCY_INSTALL_TIMEOUT_SECONDS: ${CODEGEN_DEPENDENCY_INSTALL_TIMEOUT_SECONDS:-600}
+      CODEGEN_INPUT_FILE_BASE_URL: ${CODEGEN_INPUT_FILE_BASE_URL:-http://backend:${INLUMEN_API_PORT:-5000}/api/files/content}
+      CODEGEN_INPUT_FILE_ALLOW_INSECURE_HTTP: ${CODEGEN_INPUT_FILE_ALLOW_INSECURE_HTTP:-true}
+      CODEGEN_INPUT_FILE_MAX_BYTES: ${CODEGEN_INPUT_FILE_MAX_BYTES:-52428800}
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/ready', timeout=5)"
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    networks:
+      - datapact_network
+
   deployment-validation:
     build:
       context: ./deployment_validation
@@ -135,8 +183,10 @@ services:
       - "${INLUMEN_DEPLOYMENT_VALIDATION_PORT:-8020}:8020"
     volumes:
       - ./backend:/validation/inlumen/backend
+      - inlumen_model_store:/models
     environment:
       PYTHONUNBUFFERED: "1"
+      INLUMEN_MODEL_ROOT: /models
     healthcheck:
       test:
         - CMD

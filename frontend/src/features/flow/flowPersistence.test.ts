@@ -70,3 +70,65 @@ describe("edge persistence", () => {
     )).rejects.toThrow("did not find the selected connection");
   });
 });
+
+describe("background code generation", () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.stubEnv("VITE_AUTH_ENABLED", "false");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    globalThis.fetch = originalFetch;
+  });
+
+  it("lists durable runs that can be reattached after a reload", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      runs: [{ run_id: "run-1", status: "running" }],
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    globalThis.fetch = fetchMock;
+    const { listPipelineScriptGenerationRuns } = await import(
+      "@/features/flow/flowPersistence"
+    );
+
+    await expect(listPipelineScriptGenerationRuns(5)).resolves.toEqual([
+      { run_id: "run-1", status: "running" },
+    ]);
+    expect(fetchMock.mock.calls[0][0]).toContain(
+      "/api/pipeline/generation-runs?limit=5",
+    );
+  });
+
+  it("sends the dedicated code model instead of the chat model", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      run_id: "run-code",
+      status: "queued",
+    }), {
+      status: 202,
+      headers: { "Content-Type": "application/json" },
+    }));
+    globalThis.fetch = fetchMock;
+    const { startPipelineScriptGenerationRun } = await import(
+      "@/features/flow/flowPersistence"
+    );
+
+    await startPipelineScriptGenerationRun({
+      name: "Split models",
+      provider: "openrouter",
+      model: "openai/gpt-oss-120b",
+      codegenModel: "openai/gpt-5.2-codex",
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "provider-secret",
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.llm_config.model).toBe("openai/gpt-5.2-codex");
+    expect(body.llm_config.model).not.toBe("openai/gpt-oss-120b");
+    expect(body.llm_config.api_key).toBe("provider-secret");
+  });
+});

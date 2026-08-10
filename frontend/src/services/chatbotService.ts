@@ -252,6 +252,7 @@ export const getDefaultChatbotConfig = (): ChatbotConfig => ({
   name: "OpenRouter",
   provider: "openrouter",
   model: LLM_PROVIDER_DETAILS.openrouter.defaultModel,
+  codegenModel: "",
   baseUrl: LLM_PROVIDER_DETAILS.openrouter.baseUrl,
   apiKey: "",
 });
@@ -494,7 +495,7 @@ export const buildLLMRequestConfig = (config: ChatbotConfig): LLMRequestConfig =
     throw new Error("Complete the LLM provider, model, and base URL in Settings before using LLM features.");
   }
   if (!normalizedConfig.apiKey) {
-    throw new Error("Enter an LLM API key in Settings before using chat or artifact generation.");
+    throw new Error("Enter an LLM API key in Settings before using Pipeline Chat.");
   }
   const requestConfig: LLMRequestConfig = {
     provider: normalizedConfig.provider,
@@ -513,11 +514,13 @@ export const buildLLMRequestConfig = (config: ChatbotConfig): LLMRequestConfig =
 };
 
 export const buildCodegenLLMRequestConfig = (config: ChatbotConfig): LLMRequestConfig => {
-  const normalizedConfig = normalizeConfig(config as Partial<ChatbotConfig> & Record<string, unknown>);
+  const normalizedConfig = normalizeConfig(
+    config as Partial<ChatbotConfig> & Record<string, unknown>,
+  );
   const codegenModel = normalizedConfig.codegenModel?.trim();
   if (!codegenModel) {
     throw new Error(
-      "Code Generation Model is required before LLM script generation can run.",
+      "Code Generation Model is required before script generation can run.",
     );
   }
   if (!normalizedConfig.provider || !normalizedConfig.baseUrl) {
@@ -530,20 +533,23 @@ export const buildCodegenLLMRequestConfig = (config: ChatbotConfig): LLMRequestC
       "Enter an LLM API key in Settings before using code generation.",
     );
   }
-  const requestConfig: LLMRequestConfig = {
+  const normalizedCodegenModel = normalizedConfig.provider === "openrouter"
+    ? normalizeOpenRouterModel(codegenModel)
+    : codegenModel;
+  return {
     provider: normalizedConfig.provider,
-    model: codegenModel,
+    model: normalizedCodegenModel,
     base_url: normalizedConfig.baseUrl,
     api_key: normalizedConfig.apiKey,
-    model_family: "unknown",
+    model_family: "code",
     supports_function_calling: true,
     supports_json_output: true,
     supports_structured_output: true,
     supports_vision: false,
-    timeout_seconds: 90,
+    timeout_seconds: 180,
   };
-  return requestConfig;
 };
+
 
 export const formatProviderLabel = (provider: LLMProvider) => LLM_PROVIDER_DETAILS[provider].label;
 

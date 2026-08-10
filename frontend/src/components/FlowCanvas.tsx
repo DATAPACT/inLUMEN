@@ -29,11 +29,10 @@ import {
   deleteEdgeFromBackend,
   deleteNodeFromBackend,
   fetchPipelineScriptGenerationRun,
+  listPipelineScriptGenerationRuns,
   fetchPipelineVersions,
   fetchPipelineGraph,
   fetchPipelineUpdatedAt,
-  generatePipelineScripts,
-  prepareExternalRuntimePrompt,
   restoreBackendGraphHistory,
   resumePipelineScriptGenerationRun,
   startPipelineScriptGenerationRun,
@@ -73,7 +72,6 @@ import { Textarea } from '@/components/ui/textarea';
 import {
   AlertCircle,
   CheckCircle2,
-  Copy,
   Database,
   Loader2,
   Zap,
@@ -220,35 +218,13 @@ const GENERATION_TERMINAL_STATUSES = new Set([
   "cancelled",
 ]);
 
+const ACTIVE_GENERATION_RUN_STORAGE_KEY = "inlumen-active-codegen-run-id";
+
 const effectiveGenerationStatus = (job: PipelineGenerationJob | null) => {
   const outer = String(job?.status || "").toLowerCase();
   if (GENERATION_TERMINAL_STATUSES.has(outer)) return outer;
   const nested = String(job?.generation_run?.status || "").toLowerCase();
   return nested || outer || "running";
-};
-
-const wait = (ms: number) =>
-  new Promise<void>((resolve) => {
-    window.setTimeout(resolve, ms);
-  });
-
-const copyTextToClipboard = async (value: string) => {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(value);
-    return;
-  }
-  const textarea = document.createElement("textarea");
-  textarea.value = value;
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.focus();
-  textarea.select();
-  const copied = document.execCommand("copy");
-  textarea.remove();
-  if (!copied) {
-    throw new Error("The browser did not allow clipboard access.");
-  }
 };
 
 const generationFailureMessage = (job: PipelineGenerationJob) => {
@@ -476,13 +452,28 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const [isGeneratingScripts, setIsGeneratingScripts] = useState(false);
   const [isCancellingScripts, setIsCancellingScripts] = useState(false);
   const generationCancelRequestedRef = useRef(false);
+  const handledGenerationRunsRef = useRef(new Set<string>());
   const [isScriptGenerationOpen, setIsScriptGenerationOpen] = useState(false);
   const [isValidationOpen, setIsValidationOpen] = useState(false);
   const [scriptGenerationPrompt, setScriptGenerationPrompt] = useState("");
   const [scriptGenerationMode, setScriptGenerationMode] =
     useState<PipelineScriptGenerationMode>("full");
-  const [isPreparingExternalPrompt, setIsPreparingExternalPrompt] = useState(false);
   const [generationJob, setGenerationJob] = useState<PipelineGenerationJob | null>(null);
+  const rememberGenerationJob = useCallback((job: PipelineGenerationJob) => {
+    setGenerationJob(job);
+    const runId = String(job.run_id || job.generation_run?.run_id || "").trim();
+    if (runId) {
+      localStorage.setItem(ACTIVE_GENERATION_RUN_STORAGE_KEY, runId);
+    }
+    setIsGeneratingScripts(
+      !GENERATION_TERMINAL_STATUSES.has(effectiveGenerationStatus(job)),
+    );
+  }, []);
+  const activeGenerationRunId = String(
+    generationJob?.run_id || generationJob?.generation_run?.run_id || "",
+  ).trim();
+  const activeGenerationStatus = effectiveGenerationStatus(generationJob);
+  const activeGenerationPersistenceStatus = generationJob?.persistence?.status;
   const uploadedSampleDataAvailable = hasUploadedSampleData(nodes);
   const designValidation = useMemo(() => validateGraph(nodes, edges), [edges, nodes]);
   const displayedNodes = useMemo(() => nodes.map((node) => ({
@@ -723,6 +714,128 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       window.clearInterval(id);
     };
   }, [fetchGraphAndApply, markSyncHealthy, scheduleSyncRetry]);
+
+  useEffect(() => {
+    let disposed = false;
+    const restoreGenerationRun = async () => {
+      const rememberedRunId = String(
+        localStorage.getItem(ACTIVE_GENERATION_RUN_STORAGE_KEY) || "",
+      ).trim();
+      let restored: PipelineGenerationJob | null = null;
+      if (rememberedRunId) {
+        try {
+          restored = await fetchPipelineScriptGenerationRun(rememberedRunId);
+        } catch (error) {
+          console.warn(
+            "[FlowCanvas.tsx] Could not restore remembered generation run:",
+            error,
+          );
+        }
+      }
+      if (!restored) {
+        try {
+          const runs = await listPipelineScriptGenerationRuns(20);
+          restored =
+            runs.find(
+              (run) =>
+                !GENERATION_TERMINAL_STATUSES.has(effectiveGenerationStatus(run)),
+            ) || runs[0] || null;
+        } catch (error) {
+          console.warn(
+            "[FlowCanvas.tsx] Could not discover background generation runs:",
+            error,
+          );
+        }
+      }
+      if (!disposed && restored) {
+        rememberGenerationJob(restored);
+      }
+    };
+    void restoreGenerationRun();
+    return () => {
+      disposed = true;
+    };
+  }, [rememberGenerationJob]);
+
+  useEffect(() => {
+    const runId = activeGenerationRunId;
+    if (!runId) return;
+    const status = activeGenerationStatus;
+    const needsFinalization =
+      status === "valid" && activeGenerationPersistenceStatus === "pending";
+    if (GENERATION_TERMINAL_STATUSES.has(status) && !needsFinalization) return;
+
+    let disposed = false;
+    let requestInFlight = false;
+    const refresh = async () => {
+      if (requestInFlight) return;
+      requestInFlight = true;
+      try {
+        const latest = await fetchPipelineScriptGenerationRun(runId);
+        if (!disposed) rememberGenerationJob(latest);
+      } catch (error) {
+        if (!disposed) {
+          console.warn("[FlowCanvas.tsx] Generation progress refresh failed:", error);
+        }
+      } finally {
+        requestInFlight = false;
+      }
+    };
+    void refresh();
+    const intervalId = window.setInterval(() => {
+      void refresh();
+    }, 3000);
+    return () => {
+      disposed = true;
+      window.clearInterval(intervalId);
+    };
+  }, [
+    activeGenerationPersistenceStatus,
+    activeGenerationRunId,
+    activeGenerationStatus,
+    rememberGenerationJob,
+  ]);
+
+  useEffect(() => {
+    if (!generationJob) return;
+    const runId = String(
+      generationJob.run_id || generationJob.generation_run?.run_id || "",
+    ).trim();
+    const status = effectiveGenerationStatus(generationJob);
+    if (!runId || !GENERATION_TERMINAL_STATUSES.has(status)) return;
+    if (status === "valid" && generationJob.persistence?.status === "pending") return;
+    setIsGeneratingScripts(false);
+    if (handledGenerationRunsRef.current.has(runId)) return;
+    handledGenerationRunsRef.current.add(runId);
+
+    if (status === "valid" && generationJob.persistence?.status === "persisted") {
+      const persistedResult = generationJob.persistence?.result as
+        | { nodes?: unknown[] }
+        | undefined;
+      const generatedCount = Array.isArray(persistedResult?.nodes)
+        ? persistedResult.nodes.length
+        : 0;
+      markLocalWrite(5000);
+      void fetchGraphAndApply()
+        .then(() => {
+          toast.success("Runtime scripts generated", {
+            description: `${generatedCount} node bundle${generatedCount === 1 ? "" : "s"} generated in the background.`,
+          });
+        })
+        .catch((error) => {
+          console.error("[FlowCanvas.tsx] Generated graph refresh failed:", error);
+          toast.error("Scripts generated, but the graph could not be refreshed", {
+            description: error instanceof Error ? error.message : "Unknown error",
+          });
+        });
+      return;
+    }
+    if (status !== "cancelled") {
+      toast.error("Script generation failed", {
+        description: generationFailureMessage(generationJob),
+      });
+    }
+  }, [fetchGraphAndApply, generationJob, markLocalWrite]);
 
   // Expose updateNode 
   const updateNode = useCallback((id: string, data: Record<string, unknown>) => {
@@ -1188,27 +1301,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   };
 
   const handleGeneratePipelineScripts = () => {
-    if (isGeneratingScripts) return;
+    if (isGeneratingScripts) {
+      setIsScriptGenerationOpen(true);
+      return;
+    }
     setScriptGenerationPrompt(String(pipelinePrompt || "").trim());
     setScriptGenerationMode(uploadedSampleDataAvailable ? "full" : "generic");
     setIsScriptGenerationOpen(true);
-  };
-
-  const pollPipelineGenerationRun = async (started: PipelineGenerationJob) => {
-    setGenerationJob(started);
-    const runId = String(started.run_id || "").trim();
-    if (!runId) {
-      throw new Error("Pipeline generation run did not return a run id.");
-    }
-    let latest = started;
-    while (
-      !GENERATION_TERMINAL_STATUSES.has(effectiveGenerationStatus(latest))
-    ) {
-      await wait(3000);
-      latest = await fetchPipelineScriptGenerationRun(runId);
-      setGenerationJob(latest);
-    }
-    return latest;
   };
 
   const handleRunPipelineScriptGeneration = async () => {
@@ -1225,32 +1324,16 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     setIsGeneratingScripts(true);
     setGenerationJob(null);
     try {
-      markLocalWrite(5000);
-      let generatedCount = 0;
-      if (mode === "full") {
-        const started = await startPipelineScriptGenerationRun(
-          activeChatbotConfig,
-          options,
-        );
-        const latest = await pollPipelineGenerationRun(started);
-        if (
-          latest.status !== "valid" ||
-          latest.persistence?.status !== "persisted"
-        ) {
-          throw new Error(generationFailureMessage(latest));
-        }
-        const persistedResult = latest.persistence?.result as { nodes?: unknown[] } | undefined;
-        generatedCount = Array.isArray(persistedResult?.nodes)
-          ? persistedResult.nodes.length
-          : 0;
-      } else {
-        const result = await generatePipelineScripts(activeChatbotConfig, options);
-        generatedCount = Array.isArray(result?.nodes) ? result.nodes.length : 0;
+      const started = await startPipelineScriptGenerationRun(
+        activeChatbotConfig,
+        options,
+      );
+      if (!String(started.run_id || "").trim()) {
+        throw new Error("Pipeline generation run did not return a run id.");
       }
-      await fetchGraphAndApply();
-      setIsScriptGenerationOpen(false);
-      toast.success("Runtime scripts generated", {
-        description: `${generatedCount} node bundle${generatedCount === 1 ? "" : "s"} generated.`,
+      rememberGenerationJob(started);
+      toast.info("Runtime generation started", {
+        description: "This runs in the background. You can close this panel and return at any time.",
       });
     } catch (error) {
       if (generationCancelRequestedRef.current) {
@@ -1260,33 +1343,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       toast.error("Script generation failed", {
         description: error instanceof Error ? error.message : "Unknown error",
       });
-    } finally {
       setIsGeneratingScripts(false);
-    }
-  };
-
-  const handleExternalRuntimePrompt = async () => {
-    if (isPreparingExternalPrompt) return;
-    setIsPreparingExternalPrompt(true);
-    try {
-      const result = await prepareExternalRuntimePrompt(
-        scriptGenerationPrompt.trim(),
-      );
-      const prompt = String(result.prompt || "").trim();
-      if (!prompt) {
-        throw new Error("The prepared external AI prompt was empty.");
-      }
-      await copyTextToClipboard(prompt);
-      toast.success("Prompt copied", {
-        description: `Paste it into any AI for ${result.node_count || nodes.length} pipeline node${(result.node_count || nodes.length) === 1 ? "" : "s"}.`,
-      });
-    } catch (error) {
-      console.error("[FlowCanvas.tsx] Prepare external AI prompt error:", error);
-      toast.error("Could not prepare external AI prompt", {
-        description: error instanceof Error ? error.message : "Unknown error",
-      });
-    } finally {
-      setIsPreparingExternalPrompt(false);
     }
   };
 
@@ -1304,7 +1361,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     setIsGeneratingScripts(true);
     generationCancelRequestedRef.current = false;
     try {
-      markLocalWrite(5000);
       const started = await resumePipelineScriptGenerationRun(
         currentRunId,
         activeChatbotConfig,
@@ -1313,21 +1369,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           repairAttempts: 7,
         },
       );
-      const latest = await pollPipelineGenerationRun(started);
-      if (
-        latest.status !== "valid" ||
-        latest.persistence?.status !== "persisted"
-      ) {
-        throw new Error(generationFailureMessage(latest));
-      }
-      const persistedResult = latest.persistence?.result as { nodes?: unknown[] } | undefined;
-      const generatedCount = Array.isArray(persistedResult?.nodes)
-        ? persistedResult.nodes.length
-        : 0;
-      await fetchGraphAndApply();
-      setIsScriptGenerationOpen(false);
-      toast.success("Failed node repaired", {
-        description: `${generatedCount} node bundle${generatedCount === 1 ? "" : "s"} persisted.`,
+      rememberGenerationJob(started);
+      toast.info("Node repair started", {
+        description: "The repair is running in the background.",
       });
     } catch (error) {
       if (generationCancelRequestedRef.current) {
@@ -1337,7 +1381,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       toast.error("Node repair failed", {
         description: error instanceof Error ? error.message : "Unknown error",
       });
-    } finally {
       setIsGeneratingScripts(false);
     }
   };
@@ -1356,8 +1399,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     setIsCancellingScripts(true);
     try {
       const cancelled = await cancelPipelineScriptGenerationRun(runId);
-      setGenerationJob(cancelled);
-      setIsGeneratingScripts(false);
+      rememberGenerationJob(cancelled);
       toast.info("Runtime script generation stopped", {
         description: `Run ${runId.slice(0, 8)} was cancelled.`,
       });
@@ -1572,16 +1614,14 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
       <Dialog
         open={isScriptGenerationOpen}
-        onOpenChange={(open) => {
-          if (!isGeneratingScripts) setIsScriptGenerationOpen(open);
-        }}
+        onOpenChange={setIsScriptGenerationOpen}
       >
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>Add Node Scripts</DialogTitle>
             <DialogDescription>
-              Every node follows the same simple file rule, whether the files
-              come from you, another AI, or inLUMEN.
+              inLUMEN uses the configured code-generation model to create runtime
+              packages, then validates them. Background runs continue when this panel is closed.
             </DialogDescription>
           </DialogHeader>
 
@@ -1591,10 +1631,11 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
               <div className="grid gap-1 text-muted-foreground">
                 <p><code className="text-foreground">main.py</code> — the node script</p>
                 <p><code className="text-foreground">requirements.txt</code> — only when packages are needed</p>
+                <p><code className="text-foreground">node-manifest.json</code> — runtime and data contract metadata</p>
               </div>
               <p className="text-xs text-muted-foreground">
-                That is all. inLUMEN builds the Dagster setup and passes files
-                between connected nodes automatically.
+                Dockerfiles are not attached to nodes. The deployment exporter
+                builds the shared Dagster and Argo images from these packages.
               </p>
               <p className="text-xs text-muted-foreground">
                 To attach generated code: select a node, open Inspector, and use Runtime Package. Actual input files belong in the Run tab; Test Fixtures are only for repeatable design-time tests.
@@ -1678,31 +1719,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
               )}
             </div>
 
-            <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3">
-              <div className="space-y-1">
-                <p className="text-sm font-medium">Using ChatGPT or another AI?</p>
-                <p className="text-xs text-muted-foreground">
-                  Copy one ready-made prompt, paste it into the AI, then upload
-                  the returned files to the matching nodes. The response also
-                  tells you exactly which node receives each real input file.
-                </p>
-              </div>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => { void handleExternalRuntimePrompt(); }}
-                disabled={isPreparingExternalPrompt || isGeneratingScripts}
-              >
-                {isPreparingExternalPrompt ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                ) : (
-                  <Copy className="mr-2 h-4 w-4" />
-                )}
-                Copy prompt
-              </Button>
-            </div>
-
             {generationJob && (
               <div className="space-y-3 rounded-md border border-border p-3">
                 <div className="flex items-center justify-between text-sm">
@@ -1714,6 +1730,11 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
                   </span>
                 </div>
                 <Progress value={generationProgress} />
+                {isGeneratingScripts && (
+                  <p className="text-xs text-muted-foreground">
+                    You can close this panel. Use Scripts → View run to return to it.
+                  </p>
+                )}
                 {generationSteps.length > 0 && (
                   <div className="max-h-40 space-y-2 overflow-auto pr-1">
                     {generationSteps.map((step) => (
@@ -1752,7 +1773,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
               {isCancellingScripts && (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               )}
-              {isGeneratingScripts ? "Stop generation" : "Cancel"}
+              {isGeneratingScripts ? "Stop generation" : "Close"}
             </Button>
             {canRepairFailedNode && (
               <Button

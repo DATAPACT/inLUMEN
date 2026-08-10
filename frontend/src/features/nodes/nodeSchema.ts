@@ -126,14 +126,12 @@ export const IMPLEMENTATION_KIND_OPTIONS = [
   { value: "generated-code", label: "Generated code" },
 ] as const;
 
-export type ImplementationKind = (typeof IMPLEMENTATION_KIND_OPTIONS)[number]["value"];
+export type ImplementationKind = string;
 
 export const normalizeImplementationKind = (value: unknown): ImplementationKind => {
   const raw = String(value ?? "").trim().toLowerCase().replace(/\s+/g, "-");
-  const normalized = raw === "git-repository" ? "repository" : raw;
-  return IMPLEMENTATION_KIND_OPTIONS.some((option) => option.value === normalized)
-    ? normalized as ImplementationKind
-    : "python";
+  if (!raw) return "python";
+  return raw === "git-repository" ? "repository" : raw;
 };
 
 export type NodeImplementation = Record<string, unknown> & {
@@ -232,7 +230,7 @@ export const getNodeFileBucket = (file: NodeFileReference, nodeId: string) => {
   return `files-step-id-${nodeId}`.toLowerCase();
 };
 
-const CODE_FILE_PATTERN = /(^|\/)(dockerfile(?:\.[^/]*)?|makefile|requirements(?:\.[^/]*)?\.txt|pyproject\.toml|package(?:-lock)?\.json|.*\.(?:py|pyi|sql|sh|bash|zsh|js|jsx|ts|tsx|java|c|cc|cpp|h|hpp|go|rs|rb|php|r|scala|kt|kts|swift|lua|pl|ex|exs))$/i;
+const CODE_FILE_PATTERN = /(^|\/)(dockerfile(?:\.[^/]*)?|makefile|requirements(?:\.[^/]*)?\.txt|node-manifest\.json|validation-report\.json|pyproject\.toml|package(?:-lock)?\.json|.*\.(?:py|pyi|sql|sh|bash|zsh|js|jsx|ts|tsx|java|c|cc|cpp|h|hpp|go|rs|rb|php|r|scala|kt|kts|swift|lua|pl|ex|exs))$/i;
 
 export const getNodeFileRole = (file: NodeFileReference): NodeFileRole => {
   if (file && typeof file === "object" && !isBrowserFile(file)) {
@@ -327,13 +325,16 @@ export const normalizeDefinitionVersion = (value: unknown) => {
   return Number.isInteger(version) && version > 0 ? version : undefined;
 };
 
-export const normalizeNodeImplementation = (value: unknown): NodeImplementation =>
-  value && typeof value === "object" && !Array.isArray(value)
-    ? {
-        ...(value as NodeImplementation),
-        kind: normalizeImplementationKind((value as NodeImplementation).kind),
-      }
-    : {};
+export const normalizeNodeImplementation = (value: unknown): NodeImplementation => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const implementation = { ...(value as NodeImplementation) };
+  if (String(implementation.kind ?? "").trim()) {
+    implementation.kind = normalizeImplementationKind(implementation.kind);
+  } else {
+    delete implementation.kind;
+  }
+  return implementation;
+};
 
 export const normalizeGeneratedArtifact = (
   value: unknown,

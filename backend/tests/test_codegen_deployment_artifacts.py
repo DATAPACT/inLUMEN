@@ -283,7 +283,7 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertIn("inputs/vital_signs_short.csv", by_path)
         self.assertIn("inputs/sample.wav", by_path)
         self.assertIn("nodes/node-1-ingestion/main.py", by_path)
-        self.assertIn("nodes/node-1-ingestion/Dockerfile.1", by_path)
+        self.assertNotIn("nodes/node-1-ingestion/Dockerfile.1", by_path)
         self.assertIn("outputs/node-2-preprocessing/.gitkeep", by_path)
         self.assertIn("argo/workflow.yaml", by_path)
         self.assertIn("argo/Dockerfile", by_path)

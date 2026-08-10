@@ -98,7 +98,7 @@ describe("flow graph normalization", () => {
             inputs: [],
             outputs: [{ id: "data", name: "data", type: "any", required: true, description: "Source data." }],
           },
-          implementation: { kind: "python", parser: "csv" },
+          implementation: { parser: "csv" },
           secret_params: [],
           configuration_status: "valid",
           generated_artifact: { status: "current" },

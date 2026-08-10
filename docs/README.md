@@ -143,6 +143,7 @@ During development, run a smaller part of the suite by selecting a component:
 
 ```bash
 python scripts/run_tests.py --component backend
+python scripts/run_tests.py --component codegen
 python scripts/run_tests.py --component deployment-validation
 python scripts/run_tests.py --component frontend
 python scripts/run_tests.py --component compose
@@ -212,61 +213,52 @@ curl -i -X OPTIONS "$INLUMEN_API_PUBLIC_URL/health" \
 The response should include `Access-Control-Allow-Origin: *`.
 
 Step 5: Wait for the stack to finish starting. The root compose file now:
-- starts Neo4J, MinIO, the backend gateway, and the frontend together
+- starts Neo4J, MinIO, codegen, the backend gateway, and the frontend together
 - builds the `backend` service from the Python source under `backend/`
 - mounts the frontend and backend source folders for development
 - keeps graph and object storage logic inside the backend gateway instead of exposing adapter services
 - connects the LLM agents to the OpenAI-compatible endpoint selected in the UI
 - is set up to behave consistently on macOS and Windows through Docker Desktop
 
-Step 6: Configure an LLM provider from the UI. Open `http://localhost:8080`, choose Settings, and create an LLM configuration with provider, base URL, general model, Code Generation Model, and API key. Coding reuses the same provider, base URL, and API key while selecting its model from the separate Code Generation Model field.
+Step 6: Configure an LLM provider from the UI only if you use the Chat workspace. Code generation and deployment export do not use that provider, model, or API key.
 
 ### Code generation service
 
-> [!IMPORTANT]
-> Code generation requires both this inLUMEN application and the separate
-> [inlumen-codegen-service](https://github.com/aliduabubakari/inlumen-codegen-service)
-> to be running. Starting inLUMEN alone does not provide code generation.
+Code generation is included in this repository under `codegen/` and starts as
+a private service with the root Compose stack. The browser never calls it
+directly: inLUMEN creates a background job through the backend, and the backend
+authenticates to `http://codegen:8010` over the internal Compose network.
 
-The companion repository is a separate backend-to-backend service; the browser
-never calls it directly. Start it separately and point the inLUMEN backend
-container at its endpoint. For a local setup, use the host-published port:
+Generation jobs and inLUMEN artifact-finalization metadata are stored in SQLite
+databases on persistent volumes. A run therefore continues when its progress
+panel is closed, can be rediscovered after a browser reload, and remains
+inspectable after an application restart. Work that was executing during a
+codegen-process restart is marked as interrupted and can be resumed from its
+durable request snapshot.
 
-```text
-# inLUMEN/.env
-INLUMEN_CODEGEN_SERVICE_URL=http://host.docker.internal:8010
-INLUMEN_CODEGEN_SERVICE_API_KEY=<same value as CODEGEN_SERVICE_API_KEY>
-```
+Generation uses the dedicated code model selected in Settings. The design/chat
+model remains independent. inLUMEN sends non-secret provider/model metadata in
+the request and forwards the provider credential to codegen in an ephemeral
+header; the credential is excluded from durable job snapshots. Generated code
+is checked against reviewed task profiles, trusted adapters, package policy,
+data contracts, and sandbox validation before it is persisted.
 
-```bash
-# ../inlumen-codegen-service
-cp .env.example .env
-docker compose up --build --wait -d
-
-# ../inLUMEN
-docker compose up --build -d
-```
-
-For local caller-owned LLM configuration, set
-`CODEGEN_ALLOW_REQUEST_LLM_CONFIG=true` in the codegen `.env`. The model,
-provider URL, and API key selected in the inLUMEN Settings dialog are forwarded
-through the backend; the provider key is moved to the `X-LLM-API-Key` request
-header and is not included in the JSON sent to codegen. The coding request uses
-the separate Code Generation Model field from that same Settings configuration.
-
-Codegen can later be deployed independently without frontend changes. Set:
+Codegen remains independently deployable without frontend changes. Set:
 
 ```text
 INLUMEN_CODEGEN_SERVICE_URL=https://codegen.example.com
 INLUMEN_CODEGEN_SERVICE_API_KEY=<deployed service token>
 ```
 
-Use HTTPS for any non-local endpoint. A remote deployment can own its provider
-configuration by keeping `CODEGEN_ALLOW_REQUEST_LLM_CONFIG=false` and setting
-`CODEGEN_LLM_MODEL`, `CODEGEN_LLM_BASE_URL`, and its provider key on the
-codegen service. In that mode, codegen ignores caller-supplied provider options.
-The codegen service currently keeps async run state in memory, so deploy one
-replica and avoid restarts during an active generation run.
+Use HTTPS for any non-local endpoint. The service token authenticates inLUMEN
+to codegen; the separately forwarded provider credential authenticates codegen
+to the configured model endpoint.
+
+The embedded SQLite job store is durable and appropriate for a single codegen
+replica. A horizontally scaled deployment should replace it with a shared job
+database and worker queue. Production sandbox execution should likewise use
+isolated workers or cluster jobs rather than expose a host Docker socket beyond
+the dedicated codegen service.
 
 For OpenRouter, use your OpenRouter API key after adding the provider key in OpenRouter settings. Short model aliases such as `gpt-oss-120b` are accepted by inLUMEN and normalized before the request is sent.
 

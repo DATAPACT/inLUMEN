@@ -18,6 +18,27 @@ from node_parameters import secret_params_json
 from step_types import normalize_step_type
 
 
+SEMANTIC_IMPLEMENTATION_KIND_ALIASES = {
+    "trusted-pretrained-inference": ("generated-code", "trusted_heavy_model"),
+    "trusted_pretrained_inference": ("generated-code", "trusted_heavy_model"),
+    "classical-ml-training": ("generated-code", "classical_ml"),
+    "classical_ml_training": ("generated-code", "classical_ml"),
+    "deterministic-processing": ("generated-code", "deterministic"),
+    "deterministic_processing": ("generated-code", "deterministic"),
+}
+
+
+def normalize_agent_implementation(implementation: Any) -> dict[str, Any]:
+    """Keep runtime packaging separate from a task's semantic execution class."""
+    candidate = dict(implementation) if isinstance(implementation, dict) else {}
+    raw_kind = str(candidate.get("kind") or "").strip().lower()
+    alias = SEMANTIC_IMPLEMENTATION_KIND_ALIASES.get(raw_kind)
+    if alias:
+        candidate["kind"] = alias[0]
+        candidate.setdefault("execution_profile", alias[1])
+    return candidate
+
+
 class ForcedAssistantAgent(AssistantAgent):
     """AssistantAgent that always enforces tool calling."""
 
@@ -80,7 +101,10 @@ def build_pipeline_editing_team(
     provenance_context: dict | None = None,
 ) -> RoundRobinGroupChat:
     log_llm_selection("Building pipeline editing team", llm_config)
-    model_client = select_model_client(llm_config)
+    # Graph mutations share ordering and flow-id state. Parallel tool calls can
+    # deadlock Neo4j and, even when they all succeed, connect steps in an
+    # arbitrary order. Keep each agent turn strictly sequential.
+    model_client = select_model_client(llm_config, parallel_tool_calls=False)
 
     # Database Schema (METAMODEL) - TODO: hidden for now
     DB_SCHEMA = """
@@ -142,7 +166,7 @@ def build_pipeline_editing_team(
             result = await run_query(query, query_type)
             return repr(result)
         except Exception as exc:
-            return repr({"Error in graph_operator": str(exc)})
+            raise RuntimeError(f"list_pipelines failed: {exc}") from exc
 
     async def get_pipeline_steps(pipeline_uid: str) -> str:
         """Gets the steps present in a pipeline."""
@@ -156,7 +180,7 @@ def build_pipeline_editing_team(
             result = await run_query(query, query_type)
             return repr(result)
         except Exception as exc:
-            return repr({"Error in graph_operator": str(exc)})
+            raise RuntimeError(f"get_pipeline_steps failed: {exc}") from exc
 
     async def inspect_step(step_uid: str) -> str:
         """Inspects a step: returns incoming/outgoing neighbors and used files."""
@@ -175,7 +199,7 @@ def build_pipeline_editing_team(
             result = await run_query(query, query_type)
             return repr(result)
         except Exception as exc:
-            return repr({"Error in graph_operator": str(exc)})
+            raise RuntimeError(f"inspect_step failed: {exc}") from exc
 
     async def overview() -> str:
         """Gives an overview of the pipeline, the present steps and linked files."""
@@ -210,7 +234,7 @@ def build_pipeline_editing_team(
             result = await run_query(query, query_type)
             return repr(result)
         except Exception as exc:
-            return repr({"Error in graph_operator": str(exc)})
+            raise RuntimeError(f"overview failed: {exc}") from exc
 
     async def create_pipeline(params: str) -> str:
         """Creates or updates the current design PIPELINE and its active PIPELINE_VERSION.
@@ -297,7 +321,7 @@ def build_pipeline_editing_team(
             result = await run_query(query, query_type)
             return repr(result)
         except Exception as exc:
-            return repr({"Error in graph_operator": str(exc)})
+            raise RuntimeError(f"create_pipeline failed: {exc}") from exc
 
     def _step_props_lines(
         step_type: str,
@@ -317,7 +341,6 @@ def build_pipeline_editing_team(
             "subpipeline": "Subpipeline",
         }
         props_lines = [
-            "uid:        randomUUID()",
             f"type:       '{step_type}'",
             f"label:      '{label}'",
             f"description:'{description}'",
@@ -330,6 +353,7 @@ def build_pipeline_editing_team(
             props_lines.append("content: ''")
         param_obj = dict(parameters) if isinstance(parameters, dict) else {}
         if isinstance(implementation, dict) and implementation:
+            implementation = normalize_agent_implementation(implementation)
             implementation = resolve_implementation_plan(
                 implementation,
                 label=label,
@@ -459,7 +483,7 @@ def build_pipeline_editing_team(
             result = await run_query(query, query_type)
             return repr(result)
         except Exception as exc:
-            return repr({"Error in graph_operator": str(exc)})
+            raise RuntimeError(f"create_step failed: {exc}") from exc
 
     async def insert_step(params: str) -> str:
         """Inserts a STEP before an existing STEP.
@@ -600,10 +624,10 @@ def build_pipeline_editing_team(
                 """
             result = await run_query(query, query_type)
             return repr(result)
-        except KeyError:
-            return repr({"Error in graph_operator": "insert_step requires before_flow_id"})
+        except KeyError as exc:
+            raise ValueError("insert_step requires before_flow_id") from exc
         except Exception as exc:
-            return repr({"Error in graph_operator": str(exc)})
+            raise RuntimeError(f"insert_step failed: {exc}") from exc
 
     async def delete_step(params: str) -> str:
         """Deletes a STEP."""
@@ -639,7 +663,7 @@ def build_pipeline_editing_team(
             result = await run_query(query, query_type)
             return repr(result)
         except Exception as exc:
-            return repr({"Error in graph_operator": str(exc)})
+            raise RuntimeError(f"delete_step failed: {exc}") from exc
 
     async def delete_all_steps(params: str) -> str:
         """Deletes all STEPs from the current design pipeline while keeping the PIPELINE node.
@@ -677,7 +701,7 @@ def build_pipeline_editing_team(
             result = await run_query(query, query_type)
             return repr(result)
         except Exception as exc:
-            return repr({"Error in graph_operator": str(exc)})
+            raise RuntimeError(f"delete_all_steps failed: {exc}") from exc
 
     user_proxy = UserProxyAgent("user_proxy")
     _ = user_proxy
@@ -687,7 +711,7 @@ def build_pipeline_editing_team(
         model_client=model_client,
         tools=[create_pipeline, create_step, insert_step, delete_step, delete_all_steps, overview],
         description="An agent that designs AI/data pipelines given a user request.",
-        system_message=""" You design AI/data pipelines using your registered tools. Call one or multiple tools to create or modify a pipeline as requested by the user.
+        system_message="""You design AI/data pipelines using your registered tools. Use the tools to create or modify the persisted pipeline as requested by the user.
                           A PIPELINE is composed of one or several STEPs. Use overview to check if there are any pipelines. If the user request is unclear or incomplete, ask for more details.
                         - [overview]: calling this tool will give you an overview of the current pipeline content, if any.
                         - [create_pipeline]: calling this tool will create a pipeline.
@@ -696,21 +720,26 @@ def build_pipeline_editing_team(
                         - [delete_step]: calling this tool will delete a step in a pipeline.
                         - [delete_all_steps]: calling this tool will remove every step from the current design pipeline while keeping the pipeline itself. Use it only when the user asks to clear, empty, reset, delete all steps, remove everything from, or remove all nodes/steps in the pipeline.
                         Tool calls MUST use a single string argument named params. The value of params MUST be a JSON-encoded string matching the "params JSON" schema in the docstring.
+                        Graph writes are ordered operations. Call exactly ONE mutating tool at a time, wait for its result, and stop immediately to correct any failed tool call. Never batch create_pipeline, create_step, insert_step, or delete operations in one response.
                         When creating, designing, regenerating, or rebuilding a pipeline, call create_pipeline first with a concise generated name and a fresh 1-2 sentence description that summarizes the full intended pipeline. Do this before creating steps so the UI pipeline description is updated.
+                        For a new pipeline, plan the complete dependency order before the first create_step call, then call create_step once per step in actual execution order from ingress to terminal delivery. Because create_step appends and connects to the current tail, calling it in reverse conceptual order creates a wrong graph.
                         The create_step and insert_step type MUST be one of: source, task, destination, flow, subpipeline. This set is structural and must not grow for technologies or business operations. Use source for external ingress adapters; task for processing and templates such as cleaning, OCR, speech-to-text, LLM, SQL, or API calls; destination for external delivery adapters; flow for conditions and parallel maps; and subpipeline for reusable pipelines.
                         Templates are metadata on a structural kind. Implementations are separate metadata and may be generated code, Python, SQL, a container, a Git repository, REST API, shell, custom, or a future runtime.
                         Always pass the most specific useful template for each step. Do not use generic template names such as Source, Task, or Destination when the requested capability identifies an adapter or operation. For example, remote-device REST ingestion uses source + REST API, preprocessing uses task + Data Cleaning, model training uses task + Model Training, and clinician email/SMS alerts use destination + Notification.
+                        A destination is terminal and cannot feed another step. Model an intermediate database, vector index, cache, or storage-and-retrieval adapter as a task with an output whenever downstream work consumes it. For document retrieval, the dependency order is ingestion -> chunking -> embeddings -> vector indexing/storage -> question answering -> answer delivery; vector indexing/storage is a task and answer delivery is the terminal destination.
+                        Use implementation kind rest-api only when an exact endpoint is known and include that endpoint in the implementation object. For internal analytical or transformation work with no external endpoint, use generated-code or python. Do not label an LLM, embedding model, or other internal inference task as rest-api merely because it may eventually be served behind an API.
                         Static configuration belongs in the node's parameters object. Never create a configuration node unless configuration is dynamically produced as pipeline data, in which case model it through ordinary ports.
                         Mark credentials such as API keys, access tokens, client secrets, and passwords in secret_parameters. Never invent or place a real credential in the graph.
                         Use overview to find the relevant flow_id values before calling insert_step unless the flow_id values are already provided by the user.
                         Use the label/description fields for domain-specific names such as ingestion, preprocessing, model training, or alerting.
                         Represent every capability explicitly requested by the user in the graph before finishing. Do not stop after an intermediate storage or transformation step when the request also asks for a terminal behavior. For example, a request that says "answers questions" must include a connected destination that publishes the answer. Re-read the user's request after tool calls and add any missing capability as a connected STEP.
-                        This is a one-shot, quality-first design. Choose an implementation class for every analytical step: deterministic processing, classical ML training, trusted pretrained inference, or an explicitly requested custom model.
+                        This is a one-shot, quality-first design. Choose an implementation class for every analytical step: deterministic processing, classical ML training, trusted pretrained inference, or an explicitly requested custom model. That semantic class belongs in execution_profile and related model-plan fields; implementation.kind is only the runtime packaging kind from the create_step schema. For trusted pretrained inference that inLUMEN will generate and package, use kind generated-code with execution_profile trusted_heavy_model. Never put trusted-pretrained-inference, classical-ml-training, or deterministic-processing in implementation.kind.
                         Default structured/tabular model-training tasks to a scikit-learn implementation unless the user explicitly requests deep learning, a pretrained model, or a named framework/model. Do not invent a pretrained model merely because the domain is specialized.
                         Use trusted pretrained inference for tasks that require it, including speech-to-text and transcript sentiment analysis. Put the task and runtime preferences in the create_step or insert_step implementation object; InLUMEN's routing and trusted-adapter registries resolve supported tasks to verified execution profiles, model IDs, revisions, packages, and quality policies before persistence and code generation.
                         Never invent model repository identifiers, revisions, benchmark claims, dataset provenance, or capabilities. Prefer a real classical baseline over an unverified neural model. Do not choose PocketSphinx, VADER, keyword lists, dummy estimators, or similarly limited substitutes for tasks that require a trusted pretrained model.
                         Select domain-specific or multilingual models when the request indicates that need. For long-text analysis, include chunking and aggregation parameters. For speech recognition, include language strategy, decoding parameters, timestamps, voice activity detection, and diarization requirements when relevant.
-                        For deterministic steps such as byte-preserving ingestion, file conversion, storage, or report assembly that need no learned model, omit implementation rather than inventing a model.
+                        Deterministic source and destination adapters may omit implementation. Deterministic task steps such as chunking, file conversion, intermediate storage, or report assembly still require a generated-code or python implementation; do not invent a learned model for them.
+                        Before claiming success, call overview after the last mutation and verify that every requested capability exists in dependency order and is connected. Never describe a partial graph as completed, and never ask the user to discover or repair tool failures in the UI.
                         """,
         max_tool_iterations=30,
         reflect_on_tool_use=True,

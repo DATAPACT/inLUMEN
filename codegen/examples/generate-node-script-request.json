@@ -1,0 +1,78 @@
+{
+  "context": {
+    "schema_version": "inlumen.script-generation-context@1",
+    "target_node": {
+      "flow_id": "clean",
+      "label": "Clean customer data",
+      "description": "Remove duplicates and normalize country names.",
+      "type": "action",
+      "parameters": {}
+    },
+    "pipeline": {
+      "name": "Customer analytics",
+      "description": "Prepare customer records for model training."
+    },
+    "graph": {
+      "nodes": [
+        {
+          "flow_id": "input",
+          "label": "Customer CSV",
+          "type": "input"
+        },
+        {
+          "flow_id": "clean",
+          "label": "Clean customer data",
+          "type": "action"
+        }
+      ],
+      "edges": [
+        {
+          "source": "input",
+          "target": "clean"
+        }
+      ],
+      "upstream_nodes": ["input"],
+      "downstream_nodes": []
+    },
+    "available_inputs": [
+      {
+        "filename": "customers.csv",
+        "content_type": "text/csv",
+        "kind": "table",
+        "format": "csv",
+        "columns": ["name", "country", "email"],
+        "sample": {
+          "rows": [
+            {
+              "name": "Ada",
+              "country": "norway",
+              "email": "ada@example.com"
+            }
+          ]
+        }
+      }
+    ],
+    "expected_outputs": [
+      {
+        "name": "cleaned_customers",
+        "kind": "table",
+        "format": "json",
+        "description": "Deduplicated customer records."
+      }
+    ],
+    "runtime_constraints": {
+      "language": "python",
+      "python_version": "3.11",
+      "base_image": "python:3.11-slim",
+      "allowed_packages": ["pandas", "numpy"],
+      "network_allowed": false,
+      "max_runtime_seconds": 60
+    }
+  },
+  "options": {
+    "persist": true,
+    "repair_attempts": 2,
+    "include_sample_data": true,
+    "user_instruction": "Prefer pandas and write JSON records."
+  }
+}

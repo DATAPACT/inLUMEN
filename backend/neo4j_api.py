@@ -2510,11 +2510,13 @@ def neo4j_sync_graph():
                     return jsonify({"error": f"Pipeline version not found: {active_version_uid}"}), 404
                 version_name = record["name"] or MAIN_VERSION_NAME
 
-            result = _sync_graph_to_session(
-                session,
-                graph,
-                version_name=version_name,
-                active_version_uid=active_version_uid,
+            result = session.execute_write(
+                lambda tx: _sync_graph_to_session(
+                    tx,
+                    graph,
+                    version_name=version_name,
+                    active_version_uid=active_version_uid,
+                )
             )
         return jsonify(result), 200
     except Exception as e:

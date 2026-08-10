@@ -201,8 +201,9 @@ async def run_neo4j_query(
                 headers=headers,
             ),
         )
-        if response.status_code == 200:
-            return repr(response.text)
-        return repr({"Error": f"{response.status_code} - {response.text}"})
+        response.raise_for_status()
+        return response.text
     except Exception as exc:
-        return repr({"error": str(exc)})
+        raise RuntimeError(
+            f"Neo4j graph operation {query_type!r} failed: {exc}"
+        ) from exc

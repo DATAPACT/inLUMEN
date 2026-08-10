@@ -27,6 +27,7 @@ from analytics_api import (
 from attachment_validation import attachment_input_errors, read_attachment_probe
 from auth_middleware import require_auth
 from chat_state import clear_state_from_disk
+from codegen_runs import CodegenRunStore
 from generators.routes import create_generator_blueprint
 from graph_client import dispatch_graph_request
 from local_api_client import LocalApiResponse
@@ -59,6 +60,9 @@ CODEGEN_PIPELINE_REQUEST_TIMEOUT_SECONDS = int(
 )
 CODEGEN_SAMPLE_BINARY_MAX_BYTES = int(
     os.getenv("INLUMEN_CODEGEN_SAMPLE_BINARY_MAX_BYTES", str(16 * 1024 * 1024))
+)
+CODEGEN_RUN_STORE = CodegenRunStore(
+    os.getenv("INLUMEN_CODEGEN_RUN_DB_PATH", "state/codegen-runs.sqlite3")
 )
 DEFAULT_CODEGEN_ALLOWED_PACKAGES = [
     "pandas",
@@ -109,7 +113,6 @@ Each main.py must be a one-shot, non-interactive Python 3.11 batch program. It m
 If you can create files, return one ZIP with folders named nodes/<flow_id>/. Otherwise, show each file in its own code block under a clear NODE <flow_id> heading. Return complete working code, not pseudocode.
 
 Finish with a short RUN INPUT MAP. For every real external input the user must provide, state the exact filename, flow_id, and root node label that first reads it. The user supplies these ephemeral files in the Run tab; they must not be attached to nodes as runtime code or test fixtures."""
-PIPELINE_GENERATION_RUNS: dict[str, dict[str, Any]] = {}
 CHATBOT_CONFIGS_PATH = Path(
     os.getenv("CHATBOT_CONFIGS_PATH", "state/chatbot_configurations.json")
 )
@@ -368,6 +371,69 @@ def _filename_from_request() -> str:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _codegen_job_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep progress metadata while avoiding duplicate generated file payloads."""
+    return {
+        key: deepcopy(payload[key])
+        for key in (
+            "run_id",
+            "status",
+            "resumed_from_run_id",
+            "resume_from_flow_id",
+            "generation_run",
+            "error",
+            "created_at",
+            "updated_at",
+        )
+        if key in payload
+    }
+
+
+def _codegen_context_fingerprint(context: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        context,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _codegen_run_summary(local_run: dict[str, Any]) -> dict[str, Any]:
+    metadata = (
+        local_run.get("metadata")
+        if isinstance(local_run.get("metadata"), dict)
+        else {}
+    )
+    remote_job = (
+        local_run.get("remote_job")
+        if isinstance(local_run.get("remote_job"), dict)
+        else {}
+    )
+    if local_run.get("cancelled"):
+        persistence = {"status": "cancelled"}
+    elif local_run.get("persisted_response"):
+        persistence = {
+            "status": "persisted"
+            if local_run.get("persisted")
+            else "not_persisted"
+        }
+    else:
+        persistence = {"status": "pending"}
+    return {
+        **remote_job,
+        "run_id": str(local_run.get("run_id") or remote_job.get("run_id") or ""),
+        "status": str(
+            local_run.get("status") or remote_job.get("status") or "queued"
+        ),
+        "mode": metadata.get("generation_mode", ""),
+        "data_awareness": metadata.get("data_awareness", {}),
+        "persistence": persistence,
+        "created_at": local_run.get("created_at"),
+        "updated_at": local_run.get("updated_at"),
+    }
 
 
 def _node_data(node: dict[str, Any]) -> dict[str, Any]:
@@ -633,12 +699,11 @@ def _build_codegen_context(
 
 
 def _post_codegen_request(payload: dict[str, Any]) -> dict[str, Any]:
-    request_payload, llm_api_key = _prepare_codegen_request(payload)
-    encoded = json.dumps(request_payload).encode("utf-8")
+    encoded, headers = _codegen_request_parts(payload)
     http_request = Request(
         f"{CODEGEN_SERVICE_URL}/v1/generate/node-script",
         data=encoded,
-        headers=_codegen_request_headers(llm_api_key=llm_api_key),
+        headers=headers,
         method="POST",
     )
     try:
@@ -656,12 +721,11 @@ def _post_codegen_request(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _post_codegen_pipeline_request(payload: dict[str, Any]) -> dict[str, Any]:
-    request_payload, llm_api_key = _prepare_codegen_request(payload)
-    encoded = json.dumps(request_payload).encode("utf-8")
+    encoded, headers = _codegen_request_parts(payload)
     http_request = Request(
         f"{CODEGEN_SERVICE_URL}/v1/generate/pipeline-scripts",
         data=encoded,
-        headers=_codegen_request_headers(llm_api_key=llm_api_key),
+        headers=headers,
         method="POST",
     )
     try:
@@ -682,12 +746,11 @@ def _post_codegen_pipeline_request(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _post_codegen_pipeline_run_request(payload: dict[str, Any]) -> dict[str, Any]:
-    request_payload, llm_api_key = _prepare_codegen_request(payload)
-    encoded = json.dumps(request_payload).encode("utf-8")
+    encoded, headers = _codegen_request_parts(payload)
     http_request = Request(
         f"{CODEGEN_SERVICE_URL}/v1/generate/pipeline-scripts/runs",
         data=encoded,
-        headers=_codegen_request_headers(llm_api_key=llm_api_key),
+        headers=headers,
         method="POST",
     )
     try:
@@ -707,16 +770,12 @@ def _post_codegen_pipeline_run_request(payload: dict[str, Any]) -> dict[str, Any
 def _post_codegen_pipeline_run_resume_request(
     run_id: str,
     payload: dict[str, Any],
-    *,
-    llm_api_key: str = "",
 ) -> dict[str, Any]:
-    request_payload, request_llm_api_key = _prepare_codegen_request(payload)
-    selected_llm_api_key = str(llm_api_key or request_llm_api_key).strip()
-    encoded = json.dumps(request_payload).encode("utf-8")
+    encoded, headers = _codegen_request_parts(payload)
     http_request = Request(
         f"{CODEGEN_SERVICE_URL}/v1/generate/pipeline-scripts/runs/{run_id}/resume",
         data=encoded,
-        headers=_codegen_request_headers(llm_api_key=selected_llm_api_key),
+        headers=headers,
         method="POST",
     )
     try:
@@ -782,24 +841,28 @@ def _cancel_codegen_pipeline_run_request(run_id: str) -> dict[str, Any]:
 
 def _prepare_codegen_request(
     payload: dict[str, Any],
-) -> tuple[dict[str, Any], str]:
+) -> dict[str, Any]:
     request_payload = deepcopy(payload)
-    llm_config = request_payload.get("llm_config")
-    if not isinstance(llm_config, dict):
-        return request_payload, ""
+    raw_config = request_payload.get("llm_config")
+    if isinstance(raw_config, dict):
+        raw_config.pop("api_key", None)
+        raw_config.pop("apiKey", None)
+    return request_payload
 
-    llm_api_key = str(
-        llm_config.get("api_key") or llm_config.get("apiKey") or ""
-    ).strip()
-    llm_config.pop("api_key", None)
-    llm_config.pop("apiKey", None)
-    return request_payload, llm_api_key
+
+def _codegen_llm_api_key(payload: dict[str, Any] | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    config = payload.get("llm_config")
+    if not isinstance(config, dict):
+        return ""
+    return str(config.get("api_key") or config.get("apiKey") or "").strip()
 
 
 def _codegen_request_headers(
     *,
-    llm_api_key: str = "",
     include_content_type: bool = True,
+    llm_api_key: str = "",
 ) -> dict[str, str]:
     headers = {"Accept": "application/json"}
     if include_content_type:
@@ -818,18 +881,13 @@ def _codegen_request_headers(
 
 def _codegen_request_parts(
     payload: dict[str, Any] | None = None,
-    *,
-    include_llm_key: bool = False,
-    llm_api_key: str = "",
 ) -> tuple[bytes | None, dict[str, str]]:
     request_payload: dict[str, Any] | None = None
-    request_llm_api_key = ""
     if payload is not None:
-        request_payload, request_llm_api_key = _prepare_codegen_request(payload)
-    selected_llm_api_key = str(llm_api_key or request_llm_api_key).strip()
+        request_payload = _prepare_codegen_request(payload)
     headers = _codegen_request_headers(
-        llm_api_key=selected_llm_api_key if include_llm_key else "",
         include_content_type=payload is not None,
+        llm_api_key=_codegen_llm_api_key(payload),
     )
     encoded = (
         json.dumps(request_payload).encode("utf-8")
@@ -837,27 +895,6 @@ def _codegen_request_parts(
         else None
     )
     return encoded, headers
-
-
-def _codegen_llm_config_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    raw_config = (
-        payload.get("llm_config")
-        if isinstance(payload.get("llm_config"), dict)
-        else {}
-    )
-    return {
-        key: value
-        for key, value in {
-            "model": raw_config.get("model"),
-            "base_url": raw_config.get("base_url")
-            or raw_config.get("baseUrl"),
-            "api_key": raw_config.get("api_key")
-            or raw_config.get("apiKey"),
-            "temperature": raw_config.get("temperature"),
-            "timeout_seconds": raw_config.get("timeout_seconds"),
-        }.items()
-        if value not in (None, "")
-    }
 
 
 def _codegen_configuration_hash(
@@ -896,6 +933,34 @@ def _persist_codegen_artifact(
     graph: dict[str, Any],
 ) -> dict[str, Any]:
     files = artifact.get("files") if isinstance(artifact.get("files"), list) else []
+    new_filenames = {
+        str(item.get("filename") or "").strip()
+        for item in files
+        if isinstance(item, dict) and str(item.get("filename") or "").strip()
+    }
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    current_node = next(
+        (
+            item
+            for item in nodes
+            if isinstance(item, dict)
+            and str(item.get("id") or item.get("flow_id") or "") == node_id
+        ),
+        None,
+    )
+    current_data = _node_data(current_node) if isinstance(current_node, dict) else {}
+    current_artifact = (
+        current_data.get("generated_artifact")
+        if isinstance(current_data.get("generated_artifact"), dict)
+        else {}
+    )
+    stale_filenames = {
+        str(item.get("filename") or "").strip()
+        for item in current_artifact.get("files") or []
+        if isinstance(item, dict)
+        and str(item.get("filename") or "").strip()
+        and str(item.get("filename") or "").strip() not in new_filenames
+    }
     stored_files = []
     bucket = f"files-step-id-{node_id}".lower()
     for file_item in files:
@@ -922,7 +987,13 @@ def _persist_codegen_artifact(
             "neo4j_add_file",
             method="POST",
             data=b"",
-            json_payload={"properties": {"flow_id": node_id, "filename": filename}},
+            json_payload={
+                "properties": {
+                    "flow_id": node_id,
+                    "filename": filename,
+                    "role": "code",
+                }
+            },
         )
         graph_response.raise_for_status()
         stored_files.append(
@@ -930,8 +1001,31 @@ def _persist_codegen_artifact(
                 "filename": filename,
                 "bucket": bucket,
                 "content_type": str(file_item.get("content_type") or "text/plain"),
+                "role": "code",
             }
         )
+
+    for filename in sorted(stale_filenames):
+        storage_response = _proxy(
+            dispatch_object_request,
+            "minio_remove_file",
+            method="DELETE",
+            params={},
+            data=b"",
+            form={"bucket_id": node_id, "filename": filename},
+        )
+        storage_response.raise_for_status()
+        graph_response = _proxy(
+            dispatch_graph_request,
+            "neo4j_delete_file",
+            method="DELETE",
+            params={},
+            data=b"",
+            json_payload={
+                "properties": {"flow_id": node_id, "filename": filename}
+            },
+        )
+        graph_response.raise_for_status()
 
     generated_artifact = {
         **artifact,
@@ -1140,7 +1234,7 @@ def _build_pipeline_codegen_payload(
                 include_samples=include_sample_data,
             ),
             "options": options,
-            "llm_config": _codegen_llm_config_from_payload(payload),
+            "llm_config": payload.get("llm_config"),
         },
         metadata,
     )
@@ -1287,6 +1381,8 @@ def _validate_chatbot_config_payload(
         return _json_error(400, "name is required")
     if not model:
         return _json_error(400, "model is required")
+    if not codegen_model:
+        return _json_error(400, "codegenModel is required")
     if not base_url:
         return _json_error(400, "baseUrl is required")
     now = _utc_now_iso()
@@ -1670,13 +1766,13 @@ def node_generate_script(node_id: str):
 
         codegen_payload = {
             "context": context,
+            "llm_config": payload.get("llm_config"),
             "options": {
                 "persist": False,
                 "repair_attempts": 7,
                 "include_sample_data": bool(payload.get("include_sample_data")),
                 "user_instruction": str(payload.get("user_instruction") or ""),
             },
-            "llm_config": _codegen_llm_config_from_payload(payload),
         }
         codegen_response = _post_codegen_request(codegen_payload)
         artifact = codegen_response.get("generated_artifact")
@@ -1792,11 +1888,24 @@ def pipeline_external_runtime_prompt():
         return _json_error(502, "external AI runtime prompt preparation failed", str(exc))
 
 
-@app.route("/api/pipeline/generation-runs", methods=["POST", "OPTIONS"])
+@app.route("/api/pipeline/generation-runs", methods=["GET", "POST", "OPTIONS"])
 @require_auth
 def pipeline_generation_runs():
     if request.method == "OPTIONS":
         return _preflight_response()
+    if request.method == "GET":
+        try:
+            limit = min(max(int(request.args.get("limit") or 20), 1), 100)
+        except (TypeError, ValueError):
+            limit = 20
+        return jsonify(
+            {
+                "runs": [
+                    _codegen_run_summary(record)
+                    for record in CODEGEN_RUN_STORE.list(limit=limit)
+                ]
+            }
+        ), 200
     payload = _request_json()
     try:
         graph_response = _proxy(
@@ -1816,13 +1925,20 @@ def pipeline_generation_runs():
         run_id = str(codegen_run.get("run_id") or "").strip()
         if not run_id:
             return _json_error(502, "codegen service did not return a run_id")
-        PIPELINE_GENERATION_RUNS[run_id] = {
+        now = _utc_now_iso()
+        CODEGEN_RUN_STORE.put({
+            "run_id": run_id,
+            "status": str(codegen_run.get("status") or "queued"),
             "graph": graph,
             "metadata": metadata,
+            "context_fingerprint": _codegen_context_fingerprint(
+                codegen_payload["context"]
+            ),
+            "remote_job": _codegen_job_snapshot(codegen_run),
             "persisted": False,
-            "created_at": _utc_now_iso(),
-            "updated_at": _utc_now_iso(),
-        }
+            "created_at": now,
+            "updated_at": now,
+        })
         return jsonify(
             {
                 **codegen_run,
@@ -1842,7 +1958,7 @@ def pipeline_generation_run_resume(run_id: str):
         return _preflight_response()
     payload = _request_json()
     try:
-        local_run = PIPELINE_GENERATION_RUNS.get(run_id)
+        local_run = CODEGEN_RUN_STORE.get(run_id)
         if local_run is None:
             return _json_error(
                 404,
@@ -1866,15 +1982,14 @@ def pipeline_generation_run_resume(run_id: str):
                 + repair_instruction
             )
         resume_payload = {
+            "llm_config": payload.get("llm_config"),
             "flow_id": str(payload.get("flow_id") or "").strip() or None,
             "repair_attempts": payload.get("repair_attempts", 7),
             "user_instruction": combined_instruction,
         }
-        resume_llm_config = _codegen_llm_config_from_payload(payload)
         codegen_run = _post_codegen_pipeline_run_resume_request(
             run_id,
             resume_payload,
-            llm_api_key=str(resume_llm_config.get("api_key") or ""),
         )
         new_run_id = str(codegen_run.get("run_id") or "").strip()
         if not new_run_id:
@@ -1891,14 +2006,19 @@ def pipeline_generation_run_resume(run_id: str):
             options["repair_attempts"] = 7
         metadata["options"] = options
         metadata["generation_mode"] = "repair"
-        PIPELINE_GENERATION_RUNS[new_run_id] = {
+        now = _utc_now_iso()
+        CODEGEN_RUN_STORE.put({
+            "run_id": new_run_id,
+            "status": str(codegen_run.get("status") or "queued"),
             "graph": local_run["graph"],
             "metadata": metadata,
+            "context_fingerprint": local_run.get("context_fingerprint", ""),
+            "remote_job": _codegen_job_snapshot(codegen_run),
             "persisted": False,
             "resumed_from_run_id": run_id,
-            "created_at": _utc_now_iso(),
-            "updated_at": _utc_now_iso(),
-        }
+            "created_at": now,
+            "updated_at": now,
+        })
         return jsonify(
             {
                 **codegen_run,
@@ -1922,10 +2042,13 @@ def pipeline_generation_run(run_id: str):
     try:
         if request.method == "DELETE":
             codegen_run = _cancel_codegen_pipeline_run_request(run_id)
-            local_run = PIPELINE_GENERATION_RUNS.get(run_id)
+            local_run = CODEGEN_RUN_STORE.get(run_id)
             if local_run is not None:
+                local_run["status"] = "cancelled"
                 local_run["updated_at"] = _utc_now_iso()
                 local_run["cancelled"] = True
+                local_run["remote_job"] = _codegen_job_snapshot(codegen_run)
+                CODEGEN_RUN_STORE.put(local_run)
             return jsonify(
                 {
                     **codegen_run,
@@ -1940,7 +2063,12 @@ def pipeline_generation_run(run_id: str):
             ), 200
 
         codegen_run = _get_codegen_pipeline_run_request(run_id)
-        local_run = PIPELINE_GENERATION_RUNS.get(run_id)
+        local_run = CODEGEN_RUN_STORE.get(run_id)
+        if local_run is not None:
+            local_run["status"] = str(codegen_run.get("status") or "running")
+            local_run["updated_at"] = _utc_now_iso()
+            local_run["remote_job"] = _codegen_job_snapshot(codegen_run)
+            CODEGEN_RUN_STORE.put(local_run)
         response_payload = {
             **codegen_run,
             "mode": (local_run or {}).get("metadata", {}).get("generation_mode", ""),
@@ -1980,8 +2108,56 @@ def pipeline_generation_run(run_id: str):
             if persistence_status == "not_persisted":
                 response_payload["persistence"][
                     "reason"
-                ] = "pipeline script generation failed validation"
+                ] = local_run.get("finalization_error") or (
+                    "pipeline script generation failed validation"
+                )
             return jsonify(response_payload), 200
+
+        if status == "valid":
+            include_samples = (
+                local_run.get("metadata", {})
+                .get("options", {})
+                .get("include_sample_data", True)
+                is not False
+            )
+            current_graph_response = _proxy(
+                dispatch_graph_request,
+                "neo4j_get_graph",
+                method="GET",
+                data=b"",
+            )
+            current_graph_response.raise_for_status()
+            current_graph = _upstream_json(current_graph_response)
+            current_graph = current_graph if isinstance(current_graph, dict) else {}
+            current_context = _build_pipeline_codegen_context(
+                current_graph,
+                include_samples=include_samples,
+            )
+            expected_fingerprint = str(local_run.get("context_fingerprint") or "")
+            if (
+                expected_fingerprint
+                and _codegen_context_fingerprint(current_context)
+                != expected_fingerprint
+            ):
+                reason = (
+                    "The pipeline changed while code generation was running. "
+                    "Generated artifacts were not attached; start a new run for "
+                    "the current graph."
+                )
+                local_run["persisted"] = False
+                local_run["finalization_error"] = reason
+                local_run["persisted_response"] = {
+                    "status": "not_persisted",
+                    "reason": reason,
+                }
+                local_run["updated_at"] = _utc_now_iso()
+                CODEGEN_RUN_STORE.put(local_run)
+                response_payload["persistence"] = {
+                    "status": "not_persisted",
+                    "reason": reason,
+                    "result": local_run["persisted_response"],
+                }
+                return jsonify(response_payload), 200
 
         is_valid, finalized = _finalize_pipeline_codegen_response(
             result,
@@ -2003,6 +2179,7 @@ def pipeline_generation_run(run_id: str):
                 "reason": "pipeline script generation failed validation",
                 "result": finalized,
             }
+        CODEGEN_RUN_STORE.put(local_run)
         return jsonify(response_payload), 200
     except Exception as exc:
         return _json_error(502, "pipeline generation run lookup failed", str(exc))

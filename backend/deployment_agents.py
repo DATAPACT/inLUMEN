@@ -1,10 +1,8 @@
 import hashlib
-import inspect
 import json
 import re
 from typing import Any, Optional
 
-from autogen_core.models import SystemMessage, UserMessage
 from pydantic import BaseModel, Field
 
 from attachment_validation import attachment_input_errors
@@ -22,7 +20,6 @@ from deployment_artifacts import (
     validate_dockerfile_artifacts,
 )
 from generators.registry import GeneratorRegistry
-from llm_config import LLMConfig, resolve_llm_config, select_model_client
 from minio_gateway import read_minio_object, read_minio_object_bytes
 
 CODEGEN_GENERATOR = "inlumen-codegen-service"
@@ -57,13 +54,12 @@ class ListDockerfilesResponse(BaseModel):
 async def generate_dockerfiles_with_agent(
     filenames: list[str],
     ids: list[str],
-    llm_config: Optional[LLMConfig] = None,
     pipeline_graph: Optional[dict] = None,
     file_refs: Optional[list[dict]] = None,
     *,
     require_attached_runtime: bool = False,
 ) -> ListDockerfilesResponse:
-    """Generate deterministic Dockerfiles where registered, using the LLM otherwise."""
+    """Derive deployment Dockerfiles deterministically from reviewed runtime packages."""
     if file_refs is None:
         if len(filenames) != len(ids):
             raise ValueError("filenames and ids must have the same length.")
@@ -112,7 +108,6 @@ async def generate_dockerfiles_with_agent(
     deterministic_bundles = []
     codegen_runtime_artifacts: list[dict[str, Any]] = []
     codegen_dockerfiles: list[dict[str, Any]] = []
-    generic_steps = []
     artifact_errors: list[str] = []
     for step in steps:
         if _is_managed_adapter(step):
@@ -151,17 +146,13 @@ async def generate_dockerfiles_with_agent(
             codegen_dockerfiles.append(dockerfile)
             continue
 
-        if require_attached_runtime:
-            artifact_errors.append(
-                f"Node {step.get('flow_id') or '<unknown>'} cannot be exported "
-                "to validated orchestration until it has an attached main.py or "
-                "a generated runtime bundle."
-            )
-            continue
-
         generator = generator_registry.generator_for_step(step)
         if generator is None:
-            generic_steps.append(step)
+            artifact_errors.append(
+                f"Node {step.get('flow_id') or '<unknown>'} cannot be exported "
+                "until it has an attached main.py, a generated runtime bundle, "
+                "or a registered deterministic runtime generator."
+            )
             continue
         deterministic_bundles.append(generator.generate(step, pipeline_graph))
 
@@ -175,58 +166,12 @@ async def generate_dockerfiles_with_agent(
         bundle.dockerfile_artifact()
         for bundle in deterministic_bundles
     ]
-    generic_dockerfiles: list[dict[str, Any]] = []
-    validation_errors: list[str] = []
-    if generic_steps:
-        resolved_config = llm_config or resolve_llm_config()
-        generic_step_ids = {str(step["flow_id"]) for step in generic_steps}
-        generic_file_refs = [
-            file_ref
-            for file_ref in file_refs
-            if str(file_ref.get("step_id") or "") in generic_step_ids
-        ]
-        file_contents = await _fetch_dockerfile_prompt_files(generic_file_refs)
-        for attempt in range(2):
-            try:
-                raw_payload = await _generate_dockerfiles_payload_with_llm(
-                    steps=generic_steps,
-                    pipeline_graph=pipeline_graph or {},
-                    file_contents=file_contents,
-                    llm_config=resolved_config,
-                    validation_errors=validation_errors,
-                )
-                normalized = _normalize_llm_dockerfile_payload(
-                    raw_payload,
-                    generic_steps,
-                )
-                generic_dockerfiles = normalized["dockerfiles"]
-                validate_dockerfile_artifacts(
-                    generic_dockerfiles,
-                    [step["flow_id"] for step in generic_steps],
-                    generic_steps,
-                )
-                break
-            except DeploymentArtifactValidationError as exc:
-                validation_errors = exc.errors
-            except ValueError as exc:
-                validation_errors = [str(exc)]
-            if validation_errors:
-                print(
-                    "[deployment_agents.py] LLM Dockerfile guardrail validation failed "
-                    f"on attempt {attempt + 1}: {validation_errors}"
-                )
-        else:
-            raise DeploymentArtifactValidationError(
-                "Dockerfile guardrail validation failed",
-                validation_errors,
-            )
-
     step_order = {
         str(step["flow_id"]): index
         for index, step in enumerate(steps)
     }
     dockerfiles = sorted(
-        [*codegen_dockerfiles, *deterministic_dockerfiles, *generic_dockerfiles],
+        [*codegen_dockerfiles, *deterministic_dockerfiles],
         key=lambda item: step_order.get(str(item.get("flow_id") or ""), len(steps)),
     )
     validate_dockerfile_artifacts(
@@ -261,9 +206,8 @@ async def generate_dockerfiles_with_agent(
         "guardrails": {
             "valid": True,
             "checks": [
-                "persisted codegen runtime artifacts were reused before Dockerfile fallback",
-                "registered node generators bypassed the LLM",
-                "generic nodes used the existing guarded LLM path",
+                "persisted runtime artifacts were reused before deployment packaging",
+                "all build definitions were derived deterministically without an LLM",
                 "one validated Dockerfile was produced per executable pipeline step",
                 "root pipeline inputs were packaged separately from generated runtime artifacts",
             ],
@@ -523,7 +467,7 @@ def _codegen_artifact_from_persisted_files(step: dict[str, Any]) -> dict[str, An
     has_runtime_files = all(
         required in filenames
         for required in ("main.py", "requirements.txt", "node-manifest.json")
-    ) and any(name.startswith("Dockerfile.") for name in filenames)
+    )
     if not has_runtime_files:
         return None
     return {
@@ -546,6 +490,46 @@ def _is_managed_adapter(step: dict[str, Any]) -> bool:
         "source",
         "destination",
     }
+
+
+def _deterministic_python_dockerfile(
+    flow_id: str,
+    filenames: list[str],
+    *,
+    base_image: str = "python:3.11-slim",
+) -> tuple[str, str]:
+    """Create the transient build definition owned by the deployment exporter."""
+    runtime_filenames = [
+        str(filename).strip()
+        for filename in filenames
+        if str(filename).strip()
+        and not str(filename).strip().startswith("Dockerfile.")
+    ]
+    copy_lines = [
+        f"COPY {json.dumps([filename, '/app/' + filename])}"
+        for filename in runtime_filenames
+    ]
+    install_lines = (
+        [
+            f"COPY --from=ghcr.io/astral-sh/uv:{UV_PINNED_VERSION} /uv /uvx /bin/",
+            "RUN --mount=type=cache,target=/root/.cache/uv uv pip install --system -r requirements.txt",
+        ]
+        if "requirements.txt" in runtime_filenames
+        else []
+    )
+    content = "\n".join(
+        [
+            "# syntax=docker/dockerfile:1.7",
+            f"FROM {base_image or 'python:3.11-slim'}",
+            "ENV PYTHONUNBUFFERED=1",
+            "WORKDIR /app",
+            *copy_lines,
+            *install_lines,
+            'CMD ["python", "/app/main.py"]',
+            "",
+        ]
+    )
+    return f"Dockerfile.{_sanitize_fragment(flow_id, 'step')}", content
 
 
 def _managed_adapter_main_source(adapter_spec: dict[str, Any]) -> str:
@@ -667,18 +651,6 @@ def _managed_adapter_runtime(
         "adapter": adapter_spec,
         "source": "inLumen managed boundary adapter",
     }
-    dockerfile_filename = f"Dockerfile.{_sanitize_fragment(flow_id, 'step')}"
-    dockerfile_content = "\n".join(
-        [
-            "# syntax=docker/dockerfile:1.7",
-            "FROM python:3.11-slim",
-            "ENV PYTHONUNBUFFERED=1",
-            "WORKDIR /app",
-            'COPY ["main.py", "/app/main.py"]',
-            'COPY ["node-manifest.json", "/app/node-manifest.json"]',
-            'CMD ["python", "/app/main.py"]',
-        ]
-    ) + "\n"
     runtime_files = [
         {
             "filename": "main.py",
@@ -695,12 +667,11 @@ def _managed_adapter_runtime(
             "content": json.dumps(node_manifest, indent=2) + "\n",
             "content_type": "application/json",
         },
-        {
-            "filename": dockerfile_filename,
-            "content": dockerfile_content,
-            "content_type": "text/x-dockerfile",
-        },
     ]
+    dockerfile_filename, dockerfile_content = _deterministic_python_dockerfile(
+        flow_id,
+        [item["filename"] for item in runtime_files],
+    )
     configuration_hash = hashlib.sha256(
         json.dumps(
             {
@@ -837,29 +808,9 @@ async def _read_attached_python_runtime(
             "content_type": "application/json",
         }
     )
-    dockerfile_filename = f"Dockerfile.{_sanitize_fragment(flow_id, 'step')}"
-    copy_lines = [
-        f"COPY {json.dumps([item['filename'], '/app/' + item['filename']])}"
-        for item in runtime_files
-    ]
-    dockerfile_content = "\n".join(
-        [
-            "# syntax=docker/dockerfile:1.7",
-            "FROM python:3.11-slim",
-            f"COPY --from=ghcr.io/astral-sh/uv:{UV_PINNED_VERSION} /uv /uvx /bin/",
-            "ENV PYTHONUNBUFFERED=1",
-            "WORKDIR /app",
-            *copy_lines,
-            "RUN --mount=type=cache,target=/root/.cache/uv uv pip install --system -r requirements.txt",
-            'CMD ["python", "/app/main.py"]',
-        ]
-    ) + "\n"
-    runtime_files.append(
-        {
-            "filename": dockerfile_filename,
-            "content": dockerfile_content,
-            "content_type": "text/x-dockerfile",
-        }
+    dockerfile_filename, dockerfile_content = _deterministic_python_dockerfile(
+        flow_id,
+        [item["filename"] for item in runtime_files],
     )
     runtime_artifact = {
         "flow_id": flow_id,
@@ -944,8 +895,6 @@ def _codegen_artifact_ready_errors(step: dict[str, Any], artifact: dict[str, Any
     for required in ("main.py", "requirements.txt", "node-manifest.json"):
         if required not in filenames:
             errors.append(f"Node {flow_id} codegen runtime artifact is missing {required}.")
-    if not any(name.startswith("Dockerfile.") for name in filenames):
-        errors.append(f"Node {flow_id} codegen runtime artifact is missing Dockerfile.{flow_id}.")
     return errors
 
 
@@ -1022,15 +971,10 @@ async def _read_persisted_codegen_artifact(
             }
         )
 
-    dockerfile = next(
-        (item for item in retrieved_files if item["filename"].startswith("Dockerfile.")),
-        None,
-    )
-    if dockerfile is None:
-        raise DeploymentArtifactValidationError(
-            "Persisted codegen runtime artifact validation failed",
-            [f"Node {flow_id} codegen runtime artifact did not include a Dockerfile."],
-        )
+    retrieved_files = [
+        item for item in retrieved_files
+        if not item["filename"].startswith("Dockerfile.")
+    ]
 
     node_manifest: dict[str, Any] = {}
     manifest_file = next(
@@ -1064,11 +1008,18 @@ async def _read_persisted_codegen_artifact(
     if not isinstance(entrypoint, list) or not all(isinstance(item, str) for item in entrypoint):
         entrypoint = ["python", "/app/main.py"]
 
-    context_files = [
-        item["filename"]
-        for item in retrieved_files
-        if not item["filename"].startswith("Dockerfile.")
-    ]
+    context_files = [item["filename"] for item in retrieved_files]
+    runtime_config = (
+        node_manifest.get("runtime")
+        if isinstance(node_manifest.get("runtime"), dict)
+        else {}
+    )
+    base_image = str(runtime_config.get("base_image") or "python:3.11-slim").strip()
+    dockerfile_filename, dockerfile_content = _deterministic_python_dockerfile(
+        flow_id,
+        context_files,
+        base_image=base_image,
+    )
     image_reference = _codegen_image_reference(flow_id, artifact)
     configuration_hash = str(artifact.get("configuration_hash") or "").strip()
     runtime_artifact = {
@@ -1092,8 +1043,8 @@ async def _read_persisted_codegen_artifact(
         "validation_report": validation_report,
     }
     dockerfile_artifact = {
-        "dockerfile_filename": dockerfile["filename"],
-        "content": dockerfile["content"],
+        "dockerfile_filename": dockerfile_filename,
+        "content": dockerfile_content,
         "flow_id": flow_id,
         "image": image_reference,
         "command": entrypoint,
@@ -1104,218 +1055,6 @@ async def _read_persisted_codegen_artifact(
         "data_contract": runtime_artifact["data_contract"],
     }
     return runtime_artifact, dockerfile_artifact
-
-
-async def _fetch_dockerfile_prompt_files(file_refs: Optional[list[dict]]) -> list[dict[str, str]]:
-    retrieved: list[dict[str, str]] = []
-    for entry in file_refs or []:
-        bucket = str(entry.get("bucket") or "").lower()
-        filename = str(entry.get("filename") or "")
-        step_id = str(entry.get("step_id") or "")
-        read_bucket = str(entry.get("snapshot_bucket") or bucket).lower()
-        read_object = str(entry.get("snapshot_object") or filename)
-        if not bucket or not filename:
-            continue
-        try:
-            content_type = str(entry.get("content_type") or "")
-            if is_text_artifact(filename, content_type):
-                content = await read_minio_object(read_bucket, read_object)
-            else:
-                encoded = encode_artifact_bytes(
-                    await read_minio_object_bytes(read_bucket, read_object),
-                    filename=filename,
-                    content_type=content_type,
-                )
-                content = (
-                    f"[Binary input: filename={filename}, "
-                    f"content_type={encoded['content_type']}, "
-                    f"size_bytes={encoded['size_bytes']}, "
-                    f"sha256={encoded['sha256']}]"
-                )
-        except Exception as exc:
-            content = f"[ERROR: {exc}]"
-        retrieved.append(
-            {
-                "step_id": step_id,
-                "bucket": bucket,
-                "filename": filename,
-                "read_bucket": read_bucket,
-                "read_object": read_object,
-                "content": _truncate_for_prompt(content),
-            }
-        )
-    return retrieved
-
-
-def _truncate_for_prompt(content: str, max_chars: int = 12000) -> str:
-    if len(content) <= max_chars:
-        return content
-    omitted = len(content) - max_chars
-    return f"{content[:max_chars]}\n\n[TRUNCATED {omitted} CHARACTERS]"
-
-
-def _dockerfile_prompt_context(
-    steps: list[dict],
-    pipeline_graph: dict,
-    file_contents: list[dict[str, str]],
-) -> dict[str, Any]:
-    prompt_steps = []
-    for step in steps:
-        flow_id = str(step["flow_id"])
-        prompt_steps.append(
-            {
-                "flow_id": flow_id,
-                "expected_dockerfile_filename": f"Dockerfile.{_sanitize_fragment(flow_id, 'step')}",
-                "label": step.get("label", ""),
-                "description": step.get("description", ""),
-                "type": step.get("type", ""),
-                "content": step.get("content", ""),
-                "endpoint": step.get("endpoint", ""),
-                "database": step.get("database", ""),
-                "param": step.get("param", {}),
-                "files": step.get("files", []),
-            }
-        )
-    return {
-        "steps": prompt_steps,
-        "edges": pipeline_graph.get("edges", []) if isinstance(pipeline_graph, dict) else [],
-        "file_contents": file_contents,
-    }
-
-
-def _dockerfile_system_prompt() -> str:
-    return """You generate production-ready Dockerfiles for inLUMEN pipeline steps.
-Use natural-language understanding over each step label, description, parameters, attached filenames, and file contents.
-Return only one strict JSON object. Do not return markdown, explanations, or code fences."""
-
-
-def _dockerfile_user_prompt(context: dict[str, Any], validation_errors: list[str]) -> str:
-    repair = ""
-    if validation_errors:
-        repair = (
-            "\nThe previous JSON failed validation. Fix all of these issues in the new JSON:\n"
-            + json.dumps(validation_errors, indent=2)
-            + "\n"
-        )
-
-    return f"""Generate Dockerfile artifacts for every step in this context.
-
-Rules:
-- Return exactly this shape: {{"dockerfiles":[{{"dockerfile_filename":"Dockerfile.<step_id>","content":"...","flow_id":"<step_id>","image":"inlumen/<step-name>:latest","command":["..."],"files":["..."]}}],"guardrails":{{"valid":true,"checks":["LLM-generated Dockerfiles validated after generation"]}}}}
-- Generate exactly one Dockerfile per step, using each step's expected_dockerfile_filename.
-- Dockerfile content must start with FROM, include WORKDIR, copy/add attached files when present, and include CMD or ENTRYPOINT.
-- Infer the runtime and install commands from attached files and contents. For example, requirements.txt means install Python requirements, package.json means install npm dependencies, shell scripts need bash/chmod, and notebooks/scripts should use a compatible runtime.
-- Use JSON-array form for CMD/ENTRYPOINT where practical, and put the same array in the command field.
-- Keep the output plain JSON. The Dockerfile content string must not contain markdown fences.
-{repair}
-Context JSON:
-{json.dumps(context, indent=2)}
-"""
-
-
-async def _generate_dockerfiles_payload_with_llm(
-    *,
-    steps: list[dict],
-    pipeline_graph: dict,
-    file_contents: list[dict[str, str]],
-    llm_config: LLMConfig,
-    validation_errors: list[str],
-) -> dict[str, Any]:
-    model_client = select_model_client(llm_config, parallel_tool_calls=False)
-    context = _dockerfile_prompt_context(steps, pipeline_graph, file_contents)
-    create_kwargs: dict[str, Any] = {}
-
-    try:
-        result = await model_client.create(
-            [
-                SystemMessage(content=_dockerfile_system_prompt()),
-                UserMessage(content=_dockerfile_user_prompt(context, validation_errors), source="user"),
-            ],
-            **create_kwargs,
-        )
-    finally:
-        close = getattr(model_client, "close", None)
-        if close:
-            close_result = close()
-            if inspect.isawaitable(close_result):
-                await close_result
-
-    return _coerce_llm_json_payload(result.content)
-
-
-def _coerce_llm_json_payload(content: Any) -> dict[str, Any]:
-    if isinstance(content, ListDockerfilesResponse):
-        if hasattr(content, "model_dump"):
-            return content.model_dump()
-        return content.dict()
-    if isinstance(content, dict):
-        return content
-    if not isinstance(content, str):
-        raise ValueError(f"LLM returned unsupported Dockerfile payload type: {type(content).__name__}")
-
-    text = content.strip()
-    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, flags=re.DOTALL | re.IGNORECASE)
-    if fence:
-        text = fence.group(1).strip()
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"LLM returned invalid Dockerfile JSON: {exc}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("LLM Dockerfile JSON must be an object.")
-    return parsed
-
-
-def _normalize_llm_dockerfile_payload(payload: dict[str, Any], steps: list[dict]) -> dict[str, Any]:
-    dockerfiles = payload.get("dockerfiles")
-    if not isinstance(dockerfiles, list):
-        raise ValueError("LLM Dockerfile JSON must contain a dockerfiles array.")
-
-    step_by_id = {str(step["flow_id"]): step for step in steps}
-    normalized = []
-    for item in dockerfiles:
-        if hasattr(item, "model_dump"):
-            item = item.model_dump()
-        elif hasattr(item, "dict"):
-            item = item.dict()
-        if not isinstance(item, dict):
-            normalized.append(item)
-            continue
-
-        flow_id = str(item.get("flow_id") or item.get("step_id") or "").strip()
-        if not flow_id:
-            match = re.match(
-                r"^Dockerfile\.([A-Za-z0-9][A-Za-z0-9_.-]*)$",
-                str(item.get("dockerfile_filename") or ""),
-            )
-            flow_id = match.group(1) if match else ""
-        step = step_by_id.get(flow_id, {})
-        files = item.get("files")
-        if not isinstance(files, list):
-            files = [entry["filename"] for entry in step.get("files") or []]
-        normalized.append(
-            {
-                **item,
-                "flow_id": flow_id,
-                "dockerfile_filename": str(item.get("dockerfile_filename") or ""),
-                "content": str(item.get("content") or ""),
-                "image": str(item.get("image") or f"inlumen/{_argo_name(flow_id)}:latest"),
-                "command": item.get("command") if isinstance(item.get("command"), list) else [],
-                "files": [str(name) for name in files],
-            }
-        )
-
-    return {
-        "dockerfiles": normalized,
-        "guardrails": {
-            "valid": True,
-            "checks": [
-                "LLM generated Dockerfile content from pipeline context and attached files",
-                "one Dockerfile per pipeline step",
-                "Dockerfiles passed deterministic format guardrails after generation",
-            ],
-        },
-    }
 
 
 def _minio_codefetch_tool(params: Optional[dict] = None) -> dict:

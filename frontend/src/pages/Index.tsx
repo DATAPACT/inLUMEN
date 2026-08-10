@@ -183,12 +183,15 @@ type ChatApiResponse = {
   sync?: {
     status?: string;
     guardrail_passed?: boolean;
+    graph_safe_to_apply?: boolean;
+    rollback_applied?: boolean;
     expected_graph_change?: boolean;
     graph_changed?: boolean;
     message?: string;
     node_count?: number;
     edge_count?: number;
     updated_at?: string | null;
+    validation_errors?: string[];
   };
 };
 
@@ -514,11 +517,6 @@ const Index = () => {
       const responseText = data.assistant_message ?? "";
       setConversation(prev => [...prev, { role: 'assistant', content: responseText }]);
 
-      setCanvasSyncStatus({
-        state: 'syncing',
-        message: 'Applying agent graph changes to the canvas...',
-      });
-
       if (!flowCanvasRef.current) {
         setCanvasSyncStatus({
           state: 'warning',
@@ -527,6 +525,28 @@ const Index = () => {
         return;
       }
 
+      const sync = data.sync;
+      const guardrailPassed = sync?.guardrail_passed !== false;
+      const graphSafeToApply = sync?.graph_safe_to_apply ?? guardrailPassed;
+      const syncMessage = sync?.message || 'The agent graph could not be verified.';
+
+      if (!graphSafeToApply) {
+        setCanvasSyncStatus({
+          state: 'warning',
+          message: syncMessage,
+          updatedAt: sync?.updated_at ?? null,
+        });
+        toast.warning("Agent graph was not applied", {
+          description: syncMessage,
+        });
+        return;
+      }
+
+      setCanvasSyncStatus({
+        state: 'syncing',
+        message: 'Applying validated agent graph changes to the canvas...',
+      });
+
       const syncedGraph = await flowCanvasRef.current.syncFromBackend(data.graph);
       const visibleNodeCountBefore = Array.isArray(canvasGraph?.nodes)
         ? canvasGraph.nodes.length
@@ -534,24 +554,24 @@ const Index = () => {
       if (visibleNodeCountBefore === 0 && syncedGraph.nodes.length > 0) {
         setPipelineHighLevelPrompt(messageText.trim());
       }
-      scheduleActiveVersionSnapshot();
-      const sync = data.sync;
+      if (guardrailPassed) {
+        scheduleActiveVersionSnapshot();
+      }
       const nodeCount = sync?.node_count ?? syncedGraph.nodes.length;
       const edgeCount = sync?.edge_count ?? syncedGraph.edges.length;
       const updatedAt = sync?.updated_at ?? syncedGraph.updated_at;
-      const guardrailPassed = sync?.guardrail_passed !== false;
-      const syncMessage = sync?.message
+      const appliedSyncMessage = sync?.message
         || `Canvas sync needs attention: ${nodeCount} node${nodeCount === 1 ? '' : 's'} and ${edgeCount} edge${edgeCount === 1 ? '' : 's'}.`;
 
       setCanvasSyncStatus({
         state: guardrailPassed ? 'idle' : 'warning',
-        message: guardrailPassed ? '' : syncMessage,
+        message: guardrailPassed ? '' : appliedSyncMessage,
         updatedAt,
       });
 
       if (!guardrailPassed) {
         toast.warning("Canvas sync guardrail", {
-          description: syncMessage,
+          description: appliedSyncMessage,
         });
       }
     } catch (error) {
@@ -1277,7 +1297,7 @@ const Index = () => {
                 LLM configuration
               </div>
               <p className="mb-3 text-xs text-muted-foreground">
-                Used by Pipeline Chat and Generate Deployment Artifacts.
+                The design model powers Pipeline Chat; the code model generates runtime code.
               </p>
               <div className="mb-3 rounded-md bg-background/70 p-3 text-xs text-muted-foreground space-y-1">
                 <div>

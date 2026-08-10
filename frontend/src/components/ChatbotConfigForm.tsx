@@ -43,7 +43,7 @@ const formSchema = z.object({
   name: z.string().min(1, "Configuration name is required"),
   provider: z.enum(providerValues),
   model: z.string().min(1, "Model name is required"),
-  codegenModel: z.string().optional(),
+  codegenModel: z.string().min(1, "Code generation model is required"),
   baseUrl: z
     .string()
     .min(1, "Base URL is required")
@@ -72,7 +72,7 @@ export function ChatbotConfigForm({
       name: initialConfig?.name || "New Configuration",
       provider: initialConfig?.provider || defaultConfig.provider,
       model: initialConfig?.model || defaultConfig.model,
-      codegenModel: initialConfig?.codegenModel || "",
+      codegenModel: initialConfig?.codegenModel || defaultConfig.model,
       baseUrl: initialConfig?.baseUrl || defaultConfig.baseUrl,
       apiKey: initialConfig?.apiKey || "",
     },
@@ -89,7 +89,7 @@ export function ChatbotConfigForm({
       name: nextConfig.name,
       provider: nextConfig.provider,
       model: nextConfig.model,
-      codegenModel: nextConfig.codegenModel || "",
+      codegenModel: nextConfig.codegenModel || nextConfig.model,
       baseUrl: nextConfig.baseUrl,
       apiKey: nextConfig.apiKey || "",
     });
@@ -115,7 +115,7 @@ export function ChatbotConfigForm({
         name: values.name,
         provider: values.provider,
         model: values.model,
-        codegenModel: values.codegenModel?.trim() || "",
+        codegenModel: values.codegenModel.trim(),
         baseUrl: values.baseUrl,
         apiKey: values.apiKey?.trim() || "",
       };
@@ -233,10 +233,11 @@ export function ChatbotConfigForm({
                 <FormItem>
                   <FormLabel>Code Generation Model</FormLabel>
                   <FormControl>
-                    <Input placeholder="deepseek-v4-pro" {...field} />
+                    <Input placeholder="openai/gpt-5.2-codex" {...field} />
                   </FormControl>
                   <p className="text-xs text-muted-foreground">
-                    Used only for coding; it reuses this configuration&apos;s provider, base URL, and API key.
+                    Used for node and pipeline code generation. It shares this
+                    configuration&apos;s provider, base URL, and API key.
                   </p>
                   <FormMessage />
                 </FormItem>
