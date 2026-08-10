@@ -91,10 +91,23 @@ class DeploymentInputContractValidationTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        (root / "run-spec.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "inlumen.run-spec@1",
+                    "runtime": {"package_manager": "uv"},
+                    "node_order": ["1"],
+                    "nodes": [{"id": "1"}],
+                    "connections": [],
+                }
+            ),
+            encoding="utf-8",
+        )
         (root / "bundle-manifest.json").write_text(
             json.dumps(
                 {
                     "schema_version": "inlumen.deployment-bundle@1",
+                    "run_spec": "run-spec.json",
                     "targets": {"argo": False, "dagster": False},
                     "nodes": [
                         {
@@ -107,6 +120,24 @@ class DeploymentInputContractValidationTest(unittest.TestCase):
                 }
             ),
             encoding="utf-8",
+        )
+
+    def test_validation_rejects_run_spec_node_drift(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_bundle(root, kind="binary")
+            run_spec_path = root / "run-spec.json"
+            run_spec = json.loads(run_spec_path.read_text(encoding="utf-8"))
+            run_spec["nodes"] = [{"id": "other"}]
+            run_spec_path.write_text(json.dumps(run_spec), encoding="utf-8")
+            report = validate_deployment_bundle(
+                root,
+                targets={"argo": False, "dagster": False},
+            )
+
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any("node ids do not match" in error for error in report["errors"])
         )
 
     def test_validation_rejects_exported_kind_mismatch(self):

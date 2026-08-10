@@ -943,28 +943,46 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         .map((c) => c.id);
       if (removedEdgeIds.length > 0) {
         pushHistorySnapshot();
-        setEdges((eds) => {
-          const removedEdges = eds.filter((e) => removedEdgeIds.includes(e.id));
-          removedEdges.forEach((edge) => {
+        const removedEdges = edges.filter((edge) => removedEdgeIds.includes(edge.id));
+        setEdges((currentEdges) => applyEdgeChanges(changes, currentEdges));
+        markLocalWrite(5000);
+        void Promise.all(
+          removedEdges.map(async (edge) => {
             const sourceNode = nodes.find((n) => n.id === edge.source);
             const targetNode = nodes.find((n) => n.id === edge.target);
             if (!sourceNode || !targetNode) {
-              console.warn(
-                "[FlowCanvas.tsx] Could not find source/target nodes for edge removal:",
-                edge.id
-              );
-              return;
+              throw new Error(`Could not resolve the endpoints for connection ${edge.id}.`);
             }
-            markLocalWrite(800);
-            deleteEdgeFromBackend(sourceNode, targetNode, edge);
+            await deleteEdgeFromBackend(sourceNode, targetNode, edge);
+            onRemoveEdge?.(edge.id);
+          }),
+        ).then(() => {
+          markLocalWrite(1000);
+        }).catch(async (error) => {
+          console.error("[FlowCanvas.tsx] Connection deletion failed:", error);
+          toast.error("Could not remove connection", {
+            description: error instanceof Error ? error.message : "The backend did not accept the deletion.",
           });
-          return applyEdgeChanges(changes, eds);
+          try {
+            await fetchGraphAndApply();
+          } catch (syncError) {
+            scheduleSyncRetry("Connection deletion recovery failed", syncError);
+          }
         });
         return;
       }
       setEdges((eds) => applyEdgeChanges(changes, eds));
     },
-    [nodes, markLocalWrite, onCanvasEdited, pushHistorySnapshot]
+    [
+      edges,
+      fetchGraphAndApply,
+      markLocalWrite,
+      nodes,
+      onCanvasEdited,
+      onRemoveEdge,
+      pushHistorySnapshot,
+      scheduleSyncRetry,
+    ]
   );
 
   const onConnect = useCallback(
@@ -1573,14 +1591,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
               <div className="grid gap-1 text-muted-foreground">
                 <p><code className="text-foreground">main.py</code> — the node script</p>
                 <p><code className="text-foreground">requirements.txt</code> — only when packages are needed</p>
-                <p><span className="text-foreground">Input files</span> — upload them to the first node that reads them</p>
               </div>
               <p className="text-xs text-muted-foreground">
                 That is all. inLUMEN builds the Dagster setup and passes files
                 between connected nodes automatically.
               </p>
               <p className="text-xs text-muted-foreground">
-                To upload: select a node, open Inspector, and choose Upload Files.
+                To attach generated code: select a node, open Inspector, and use Runtime Package. Actual input files belong in the Run tab; Test Fixtures are only for repeatable design-time tests.
               </p>
             </div>
 

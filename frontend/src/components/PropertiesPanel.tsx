@@ -877,12 +877,12 @@ export function PropertiesPanel({
         className="w-full"
       >
         <Upload className="mr-2 h-4 w-4" />
-        Upload {role === "code" ? "Code" : "Data"} Files
+        Upload {role === "code" ? "Runtime Package" : "Test Fixture"} Files
       </Button>
 
       {indexedFiles.length === 0 ? (
         <p className="mt-3 text-center text-xs text-muted-foreground">
-          No {role === "code" ? "implementation" : "data"} files attached.
+          No {role === "code" ? "runtime package" : "test fixture"} files attached.
         </p>
       ) : (
         <div className="mt-3 space-y-2">
@@ -1330,8 +1330,8 @@ export function PropertiesPanel({
             {canGenerateScript && (
               <InspectorSection
                 id="inspector-implementation"
-                title="Implementation"
-                description="Runtime technology is independent of the Task template and graph kind."
+                title="Runtime Package"
+                description="Task code runs from this package. For Python, attach main.py and requirements.txt (not requirements.py). Source and Destination components use inLumen-managed adapters."
                 status={sectionStatus("implementation")}
               >
                 <div className="space-y-2">
@@ -1421,7 +1421,7 @@ export function PropertiesPanel({
                   <div>
                     <Label className="text-sm">Code</Label>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      Generate code or attach files from an upload, Git repository, or container workflow.
+                      Generate code or attach the entrypoint and dependency files used to execute this node.
                     </p>
                   </div>
                   <Button
@@ -1519,8 +1519,8 @@ export function PropertiesPanel({
             )}
 
             <InspectorSection
-              title="Sample Data"
-              description="Uploaded sample files support design-time inspection and code generation; they are not pipeline inputs."
+              title="Test Fixtures"
+              description="Persisted fixtures support inspection, code generation, and repeatable tests. Supply actual input files from the Run tab; those are not attached to the node."
             >
               {canManageFiles && renderFileArea("data", indexedDataFiles, dataFileInputRef)}
             </InspectorSection>

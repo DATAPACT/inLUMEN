@@ -5,6 +5,7 @@ import mimetypes
 import os
 import re
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -186,6 +187,37 @@ def _read_validation_bundle_files(bundle_root: Path) -> list[dict]:
                 "flow_id": "",
                 **encoded,
                 "role": "runtime",
+                **(
+                    {"encoding": "base64"}
+                    if encoded.get("content_encoding") == "base64"
+                    else {}
+                ),
+            }
+        )
+    return files
+
+
+def _read_run_output_files(bundle_root: Path) -> list[dict]:
+    output_root = bundle_root / "outputs"
+    if not output_root.is_dir():
+        return []
+    files: list[dict] = []
+    for path in sorted(item for item in output_root.rglob("*") if item.is_file()):
+        if path.name == ".gitkeep":
+            continue
+        relative = path.relative_to(bundle_root).as_posix()
+        encoded = encode_artifact_bytes(
+            path.read_bytes(),
+            filename=path.name,
+            content_type="application/json" if path.suffix == ".json" else "",
+        )
+        files.append(
+            {
+                "path": relative,
+                "filename": path.name,
+                "flow_id": "",
+                **encoded,
+                "role": "run-output",
                 **(
                     {"encoding": "base64"}
                     if encoded.get("content_encoding") == "base64"
@@ -714,6 +746,7 @@ def agentic_generate_deployment_bundle():
 
         validation_report = None
         repair_report = None
+        run_record = None
         if validate_bundle:
             bundle_dir = _write_validation_bundle(bundle["files"])
             service_report = _post_deployment_validation_request(
@@ -778,11 +811,53 @@ def agentic_generate_deployment_bundle():
                     }
                 )
 
+            execution_requested = (
+                not fast_validation
+                and bool(bundle["manifest"]["targets"].get("dagster"))
+                and bool(validation_options.get("materialize", True))
+            )
+            if execution_requested:
+                run_outputs = _read_run_output_files(bundle_dir)
+                bundle["files"].extend(run_outputs)
+                run_record = {
+                    "schema_version": "inlumen.run-result@1",
+                    "run_id": uuid.uuid4().hex,
+                    "status": "succeeded",
+                    "engine": "dagster",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "run_spec": "run-spec.json",
+                    "package_manager": (
+                        ((validation_report.get("dagster") or {}).get("package_manager"))
+                        if isinstance(validation_report, dict)
+                        else None
+                    ) or "uv",
+                    "outputs": [
+                        {
+                            "path": output["path"],
+                            "filename": output["filename"],
+                            "size_bytes": output.get("size_bytes"),
+                            "sha256": output.get("sha256"),
+                        }
+                        for output in run_outputs
+                    ],
+                }
+                bundle["files"].append(
+                    {
+                        "path": f"runs/{run_record['run_id']}/run-result.json",
+                        "filename": "run-result.json",
+                        "flow_id": "",
+                        "content": json.dumps(run_record, indent=2) + "\n",
+                        "content_type": "application/json",
+                        "role": "run-result",
+                    }
+                )
+
         return jsonify(
             {
                 **bundle,
                 "validation_report": validation_report,
                 "repair_report": repair_report,
+                "run": run_record,
             }
         ), 200
     except DeploymentArtifactValidationError as exc:

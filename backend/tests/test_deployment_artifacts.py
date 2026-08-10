@@ -69,7 +69,7 @@ class DeploymentArtifactsTest(unittest.TestCase):
                 {"flow_id": "3", "files": []},
             ],
         )
-        self.assertIn("RUN pip install --no-cache-dir -r requirements.txt", dockerfiles[0]["content"])
+        self.assertIn("uv pip install --system -r requirements.txt", dockerfiles[0]["content"])
         self.assertIn('RUN find /app -type f -name "*.sh"', dockerfiles[0]["content"])
 
     def test_preserves_structural_metadata_and_explicit_ports(self):

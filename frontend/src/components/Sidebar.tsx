@@ -24,7 +24,9 @@ import {
   Hash,
   Paperclip,
   Download,
-  ShieldCheck
+  ShieldCheck,
+  Upload,
+  X,
 } from 'lucide-react';
 import {
   createNodeDataFromDefinition,
@@ -82,6 +84,9 @@ type DockerfileGenerationResponse = {
   }>;
   runtime_artifacts?: Array<{
     flow_id?: string;
+    data_contract?: {
+      inputs?: Array<Record<string, unknown>>;
+    };
     files?: Array<{
       filename?: string;
       content?: string;
@@ -90,13 +95,18 @@ type DockerfileGenerationResponse = {
   }>;
   deployment_files?: DeploymentBundleFile[];
   input_files?: DeploymentBundleFile[];
+  root_flow_ids?: string[];
 };
 
 type DeploymentValidationReport = {
   ok?: boolean;
   errors?: string[];
   argo?: { ok?: boolean; errors?: string[] } | null;
-  dagster?: { ok?: boolean; errors?: string[] } | null;
+  dagster?: {
+    ok?: boolean;
+    errors?: string[];
+    steps?: Array<{ ok?: boolean; output?: string }>;
+  } | null;
 };
 
 type DeploymentRepairReport = {
@@ -110,6 +120,16 @@ type DeploymentBundleGenerationResponse = {
   manifest?: Record<string, unknown>;
   validation_report?: DeploymentValidationReport | null;
   repair_report?: DeploymentRepairReport | null;
+  run?: PipelineRunResult | null;
+};
+
+type PipelineRunResult = {
+  run_id?: string;
+  status?: string;
+  engine?: string;
+  created_at?: string;
+  package_manager?: string;
+  outputs?: Array<{ path?: string; filename?: string; size_bytes?: number }>;
 };
 
 type DeploymentBundleFile = {
@@ -136,12 +156,153 @@ type PipelineOverviewResponse = {
 const errorToMessage = (error: unknown, fallback: string) =>
   error instanceof Error ? error.message : fallback;
 
+const deploymentFailureMessage = (
+  payload: Record<string, unknown>,
+  fallback: string,
+) => {
+  const report = payload.validation_report as DeploymentValidationReport | undefined;
+  const messages = [
+    ...(Array.isArray(report?.errors) ? report.errors : []),
+    ...(Array.isArray(report?.dagster?.errors) ? report.dagster.errors : []),
+    ...(Array.isArray(report?.argo?.errors) ? report.argo.errors : []),
+  ];
+  const failedStep = [...(report?.dagster?.steps || [])]
+    .reverse()
+    .find((step) => step.ok === false);
+  const diagnostic = String(failedStep?.output || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .reverse()
+    .find((line) => /(?:FileNotFoundError|ValueError|RuntimeError):/.test(line));
+  if (diagnostic) messages.push(diagnostic);
+  if (messages.length === 0 && typeof payload.error === "string") {
+    messages.push(payload.error);
+  }
+  return Array.from(new Set(messages.filter(Boolean))).slice(0, 4).join(" ") || fallback;
+};
+
+const fileToBase64 = async (file: File) => {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error(`Could not read ${file.name}.`));
+    reader.readAsDataURL(file);
+  });
+  const separator = dataUrl.indexOf(",");
+  if (separator < 0) throw new Error(`Could not encode ${file.name}.`);
+  return dataUrl.slice(separator + 1);
+};
+
+const sha256File = async (file: File) => {
+  const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+  return `sha256:${Array.from(new Uint8Array(digest))
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("")}`;
+};
+
+const buildRunInputArtifacts = async (
+  payload: DockerfileGenerationResponse,
+  files: File[],
+): Promise<DeploymentBundleFile[]> => {
+  const bindings = new Map<string, Array<{ flowId: string; descriptor: Record<string, unknown> }>>();
+  const addBinding = (filename: string, flowId: string, descriptor: Record<string, unknown>) => {
+    const cleanFilename = filename.trim();
+    if (!cleanFilename || !flowId) return;
+    const current = bindings.get(cleanFilename) || [];
+    if (!current.some((entry) => entry.flowId === flowId)) {
+      current.push({ flowId, descriptor });
+      bindings.set(cleanFilename, current);
+    }
+  };
+
+  (payload.runtime_artifacts || []).forEach((artifact) => {
+    const flowId = String(artifact.flow_id || "").trim();
+    (artifact.data_contract?.inputs || []).forEach((descriptor) => {
+      const filename = String(descriptor.filename || descriptor.name || "");
+      addBinding(filename, flowId, descriptor);
+    });
+  });
+  (payload.input_files || []).forEach((input) => {
+    addBinding(
+      String(input.filename || ""),
+      String(input.flow_id || "").trim(),
+      input as Record<string, unknown>,
+    );
+  });
+
+  return Promise.all(files.map(async (file) => {
+    const candidates = bindings.get(file.name) || [];
+    if (candidates.length === 0) {
+      const roots = Array.from(new Set((payload.root_flow_ids || []).filter(Boolean)));
+      if (roots.length === 1) {
+        candidates.push({ flowId: roots[0], descriptor: { filename: file.name } });
+      } else {
+        throw new Error(
+          `${file.name} is not declared by a root node input contract. `
+          + "Use the exact filename shown in that node's manifest.",
+        );
+      }
+    }
+    if (candidates.length > 1) {
+      throw new Error(
+        `${file.name} is declared by multiple root nodes. Give those inputs unique filenames before running.`,
+      );
+    }
+    const binding = candidates[0];
+    return {
+      path: `inputs/${file.name}`,
+      filename: file.name,
+      flow_id: binding.flowId,
+      content: await fileToBase64(file),
+      content_encoding: "base64",
+      content_type: file.type || "application/octet-stream",
+      size_bytes: file.size,
+      sha256: await sha256File(file),
+      role: "input",
+      ...Object.fromEntries(
+        ["name", "kind", "format", "schema", "required"]
+          .filter((key) => binding.descriptor[key] !== undefined)
+          .map((key) => [key, binding.descriptor[key]]),
+      ),
+    };
+  }));
+};
+
 type DockerfileDownload = { name: string; url: string };
 type RuntimeArtifactDownload = { name: string; url: string };
 type YamlDownload = { name: string; url: string };
 type DeploymentBundleDownload = { name: string; url: string };
 type DeploymentTargets = { argo: boolean; dagster: boolean };
 type DeploymentValidationMode = "fast" | "validate" | "repair";
+
+const groupRuntimeArtifactDownloads = (downloads: RuntimeArtifactDownload[]) => {
+  const groups = new Map<string, {
+    label: string;
+    downloads: Array<RuntimeArtifactDownload & { displayName: string }>;
+  }>();
+
+  downloads.forEach((download) => {
+    const [scope, nodeSlug, ...filenameParts] = download.name.split("__");
+    const isNodeFile = scope === "nodes" && Boolean(nodeSlug) && filenameParts.length > 0;
+    const key = isNodeFile ? `${scope}__${nodeSlug}` : "other";
+    const label = isNodeFile
+      ? nodeSlug
+          .replace(/^node-\d+-/, "")
+          .split("-")
+          .filter(Boolean)
+          .map((word) => `${word.charAt(0).toUpperCase()}${word.slice(1)}`)
+          .join(" ")
+      : "Other files";
+    const group = groups.get(key) || { label, downloads: [] };
+    group.downloads.push({
+      ...download,
+      displayName: isNodeFile ? filenameParts.join("__") : download.name,
+    });
+    groups.set(key, group);
+  });
+
+  return Array.from(groups.entries()).map(([key, group]) => ({ key, ...group }));
+};
 
 const FAMILY_LABELS: Record<string, string> = {
   sources: "Sources",
@@ -182,11 +343,13 @@ export function Sidebar({
   const [deploymentError, setDeploymentError] = useState<string>("");
   const [deploymentValidationReport, setDeploymentValidationReport] = useState<DeploymentValidationReport | null>(null);
   const [deploymentRepairReport, setDeploymentRepairReport] = useState<DeploymentRepairReport | null>(null);
+  const [pipelineRunResult, setPipelineRunResult] = useState<PipelineRunResult | null>(null);
   const [deploymentValidationMode, setDeploymentValidationMode] = useState<DeploymentValidationMode>("validate");
   const [deploymentTargets, setDeploymentTargets] = useState<DeploymentTargets>({
-    argo: true,
-    dagster: false,
+    argo: false,
+    dagster: true,
   });
+  const [runInputFiles, setRunInputFiles] = useState<File[]>([]);
   const [nodeDefinitions, setNodeDefinitions] = useState<NodeDefinition[]>(
     getFallbackNodeDefinitions,
   );
@@ -254,6 +417,8 @@ export function Sidebar({
     setDeploymentError("");
     setDeploymentValidationReport(null);
     setDeploymentRepairReport(null);
+    setPipelineRunResult(null);
+    setRunInputFiles([]);
     // The reset key changes only after a confirmed workspace-wide clear.
   }, [workspaceResetKey]);
 
@@ -338,8 +503,8 @@ export function Sidebar({
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        // Dagster exports are attachment-driven. A Python script is sufficient;
-        // requirements, manifests, Dockerfiles, and input files are optional.
+        // Dagster accepts either a generated runtime bundle or an attached main.py;
+        // the backend enriches simple Python packages into the canonical contract.
         require_attached_runtime: deploymentTargets.dagster,
       }),
     });
@@ -360,11 +525,19 @@ export function Sidebar({
   const generateDeploymentBundle = async (
     dockerfileJson: DockerfileGenerationResponse,
   ): Promise<DeploymentBundleGenerationResponse> => {
+    const shouldApplyRunInputOverride = deploymentTargets.dagster
+      && deploymentValidationMode !== "fast";
+    const inputFiles = shouldApplyRunInputOverride && runInputFiles.length > 0
+      ? await buildRunInputArtifacts(dockerfileJson, runInputFiles)
+      : undefined;
+    const runtimePayload = inputFiles
+      ? { ...dockerfileJson, input_files: inputFiles }
+      : dockerfileJson;
     const bundleRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_deployment_bundle`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        dockerfile_json: dockerfileJson,
+        dockerfile_json: runtimePayload,
         targets: deploymentTargets,
         validation_mode: deploymentValidationMode,
         validate_bundle: true,
@@ -381,8 +554,11 @@ export function Sidebar({
     });
 
     if (!bundleRes.ok) {
-      const errText = await bundleRes.text().catch(() => "");
-      throw new Error(`Failed to generate deployment bundle: ${bundleRes.status} ${bundleRes.statusText} ${errText}`);
+      const payload = await bundleRes.json().catch(() => ({}));
+      throw new Error(deploymentFailureMessage(
+        payload,
+        `Failed to generate deployment bundle (${bundleRes.status}).`,
+      ));
     }
 
     return await bundleRes.json();
@@ -438,6 +614,7 @@ export function Sidebar({
       setDeploymentError("");
       setDeploymentValidationReport(null);
       setDeploymentRepairReport(null);
+      setPipelineRunResult(null);
       if (!deploymentTargets.argo && !deploymentTargets.dagster) {
         throw new Error("Select at least one deployment target.");
       }
@@ -515,6 +692,7 @@ export function Sidebar({
       setYamlDownload(yamlDownloadLink);
       setDeploymentValidationReport(bundle.validation_report || null);
       setDeploymentRepairReport(bundle.repair_report || null);
+      setPipelineRunResult(bundle.run || null);
       setDeploymentBundleDownload({
         name: `inlumen-${targetName || "deployment"}-artifacts-${Date.now()}.zip`,
         url: bundleUrl,
@@ -525,6 +703,7 @@ export function Sidebar({
       clearDeploymentBundleDownload();
       setDeploymentValidationReport(null);
       setDeploymentRepairReport(null);
+      setPipelineRunResult(null);
       console.error("[Sidebar.tsx] Generate deployment artifacts error:", e);
       setDeploymentError(errorToMessage(e, "Failed to generate deployment artifacts."));
     } finally {
@@ -539,10 +718,13 @@ export function Sidebar({
   } as PipelineOverview;
   const isMainVersion = activeVersionUid === MAIN_PIPELINE_VERSION_UID;
   const deploymentButtonLabel = deploymentValidationMode === "repair"
-    ? "Generate, Repair & Validate"
+    ? "Repair, Run & Build Bundle"
     : deploymentValidationMode === "validate"
-      ? "Generate & Validate"
-      : "Generate Deployment Artifacts";
+      ? deploymentTargets.dagster
+        ? deploymentTargets.argo ? "Run Dagster & Build Argo" : "Run with Dagster"
+        : "Validate Argo Export"
+      : "Build Bundle Only";
+  const runtimeArtifactGroups = groupRuntimeArtifactDownloads(runtimeArtifactDownloads);
 
   useEffect(() => {
     setOverviewVersionDraft(overview?.version ?? "");
@@ -596,7 +778,7 @@ export function Sidebar({
   };
 
   return (
-    <div className={cn("w-64 border-r border-border bg-card flex flex-col", className)}>
+    <div className={cn("flex w-64 min-w-0 flex-col overflow-hidden border-r border-border bg-card", className)}>
       <Tabs value={activeTab} onValueChange={onTabChange} className="w-full">
         <TabsList className="grid h-12 w-full grid-cols-3 rounded-none border-b border-border p-1">
           <TabsTrigger value="lab" className="min-w-0 gap-1 px-1.5 text-xs">
@@ -614,7 +796,7 @@ export function Sidebar({
         </TabsList>
       </Tabs>
 
-      <ScrollArea className="flex-1 px-4">
+      <ScrollArea className="min-w-0 flex-1 px-3">
         {activeTab === "lab" && (
           <div className="py-4 space-y-6">
             <div>
@@ -757,19 +939,19 @@ export function Sidebar({
         )}
 
         {activeTab === "simulate" && (
-          <div className="py-4 space-y-4">
-            {/* Deployment artifacts */}
-            <div className="p-4 border rounded-lg border-border">
-              <h3 className="text-sm font-medium mb-2">Generate Deployment Artifacts</h3>
+          <div className="w-full min-w-0 max-w-full space-y-4 overflow-hidden py-4">
+            <div className="min-w-0 overflow-hidden rounded-lg border border-border p-3">
+              <h3 className="text-sm font-medium mb-2">Run & Export Pipeline</h3>
               <p className="text-xs text-muted-foreground mb-3">
-                Builds from the scripts and input files attached to each node.
+                Dagster is the local runner. Argo is an optional Kubernetes export built from the same Run Spec.
               </p>
 
               <div className="mb-3 rounded-md border border-border bg-muted/20 p-2">
-                <div className="mb-2 text-xs font-medium">Deployment target</div>
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                <div className="mb-2 text-xs font-medium">Execution adapter</div>
+                <label className="flex min-w-0 items-start gap-2 text-xs text-muted-foreground">
                   <input
                     type="checkbox"
+                    className="mt-0.5 shrink-0"
                     checked={deploymentTargets.argo}
                     onChange={(event) =>
                       setDeploymentTargets((current) => ({
@@ -778,11 +960,12 @@ export function Sidebar({
                       }))
                     }
                   />
-                  <span>Argo Workflow</span>
+                  <span className="min-w-0 leading-snug">Argo Workflow (Kubernetes export)</span>
                 </label>
-                <label className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+                <label className="mt-2 flex min-w-0 items-start gap-2 text-xs text-muted-foreground">
                   <input
                     type="checkbox"
+                    className="mt-0.5 shrink-0"
                     checked={deploymentTargets.dagster}
                     onChange={(event) =>
                       setDeploymentTargets((current) => ({
@@ -791,7 +974,7 @@ export function Sidebar({
                       }))
                     }
                   />
-                  <span>Dagster project</span>
+                  <span className="min-w-0 leading-snug">Dagster + Docker Compose (local)</span>
                 </label>
               </div>
 
@@ -800,11 +983,11 @@ export function Sidebar({
                   <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   Deployment validation
                 </div>
-                <div className="grid grid-cols-3 gap-1">
+                <div className="grid grid-cols-2 gap-1">
                   {([
-                    ["fast", "Fast"],
-                    ["validate", "Validate"],
-                    ["repair", "Repair"],
+                    ["fast", "Build"],
+                    ["validate", "Run"],
+                    ["repair", "Repair + run"],
                   ] as const).map(([mode, label]) => (
                     <button
                       key={mode}
@@ -812,6 +995,7 @@ export function Sidebar({
                       onClick={() => setDeploymentValidationMode(mode)}
                       className={cn(
                         "rounded-md border px-2 py-1.5 text-xs transition-colors",
+                        mode === "repair" && "col-span-2",
                         deploymentValidationMode === mode
                           ? "border-primary bg-primary/15 text-primary"
                           : "border-border bg-background text-muted-foreground hover:bg-muted",
@@ -823,12 +1007,71 @@ export function Sidebar({
                 </div>
                 <p className="mt-2 text-xs text-muted-foreground">
                   {deploymentValidationMode === "repair"
-                    ? "Normalize the bundle layout, then validate before download."
+                    ? deploymentTargets.dagster
+                      ? "Normalize the bundle, run Dagster materialization, and validate every selected export."
+                      : "Normalize and validate the Argo export without requiring a live Kubernetes cluster."
                     : deploymentValidationMode === "validate"
-                      ? "Validate contracts and materialize selected Dagster assets before download."
-                      : "Validate bundle structure, required inputs, contracts, paths, sizes, and checksums without installing or materializing targets."}
+                      ? deploymentTargets.dagster
+                        ? "Execute the pipeline through Dagster materialization and return its validation result."
+                        : "Validate the generated Argo workflow and shared image bundle without submitting it to a cluster."
+                      : "Build and structurally validate the bundle without installing or executing it."}
                 </p>
               </div>
+
+              {deploymentTargets.dagster && deploymentValidationMode !== "fast" && (
+                <details className="mb-3 min-w-0 rounded-md border border-border bg-muted/20">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-2 py-2 text-xs font-medium [&::-webkit-details-marker]:hidden">
+                    <span className="min-w-0">Run input override</span>
+                    <span className="shrink-0 text-muted-foreground">
+                      {runInputFiles.length > 0 ? `${runInputFiles.length} selected` : "Optional"}
+                    </span>
+                  </summary>
+                  <div className="min-w-0 border-t border-border p-2">
+                    <p className="mb-2 text-xs leading-snug text-muted-foreground">
+                      Use this only to replace the attached fixture on a File or User Upload source for this run.
+                    </p>
+                    <label className="flex min-w-0 cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-border bg-background px-2 py-2 text-xs hover:bg-muted">
+                      <Upload className="h-3.5 w-3.5 shrink-0" />
+                      <span className="min-w-0 truncate">Choose override files</span>
+                      <input
+                        type="file"
+                        multiple
+                        className="hidden"
+                        onChange={(event) => {
+                          const selected = Array.from(event.target.files || []);
+                          setRunInputFiles((current) => {
+                            const byName = new Map(current.map((file) => [file.name, file]));
+                            selected.forEach((file) => byName.set(file.name, file));
+                            return Array.from(byName.values());
+                          });
+                          event.target.value = "";
+                        }}
+                      />
+                    </label>
+                    {runInputFiles.length > 0 ? (
+                      <div className="mt-2 min-w-0 space-y-1">
+                        {runInputFiles.map((file) => (
+                          <div key={file.name} className="flex min-w-0 items-center justify-between gap-2 rounded bg-background px-2 py-1 text-xs">
+                            <span className="min-w-0 flex-1 truncate" title={file.name}>{file.name}</span>
+                            <button
+                              type="button"
+                              className="shrink-0"
+                              onClick={() => setRunInputFiles((current) => current.filter((item) => item.name !== file.name))}
+                              aria-label={`Remove ${file.name}`}
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-xs leading-snug text-muted-foreground">
+                        No override: the source's attached test fixture is used.
+                      </p>
+                    )}
+                  </div>
+                </details>
+              )}
 
               <Button
                 className="h-auto min-h-10 w-full whitespace-normal px-3 py-2 text-center leading-snug"
@@ -857,6 +1100,17 @@ export function Sidebar({
                 </div>
               )}
 
+              {pipelineRunResult && (
+                <div className="mt-3 rounded-md border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs">
+                  <div className="font-medium text-emerald-300">
+                    Dagster run {pipelineRunResult.status || "completed"}
+                  </div>
+                  <div className="mt-1 text-muted-foreground">
+                    Run {String(pipelineRunResult.run_id || "").slice(0, 8)} · {pipelineRunResult.package_manager || "uv"} · {pipelineRunResult.outputs?.length || 0} output files
+                  </div>
+                </div>
+              )}
+
               {deploymentRepairReport && (
                 <div className="mt-3 rounded-md border border-border bg-muted/20 p-2 text-xs">
                   <div className="font-medium">
@@ -871,99 +1125,117 @@ export function Sidebar({
               )}
 
               {deploymentBundleDownload && (
-                <div className="mt-4">
-                  <div className="text-xs font-medium mb-2">Deployment Bundle</div>
+                <div className="mt-4 min-w-0">
+                  <div className="mb-2 text-xs font-medium">Deployment Bundle</div>
                   <a
                     href={deploymentBundleDownload.url}
                     download={deploymentBundleDownload.name}
-                    className="flex items-center gap-2 text-xs underline"
+                    title={deploymentBundleDownload.name}
+                    className="flex w-full min-w-0 items-center justify-center gap-2 overflow-hidden rounded-md border border-border bg-background px-2 py-2 text-xs font-medium hover:bg-muted"
                   >
-                    <Download className="w-3.5 h-3.5" />
-                    <span className="truncate">{deploymentBundleDownload.name}</span>
+                    <Download className="h-3.5 w-3.5 shrink-0" />
+                    <span className="min-w-0 truncate">Download bundle</span>
                   </a>
                   <Button
                     variant="outline"
                     size="sm"
-                    className="mt-3 w-full"
+                    className="mt-2 h-auto w-full whitespace-normal px-2 py-1.5 text-xs"
                     onClick={clearDeploymentBundleDownload}
                   >
-                    Clear Bundle Link
+                    Remove bundle link
                   </Button>
                 </div>
               )}
 
               {dockerfileDownloads.length > 0 && (
-                <div className="mt-4">
-                  <div className="text-xs font-medium mb-2">Dockerfile Downloads</div>
-                  <div className="space-y-1">
+                <details className="mt-3 min-w-0 rounded-md border border-border">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-2 py-2 text-xs font-medium [&::-webkit-details-marker]:hidden">
+                    <span>Dockerfiles</span>
+                    <span className="shrink-0 text-muted-foreground">{dockerfileDownloads.length}</span>
+                  </summary>
+                  <div className="min-w-0 space-y-1 border-t border-border p-2">
                     {dockerfileDownloads.map((d) => (
                       <a
                         key={d.url}
                         href={d.url}
                         download={d.name}
-                        className="flex items-center gap-2 text-xs underline"
+                        title={d.name}
+                        className="flex min-w-0 items-center gap-2 overflow-hidden text-xs underline"
                       >
-                        <Download className="w-3.5 h-3.5" />
-                        <span className="truncate">{d.name}</span>
+                        <Download className="h-3.5 w-3.5 shrink-0" />
+                        <span className="min-w-0 truncate">{d.name}</span>
                       </a>
                     ))}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="mt-2 h-auto w-full whitespace-normal px-2 py-1.5 text-xs"
+                      onClick={clearDockerfileDownloads}
+                    >
+                      Remove Dockerfile links
+                    </Button>
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="mt-3 w-full"
-                    onClick={clearDockerfileDownloads}
-                  >
-                    Clear Dockerfile Links
-                  </Button>
-                </div>
+                </details>
               )}
 
               {runtimeArtifactDownloads.length > 0 && (
-                <div className="mt-4">
-                  <div className="text-xs font-medium mb-2">Runtime Artifact Downloads</div>
-                  <div className="space-y-1">
-                    {runtimeArtifactDownloads.map((download) => (
-                      <a
-                        key={download.url}
-                        href={download.url}
-                        download={download.name}
-                        className="flex items-center gap-2 text-xs underline"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                        <span className="truncate">{download.name}</span>
-                      </a>
+                <details className="mt-3 min-w-0 rounded-md border border-border">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-2 py-2 text-xs font-medium [&::-webkit-details-marker]:hidden">
+                    <span>Runtime files</span>
+                    <span className="shrink-0 text-muted-foreground">{runtimeArtifactDownloads.length}</span>
+                  </summary>
+                  <div className="min-w-0 space-y-1 border-t border-border p-2">
+                    {runtimeArtifactGroups.map((group) => (
+                      <div key={group.key} className="min-w-0 rounded-md bg-muted/30 p-1.5">
+                        <div className="truncate text-[10px] font-semibold uppercase tracking-wide text-muted-foreground" title={group.label}>
+                          {group.label}
+                        </div>
+                        <div className="mt-1 min-w-0 space-y-1">
+                          {group.downloads.map((download) => (
+                            <a
+                              key={download.url}
+                              href={download.url}
+                              download={download.name}
+                              title={download.name}
+                              className="flex min-w-0 items-center gap-2 overflow-hidden text-xs underline"
+                            >
+                              <Download className="h-3.5 w-3.5 shrink-0" />
+                              <span className="min-w-0 truncate">{download.displayName}</span>
+                            </a>
+                          ))}
+                        </div>
+                      </div>
                     ))}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="mt-2 h-auto w-full whitespace-normal px-2 py-1.5 text-xs"
+                      onClick={clearRuntimeArtifactDownloads}
+                    >
+                      Remove runtime links
+                    </Button>
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="mt-3 w-full"
-                    onClick={clearRuntimeArtifactDownloads}
-                  >
-                    Clear Runtime Artifact Links
-                  </Button>
-                </div>
+                </details>
               )}
 
               {yamlDownload && (
-                <div className="mt-4">
-                  <div className="text-xs font-medium mb-2">YAML Download</div>
+                <div className="mt-3 min-w-0">
                   <a
                     href={yamlDownload.url}
                     download={yamlDownload.name}
-                    className="flex items-center gap-2 text-xs underline"
+                    title={yamlDownload.name}
+                    className="flex w-full min-w-0 items-center justify-center gap-2 overflow-hidden rounded-md border border-border bg-background px-2 py-2 text-xs font-medium hover:bg-muted"
                   >
-                    <Download className="w-3.5 h-3.5" />
-                    <span className="truncate">{yamlDownload.name}</span>
+                    <Download className="h-3.5 w-3.5 shrink-0" />
+                    <span className="min-w-0 truncate">Download Argo YAML</span>
                   </a>
                   <Button
                     variant="outline"
                     size="sm"
-                    className="mt-3 w-full"
+                    className="mt-2 h-auto w-full whitespace-normal px-2 py-1.5 text-xs"
                     onClick={clearYamlDownload}
                   >
-                    Clear YAML Link
+                    Remove YAML link
                   </Button>
                 </div>
               )}

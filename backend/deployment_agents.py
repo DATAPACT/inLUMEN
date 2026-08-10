@@ -1,3 +1,4 @@
+import hashlib
 import inspect
 import json
 import re
@@ -8,9 +9,11 @@ from pydantic import BaseModel, Field
 
 from attachment_validation import attachment_input_errors
 from artifact_content import encode_artifact_bytes, is_text_artifact
+from artifact_contract import classify_artifact
 from async_runtime import run_async
 from deployment_artifacts import (
     DeploymentArtifactValidationError,
+    UV_PINNED_VERSION,
     _argo_name,
     _sanitize_fragment,
     build_argo_workflow_yaml,
@@ -23,6 +26,8 @@ from llm_config import LLMConfig, resolve_llm_config, select_model_client
 from minio_gateway import read_minio_object, read_minio_object_bytes
 
 CODEGEN_GENERATOR = "inlumen-codegen-service"
+ATTACHED_RUNTIME_GENERATOR = "inlumen-attached-runtime"
+MANAGED_ADAPTER_GENERATOR = "inlumen-managed-adapter"
 
 
 class ListDockerfilesResponse(BaseModel):
@@ -45,6 +50,7 @@ class ListDockerfilesResponse(BaseModel):
     runtime_artifacts: list[dict[str, Any]] = Field(default_factory=list)
     deployment_files: list[dict[str, Any]] = Field(default_factory=list)
     input_files: list[dict[str, Any]] = Field(default_factory=list)
+    root_flow_ids: list[str] = Field(default_factory=list)
     guardrails: Optional[GuardrailReport] = None
 
 
@@ -109,6 +115,12 @@ async def generate_dockerfiles_with_agent(
     generic_steps = []
     artifact_errors: list[str] = []
     for step in steps:
+        if _is_managed_adapter(step):
+            runtime_artifact, dockerfile = _managed_adapter_runtime(step)
+            codegen_runtime_artifacts.append(runtime_artifact)
+            codegen_dockerfiles.append(dockerfile)
+            continue
+
         codegen_artifact = (
             _codegen_artifact_from_persisted_files(step)
             if require_attached_runtime
@@ -129,12 +141,21 @@ async def generate_dockerfiles_with_agent(
             codegen_dockerfiles.append(dockerfile)
             continue
 
+        if _has_attached_python_entrypoint(step):
+            try:
+                runtime_artifact, dockerfile = await _read_attached_python_runtime(step)
+            except DeploymentArtifactValidationError as exc:
+                artifact_errors.extend(exc.errors)
+                continue
+            codegen_runtime_artifacts.append(runtime_artifact)
+            codegen_dockerfiles.append(dockerfile)
+            continue
+
         if require_attached_runtime:
             artifact_errors.append(
                 f"Node {step.get('flow_id') or '<unknown>'} cannot be exported "
-                "to validated orchestration until its generated runtime bundle "
-                "is attached (main.py, requirements.txt, node-manifest.json, "
-                "and Dockerfile.<flow_id>)."
+                "to validated orchestration until it has an attached main.py or "
+                "a generated runtime bundle."
             )
             continue
 
@@ -234,6 +255,9 @@ async def generate_dockerfiles_with_agent(
             runtime_artifacts,
         ),
         "input_files": input_files,
+        "root_flow_ids": sorted(
+            _root_step_ids(steps, pipeline_graph or {}),
+        ),
         "guardrails": {
             "valid": True,
             "checks": [
@@ -506,6 +530,381 @@ def _codegen_artifact_from_persisted_files(step: dict[str, Any]) -> dict[str, An
         "status": "current",
         "generator": CODEGEN_GENERATOR,
         "files": files,
+    }
+
+
+def _has_attached_python_entrypoint(step: dict[str, Any]) -> bool:
+    return any(
+        isinstance(item, dict)
+        and str(item.get("filename") or "").strip().lower() == "main.py"
+        for item in (step.get("files") or [])
+    )
+
+
+def _is_managed_adapter(step: dict[str, Any]) -> bool:
+    return str(step.get("type") or "").strip().lower() in {
+        "source",
+        "destination",
+    }
+
+
+def _managed_adapter_main_source(adapter_spec: dict[str, Any]) -> str:
+    embedded_spec = json.dumps(adapter_spec, sort_keys=True)
+    return f'''import json
+import os
+import shutil
+from pathlib import Path
+
+
+ADAPTER_SPEC = json.loads({embedded_spec!r})
+
+
+def _read_entries(manifest_path: Path):
+    if not manifest_path.is_file():
+        return []
+    with manifest_path.open("r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    entries = manifest.get("inputs") or manifest.get("outputs") or manifest.get("files") or []
+    return [dict(entry) for entry in entries if isinstance(entry, dict)]
+
+
+def _source_outputs(entries, output_dir: Path):
+    outputs = []
+    for index, entry in enumerate(entries):
+        filename = Path(
+            str(entry.get("filename") or entry.get("name") or f"input-{{index + 1}}")
+        ).name
+        source_path = Path(str(entry.get("path") or filename))
+        if not source_path.is_absolute():
+            source_path = Path(os.environ["INLUMEN_INPUT_MANIFEST"]).parent / source_path
+        if not source_path.is_file():
+            raise FileNotFoundError(f"Source adapter input does not exist: {{source_path}}")
+        destination_path = output_dir / filename
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, destination_path)
+        output = dict(entry)
+        output["name"] = str(output.get("name") or Path(filename).stem)
+        output["filename"] = filename
+        output["path"] = str(destination_path.resolve())
+        outputs.append(output)
+    return outputs
+
+
+def _destination_outputs(entries, output_dir: Path):
+    receipt_path = output_dir / "delivery-receipt.json"
+    receipt = {{
+        "adapter": ADAPTER_SPEC,
+        "mode": str(os.getenv("INLUMEN_RUN_MODE") or "test"),
+        "received": [
+            str(entry.get("filename") or entry.get("name") or "")
+            for entry in entries
+        ],
+    }}
+    with receipt_path.open("w", encoding="utf-8") as handle:
+        json.dump(receipt, handle, indent=2)
+    return [{{
+        "name": "delivery_receipt",
+        "filename": receipt_path.name,
+        "path": str(receipt_path.resolve()),
+        "kind": "json",
+        "format": "json",
+    }}]
+
+
+def main():
+    input_manifest = Path(os.environ["INLUMEN_INPUT_MANIFEST"])
+    output_dir = Path(os.environ["INLUMEN_OUTPUT_DIR"])
+    output_manifest = Path(os.environ["INLUMEN_OUTPUT_MANIFEST"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    entries = _read_entries(input_manifest)
+    if ADAPTER_SPEC["kind"] == "source":
+        outputs = _source_outputs(entries, output_dir)
+    else:
+        outputs = _destination_outputs(entries, output_dir)
+    output_manifest.parent.mkdir(parents=True, exist_ok=True)
+    with output_manifest.open("w", encoding="utf-8") as handle:
+        json.dump({{"schema_version": "inlumen.output-manifest@1", "outputs": outputs}}, handle, indent=2)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def _managed_adapter_runtime(
+    step: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build the deterministic runtime owned by inLumen for graph boundaries."""
+    flow_id = str(step.get("flow_id") or "").strip()
+    adapter_parameters = (
+        dict(step.get("param"))
+        if isinstance(step.get("param"), dict)
+        else {}
+    )
+    adapter_parameters.pop("model_plan", None)
+    adapter_settings = {
+        key: value
+        for key, value in {
+            "endpoint": str(step.get("endpoint") or "").strip(),
+            "database": str(step.get("database") or "").strip(),
+            "advanced": str(step.get("content") or "").strip(),
+        }.items()
+        if value
+    }
+    adapter_spec = {
+        "kind": str(step.get("type") or "").strip().lower(),
+        "template": str(step.get("template") or "").strip(),
+        "label": str(step.get("label") or "").strip(),
+        "parameters": adapter_parameters,
+        "settings": adapter_settings,
+    }
+    main_content = _managed_adapter_main_source(adapter_spec)
+    node_manifest = {
+        "schema_version": "inlumen.node-manifest@1",
+        "flow_id": flow_id,
+        "entrypoint": ["python", "/app/main.py"],
+        "data_contract": {"inputs": [], "outputs": []},
+        "adapter": adapter_spec,
+        "source": "inLumen managed boundary adapter",
+    }
+    dockerfile_filename = f"Dockerfile.{_sanitize_fragment(flow_id, 'step')}"
+    dockerfile_content = "\n".join(
+        [
+            "# syntax=docker/dockerfile:1.7",
+            "FROM python:3.11-slim",
+            "ENV PYTHONUNBUFFERED=1",
+            "WORKDIR /app",
+            'COPY ["main.py", "/app/main.py"]',
+            'COPY ["node-manifest.json", "/app/node-manifest.json"]',
+            'CMD ["python", "/app/main.py"]',
+        ]
+    ) + "\n"
+    runtime_files = [
+        {
+            "filename": "main.py",
+            "content": main_content,
+            "content_type": "text/x-python;charset=utf-8",
+        },
+        {
+            "filename": "requirements.txt",
+            "content": "",
+            "content_type": "text/plain;charset=utf-8",
+        },
+        {
+            "filename": "node-manifest.json",
+            "content": json.dumps(node_manifest, indent=2) + "\n",
+            "content_type": "application/json",
+        },
+        {
+            "filename": dockerfile_filename,
+            "content": dockerfile_content,
+            "content_type": "text/x-dockerfile",
+        },
+    ]
+    configuration_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "flow_id": flow_id,
+                "adapter": adapter_spec,
+                "runtime": main_content,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    image = (
+        f"inlumen/adapter-{_sanitize_fragment(adapter_spec['kind'], 'adapter')}:"
+        f"{configuration_hash[:12]}"
+    )
+    runtime_artifact = {
+        "flow_id": flow_id,
+        "definition_id": str(step.get("definition_id") or ""),
+        "definition_version": step.get("definition_version") or 1,
+        "generator": MANAGED_ADAPTER_GENERATOR,
+        "configuration_hash": configuration_hash,
+        "entrypoint": ["python", "/app/main.py"],
+        "data_contract": node_manifest["data_contract"],
+        "files": runtime_files,
+        "manifest": node_manifest,
+        "validation_report": {
+            "status": "valid",
+            "errors": [],
+            "warnings": [],
+        },
+    }
+    return runtime_artifact, {
+        "dockerfile_filename": dockerfile_filename,
+        "content": dockerfile_content,
+        "flow_id": flow_id,
+        "image": image,
+        "command": ["python", "/app/main.py"],
+        "files": [item["filename"] for item in runtime_files],
+        "generator": MANAGED_ADAPTER_GENERATOR,
+        "configuration_hash": configuration_hash,
+        "build_manifest": "node-manifest.json",
+        "data_contract": node_manifest["data_contract"],
+    }
+
+
+def _is_attached_runtime_file(file_ref: dict[str, Any]) -> bool:
+    filename = str(file_ref.get("filename") or "").strip().lower()
+    role = str(file_ref.get("role") or "").strip().lower()
+    if role == "data":
+        return False
+    return role == "code" or filename in {"main.py", "requirements.txt"} or filename.endswith(
+        (".py", ".pyi", ".json", ".toml", ".yaml", ".yml", ".sql", ".sh")
+    )
+
+
+async def _read_attached_python_runtime(
+    step: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Enrich a user-attached main.py into the canonical runtime package."""
+    flow_id = str(step.get("flow_id") or "").strip()
+    runtime_files: list[dict[str, Any]] = []
+    fixture_descriptors: list[dict[str, Any]] = []
+
+    for file_ref in step.get("files") or []:
+        if not isinstance(file_ref, dict):
+            continue
+        filename = str(file_ref.get("filename") or "").strip()
+        if not filename:
+            continue
+        if not _is_attached_runtime_file(file_ref):
+            fixture_descriptors.append(
+                {
+                    "name": filename,
+                    "filename": filename,
+                    "required": True,
+                    **classify_artifact(filename),
+                }
+            )
+            continue
+        read_bucket = str(
+            file_ref.get("snapshot_bucket")
+            or file_ref.get("bucket")
+            or f"files-step-id-{flow_id}"
+        ).strip().lower()
+        read_object = str(
+            file_ref.get("snapshot_object") or filename
+        ).strip()
+        try:
+            encoded = encode_artifact_bytes(
+                await read_minio_object_bytes(read_bucket, read_object),
+                filename=filename,
+            )
+        except Exception as exc:
+            raise DeploymentArtifactValidationError(
+                "Attached Python runtime validation failed",
+                [f"Node {flow_id} failed to read {filename}: {exc}"],
+            ) from exc
+        runtime_files.append(
+            {
+                "filename": filename,
+                "bucket": str(file_ref.get("bucket") or read_bucket),
+                **encoded,
+            }
+        )
+
+    filenames = {item["filename"] for item in runtime_files}
+    if "main.py" not in filenames:
+        raise DeploymentArtifactValidationError(
+            "Attached Python runtime validation failed",
+            [f"Node {flow_id} is missing main.py."],
+        )
+    if "requirements.txt" not in filenames:
+        runtime_files.append(
+            {
+                "filename": "requirements.txt",
+                "content": "",
+                "content_type": "text/plain;charset=utf-8",
+            }
+        )
+
+    node_manifest = {
+        "schema_version": "inlumen.node-manifest@1",
+        "flow_id": flow_id,
+        "entrypoint": ["python", "/app/main.py"],
+        "data_contract": {
+            "inputs": fixture_descriptors,
+            "outputs": [],
+        },
+        "source": "user-attached runtime package",
+    }
+    runtime_files.append(
+        {
+            "filename": "node-manifest.json",
+            "content": json.dumps(node_manifest, indent=2) + "\n",
+            "content_type": "application/json",
+        }
+    )
+    dockerfile_filename = f"Dockerfile.{_sanitize_fragment(flow_id, 'step')}"
+    copy_lines = [
+        f"COPY {json.dumps([item['filename'], '/app/' + item['filename']])}"
+        for item in runtime_files
+    ]
+    dockerfile_content = "\n".join(
+        [
+            "# syntax=docker/dockerfile:1.7",
+            "FROM python:3.11-slim",
+            f"COPY --from=ghcr.io/astral-sh/uv:{UV_PINNED_VERSION} /uv /uvx /bin/",
+            "ENV PYTHONUNBUFFERED=1",
+            "WORKDIR /app",
+            *copy_lines,
+            "RUN --mount=type=cache,target=/root/.cache/uv uv pip install --system -r requirements.txt",
+            'CMD ["python", "/app/main.py"]',
+        ]
+    ) + "\n"
+    runtime_files.append(
+        {
+            "filename": dockerfile_filename,
+            "content": dockerfile_content,
+            "content_type": "text/x-dockerfile",
+        }
+    )
+    runtime_artifact = {
+        "flow_id": flow_id,
+        "definition_id": str(step.get("definition_id") or ""),
+        "definition_version": step.get("definition_version") or 1,
+        "generator": ATTACHED_RUNTIME_GENERATOR,
+        "entrypoint": ["python", "/app/main.py"],
+        "data_contract": node_manifest["data_contract"],
+        "files": runtime_files,
+        "manifest": node_manifest,
+        "validation_report": {
+            "status": "valid",
+            "errors": [],
+            "warnings": [
+                "Output filenames are discovered after execution because this attached package did not declare them."
+            ],
+        },
+    }
+    configuration_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "flow_id": flow_id,
+                "files": [
+                    {
+                        "filename": item["filename"],
+                        "content": item.get("content") or "",
+                    }
+                    for item in runtime_files
+                ],
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    image = f"inlumen/attached-{_sanitize_fragment(flow_id, 'step')}:{configuration_hash[:12]}"
+    return runtime_artifact, {
+        "dockerfile_filename": dockerfile_filename,
+        "content": dockerfile_content,
+        "flow_id": flow_id,
+        "image": image,
+        "command": ["python", "/app/main.py"],
+        "files": [item["filename"] for item in runtime_files],
+        "generator": ATTACHED_RUNTIME_GENERATOR,
+        "configuration_hash": configuration_hash,
+        "build_manifest": "node-manifest.json",
+        "data_contract": node_manifest["data_contract"],
     }
 
 

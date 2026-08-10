@@ -1575,11 +1575,16 @@ def neo4j_delete_edge():
     WHERE ($source_port = '' AND $target_port = '')
        OR (coalesce(r.source_port, '') = $source_port
            AND coalesce(r.target_port, '') = $target_port)
-    DELETE r
-    WITH prev, next
+       OR (coalesce(r.source_port, '') = ''
+           AND coalesce(r.target_port, '') = '')
+    WITH prev, next, collect(r) AS relationships, count(r) AS deleted_count
+    FOREACH (relationship IN relationships | DELETE relationship)
+    WITH prev, next, deleted_count
     OPTIONAL MATCH (p:PIPELINE)-[:HAS_STEP]->(prev)
     SET p.updated_at = datetime()
-    RETURN prev.flow_id AS from_flow_id, next.flow_id AS to_flow_id
+    RETURN prev.flow_id AS from_flow_id,
+           next.flow_id AS to_flow_id,
+           deleted_count AS deleted_count
     """
     try:
         with driver.session() as session:
@@ -1606,6 +1611,7 @@ def neo4j_delete_edge():
             return jsonify({
                 "from_flow_id": record["from_flow_id"],
                 "to_flow_id": record["to_flow_id"],
+                "deleted_count": record["deleted_count"],
                 "rel_type": "FLOWS_TO"
             }), 200
     except Exception as e:

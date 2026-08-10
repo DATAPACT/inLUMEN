@@ -100,15 +100,15 @@ For every node, create:
 - main.py
 - requirements.txt only if main.py needs third-party packages
 
-Return code files only. Never create or return input data, example data, fake files, placeholder files, credentials, Dockerfiles, Dagster files, or manifests. The user will upload real input data separately.
+Return code files only. Never create or return input data, example data, fake files, placeholder files, credentials, Dockerfiles, Dagster files, or manifests. The user will supply real input data separately from inLUMEN's Run tab.
 
-Each main.py runs with that node's uploaded input files and the previous node's output files in the current folder. It must read from that folder and write its results back to that folder. Connected nodes must agree on output filenames and formats.
+Each main.py runs with the root node's Run-tab inputs or the previous node's output files in the current folder. It must read from that folder and write its results back to that folder. Connected nodes must agree on output filenames and formats.
 
 Each main.py must be a one-shot, non-interactive Python 3.11 batch program. It must not call input(), start a server or UI, watch for files, sleep indefinitely, or loop forever. It must validate required input files before loading large models, downloading resources, or doing other slow setup; invalid inputs must fail immediately with a clear error. A node with a downstream connection must write at least one real output file, then exit successfully.
 
 If you can create files, return one ZIP with folders named nodes/<flow_id>/. Otherwise, show each file in its own code block under a clear NODE <flow_id> heading. Return complete working code, not pseudocode.
 
-Finish with a short INPUT UPLOAD MAP. For every real external input the user must provide, state the flow_id and node label that first reads it. Inputs must be uploaded to that first consumer node, never to a later node."""
+Finish with a short RUN INPUT MAP. For every real external input the user must provide, state the exact filename, flow_id, and root node label that first reads it. The user supplies these ephemeral files in the Run tab; they must not be attached to nodes as runtime code or test fixtures."""
 PIPELINE_GENERATION_RUNS: dict[str, dict[str, Any]] = {}
 CHATBOT_CONFIGS_PATH = Path(
     os.getenv("CHATBOT_CONFIGS_PATH", "state/chatbot_configurations.json")

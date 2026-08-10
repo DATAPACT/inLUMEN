@@ -71,9 +71,10 @@ so existing saved graphs remain loadable.
 The canonical Pipeline IR is JSON: nodes contain their structural kind, template,
 implementation metadata, parameters, explicit ports, and project-file references;
 edges identify both endpoint nodes and port IDs. This JSON contract drives version
-storage, project import/export, agent context, and deployment generation. Argo YAML,
-the Dagster project (including Docker Compose), and other future targets are derived
-artifacts. YAML is not an internal representation and the canvas deliberately accepts
+storage, project import/export, agent context, and deployment generation. Executable
+bundles add an engine-neutral `inlumen.run-spec@1`; the Dagster project (including
+Docker Compose) and optional Argo Workflow are adapters derived from that contract.
+YAML is not an internal representation and the canvas deliberately accepts
 JSON project imports only; generated YAML remains export-only.
 
 ## **Architecture**
@@ -291,28 +292,38 @@ LLM configuration metadata is also saved through the gateway by default (`VITE_E
 
 LLM agents use OpenAI-compatible Chat Completions endpoints. Configure OpenRouter, Ollama Cloud, or a custom on-prem endpoint in the Settings dialog. The backend rejects LLM requests that do not include a browser-supplied LLM configuration.
 
-### Bring your own node scripts
+### Run Python pipelines and bring your own task scripts
 
-Dagster deployment generation accepts files from any external source through the
-normal node **Upload Files** control. The simple node-file rule is:
+Source and Destination components are boundary adapters managed by inLUMEN. A
+File Source, for example, publishes the selected run input into the pipeline;
+a Notification Destination captures or delivers the final result. They do not
+ask the user for `main.py` and never require an LLM during export.
+
+Only Task components have a **Runtime Package** section. The simple Python rule
+is:
 
 1. Attach `main.py`.
-2. Attach `requirements.txt` only when the script needs third-party packages.
-3. Attach each real input file to the first node that reads it.
+2. Attach `requirements.txt` only when the script needs third-party packages
+   (`requirements.py` is not a Python dependency format).
+3. Attach small repeatable data only as **Test Fixtures**.
+4. Supply actual input files from the **Run** tab. Run inputs are ephemeral and
+   replace fixtures for that execution; their filenames must match the root node
+   contract.
 
-At runtime, the node's attachments and upstream outputs are placed in the
-script's working directory. Ordinary scripts can read files such as `input.csv`
-and write result files there. inLUMEN automatically passes new or changed files
-to the next node and creates all Dagster packaging. No Dagster code, manifest, or
-Dockerfile is required from the user.
+inLUMEN enriches a manually attached Task `main.py` into the node manifest and
+Dockerfile contract. Generated packages already include those files. Python
+dependency installation uses pinned `uv`. At execution time each Task reads
+`INLUMEN_INPUT_MANIFEST`, writes files under `INLUMEN_OUTPUT_DIR`, and writes an
+`inlumen.output-manifest@1` document to `INLUMEN_OUTPUT_MANIFEST`. Dagster and
+Argo use that same handoff contract.
 
 The **Generate Runtime Scripts** action reuses the high-level prompt that created
 the pipeline. Users can either select **Generate and attach**, or select
 **Copy prompt** and paste the ready-made request into any external AI. Both paths
 produce the same simple node files. The external AI is asked to return code only;
-input data always comes from the user. Its response includes an input upload map
-with the correct node ID for each input. Bundle generation also catches clear
-cases where an input was attached to a later node instead of its first consumer.
+input data always comes from the user. Its response includes a Run Input Map with
+the exact filename and root consumer for each input. Bundle generation rejects
+inputs that do not match the declared root contract.
 Clearly malformed or placeholder inputs
 (for example a text placeholder renamed to `.wav`) are rejected before a bundle
 is generated.
@@ -329,6 +340,15 @@ mounts that volume read-only for node execution. The isolated Dagster code
 service then runs with Hugging Face and Transformers offline modes enabled, so a
 pipeline run cannot stall on a model-hub download. Set `HF_TOKEN` in the shell
 that launches `docker compose up`; it is used only by model prefetch.
+
+The Run tab uses Dagster as the primary local execution adapter. A generated
+bundle runs with `docker compose up --build` and exposes Dagster at
+`http://localhost:3000`. Runs return `inlumen.run-result@1`, and materialized
+output files are included under `outputs/` in the downloaded bundle. Argo is an
+optional Kubernetes export. Its bundle builds
+one content-addressed shared pipeline image from `argo/Dockerfile`; it does not
+require an image per step unless incompatible dependency environments are split
+explicitly in a future export.
 
 API key handling:
 - Provider API keys are entered only in the UI, kept in browser localStorage so they survive refreshes, browser restarts, and container restarts, sent to the backend only inside the specific LLM request payload, and are not saved by the backend `/api/chatbot-configs` endpoints.
@@ -407,7 +427,7 @@ curl -X POST http://localhost:5000/simple_chat \
 Available gateway endpoint groups:
 
 - `Pipelines`: create, list, fetch, and list versions for the current design pipeline
-- `Artifacts`: generate Dockerfiles with the configured LLM, then assemble Argo Workflow YAML deterministically from the pipeline graph and Dockerfile metadata
+- `Artifacts`: generate the engine-neutral Run Spec, a runnable Dagster Docker Compose bundle, and an optional shared-image Argo Workflow export
 - `Workflows`: list available workflow metadata, associated pipeline IDs, version metadata, and temporary MinIO signed access URLs when files are available
 - `Canvas Graph`: replicate UI node and edge creation, deletion, property updates, and position changes through the gateway API
 - `Pipeline State`: fetch the current graph, overview metadata, and saved UI pipeline versions
