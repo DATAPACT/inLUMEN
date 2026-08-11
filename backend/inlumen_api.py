@@ -599,6 +599,12 @@ def _node_descriptor(
     if isinstance(content, str) and content.strip():
         parameters["content"] = content.strip()
     implementation = implementation_plan_from_data(data)
+    subpipeline = data.get("subpipeline")
+    if not isinstance(subpipeline, dict):
+        try:
+            subpipeline = json.loads(data.get("subpipeline_json") or "{}")
+        except (TypeError, ValueError):
+            subpipeline = {}
     return {
         "flow_id": str(node.get("id") or data.get("flow_id") or data.get("id") or ""),
         "label": str(data.get("label") or ""),
@@ -607,6 +613,7 @@ def _node_descriptor(
         "template": str(data.get("template_label") or data.get("definition_id") or ""),
         "parameters": parameters,
         "implementation": implementation,
+        "subpipeline": subpipeline if isinstance(subpipeline, dict) else {},
         "ports": normalize_node_ports(data.get("ports"), data.get("type")),
         "files": _node_file_entries(node, include_samples=include_samples),
     }
@@ -1655,6 +1662,24 @@ def pipeline_version_restore():
 @require_auth
 def pipeline_version_set_main():
     return _proxy_response(dispatch_graph_request, "neo4j_set_pipeline_version_as_main")
+
+
+@app.route("/api/reusable-pipelines", methods=["GET", "POST", "DELETE", "OPTIONS"])
+@require_auth
+def reusable_pipelines():
+    return _proxy_response(dispatch_graph_request, "neo4j_reusable_pipelines")
+
+
+@app.route("/api/reusable-pipelines/version", methods=["GET", "OPTIONS"])
+@require_auth
+def reusable_pipeline_version():
+    return _proxy_response(dispatch_graph_request, "neo4j_reusable_pipeline_version")
+
+
+@app.route("/api/reusable-pipelines/attach", methods=["POST", "OPTIONS"])
+@require_auth
+def attach_reusable_pipeline_version():
+    return _proxy_response(dispatch_graph_request, "neo4j_attach_reusable_pipeline_version")
 
 
 @app.route("/api/workspace/clear-all", methods=["POST", "OPTIONS"])

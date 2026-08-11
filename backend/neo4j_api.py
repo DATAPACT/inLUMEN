@@ -23,6 +23,14 @@ from node_definitions.instance import (
     definition_properties_from_data,
     normalize_definition_properties,
 )
+from pipeline_graph_validation import validate_pipeline_graph
+from subpipeline_reference import (
+    derive_subpipeline_interface,
+    missing_explicit_port_contracts,
+    normalize_reusable_pipeline_graph,
+    plan_subpipeline_port_migration,
+    public_ports_for_interface,
+)
 
 NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD = get_neo4j_settings()
 
@@ -1864,6 +1872,404 @@ def neo4j_list_pipeline_versions():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/neo4j_reusable_pipelines', methods=['GET', 'POST', 'DELETE', 'OPTIONS'])
+@require_auth
+def neo4j_reusable_pipelines():
+    """List reusable pipelines or save a new immutable reusable-pipeline version."""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    if request.method == 'DELETE':
+        payload = request.get_json(force=True) or {}
+        pipeline_uid = str(payload.get("pipeline_uid") or "").strip()
+        if not pipeline_uid:
+            return jsonify({"error": "pipeline_uid is required"}), 400
+        try:
+            with driver.session() as session:
+                referenced = session.run("""
+                CALL {
+                  MATCH (step:STEP)
+                  WHERE coalesce(step.subpipeline_json, '') CONTAINS $pipeline_uid
+                  RETURN count(step) AS parent_reference_count
+                }
+                CALL {
+                  MATCH (:PIPELINE {status:'reusable'})-[:HAS_VERSION]->(version:PIPELINE_VERSION)
+                  WHERE coalesce(version.graph_json, '') CONTAINS $pipeline_uid
+                  RETURN count(version) AS reusable_reference_count
+                }
+                RETURN parent_reference_count, reusable_reference_count
+                """, pipeline_uid=pipeline_uid).single()
+                parent_references = int(referenced["parent_reference_count"] or 0) if referenced else 0
+                reusable_references = int(referenced["reusable_reference_count"] or 0) if referenced else 0
+                if parent_references or reusable_references:
+                    return jsonify({
+                        "error": "Reusable pipeline is still referenced and cannot be deleted",
+                        "parent_reference_count": parent_references,
+                        "reusable_reference_count": reusable_references,
+                    }), 409
+                record = session.run("""
+                MATCH (p:PIPELINE {uid:$pipeline_uid, status:'reusable'})
+                OPTIONAL MATCH (p)-[:HAS_VERSION]->(v:PIPELINE_VERSION)
+                WITH p, collect(v) AS versions
+                DETACH DELETE p
+                FOREACH (version IN versions | DETACH DELETE version)
+                RETURN size(versions) AS deleted_version_count
+                """, pipeline_uid=pipeline_uid).single()
+                if not record:
+                    return jsonify({"error": "Reusable pipeline not found"}), 404
+                return jsonify({
+                    "deleted_pipeline_uid": pipeline_uid,
+                    "deleted_version_count": record["deleted_version_count"] or 0,
+                }), 200
+        except Exception as e:
+            print("[neo4j_api.py] Error deleting reusable pipeline:", e)
+            return jsonify({"error": str(e)}), 500
+    if request.method == 'GET':
+        try:
+            with driver.session() as session:
+                if not _label_exists(session, "PIPELINE"):
+                    return jsonify({"pipelines": []}), 200
+                rows = [record.data() for record in session.run("""
+                MATCH (p:PIPELINE {status:'reusable'})-[:HAS_VERSION]->(v:PIPELINE_VERSION)
+                RETURN p.uid AS pipeline_uid,
+                       coalesce(p.name, p.label, '') AS pipeline_name,
+                       coalesce(p.description, '') AS description,
+                       p.active_version_uid AS active_version_uid,
+                       v.uid AS version_uid,
+                       coalesce(v.name, v.version, '') AS version_name,
+                       v.interface_json AS interface_json,
+                       v.graph_json AS graph_json,
+                       v.node_count AS node_count,
+                       v.edge_count AS edge_count,
+                       toString(v.created_at) AS created_at,
+                       toString(v.updated_at) AS updated_at
+                ORDER BY pipeline_name, v.created_at DESC
+                """)]
+                pipelines: dict[str, dict[str, Any]] = {}
+                for row in rows:
+                    pipeline_uid = str(row.get("pipeline_uid") or "")
+                    pipeline = pipelines.setdefault(pipeline_uid, {
+                        "uid": pipeline_uid,
+                        "name": row.get("pipeline_name") or "",
+                        "description": row.get("description") or "",
+                        "active_version_uid": row.get("active_version_uid") or "",
+                        "versions": [],
+                    })
+                    try:
+                        stored_graph = json.loads(row.get("graph_json") or "{}")
+                    except (TypeError, ValueError):
+                        stored_graph = {}
+                    normalized_graph = normalize_reusable_pipeline_graph(stored_graph)
+                    interface = derive_subpipeline_interface(normalized_graph)
+                    pipeline["versions"].append({
+                        "uid": row.get("version_uid") or "",
+                        "name": row.get("version_name") or "",
+                        "interface": interface if isinstance(interface, dict) else {},
+                        "node_count": row.get("node_count") or 0,
+                        "edge_count": row.get("edge_count") or 0,
+                        "created_at": row.get("created_at"),
+                        "updated_at": row.get("updated_at"),
+                    })
+                return jsonify({"pipelines": list(pipelines.values())}), 200
+        except Exception as e:
+            print("[neo4j_api.py] Error listing reusable pipelines:", e)
+            return jsonify({"error": str(e)}), 500
+
+    payload = request.get_json(force=True) or {}
+    graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+    name = str(payload.get("name") or "").strip()
+    description = str(payload.get("description") or "").strip()
+    pipeline_uid = str(payload.get("pipeline_uid") or "").strip()
+    version_name = str(payload.get("version_name") or "").strip() or "Version 1"
+    if not name:
+        return jsonify({"error": "Reusable pipeline name is required"}), 400
+    missing_ports = missing_explicit_port_contracts(graph)
+    if missing_ports:
+        return jsonify({
+            "error": "Every reusable-pipeline component requires an explicit typed port contract",
+            "components": missing_ports,
+        }), 422
+    graph = normalize_reusable_pipeline_graph(graph)
+    report = validate_pipeline_graph(graph)
+    if not report.get("valid"):
+        return jsonify({"error": "Reusable pipeline graph is invalid", "validation": report}), 422
+    interface = derive_subpipeline_interface(graph)
+    if not interface["inputs"] or not interface["outputs"]:
+        return jsonify({"error": "Reusable pipeline requires Source and Destination boundaries"}), 422
+
+    version_uid = str(uuid.uuid4())
+    graph_with_metadata = _graph_with_metadata(graph, graph.get("updated_at"))
+    graph_json = json.dumps(graph_with_metadata, ensure_ascii=False)
+    interface_json = json.dumps(interface, ensure_ascii=False, sort_keys=True)
+    public_ports_json = json.dumps(public_ports_for_interface(interface), ensure_ascii=False, sort_keys=True)
+    try:
+        with driver.session() as session:
+            if pipeline_uid:
+                existing = session.run("""
+                MATCH (p:PIPELINE {uid:$pipeline_uid, status:'reusable'})
+                RETURN p.uid AS uid
+                """, pipeline_uid=pipeline_uid).single()
+                if not existing:
+                    return jsonify({"error": "Reusable pipeline not found"}), 404
+                duplicate_version = session.run("""
+                MATCH (:PIPELINE {uid:$pipeline_uid, status:'reusable'})-[:HAS_VERSION]->(version:PIPELINE_VERSION)
+                WHERE toLower(trim(coalesce(version.name, ''))) = toLower(trim($version_name))
+                RETURN version.uid AS version_uid
+                LIMIT 1
+                """, pipeline_uid=pipeline_uid, version_name=version_name).single()
+                if duplicate_version:
+                    return jsonify({
+                        "error": "This reusable pipeline already has a version with that name",
+                        "version_uid": duplicate_version["version_uid"],
+                    }), 409
+            else:
+                duplicate = session.run("""
+                MATCH (existing:PIPELINE {status:'reusable'})
+                WHERE toLower(trim(coalesce(existing.name, ''))) = toLower(trim($name))
+                RETURN existing.uid AS pipeline_uid,
+                       existing.active_version_uid AS version_uid
+                LIMIT 1
+                """, name=name).single()
+                if duplicate:
+                    return jsonify({
+                        "error": "A reusable pipeline with this name already exists; select it or save a new version",
+                        "pipeline_uid": duplicate["pipeline_uid"],
+                        "version_uid": duplicate["version_uid"],
+                    }), 409
+                pipeline_uid = str(uuid.uuid4())
+            record = session.run("""
+            MERGE (p:PIPELINE {uid:$pipeline_uid})
+            ON CREATE SET p.created_at = datetime(), p.status = 'reusable'
+            SET p.name = $name,
+                p.label = $name,
+                p.description = $description,
+                p.status = 'reusable',
+                p.active_version_uid = $version_uid,
+                p.updated_at = datetime()
+            WITH p
+            OPTIONAL MATCH (p)-[:HAS_VERSION]->(existing:PIPELINE_VERSION)
+            WITH p, count(existing) + 1 AS version_index
+            CREATE (v:PIPELINE_VERSION {
+                uid:$version_uid,
+                name:$version_name,
+                version:$version_name,
+                version_index:version_index,
+                is_main:false,
+                description:$description,
+                graph_json:$graph_json,
+                interface_json:$interface_json,
+                public_ports_json:$public_ports_json,
+                node_count:$node_count,
+                edge_count:$edge_count,
+                file_count:0,
+                created_at:datetime(),
+                updated_at:datetime()
+            })
+            MERGE (p)-[:HAS_VERSION]->(v)
+            RETURN p.uid AS pipeline_uid,
+                   p.name AS pipeline_name,
+                   v.uid AS version_uid,
+                   v.name AS version_name,
+                   toString(v.created_at) AS created_at
+            """,
+                pipeline_uid=pipeline_uid,
+                name=name,
+                description=description,
+                version_uid=version_uid,
+                version_name=version_name,
+                graph_json=graph_json,
+                interface_json=interface_json,
+                public_ports_json=public_ports_json,
+                node_count=len(graph_with_metadata.get("nodes") or []),
+                edge_count=len(graph_with_metadata.get("edges") or []),
+            ).single()
+            saved = record.data() if record else {}
+            return jsonify({
+                "reference": {
+                    "pipeline_uid": saved.get("pipeline_uid") or pipeline_uid,
+                    "pipeline_name": saved.get("pipeline_name") or name,
+                    "version_uid": saved.get("version_uid") or version_uid,
+                    "version_name": saved.get("version_name") or "Version 1",
+                },
+                "interface": interface,
+                "graph": graph_with_metadata,
+            }), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error saving reusable pipeline:", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/neo4j_reusable_pipeline_version', methods=['GET'])
+@require_auth
+def neo4j_reusable_pipeline_version():
+    pipeline_uid = str(request.args.get("pipeline_uid") or "").strip()
+    version_uid = str(request.args.get("version_uid") or "").strip()
+    if not pipeline_uid or not version_uid:
+        return jsonify({"error": "pipeline_uid and version_uid are required"}), 400
+    try:
+        with driver.session() as session:
+            record = session.run("""
+            MATCH (p:PIPELINE {uid:$pipeline_uid, status:'reusable'})-[:HAS_VERSION]->(v:PIPELINE_VERSION {uid:$version_uid})
+            RETURN p.name AS pipeline_name,
+                   p.description AS description,
+                   v.name AS version_name,
+                   v.graph_json AS graph_json,
+                   v.interface_json AS interface_json,
+                   toString(v.created_at) AS created_at,
+                   toString(v.updated_at) AS updated_at
+            """, pipeline_uid=pipeline_uid, version_uid=version_uid).single()
+            if not record:
+                return jsonify({"error": "Reusable pipeline version not found"}), 404
+            try:
+                graph = json.loads(record["graph_json"] or "{}")
+            except (TypeError, ValueError):
+                graph = {}
+            try:
+                interface = json.loads(record["interface_json"] or "{}")
+            except (TypeError, ValueError):
+                interface = {}
+            graph = normalize_reusable_pipeline_graph(graph)
+            interface = derive_subpipeline_interface(graph)
+            return jsonify({
+                "reference": {
+                    "pipeline_uid": pipeline_uid,
+                    "pipeline_name": record["pipeline_name"] or "",
+                    "version_uid": version_uid,
+                    "version_name": record["version_name"] or "",
+                },
+                "description": record["description"] or "",
+                "graph": graph if isinstance(graph, dict) else {},
+                "interface": interface if isinstance(interface, dict) else {},
+                "created_at": record["created_at"],
+                "updated_at": record["updated_at"],
+            }), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error loading reusable pipeline version:", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/neo4j_attach_reusable_pipeline_version', methods=['POST', 'OPTIONS'])
+@require_auth
+def neo4j_attach_reusable_pipeline_version():
+    """Preview or atomically pin one parent Subpipeline to a reusable version."""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    payload = request.get_json(force=True) or {}
+    flow_id = str(payload.get("flow_id") or "").strip()
+    pipeline_uid = str(payload.get("pipeline_uid") or "").strip()
+    version_uid = str(payload.get("version_uid") or "").strip()
+    dry_run = bool(payload.get("dry_run"))
+    if not flow_id or not pipeline_uid or not version_uid:
+        return jsonify({"error": "flow_id, pipeline_uid, and version_uid are required"}), 400
+
+    try:
+        with driver.session() as session:
+            record = session.run("""
+            MATCH (parent:PIPELINE {status:'design'})-[:HAS_STEP]->(step:STEP {flow_id:$flow_id})
+            WHERE step.type = 'subpipeline'
+            MATCH (reusable:PIPELINE {uid:$pipeline_uid, status:'reusable'})-[:HAS_VERSION]->(version:PIPELINE_VERSION {uid:$version_uid})
+            OPTIONAL MATCH (:STEP)-[incoming:FLOWS_TO]->(step)
+            OPTIONAL MATCH (step)-[outgoing:FLOWS_TO]->(:STEP)
+            RETURN step.ports_json AS current_ports_json,
+                   reusable.name AS pipeline_name,
+                   version.name AS version_name,
+                   version.graph_json AS graph_json,
+                   version.interface_json AS interface_json,
+                   version.public_ports_json AS public_ports_json,
+                   collect(DISTINCT incoming.target_port) AS connected_inputs,
+                   collect(DISTINCT outgoing.source_port) AS connected_outputs
+            """,
+                flow_id=flow_id,
+                pipeline_uid=pipeline_uid,
+                version_uid=version_uid,
+            ).single()
+            if not record:
+                return jsonify({"error": "Parent Subpipeline or reusable pipeline version was not found"}), 404
+
+            try:
+                graph = normalize_reusable_pipeline_graph(json.loads(record["graph_json"] or "{}"))
+                interface = json.loads(record["interface_json"] or "{}")
+                public_ports = json.loads(record["public_ports_json"] or "{}")
+            except (TypeError, ValueError):
+                return jsonify({"error": "Reusable pipeline version has invalid persisted metadata"}), 422
+            if not isinstance(interface, dict) or not interface.get("inputs") or not interface.get("outputs"):
+                interface = derive_subpipeline_interface(graph)
+            if not isinstance(public_ports, dict) or not public_ports.get("inputs") or not public_ports.get("outputs"):
+                public_ports = public_ports_for_interface(interface)
+            current_ports = normalize_node_ports(record["current_ports_json"], "subpipeline")
+            connected_inputs = [str(value or "") for value in (record["connected_inputs"] or []) if value]
+            connected_outputs = [str(value or "") for value in (record["connected_outputs"] or []) if value]
+            compatibility = plan_subpipeline_port_migration(
+                current_ports,
+                public_ports,
+                connected_inputs,
+                connected_outputs,
+                requested_inputs=payload.get("input_mapping"),
+                requested_outputs=payload.get("output_mapping"),
+            )
+            reference = {
+                "pipeline_uid": pipeline_uid,
+                "pipeline_name": record["pipeline_name"] or "",
+                "version_uid": version_uid,
+                "version_name": record["version_name"] or "",
+            }
+            response_payload = {
+                "reference": reference,
+                "interface": interface,
+                "graph": graph,
+                "ports": public_ports,
+                "compatibility": compatibility,
+            }
+            if dry_run:
+                return jsonify(response_payload), 200
+            if not compatibility["compatible"]:
+                return jsonify({
+                    **response_payload,
+                    "error": "The selected version requires an explicit connection mapping",
+                }), 409
+
+            definition_json = json.dumps({
+                "version": 2,
+                "reference": reference,
+                "interface": interface,
+                "expanded": False,
+            }, ensure_ascii=False, sort_keys=True)
+            ports_value = ports_json(public_ports, "subpipeline")
+
+            def attach(tx):
+                updated = tx.run("""
+                MATCH (parent:PIPELINE {status:'design'})-[:HAS_STEP]->(step:STEP {flow_id:$flow_id})
+                WHERE step.type = 'subpipeline'
+                SET step.subpipeline_json = $definition_json,
+                    step.ports_json = $ports_json,
+                    parent.updated_at = datetime()
+                RETURN count(step) AS updated_count
+                """,
+                    flow_id=flow_id,
+                    definition_json=definition_json,
+                    ports_json=ports_value,
+                ).single()
+                if not updated or int(updated["updated_count"] or 0) != 1:
+                    raise ValueError("Parent Subpipeline disappeared while attaching the version")
+                for old_port, new_port in compatibility["input_mapping"].items():
+                    tx.run("""
+                    MATCH (:STEP)-[connection:FLOWS_TO]->(step:STEP {flow_id:$flow_id})
+                    WHERE step.type = 'subpipeline' AND connection.target_port = $old_port
+                    SET connection.target_port = $new_port
+                    """, flow_id=flow_id, old_port=old_port, new_port=new_port).consume()
+                for old_port, new_port in compatibility["output_mapping"].items():
+                    tx.run("""
+                    MATCH (step:STEP {flow_id:$flow_id})-[connection:FLOWS_TO]->(:STEP)
+                    WHERE step.type = 'subpipeline' AND connection.source_port = $old_port
+                    SET connection.source_port = $new_port
+                    """, flow_id=flow_id, old_port=old_port, new_port=new_port).consume()
+
+            session.execute_write(attach)
+            return jsonify({**response_payload, "attached": True}), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error attaching reusable pipeline version:", e)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/neo4j_save_pipeline_version', methods=['POST', 'OPTIONS'])
 @require_auth
 def neo4j_save_pipeline_version():
@@ -2736,6 +3142,37 @@ def neo4j_get_graph():
                         data["param"],
                     )
                 data.update(definition_data_from_properties(props))
+                if step_kind == "subpipeline" and isinstance(data.get("subpipeline"), dict):
+                    subpipeline = dict(data["subpipeline"])
+                    reference = subpipeline.get("reference")
+                    reference = reference if isinstance(reference, dict) else {}
+                    referenced_pipeline_uid = str(reference.get("pipeline_uid") or "").strip()
+                    referenced_version_uid = str(reference.get("version_uid") or "").strip()
+                    if referenced_pipeline_uid and referenced_version_uid:
+                        referenced = session.run("""
+                        MATCH (rp:PIPELINE {uid:$pipeline_uid, status:'reusable'})-[:HAS_VERSION]->(rv:PIPELINE_VERSION {uid:$version_uid})
+                        RETURN rp.name AS pipeline_name,
+                               rv.name AS version_name,
+                               rv.graph_json AS graph_json,
+                               rv.interface_json AS interface_json
+                        """, pipeline_uid=referenced_pipeline_uid, version_uid=referenced_version_uid).single()
+                        if referenced:
+                            try:
+                                resolved_graph = json.loads(referenced["graph_json"] or "{}")
+                            except (TypeError, ValueError):
+                                resolved_graph = {}
+                            resolved_graph = normalize_reusable_pipeline_graph(resolved_graph)
+                            resolved_interface = derive_subpipeline_interface(resolved_graph)
+                            subpipeline["reference"] = {
+                                **reference,
+                                "pipeline_name": referenced["pipeline_name"] or reference.get("pipeline_name") or "",
+                                "version_name": referenced["version_name"] or reference.get("version_name") or "",
+                            }
+                            subpipeline["interface"] = resolved_interface
+                            subpipeline["resolved_graph"] = resolved_graph
+                        else:
+                            subpipeline["resolution_error"] = "Referenced reusable pipeline version was not found."
+                    data["subpipeline"] = subpipeline
 
                 nodes.append({
                     "id": node_id,

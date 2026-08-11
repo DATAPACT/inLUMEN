@@ -92,6 +92,7 @@ class NodeDescriptor(BaseModel):
     ports: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     parameters: dict[str, Any] = Field(default_factory=dict)
     implementation: dict[str, Any] = Field(default_factory=dict)
+    subpipeline: dict[str, Any] = Field(default_factory=dict)
     files: list[FileDescriptor] = Field(default_factory=list)
 
 

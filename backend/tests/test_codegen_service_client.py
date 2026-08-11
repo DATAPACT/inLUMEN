@@ -160,6 +160,24 @@ class CodegenServiceClientTest(unittest.TestCase):
         )
         self.assertEqual(model_plan, descriptor["parameters"]["model_plan"])
 
+    def test_node_descriptor_preserves_resolved_reusable_pipeline_for_codegen(self):
+        definition = {
+            "version": 2,
+            "reference": {"pipeline_uid": "reusable-1", "version_uid": "version-1"},
+            "interface": {"inputs": [{"id": "audio"}], "outputs": [{"id": "analysis"}]},
+            "resolved_graph": {"nodes": [{"id": "nested-source"}], "edges": []},
+        }
+        descriptor = inlumen_api._node_descriptor({
+            "id": "conversation",
+            "data": {
+                "type": "subpipeline",
+                "label": "Conversation Understanding",
+                "subpipeline_json": json.dumps(definition),
+            },
+        })
+
+        self.assertEqual(definition, descriptor["subpipeline"])
+
     def test_dynamic_model_plan_participates_in_codegen_configuration_hash(self):
         model_plan = {
             "framework": "transformers",

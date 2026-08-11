@@ -37,6 +37,15 @@ TASK_PROFILES = {
             "Implement the described transformation against the real manifest inputs.",
         ),
     ),
+    "subpipeline": TaskProfile(
+        name="subpipeline",
+        guidance=(
+            "Implement the pinned reusable pipeline graph in node.subpipeline.resolved_graph; do not replace it with a pass-through or placeholder.",
+            "Respect the declared public interface bindings: parent inputs enter through nested source boundaries and nested destination values become parent outputs.",
+            "Execute nested components in dependency order and preserve their explicit port types and implementation plans.",
+            "Fail clearly when the pinned reference cannot be resolved or its public interface is inconsistent.",
+        ),
+    ),
     "ingestion": TaskProfile(
         name="ingestion",
         guidance=(
@@ -161,6 +170,8 @@ def classify_node_task(
     node: NodeDescriptor,
     inputs: list[FileDescriptor],
 ) -> str:
+    if node.type == "subpipeline":
+        return "subpipeline"
     # The label states the node's responsibility. Descriptions frequently
     # mention upstream/downstream tasks and must not override that responsibility.
     text = str(node.label or node.description or "").strip().lower()

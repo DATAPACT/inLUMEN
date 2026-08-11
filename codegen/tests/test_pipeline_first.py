@@ -403,6 +403,25 @@ def test_structured_risk_prediction_routes_to_classical_ml_without_training_labe
     assert "model_id" not in profile["selected_implementation_plan"]
 
 
+def test_subpipeline_profile_requires_nested_graph_and_interface_execution() -> None:
+    node = NodeDescriptor(
+        flow_id="conversation",
+        label="Conversation Understanding",
+        type="subpipeline",
+        subpipeline={
+            "reference": {"pipeline_uid": "reusable-1", "version_uid": "version-1"},
+            "interface": {"inputs": [{"id": "audio"}], "outputs": [{"id": "analysis"}]},
+            "resolved_graph": {"nodes": [{"id": "nested-source"}], "edges": []},
+        },
+    )
+
+    assert classify_node_task(node, []) == "subpipeline"
+    profile = task_profile_payload(node, [])
+    assert profile["name"] == "subpipeline"
+    assert any("pinned reusable pipeline graph" in rule for rule in profile["implementation_rules"])
+    assert any("public interface" in rule for rule in profile["implementation_rules"])
+
+
 def test_model_training_contract_includes_row_level_predictions() -> None:
     outputs = expected_outputs_for_node(
         NodeDescriptor(

@@ -8,7 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from analytics_api import _build_graph_sync_guardrail, _clean_client_graph
+from analytics_api import (
+    _build_graph_sync_guardrail,
+    _clean_client_graph,
+    _looks_like_internal_agent_message,
+    _pipeline_design_completion_message,
+)
 from graph_client import run_neo4j_query
 from llm_config import LLMConfig
 from local_api_client import LocalApiResponse
@@ -48,6 +53,54 @@ def flow_node(node_id, template, parameters):
             "description": template,
             "template_label": template,
             "param": parameters,
+        },
+    }
+
+
+def conversation_subpipeline_definition():
+    def nested(node_id, kind, ports, implementation=None):
+        data = {
+            "type": kind,
+            "label": node_id.replace("-", " ").title(),
+            "description": node_id,
+            "ports": ports,
+        }
+        if implementation is not None:
+            data["implementation"] = implementation
+        return {"id": node_id, "type": "custom", "position": {"x": 0, "y": 0}, "data": data}
+
+    graph = {
+        "nodes": [
+            nested("audio-input", "source", {
+                "inputs": [],
+                "outputs": [{"id": "audio", "name": "audio", "type": "Audio", "required": True}],
+            }),
+            nested("transcription", "task", {
+                "inputs": [{"id": "audio", "name": "audio", "type": "Audio", "required": True}],
+                "outputs": [{"id": "conversation_analysis", "name": "conversation_analysis", "type": "Object", "required": True}],
+            }, GENERATED_CODE),
+            nested("analysis-output", "destination", {
+                "inputs": [{"id": "conversation_analysis", "name": "conversation_analysis", "type": "Object", "required": True}],
+                "outputs": [],
+            }),
+        ],
+        "edges": [
+            edge("audio-input", "transcription", "audio", "audio"),
+            edge("transcription", "analysis-output", "conversation_analysis", "conversation_analysis"),
+        ],
+    }
+    return {
+        "version": 1,
+        "graph": graph,
+        "interface": {
+            "inputs": [{
+                "id": "audio", "name": "audio", "type": "Audio", "required": True,
+                "internal": {"node": "audio-input", "port": "audio"},
+            }],
+            "outputs": [{
+                "id": "conversation_analysis", "name": "conversation_analysis", "type": "Object", "required": True,
+                "internal": {"node": "analysis-output", "port": "conversation_analysis"},
+            }],
         },
     }
 
@@ -188,8 +241,98 @@ class PipelineGraphValidationTest(unittest.TestCase):
         self.assertFalse(report["valid"])
         self.assertIn("missing-flow-behavior", {issue["code"] for issue in report["issues"]})
 
+    def test_subpipeline_validates_pinned_reference_and_public_contract(self):
+        definition = conversation_subpipeline_definition()
+        definition["version"] = 2
+        definition["reference"] = {
+            "pipeline_uid": "conversation-pipeline",
+            "pipeline_name": "Conversation Understanding",
+            "version_uid": "version-1",
+            "version_name": "Version 1",
+        }
+        definition.pop("graph")
+        composite = node(2, "subpipeline", "Conversation Understanding")
+        composite["data"]["ports"] = {
+            "inputs": [{"id": "audio", "name": "audio", "type": "Audio", "required": True}],
+            "outputs": [{"id": "conversation_analysis", "name": "conversation_analysis", "type": "Object", "required": True}],
+        }
+        composite["data"]["subpipeline"] = definition
+        graph = {
+            "nodes": [node(1, "source", "Audio"), composite, node(3, "destination", "Delivery")],
+            "edges": [
+                edge(1, 2, "data", "audio"),
+                edge(2, 3, "conversation_analysis", "data"),
+            ],
+        }
+
+        self.assertTrue(validate_pipeline_graph(graph)["valid"])
+
+    def test_subpipeline_requires_reference_and_matching_public_interface(self):
+        empty = node(2, "subpipeline", "Empty")
+        empty["data"]["subpipeline"] = {}
+        empty_report = validate_pipeline_graph({
+            "nodes": [node(1, "source", "Input"), empty, node(3, "destination", "Output")],
+            "edges": [edge(1, 2, "data", "input"), edge(2, 3, "output", "data")],
+        })
+        self.assertIn("missing-subpipeline-reference", {issue["code"] for issue in empty_report["issues"]})
+
+        definition = conversation_subpipeline_definition()
+        definition["version"] = 2
+        definition["reference"] = {
+            "pipeline_uid": "conversation-pipeline",
+            "pipeline_name": "Conversation Understanding",
+            "version_uid": "version-1",
+            "version_name": "Version 1",
+        }
+        definition.pop("graph")
+        definition["interface"]["outputs"][0]["id"] = "missing"
+        broken = node(2, "subpipeline", "Broken")
+        broken["data"]["ports"] = {
+            "inputs": [{"id": "audio", "name": "audio", "type": "Audio", "required": True}],
+            "outputs": [{"id": "conversation_analysis", "name": "conversation_analysis", "type": "Object", "required": True}],
+        }
+        broken["data"]["subpipeline"] = definition
+        broken_report = validate_pipeline_graph({
+            "nodes": [node(1, "source", "Input"), broken, node(3, "destination", "Output")],
+            "edges": [edge(1, 2, "data", "audio"), edge(2, 3, "conversation_analysis", "data")],
+        })
+        self.assertIn("invalid-subpipeline-interface", {issue["code"] for issue in broken_report["issues"]})
+
 
 class PipelineAgentGuardrailTest(unittest.TestCase):
+    def test_internal_tool_syntax_is_replaced_with_a_readable_pipeline_summary(self):
+        graph = {
+            "pipeline": {"label": "Accounts Payable"},
+            "nodes": [
+                node(1, "source", "Invoice Batch Ingestion"),
+                {
+                    **node(2, "subpipeline", "Invoice Understanding"),
+                    "data": {
+                        **node(2, "subpipeline", "Invoice Understanding")["data"],
+                        "subpipeline": {
+                            "reference": {
+                                "pipeline_name": "Invoice Understanding",
+                                "version_name": "v1",
+                            },
+                        },
+                    },
+                },
+                node(3, "destination", "Accounting Export"),
+            ],
+            "edges": [],
+        }
+
+        self.assertTrue(_looks_like_internal_agent_message(
+            'call:connect_steps(params:{"source_flow_id":"2"})'
+        ))
+        message = _pipeline_design_completion_message(graph)
+        self.assertIn('"Accounts Payable" is ready and validated', message)
+        self.assertIn(
+            "Invoice Batch Ingestion → Invoice Understanding → Accounting Export",
+            message,
+        )
+        self.assertIn("Reusable pipeline: Invoice Understanding (v1)", message)
+
     def test_empty_agent_query_result_is_detected_for_live_and_mocked_results(self):
         self.assertTrue(_agent_query_returned_no_rows("[]"))
         self.assertTrue(_agent_query_returned_no_rows([]))
@@ -278,11 +421,124 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("connect_steps", tool_names)
         self.assertIn("disconnect_steps", tool_names)
         self.assertIn("configure_flow_step", tool_names)
+        self.assertIn("configure_subpipeline_step", tool_names)
+        self.assertIn("list_reusable_pipelines", tool_names)
+        self.assertIn("create_reusable_pipeline", tool_names)
         system_message = assistant_agent.call_args.kwargs["system_message"]
         self.assertIn("Condition.when_false", system_message)
         self.assertIn('value.sentiment == "negative"', system_message)
         self.assertIn("Complaint has exactly one outgoing edge", system_message)
         self.assertIn("Parallel Map owns iteration", system_message)
+        self.assertIn("another distinct saved PIPELINE", system_message)
+        self.assertIn("Conversation Understanding", system_message)
+        self.assertIn("create_step pins the reference", system_message)
+
+    @patch("pipeline_editor_team.RoundRobinGroupChat")
+    @patch("pipeline_editor_team.AssistantAgent")
+    @patch("pipeline_editor_team.select_model_client")
+    @patch("pipeline_editor_team.run_neo4j_query", new_callable=AsyncMock)
+    def test_create_subpipeline_step_atomically_pins_saved_version_and_public_ports(
+        self,
+        run_query,
+        select_model_client,
+        assistant_agent,
+        _round_robin,
+    ):
+        config = LLMConfig(
+            provider="openrouter",
+            model="test/model",
+            base_url="https://example.test/v1",
+            api_key="secret",
+        )
+        select_model_client.return_value = MagicMock()
+        run_query.side_effect = [
+            json.dumps([{"reusable_pipeline": {
+                "pipeline_uid": "reusable-1",
+                "pipeline_name": "Conversation Understanding",
+                "version_uid": "version-2",
+                "version_name": "Version 2",
+                "interface_json": json.dumps({
+                    "inputs": [{"id": "audio", "type": "Audio", "required": True}],
+                    "outputs": [{"id": "conversation_analysis", "type": "Object", "required": True}],
+                }),
+                "public_ports_json": json.dumps({
+                    "inputs": [{"id": "audio", "name": "audio", "type": "Audio", "required": True}],
+                    "outputs": [{"id": "conversation_analysis", "name": "conversation_analysis", "type": "Object", "required": True}],
+                }),
+            }}]),
+            json.dumps([{"step": {"flow_id": "2", "referenced_version_uid": "version-2"}}]),
+        ]
+
+        build_pipeline_editing_team(config)
+        create_step = next(
+            tool
+            for tool in assistant_agent.call_args.kwargs["tools"]
+            if tool.__name__ == "create_step"
+        )
+        result = asyncio.run(create_step(json.dumps({
+            "type": "subpipeline",
+            "label": "Conversation Understanding",
+            "description": "Reuse saved conversation analysis.",
+            "reusable_pipeline_uid": "reusable-1",
+            "reusable_version_uid": "version-2",
+        })))
+
+        lookup_query = run_query.await_args_list[0].args[0]
+        create_query = run_query.await_args_list[1].args[0]
+        self.assertIn("rp.uid = 'reusable-1'", lookup_query)
+        self.assertIn("rv.uid = 'version-2'", lookup_query)
+        self.assertEqual(
+            "resolve_reusable_pipeline_for_creation",
+            run_query.await_args_list[0].args[1],
+        )
+        self.assertIn("subpipeline_json:", create_query)
+        self.assertIn("primary_input_port: 'audio'", create_query)
+        self.assertIn("primary_output_port: 'conversation_analysis'", create_query)
+        self.assertIn("flow.target_port = 'audio'", create_query)
+        self.assertIn(
+            "WHEN prev.type = 'subpipeline' THEN coalesce(prev.primary_output_port, 'output')",
+            create_query,
+        )
+        self.assertIn("referenced_version_uid: 'version-2'", create_query)
+        self.assertIn("version-2", result)
+
+    @patch("pipeline_editor_team.RoundRobinGroupChat")
+    @patch("pipeline_editor_team.AssistantAgent")
+    @patch("pipeline_editor_team.select_model_client")
+    @patch("pipeline_editor_team.run_neo4j_query", new_callable=AsyncMock)
+    def test_create_step_infers_parallel_map_from_an_unambiguous_label(
+        self,
+        run_query,
+        select_model_client,
+        assistant_agent,
+        _round_robin,
+    ):
+        config = LLMConfig(
+            provider="openrouter",
+            model="test/model",
+            base_url="https://example.test/v1",
+            api_key="secret",
+        )
+        select_model_client.return_value = MagicMock()
+        run_query.return_value = json.dumps([{"step": {"flow_id": "2", "type": "flow"}}])
+
+        build_pipeline_editing_team(config)
+        create_step = next(
+            tool
+            for tool in assistant_agent.call_args.kwargs["tools"]
+            if tool.__name__ == "create_step"
+        )
+        asyncio.run(create_step(json.dumps({
+            "type": "flow",
+            "label": "Process Invoices Parallel",
+            "description": "Process each invoice in the batch independently.",
+        })))
+
+        query = run_query.await_args.args[0]
+        self.assertIn("template_label:'Parallel Map'", query)
+        self.assertIn('"max_concurrency": 4', query)
+        self.assertIn('"failure_policy": "stop"', query)
+        self.assertIn("flow.target_port = 'items'", query)
 
     @patch("pipeline_editor_team.RoundRobinGroupChat")
     @patch("pipeline_editor_team.AssistantAgent")
@@ -322,8 +578,10 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("source.type = 'flow'", query)
         self.assertIn("OR false", query)
         self.assertIn("MERGE (source)-[flow:FLOWS_TO]->(target)", query)
-        self.assertIn("flow.source_port = 'when_false'", query)
-        self.assertIn("flow.target_port = 'input'", query)
+        self.assertIn("ELSE 'when_false'", query)
+        self.assertIn("ELSE 'input'", query)
+        self.assertIn("coalesce(source.primary_output_port", query)
+        self.assertIn("coalesce(target.primary_input_port", query)
         self.assertIn("trueTarget.y = coalesce(source.y, 0.0) - 180.0", query)
         self.assertIn("falseTargetIsMerge", query)
         self.assertEqual("connect_steps", run_query.await_args.args[1])
@@ -406,6 +664,128 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("['when_true', 'when_false']", query)
         self.assertIn("'when_true'", query)
         self.assertEqual("configure_flow_step", run_query.await_args.args[1])
+
+    @patch("pipeline_editor_team.RoundRobinGroupChat")
+    @patch("pipeline_editor_team.AssistantAgent")
+    @patch("pipeline_editor_team.select_model_client")
+    @patch("pipeline_editor_team.run_neo4j_query", new_callable=AsyncMock)
+    def test_configure_subpipeline_step_pins_saved_version_and_migrates_handles(
+        self,
+        run_query,
+        select_model_client,
+        assistant_agent,
+        _round_robin,
+    ):
+        config = LLMConfig(
+            provider="openrouter",
+            model="test/model",
+            base_url="https://example.test/v1",
+            api_key="secret",
+        )
+        select_model_client.return_value = MagicMock()
+        run_query.side_effect = [
+            json.dumps([{"reusable_pipeline": {
+                "pipeline_uid": "reusable-1",
+                "pipeline_name": "Conversation Understanding",
+                "version_uid": "version-1",
+                "version_name": "Version 1",
+                "interface_json": json.dumps({
+                    "inputs": [{"id": "audio", "name": "audio", "type": "Audio", "required": True, "internal": {"node": "audio-input", "port": "audio"}}],
+                    "outputs": [{"id": "conversation_analysis", "name": "conversation_analysis", "type": "Object", "required": True, "internal": {"node": "analysis-output", "port": "conversation_analysis"}}],
+                }),
+                "public_ports_json": json.dumps({
+                    "inputs": [{"id": "audio", "name": "audio", "type": "Audio", "required": True}],
+                    "outputs": [{"id": "conversation_analysis", "name": "conversation_analysis", "type": "Object", "required": True}],
+                }),
+            }}]),
+            json.dumps([{"subpipeline_context": {
+                "current_ports_json": json.dumps({
+                    "inputs": [{"id": "input", "name": "input", "type": "any", "required": True}],
+                    "outputs": [{"id": "output", "name": "output", "type": "any", "required": True}],
+                }),
+                "connected_inputs": ["input"],
+                "connected_outputs": ["output"],
+            }}]),
+            json.dumps([{"subpipeline_step": {"referenced_version_uid": "version-1"}}]),
+        ]
+
+        build_pipeline_editing_team(config)
+        configure_subpipeline_step = next(
+            tool
+            for tool in assistant_agent.call_args.kwargs["tools"]
+            if tool.__name__ == "configure_subpipeline_step"
+        )
+        asyncio.run(configure_subpipeline_step(json.dumps({
+            "flow_id": "2",
+            "pipeline_uid": "reusable-1",
+            "version_uid": "version-1",
+        })))
+
+        query = run_query.await_args.args[0]
+        self.assertIn("subpipelineStep.subpipeline_json", query)
+        self.assertIn("subpipelineStep.ports_json", query)
+        self.assertIn("subpipelineStep.primary_input_port = 'audio'", query)
+        self.assertIn(
+            "subpipelineStep.primary_output_port = 'conversation_analysis'",
+            query,
+        )
+        self.assertIn("WHEN connection.target_port = 'input' THEN 'audio'", query)
+        self.assertIn("WHEN connection.source_port = 'output' THEN 'conversation_analysis'", query)
+        self.assertIn("input_port_mapping:{\"input\": \"audio\"}", query)
+        self.assertIn("output_port_mapping:{\"output\": \"conversation_analysis\"}", query)
+        self.assertIn("referenced_version_uid:'version-1'", query)
+        self.assertEqual("resolve_reusable_pipeline", run_query.await_args_list[0].args[1])
+        self.assertEqual("inspect_subpipeline_contract", run_query.await_args_list[1].args[1])
+        self.assertEqual("configure_subpipeline_step", run_query.await_args.args[1])
+
+    @patch("pipeline_editor_team.RoundRobinGroupChat")
+    @patch("pipeline_editor_team.AssistantAgent")
+    @patch("pipeline_editor_team.select_model_client")
+    @patch("pipeline_editor_team.run_neo4j_query", new_callable=AsyncMock)
+    def test_create_reusable_pipeline_creates_separate_versioned_pipeline(
+        self,
+        run_query,
+        select_model_client,
+        assistant_agent,
+        _round_robin,
+    ):
+        config = LLMConfig(
+            provider="openrouter",
+            model="test/model",
+            base_url="https://example.test/v1",
+            api_key="secret",
+        )
+        select_model_client.return_value = MagicMock()
+        run_query.side_effect = [
+            json.dumps([]),
+            json.dumps([{"reusable_pipeline": {
+                "pipeline_uid": "reusable-1",
+                "version_uid": "version-1",
+            }}]),
+        ]
+
+        build_pipeline_editing_team(config)
+        create_reusable_pipeline = next(
+            tool
+            for tool in assistant_agent.call_args.kwargs["tools"]
+            if tool.__name__ == "create_reusable_pipeline"
+        )
+        definition = conversation_subpipeline_definition()
+        asyncio.run(create_reusable_pipeline(json.dumps({
+            "name": "Conversation Understanding",
+            "description": "Reusable conversation analysis.",
+            "version_name": "Version 1",
+            "graph": definition["graph"],
+        })))
+
+        query = run_query.await_args.args[0]
+        self.assertIn("status:'reusable'", query)
+        self.assertIn("CREATE (v:PIPELINE_VERSION", query)
+        self.assertIn("interface_json", query)
+        self.assertIn("public_ports_json", query)
+        self.assertIn("HAS_VERSION", query)
+        self.assertEqual("find_reusable_pipeline_by_name", run_query.await_args_list[0].args[1])
+        self.assertEqual("create_reusable_pipeline", run_query.await_args.args[1])
 
     @patch("graph_client.dispatch_graph_request")
     def test_graph_client_raises_http_failures_as_tool_errors(self, dispatch_graph_request):

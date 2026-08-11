@@ -13,9 +13,22 @@ from pydantic import BaseModel
 from graph_client import run_neo4j_query
 from llm_config import LLMConfig, log_llm_selection, select_model_client
 from model_plans import resolve_implementation_plan
-from node_ports import default_input_port_id, ports_json_for_template
+from node_ports import (
+    default_input_port_id,
+    normalize_node_ports,
+    ports_json,
+    ports_json_for_template,
+)
 from node_parameters import secret_params_json
+from pipeline_graph_validation import validate_pipeline_graph
 from step_types import normalize_step_type
+from subpipeline_reference import (
+    derive_subpipeline_interface,
+    missing_explicit_port_contracts,
+    normalize_reusable_pipeline_graph,
+    plan_subpipeline_port_migration,
+    public_ports_for_interface,
+)
 
 
 SEMANTIC_IMPLEMENTATION_KIND_ALIASES = {
@@ -400,6 +413,146 @@ def build_pipeline_editing_team(
         props_lines.append(f"secret_params_json: '{escaped_secret_json}'")
         return props_lines
 
+    def _resolved_template_for_step(
+        step_type: str,
+        template_label: object,
+        label: object,
+        description: object,
+    ) -> str:
+        raw_template = str(template_label or "").strip()
+        if step_type != "flow":
+            return raw_template
+        normalized_template = raw_template.lower()
+        if normalized_template == "parallel map":
+            return "Parallel Map"
+        if normalized_template == "condition":
+            return "Condition"
+        if raw_template and normalized_template != "flow":
+            return raw_template
+        behavior_hint = f"{label or ''} {description or ''}".lower()
+        if "parallel" in behavior_hint or "for each" in behavior_hint:
+            return "Parallel Map"
+        return "Condition"
+
+    def _decoded_rows(result: object) -> list[dict[str, Any]]:
+        decoded = result
+        if isinstance(result, str):
+            try:
+                decoded = json.loads(result)
+            except (TypeError, ValueError):
+                return []
+        if not isinstance(decoded, list):
+            return []
+        return [row for row in decoded if isinstance(row, dict)]
+
+    def _cypher_string(value: object) -> str:
+        return str(value or "").replace("\\", "\\\\").replace("'", "\\'")
+
+    async def _resolve_subpipeline_for_creation(
+        data: dict[str, Any],
+        label: str,
+    ) -> dict[str, Any]:
+        """Resolve a saved version before a parent Subpipeline node exists."""
+
+        def optional_id(name: str) -> str:
+            value = str(data.get(name) or "").strip()
+            if value and not all(character.isalnum() or character in "_.-" for character in value):
+                raise ValueError(f"create_step received an invalid {name}")
+            return value
+
+        pipeline_uid = optional_id("reusable_pipeline_uid")
+        version_uid = optional_id("reusable_version_uid")
+        pipeline_name = str(data.get("reusable_pipeline_name") or label or "").strip()
+        version_name = str(data.get("reusable_version_name") or "").strip()
+        if not pipeline_uid and not pipeline_name:
+            raise ValueError(
+                "Subpipeline creation requires reusable_pipeline_uid or reusable_pipeline_name"
+            )
+
+        escaped_pipeline_name = _cypher_string(pipeline_name)
+        escaped_version_name = _cypher_string(version_name)
+        pipeline_filter = (
+            f"rp.uid = '{pipeline_uid}'"
+            if pipeline_uid
+            else (
+                "(toLower(trim(rp.name)) = toLower(trim('"
+                f"{escaped_pipeline_name}')) OR "
+                "toLower(trim('"
+                f"{escaped_pipeline_name}')) CONTAINS toLower(trim(rp.name)))"
+            )
+        )
+        if version_uid:
+            version_filter = f"rv.uid = '{version_uid}'"
+        elif version_name:
+            version_filter = f"toLower(trim(rv.name)) = toLower(trim('{escaped_version_name}'))"
+        else:
+            version_filter = "rv.uid = rp.active_version_uid"
+
+        lookup = await run_query(f"""
+        MATCH (rp:PIPELINE {{status:'reusable'}})-[:HAS_VERSION]->(rv:PIPELINE_VERSION)
+        WHERE {pipeline_filter} AND {version_filter}
+        RETURN {{
+          pipeline_uid:rp.uid, pipeline_name:rp.name,
+          version_uid:rv.uid, version_name:rv.name,
+          interface_json:rv.interface_json,
+          public_ports_json:rv.public_ports_json
+        }} AS reusable_pipeline
+        ORDER BY CASE WHEN toLower(trim(rp.name)) = toLower(trim('{escaped_pipeline_name}')) THEN 0 ELSE 1 END,
+                 rp.name
+        LIMIT 2;
+        """, "resolve_reusable_pipeline_for_creation")
+        matches = [
+            row.get("reusable_pipeline")
+            for row in _decoded_rows(lookup)
+            if isinstance(row.get("reusable_pipeline"), dict)
+        ]
+        if not matches:
+            raise ValueError(
+                f"No saved reusable pipeline version matched '{pipeline_name}'. "
+                "Call list_reusable_pipelines and use its pipeline/version identifiers."
+            )
+        if len(matches) > 1 and not pipeline_uid:
+            raise ValueError(
+                f"Reusable pipeline name '{pipeline_name}' is ambiguous. "
+                "Pass reusable_pipeline_uid and reusable_version_uid from list_reusable_pipelines."
+            )
+        reusable = matches[0]
+        try:
+            interface = json.loads(reusable.get("interface_json") or "{}")
+            public_ports = json.loads(reusable.get("public_ports_json") or "{}")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Saved reusable pipeline version has an invalid public contract") from exc
+        inputs = public_ports.get("inputs") if isinstance(public_ports, dict) else None
+        outputs = public_ports.get("outputs") if isinstance(public_ports, dict) else None
+        input_ids = [
+            str(port.get("id") or "")
+            for port in inputs or []
+            if isinstance(port, dict) and port.get("id")
+        ]
+        output_ids = [
+            str(port.get("id") or "")
+            for port in outputs or []
+            if isinstance(port, dict) and port.get("id")
+        ]
+        if not isinstance(interface, dict) or not input_ids or not output_ids:
+            raise ValueError(
+                "Saved reusable pipeline version must expose at least one public input and output"
+            )
+        reference = {
+            "pipeline_uid": str(reusable.get("pipeline_uid") or ""),
+            "pipeline_name": str(reusable.get("pipeline_name") or ""),
+            "version_uid": str(reusable.get("version_uid") or ""),
+            "version_name": str(reusable.get("version_name") or ""),
+        }
+        definition = {"version": 2, "reference": reference, "interface": interface}
+        return {
+            "reference": reference,
+            "definition_json": json.dumps(definition, ensure_ascii=True, sort_keys=True),
+            "ports_json": ports_json(public_ports, "subpipeline"),
+            "input_ids": input_ids,
+            "output_ids": output_ids,
+        }
+
     async def create_step(params: str) -> str:
         """Creates new STEP and connects it after the last STEP, if present.
 
@@ -409,6 +562,10 @@ def build_pipeline_editing_team(
           "label": "step label",
           "description": "step description",
           "template": "optional template name such as Speech-to-Text",
+          "reusable_pipeline_name": "required for Subpipeline unless uid is supplied",
+          "reusable_pipeline_uid": "optional saved reusable pipeline uid",
+          "reusable_version_uid": "optional immutable version uid",
+          "reusable_version_name": "optional version name; active version is the default",
           "parameters": {"static_parameter": "value"},
           "secret_parameters": ["api_key"],
           "implementation": {
@@ -429,30 +586,66 @@ def build_pipeline_editing_team(
         Include implementation for analytical steps. For ordinary structured
         model training, specify task/domain and classical_ml but omit model_id.
         Use source/destination templates for external adapters, task templates for
-        domain operations, flow for execution control, and subpipeline for a
-        reusable pipeline reference. Never create configuration nodes.
+        domain operations, and flow for execution control. Creating a subpipeline
+        atomically resolves and pins a saved reusable pipeline version and returns
+        its exact public input/output ids; an unreferenced placeholder is never
+        created. Never create configuration nodes.
         """
         try:
             query_type = "create_step"
             data = json.loads(params)
             step_type = normalize_step_type(data.get("type"))
-            label = str(data.get("label", "")).replace("'", "\\'")
-            description = str(data.get("description", "")).replace("'", "\\'")
+            raw_label = str(data.get("label", ""))
+            label = _cypher_string(raw_label)
+            raw_description = str(data.get("description", ""))
+            description = raw_description.replace("'", "\\'")
+            resolved_template = _resolved_template_for_step(
+                step_type,
+                data.get("template"),
+                raw_label,
+                raw_description,
+            )
             props_lines = _step_props_lines(
                 step_type,
                 label,
                 description,
-                str(data.get("template") or "").replace("'", "\\'"),
+                resolved_template.replace("'", "\\'"),
                 data.get("implementation"),
                 data.get("parameters"),
                 data.get("secret_parameters"),
             )
+            resolved_subpipeline = None
+            if step_type == "subpipeline":
+                resolved_subpipeline = await _resolve_subpipeline_for_creation(data, raw_label)
+                props_lines = [
+                    line for line in props_lines if not line.startswith("ports_json:")
+                ]
+                escaped_ports = _cypher_string(resolved_subpipeline["ports_json"])
+                escaped_definition = _cypher_string(resolved_subpipeline["definition_json"])
+                primary_input = _cypher_string(resolved_subpipeline["input_ids"][0])
+                primary_output = _cypher_string(resolved_subpipeline["output_ids"][0])
+                props_lines.extend([
+                    f"ports_json: '{escaped_ports}'",
+                    f"subpipeline_json: '{escaped_definition}'",
+                    f"primary_input_port: '{primary_input}'",
+                    f"primary_output_port: '{primary_output}'",
+                ])
             props_str = ",\n            ".join(props_lines)
-            resolved_template = str(
-                data.get("template")
-                or ("Condition" if step_type == "flow" else "")
-            )
-            target_port = default_input_port_id(step_type, resolved_template).replace("'", "\\'")
+            target_port = (
+                resolved_subpipeline["input_ids"][0]
+                if resolved_subpipeline
+                else default_input_port_id(step_type, resolved_template)
+            ).replace("'", "\\'")
+            subpipeline_return = ""
+            if resolved_subpipeline:
+                reference = resolved_subpipeline["reference"]
+                subpipeline_return = f""",
+            referenced_pipeline_uid: '{_cypher_string(reference['pipeline_uid'])}',
+            referenced_pipeline_name: '{_cypher_string(reference['pipeline_name'])}',
+            referenced_version_uid: '{_cypher_string(reference['version_uid'])}',
+            referenced_version_name: '{_cypher_string(reference['version_name'])}',
+            public_inputs: {json.dumps(resolved_subpipeline['input_ids'])},
+            public_outputs: {json.dumps(resolved_subpipeline['output_ids'])}"""
             query = f"""
             OPTIONAL MATCH (candidate:PIPELINE {{status:'design'}})
             OPTIONAL MATCH (candidate)-[:HAS_STEP]->(candidateStep:STEP)
@@ -507,6 +700,7 @@ def build_pipeline_editing_team(
             MERGE (prev)-[flow:FLOWS_TO]->(s)
             SET flow.source_port = CASE
                     WHEN prev.type = 'source' THEN 'data'
+                    WHEN prev.type = 'subpipeline' THEN coalesce(prev.primary_output_port, 'output')
                     WHEN prev.type = 'flow' AND toLower(coalesce(prev.template_label, '')) = 'condition' THEN 'when_true'
                     WHEN prev.type = 'flow' AND toLower(coalesce(prev.template_label, '')) = 'parallel map' THEN 'item'
                     ELSE 'output'
@@ -521,7 +715,7 @@ def build_pipeline_editing_team(
             description: s.description,
             x: s.x,
             y: s.y,
-            pipeline_updated_at: toString(p.updated_at)
+            pipeline_updated_at: toString(p.updated_at){subpipeline_return}
             }} AS step;
             """
             result = await run_query(query, query_type)
@@ -542,9 +736,12 @@ def build_pipeline_editing_team(
         }
 
         Standard handles are source.data, task.output/input, destination.data,
-        Condition.value/when_true/when_false, Parallel Map.items/item, and
-        subpipeline.input/output. Calling this for an existing source/target pair
-        updates that connection's handles. Use it to add every non-linear branch.
+        Condition.value/when_true/when_false, and Parallel Map.items/item.
+        Subpipeline handles are the public port ids returned by create_step.
+        For compatibility, input/output aliases are mapped to the pinned
+        Subpipeline's primary public ports. Calling this for an existing
+        source/target pair updates that connection's handles. Use it to add every
+        non-linear branch.
         Flow steps may fan out by design. A non-Flow step may only gain a second
         downstream target when allow_fan_out is explicitly true; omit it for
         ordinary chains and branch merges.
@@ -579,8 +776,16 @@ def build_pipeline_editing_team(
                OR size(existingTargets) = 0
                OR target IN existingTargets
             MERGE (source)-[flow:FLOWS_TO]->(target)
-            SET flow.source_port = '{source_port}',
-                flow.target_port = '{target_port}',
+            SET flow.source_port = CASE
+                    WHEN source.type = 'subpipeline' AND '{source_port}' = 'output'
+                    THEN coalesce(source.primary_output_port, '{source_port}')
+                    ELSE '{source_port}'
+                END,
+                flow.target_port = CASE
+                    WHEN target.type = 'subpipeline' AND '{target_port}' = 'input'
+                    THEN coalesce(target.primary_input_port, '{target_port}')
+                    ELSE '{target_port}'
+                END,
                 p.updated_at = datetime()
             WITH p, source, target, flow
             OPTIONAL MATCH (source)-[trueConnection:FLOWS_TO]->(trueTarget:STEP)
@@ -771,6 +976,268 @@ def build_pipeline_editing_team(
         except Exception as exc:
             raise RuntimeError(f"configure_flow_step failed: {exc}") from exc
 
+    async def list_reusable_pipelines(params: str) -> str:
+        """Lists separately saved reusable pipelines and their immutable versions.
+
+        params JSON: {}
+        """
+        _ = json.loads(params) if params else {}
+        query = """
+        MATCH (p:PIPELINE {status:'reusable'})-[:HAS_VERSION]->(v:PIPELINE_VERSION)
+        RETURN {
+          pipeline_uid: p.uid,
+          pipeline_name: p.name,
+          description: p.description,
+          active_version_uid: p.active_version_uid,
+          version_uid: v.uid,
+          version_name: v.name,
+          interface_json: v.interface_json,
+          node_count: v.node_count,
+          edge_count: v.edge_count
+        } AS reusable_pipeline
+        ORDER BY p.name, v.created_at DESC;
+        """
+        return repr(await run_query(query, "list_reusable_pipelines"))
+
+    async def create_reusable_pipeline(params: str) -> str:
+        """Creates a distinct reusable PIPELINE and immutable version.
+
+        params JSON:
+        {
+          "name": "Conversation Understanding",
+          "description": "Reusable transcription and conversation analysis.",
+          "version_name": "Version 1",
+          "graph": {"nodes": ["complete React Flow-shaped nodes with explicit typed ports"], "edges": ["port-aware edges"]}
+        }
+
+        The graph must be runnable on its own, with Source and Destination
+        boundaries. Every node must declare ports.inputs and ports.outputs with
+        stable ids and data types; implicit generic ports are rejected. Source
+        and Destination ports become the reusable pipeline's public contract.
+        """
+        try:
+            data = json.loads(params)
+            name = str(data.get("name") or "").strip()
+            description = str(data.get("description") or "").strip()
+            version_name = str(data.get("version_name") or "Version 1").strip() or "Version 1"
+            graph = data.get("graph") if isinstance(data.get("graph"), dict) else {}
+            if not name:
+                raise ValueError("create_reusable_pipeline requires name")
+            missing_ports = missing_explicit_port_contracts(graph)
+            if missing_ports:
+                raise ValueError(
+                    "Every reusable-pipeline component requires explicit typed ports; missing: "
+                    + ", ".join(missing_ports)
+                )
+            graph = normalize_reusable_pipeline_graph(graph)
+            validation = validate_pipeline_graph(graph)
+            if not validation.get("valid"):
+                messages = [
+                    str(issue.get("message") or "Invalid graph")
+                    for issue in validation.get("issues", [])
+                    if isinstance(issue, dict)
+                ]
+                raise ValueError("Reusable pipeline graph is invalid: " + "; ".join(messages[:6]))
+            interface = derive_subpipeline_interface(graph)
+            if not interface["inputs"] or not interface["outputs"]:
+                raise ValueError("Reusable pipeline requires Source and Destination boundaries")
+            public_ports = public_ports_for_interface(interface)
+            escaped_name = name.replace("'", "\\'")
+
+            duplicate_lookup = await run_query(f"""
+            MATCH (existing:PIPELINE {{status:'reusable'}})
+            WHERE toLower(trim(coalesce(existing.name, ''))) = toLower(trim('{escaped_name}'))
+            RETURN {{pipeline_uid:existing.uid,
+                     version_uid:existing.active_version_uid,
+                     pipeline_name:existing.name}} AS reusable_pipeline
+            LIMIT 1;
+            """, "find_reusable_pipeline_by_name")
+            duplicate_rows = json.loads(duplicate_lookup) if isinstance(duplicate_lookup, str) else duplicate_lookup
+            if isinstance(duplicate_rows, list) and duplicate_rows:
+                raise ValueError(
+                    "A reusable pipeline with this name already exists. "
+                    "Call list_reusable_pipelines and pin its saved version instead."
+                )
+
+            def escaped_json(value: Any) -> str:
+                return json.dumps(value, ensure_ascii=True, sort_keys=True).replace("\\", "\\\\").replace("'", "\\'")
+
+            escaped_description = description.replace("'", "\\'")
+            escaped_version_name = version_name.replace("'", "\\'")
+            graph_json = escaped_json(graph)
+            interface_json = escaped_json(interface)
+            public_ports_json = escaped_json(public_ports)
+            query = f"""
+            CREATE (p:PIPELINE {{
+              uid: randomUUID(), name:'{escaped_name}', label:'{escaped_name}',
+              description:'{escaped_description}', status:'reusable',
+              created_at:datetime(), updated_at:datetime()
+            }})
+            CREATE (v:PIPELINE_VERSION {{
+              uid:randomUUID(), name:'{escaped_version_name}', version:'{escaped_version_name}',
+              version_index:1, is_main:false, description:'{escaped_description}',
+              graph_json:'{graph_json}', interface_json:'{interface_json}',
+              public_ports_json:'{public_ports_json}',
+              node_count:{len(graph.get('nodes') or [])}, edge_count:{len(graph.get('edges') or [])},
+              file_count:0, created_at:datetime(), updated_at:datetime()
+            }})
+            MERGE (p)-[:HAS_VERSION]->(v)
+            SET p.active_version_uid = v.uid
+            RETURN {{
+              pipeline_uid:p.uid, pipeline_name:p.name,
+              version_uid:v.uid, version_name:v.name,
+              interface_json:v.interface_json,
+              public_ports_json:v.public_ports_json
+            }} AS reusable_pipeline;
+            """
+            return repr(await run_query(query, "create_reusable_pipeline"))
+        except Exception as exc:
+            raise RuntimeError(f"create_reusable_pipeline failed: {exc}") from exc
+
+    async def configure_subpipeline_step(params: str) -> str:
+        """Pins an existing parent Subpipeline step to a saved reusable pipeline version.
+
+        params JSON:
+        {
+          "flow_id": "parent Subpipeline step flow_id",
+          "pipeline_uid": "saved reusable pipeline uid",
+          "version_uid": "immutable reusable pipeline version uid"
+        }
+
+        The public contract is loaded from the saved version. Never pass or embed
+        a graph in this call.
+        """
+        try:
+            data = json.loads(params)
+
+            def valid_id(name: str) -> str:
+                value = str(data.get(name) or "").strip()
+                if not value or not all(character.isalnum() or character in "_.-" for character in value):
+                    raise ValueError(f"configure_subpipeline_step requires valid {name}")
+                return value
+
+            flow_id = valid_id("flow_id")
+            pipeline_uid = valid_id("pipeline_uid")
+            version_uid = valid_id("version_uid")
+            lookup = await run_query(f"""
+            MATCH (rp:PIPELINE {{uid:'{pipeline_uid}', status:'reusable'}})-[:HAS_VERSION]->(rv:PIPELINE_VERSION {{uid:'{version_uid}'}})
+            RETURN {{
+              pipeline_uid:rp.uid, pipeline_name:rp.name,
+              version_uid:rv.uid, version_name:rv.name,
+              interface_json:rv.interface_json,
+              public_ports_json:rv.public_ports_json
+            }} AS reusable_pipeline;
+            """, "resolve_reusable_pipeline")
+            decoded = json.loads(lookup) if isinstance(lookup, str) else lookup
+            rows = decoded if isinstance(decoded, list) else []
+            reusable = rows[0].get("reusable_pipeline") if rows and isinstance(rows[0], dict) else None
+            if not isinstance(reusable, dict):
+                raise ValueError("Reusable pipeline version was not found")
+            try:
+                interface = json.loads(reusable.get("interface_json") or "{}")
+                public_ports = json.loads(reusable.get("public_ports_json") or "{}")
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Reusable pipeline version has an invalid public contract") from exc
+            if not isinstance(interface, dict) or not isinstance(public_ports, dict):
+                raise ValueError("Reusable pipeline version has no public contract")
+            reference = {
+                "pipeline_uid": pipeline_uid,
+                "pipeline_name": str(reusable.get("pipeline_name") or ""),
+                "version_uid": version_uid,
+                "version_name": str(reusable.get("version_name") or ""),
+            }
+            definition = {"version": 2, "reference": reference, "interface": interface}
+            serialized_definition = json.dumps(definition, ensure_ascii=True, sort_keys=True)
+            serialized_ports = ports_json(public_ports, "subpipeline")
+            escaped_definition = serialized_definition.replace("\\", "\\\\").replace("'", "\\'")
+            escaped_ports = serialized_ports.replace("\\", "\\\\").replace("'", "\\'")
+            input_ids = [str(port.get("id") or "") for port in public_ports.get("inputs", []) if isinstance(port, dict)]
+            output_ids = [str(port.get("id") or "") for port in public_ports.get("outputs", []) if isinstance(port, dict)]
+            if not input_ids or not output_ids:
+                raise ValueError("Reusable pipeline version requires public inputs and outputs")
+
+            parent_lookup = await run_query(f"""
+            MATCH (:PIPELINE {{status:'design'}})-[:HAS_STEP]->(step:STEP {{flow_id:'{flow_id}'}})
+            WHERE step.type = 'subpipeline'
+            OPTIONAL MATCH (:STEP)-[incoming:FLOWS_TO]->(step)
+            OPTIONAL MATCH (step)-[outgoing:FLOWS_TO]->(:STEP)
+            RETURN {{current_ports_json:step.ports_json,
+                     connected_inputs:collect(DISTINCT incoming.target_port),
+                     connected_outputs:collect(DISTINCT outgoing.source_port)}} AS subpipeline_context;
+            """, "inspect_subpipeline_contract")
+            decoded_parent = json.loads(parent_lookup) if isinstance(parent_lookup, str) else parent_lookup
+            parent_rows = decoded_parent if isinstance(decoded_parent, list) else []
+            parent_context = (
+                parent_rows[0].get("subpipeline_context")
+                if parent_rows and isinstance(parent_rows[0], dict)
+                else None
+            )
+            if not isinstance(parent_context, dict):
+                raise ValueError("No parent Subpipeline step matched the supplied flow_id")
+            migration = plan_subpipeline_port_migration(
+                normalize_node_ports(parent_context.get("current_ports_json"), "subpipeline"),
+                public_ports,
+                [str(value or "") for value in parent_context.get("connected_inputs", []) if value],
+                [str(value or "") for value in parent_context.get("connected_outputs", []) if value],
+            )
+            if not migration["compatible"]:
+                conflicts = "; ".join(
+                    f"{item.get('direction')} port {item.get('port')}: {item.get('reason')}"
+                    for item in migration["conflicts"]
+                )
+                raise ValueError(
+                    "The selected reusable version has an ambiguous connection migration. "
+                    "Use disconnect_steps to remove the affected edges, configure the Subpipeline, "
+                    f"then reconnect explicit compatible ports. {conflicts}"
+                )
+
+            def migration_case(variable: str, mapping: dict[str, str]) -> str:
+                clauses = []
+                for old_port, new_port in mapping.items():
+                    escaped_old = old_port.replace("\\", "\\\\").replace("'", "\\'")
+                    escaped_new = new_port.replace("\\", "\\\\").replace("'", "\\'")
+                    clauses.append(f"WHEN {variable} = '{escaped_old}' THEN '{escaped_new}'")
+                if not clauses:
+                    return variable
+                return f"CASE {' '.join(clauses)} ELSE {variable} END"
+
+            incoming_migration = migration_case("connection.target_port", migration["input_mapping"])
+            outgoing_migration = migration_case("connection.source_port", migration["output_mapping"])
+            query = f"""
+            MATCH (p:PIPELINE {{status:'design'}})-[:HAS_STEP]->(subpipelineStep:STEP {{flow_id:'{flow_id}'}})
+            WHERE subpipelineStep.type = 'subpipeline'
+            SET subpipelineStep.subpipeline_json = '{escaped_definition}',
+                subpipelineStep.ports_json = '{escaped_ports}',
+                subpipelineStep.primary_input_port = '{_cypher_string(input_ids[0])}',
+                subpipelineStep.primary_output_port = '{_cypher_string(output_ids[0])}',
+                p.updated_at = datetime()
+            WITH p, subpipelineStep
+            OPTIONAL MATCH (:STEP)-[incoming:FLOWS_TO]->(subpipelineStep)
+            WITH p, subpipelineStep, collect(incoming) AS incomingFlows
+            OPTIONAL MATCH (subpipelineStep)-[outgoing:FLOWS_TO]->(:STEP)
+            WITH p, subpipelineStep, incomingFlows, collect(outgoing) AS outgoingFlows
+            FOREACH (connection IN incomingFlows |
+              SET connection.target_port = {incoming_migration}
+            )
+            FOREACH (connection IN outgoingFlows |
+              SET connection.source_port = {outgoing_migration}
+            )
+            RETURN {{flow_id:subpipelineStep.flow_id,
+                     referenced_pipeline_uid:'{pipeline_uid}',
+                     referenced_version_uid:'{version_uid}',
+                     public_inputs:{json.dumps(input_ids)},
+                     public_outputs:{json.dumps(output_ids)},
+                     input_port_mapping:{json.dumps(migration['input_mapping'])},
+                     output_port_mapping:{json.dumps(migration['output_mapping'])},
+                     pipeline_updated_at:toString(p.updated_at)}} AS subpipeline_step;
+            """
+            result = await run_query(query, "configure_subpipeline_step")
+            if _agent_query_returned_no_rows(result):
+                raise ValueError("No parent Subpipeline step matched the supplied flow_id")
+            return repr(result)
+        except Exception as exc:
+            raise RuntimeError(f"configure_subpipeline_step failed: {exc}") from exc
+
     async def insert_step(params: str) -> str:
         """Inserts a STEP before an existing STEP.
 
@@ -798,8 +1265,16 @@ def build_pipeline_editing_team(
         try:
             data = json.loads(params)
             step_type = normalize_step_type(data.get("type"))
-            label = str(data.get("label", "")).replace("'", "\\'")
-            description = str(data.get("description", "")).replace("'", "\\'")
+            raw_label = str(data.get("label", ""))
+            raw_description = str(data.get("description", ""))
+            label = raw_label.replace("'", "\\'")
+            description = raw_description.replace("'", "\\'")
+            resolved_template = _resolved_template_for_step(
+                step_type,
+                data.get("template"),
+                raw_label,
+                raw_description,
+            )
             before_flow_id = str(data["before_flow_id"]).replace("'", "\\'")
             raw_after_flow_id = data.get("after_flow_id")
             after_flow_id = (
@@ -812,7 +1287,7 @@ def build_pipeline_editing_team(
                     step_type,
                     label,
                     description,
-                    str(data.get("template") or "").replace("'", "\\'"),
+                    resolved_template.replace("'", "\\'"),
                     data.get("implementation"),
                     data.get("parameters"),
                     data.get("secret_parameters"),
@@ -999,6 +1474,9 @@ def build_pipeline_editing_team(
             create_pipeline,
             create_step,
             configure_flow_step,
+            list_reusable_pipelines,
+            create_reusable_pipeline,
+            configure_subpipeline_step,
             connect_steps,
             disconnect_steps,
             insert_step,
@@ -1011,15 +1489,18 @@ def build_pipeline_editing_team(
                           A PIPELINE is composed of one or several STEPs. Use overview to check if there are any pipelines. If the user request is unclear or incomplete, ask for more details.
                         - [overview]: calling this tool will give you an overview of the current pipeline content, if any.
                         - [create_pipeline]: calling this tool will create a pipeline.
-                        - [create_step]: calling this tool will create a new step in a pipeline (will always place it last).
+                        - [create_step]: calling this tool will create a new step in a pipeline (will always place it last). For type subpipeline it also resolves and pins the saved reusable version atomically.
                         - [configure_flow_step]: calling this tool will configure an existing Flow as Condition or Parallel Map and migrate its generic connection handles.
+                        - [list_reusable_pipelines]: calling this tool lists separately saved reusable pipelines and their immutable versions.
+                        - [create_reusable_pipeline]: calling this tool creates a distinct reusable pipeline and its first immutable version from a complete runnable graph.
+                        - [configure_subpipeline_step]: calling this tool pins a parent Subpipeline component to a saved reusable pipeline version; it never accepts an embedded graph.
                         - [connect_steps]: calling this tool will create or configure a connection between two steps using explicit output and input port ids. Use it for branches, merges, and to correct connection handles.
                         - [disconnect_steps]: calling this tool will remove one exact connection identified by its source, target, and port ids. Use it to repair shortcuts, stale branches, and accidental duplicate paths.
                         - [insert_step]: calling this tool will insert a new step before an existing step. Use it instead of create_step when the user asks to add a step between existing steps (for example, "add preprocessing between ingestion and training") or as a new initial step (for example, "add an initial validation step"). For between-step insertion, pass after_flow_id and before_flow_id for directly connected steps. For initial insertion, pass only before_flow_id; the target must currently have no incoming FLOWS_TO edge.
                         - [delete_step]: calling this tool will delete a step in a pipeline.
                         - [delete_all_steps]: calling this tool will remove every step from the current design pipeline while keeping the pipeline itself. Use it only when the user asks to clear, empty, reset, delete all steps, remove everything from, or remove all nodes/steps in the pipeline.
                         Tool calls MUST use a single string argument named params. The value of params MUST be a JSON-encoded string matching the "params JSON" schema in the docstring.
-                        Graph writes are ordered operations. Call exactly ONE mutating tool at a time, wait for its result, and stop immediately to correct any failed tool call. Never batch create_pipeline, create_step, configure_flow_step, connect_steps, disconnect_steps, insert_step, or delete operations in one response.
+                        Graph writes are ordered operations. Call exactly ONE mutating tool at a time, wait for its result, and stop immediately to correct any failed tool call. Never batch create_pipeline, create_step, configure_flow_step, create_reusable_pipeline, configure_subpipeline_step, connect_steps, disconnect_steps, insert_step, or delete operations in one response.
                         When creating, designing, regenerating, or rebuilding a pipeline, call create_pipeline first with a concise generated name and a fresh 1-2 sentence description that summarizes the full intended pipeline. Do this before creating steps so the UI pipeline description is updated.
                         For a new pipeline, plan the complete dependency order before the first create_step call, then call create_step once per step in actual execution order from ingress to terminal delivery. Because create_step appends and connects to the current tail, calling it in reverse conceptual order creates a wrong graph.
                         A Flow is executable control logic, not a label or decorative box. Never use the legacy generic template "Flow". Use template "Condition" with parameters.expression for routing, or template "Parallel Map" with max_concurrency and failure_policy for fan-out. Condition expressions must compare value or value.field with a literal, for example value.sentiment == "negative". The Condition input handle is value; its output handles are when_true and when_false. Parallel Map uses items and item.
@@ -1028,6 +1509,10 @@ def build_pipeline_editing_team(
                         Canonical parallel-map example: for "resize every uploaded image independently, at most four at a time, continue if one image fails, then export", build Upload -> Parallel Map(template "Parallel Map", parameters max_concurrency:4 and failure_policy:"continue") -> Resize Image -> Export. Connect Upload.data -> Parallel Map.items, Parallel Map.item -> Resize Image.input, and Resize Image.output -> Export.data. The Parallel Map owns iteration; do not duplicate one Resize step per item and do not create condition-style true/false branches for a Parallel Map.
                         When overview shows an existing generic Flow, repair it with configure_flow_step instead of creating a duplicate. Then use connect_steps to make the requested branch topology explicit.
                         The create_step and insert_step type MUST be one of: source, task, destination, flow, subpipeline. This set is structural and must not grow for technologies or business operations. Use source for external ingress adapters; task for processing and templates such as cleaning, OCR, speech-to-text, LLM, SQL, or API calls; destination for external delivery adapters; flow for conditions and parallel maps; and subpipeline for reusable pipelines.
+                        A Subpipeline is a version-pinned invocation of another distinct saved PIPELINE, never an embedded graph or decorative group. Use it only when at least two cohesive operations form a reusable capability with a stable contract. First call list_reusable_pipelines. When a suitable version exists, call create_step with type subpipeline plus reusable_pipeline_uid and reusable_version_uid from that exact list result; create_step pins the reference and loads its public ports in the same atomic operation. If none exists, call create_reusable_pipeline with a complete standalone graph, then create the parent Subpipeline using the returned pipeline_uid and version_uid. configure_subpipeline_step exists to repin an already-created legacy component, not as a required second phase for new components. Reusable pipeline names are unique; never retry creation under the same name. Never finish with an unreferenced Subpipeline component.
+                        A referenced Subpipeline placed alone on the canvas is an incomplete parent-pipeline draft, not a broken reusable definition. If overview shows that its reference and interface are already configured, do not call configure_subpipeline_step again. A missing-required-input error means the parent graph lacks an upstream connection: insert or create the appropriate Source before the existing Subpipeline and connect it to the exact public input. Then connect the Subpipeline's public output to the requested downstream processing and a terminal Destination. For an otherwise empty parent containing one configured Subpipeline, use insert_step with before_flow_id to add the Source before it; do not append a Source after it or recreate the Subpipeline.
+                        A reusable pipeline is independently runnable and follows the same graph rules as the parent: it has Source and Destination boundaries, a connected execution path, and implemented task steps. Every reusable-pipeline node must include explicit ports.inputs and ports.outputs with stable ids, required flags, and meaningful types; create_reusable_pipeline rejects implicit generic contracts. Source outputs define its public inputs; Destination inputs define its public outputs. The parent component caches that contract but owns none of the referenced steps.
+                        Canonical reusable-pipeline example: create a distinct "Conversation Understanding" pipeline that receives Audio and returns one structured Object. Its graph is Audio Input(source output audio:Audio) -> Transcription(task audio:Audio to transcript:Text, generated-code trusted_heavy_model) -> PII Redaction(task transcript:Text to redacted_transcript:Text, generated-code deterministic). Feed redacted_transcript both to Sentiment Analysis(text:Text to sentiment:Object, generated-code trusted_heavy_model) and Conversation Summary.transcript; feed Sentiment Analysis.sentiment to Conversation Summary.sentiment. Conversation Summary returns conversation_analysis:Object using generated-code custom_model, then connects to Structured Analysis Output(destination input conversation_analysis:Object). Pin the parent Subpipeline node to the returned reusable pipeline version. A parent-level sentiment condition remains outside that reusable pipeline when it controls complaint and statistics branches.
                         Templates are metadata on a structural kind. Implementations are separate metadata and may be generated code, Python, SQL, a container, a Git repository, REST API, shell, custom, or a future runtime.
                         Always pass the most specific useful template for each step. Do not use generic template names such as Source, Task, or Destination when the requested capability identifies an adapter or operation. For example, remote-device REST ingestion uses source + REST API, preprocessing uses task + Data Cleaning, model training uses task + Model Training, and clinician email/SMS alerts use destination + Notification.
                         A destination is terminal and cannot feed another step. Model an intermediate database, vector index, cache, or storage-and-retrieval adapter as a task with an output whenever downstream work consumes it. For document retrieval, the dependency order is ingestion -> chunking -> embeddings -> vector indexing/storage -> question answering -> answer delivery; vector indexing/storage is a task and answer delivery is the terminal destination.

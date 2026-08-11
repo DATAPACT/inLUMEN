@@ -11,6 +11,10 @@ import {
 } from "@/features/nodes/nodeSchema";
 import { defaultTemplateForType, findTemplateForType } from "@/features/nodes/templateCatalog";
 import { normalizeGraph, type NormalizedGraph } from "@/features/flow/flowGraph";
+import {
+  type SubpipelineInterface,
+  type SubpipelineReference,
+} from "@/features/flow/subpipeline";
 
 export const PROJECT_IR_SCHEMA_VERSION = "inlumen.project@2" as const;
 
@@ -40,8 +44,9 @@ export type PipelineIrNode = {
   source_configuration?: Record<string, unknown>;
   sample_data?: unknown[];
   subpipeline?: {
-    expanded: boolean;
-    pipeline: PipelineIr;
+    version: 2;
+    reference: SubpipelineReference;
+    interface: SubpipelineInterface;
   };
 };
 
@@ -80,15 +85,6 @@ const templateReference = (data: Record<string, unknown>, kind: StepType): Templ
   };
 };
 
-const nestedGraph = (value: unknown): NormalizedGraph => {
-  const candidate = objectValue(value);
-  const graph = objectValue(candidate.graph);
-  return normalizeGraph({
-    nodes: Array.isArray(graph.nodes) ? graph.nodes : [],
-    edges: Array.isArray(graph.edges) ? graph.edges : [],
-  });
-};
-
 const graphToPipelineIr = (graph: NormalizedGraph): PipelineIr => ({
   nodes: graph.nodes.map((node) => {
     const data = objectValue(node.data);
@@ -99,7 +95,7 @@ const graphToPipelineIr = (graph: NormalizedGraph): PipelineIr => ({
       : [];
     const implementation = normalizeNodeImplementation(data.implementation);
     const subpipelineData = objectValue(data.subpipeline);
-    const normalizedNested = kind === "subpipeline" ? nestedGraph(data.subpipeline) : null;
+    const reference = objectValue(subpipelineData.reference);
     return {
       id: String(node.id),
       kind,
@@ -116,10 +112,16 @@ const graphToPipelineIr = (graph: NormalizedGraph): PipelineIr => ({
       ...(kind === "task" ? { implementation } : {}),
       ...(kind === "source" ? { source_configuration: objectValue(data.source_config || data.source_configuration) } : {}),
       ...(files.length > 0 ? { sample_data: files } : {}),
-      ...(kind === "subpipeline" && normalizedNested ? {
+      ...(kind === "subpipeline" && reference.pipeline_uid && reference.version_uid ? {
         subpipeline: {
-          expanded: Boolean(subpipelineData.expanded),
-          pipeline: graphToPipelineIr(normalizedNested),
+          version: 2 as const,
+          reference: {
+            pipeline_uid: String(reference.pipeline_uid),
+            pipeline_name: String(reference.pipeline_name || ""),
+            version_uid: String(reference.version_uid),
+            version_name: String(reference.version_name || ""),
+          },
+          interface: subpipelineData.interface as SubpipelineInterface,
         },
       } : {}),
     };
@@ -162,8 +164,9 @@ const pipelineIrToGraphData = (pipeline: PipelineIr): { nodes: Node[]; edges: Ed
       ...(Array.isArray(node.sample_data) ? { files: node.sample_data } : {}),
       ...(node.kind === "subpipeline" && node.subpipeline ? {
         subpipeline: {
-          expanded: Boolean(node.subpipeline.expanded),
-          graph: pipelineIrToGraphData(node.subpipeline.pipeline),
+          version: 2,
+          reference: node.subpipeline.reference,
+          interface: node.subpipeline.interface,
         },
       } : {}),
     },

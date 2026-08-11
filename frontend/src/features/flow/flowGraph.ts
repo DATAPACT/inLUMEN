@@ -68,7 +68,11 @@ const objectValue = (value: unknown): Record<string, unknown> =>
     : {};
 
 const templateNameFromData = (data: Record<string, unknown>) =>
-  String(objectValue(data.template).name || data.template_label || "");
+  String(
+    (typeof data.template === "string" ? data.template : objectValue(data.template).name)
+    || data.template_label
+    || "",
+  );
 
 const migrateFlowPorts = (data: Record<string, unknown>, nodeType: ReturnType<typeof normalizeType>) => {
   const current = normalizeNodePorts(data.ports, nodeType);
@@ -94,30 +98,42 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
   const incomingNodes = Array.isArray(parsedGraph.nodes) ? parsedGraph.nodes : [];
   const incomingEdges = Array.isArray(parsedGraph.edges) ? parsedGraph.edges : [];
 
-  const nodes: Node[] = incomingNodes.flatMap((nodeEntry) => {
-    const node = (nodeEntry && typeof nodeEntry === "object" ? nodeEntry : {}) as Node;
-    if (node.id == null || String(node.id).trim() === "") return [];
-    const position = node.position || { x: 0, y: 0 };
-    const nodeType = normalizeType(node.data?.type);
-    const nodeData = (node.data || {}) as Record<string, unknown>;
+  const nodes: Node[] = incomingNodes.flatMap((nodeEntry, index) => {
+    const rawNode = objectValue(nodeEntry);
+    if (rawNode.id == null || String(rawNode.id).trim() === "") return [];
+    const nestedData = objectValue(rawNode.data);
+    const hasNestedData = Object.keys(nestedData).length > 0;
+    const nodeData = hasNestedData
+      ? nestedData
+      : Object.fromEntries(
+        Object.entries(rawNode).filter(([key]) => !["id", "position", "data"].includes(key)),
+      );
+    const rawPosition = objectValue(rawNode.position);
+    const position = {
+      x: rawPosition.x ?? index * 280,
+      y: rawPosition.y ?? 120,
+    };
+    const nodeType = normalizeType(nodeData.type);
     const templateName = templateNameFromData(nodeData);
-    const normalizedFiles = Array.isArray(node.data?.file_buckets)
-      ? node.data.file_buckets
-      : Array.isArray(node.data?.files)
-        ? node.data.files
+    const normalizedFiles = Array.isArray(nodeData.file_buckets)
+      ? nodeData.file_buckets
+      : Array.isArray(nodeData.files)
+        ? nodeData.files
         : [];
     return [{
-      ...node,
-      id: String(node.id),
+      ...rawNode,
+      id: String(rawNode.id),
+      type: hasNestedData ? String(rawNode.type || "custom") : "custom",
       position: {
         x: Number.isFinite(Number(position.x)) ? Number(position.x) : 0,
         y: Number.isFinite(Number(position.y)) ? Number(position.y) : 0,
       },
       data: {
-        ...node.data,
-        label: node.data?.label || "",
-        description: node.data?.description || "",
+        ...nodeData,
+        label: nodeData.label || "",
+        description: nodeData.description || "",
         type: nodeType,
+        ...(templateName ? { template_label: templateName } : {}),
         ports: migrateFlowPorts(nodeData, nodeType),
         ...(nodeType === "flow" && findTemplateForType("flow", templateName)
           ? { param: { ...defaultParametersForTemplate("flow", templateName), ...objectValue(nodeData.param) } }

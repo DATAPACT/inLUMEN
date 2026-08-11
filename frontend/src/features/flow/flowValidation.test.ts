@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { normalizeGraph } from "@/features/flow/flowGraph";
 import { validateGraph } from "@/features/flow/flowValidation";
+import { conversationUnderstandingSubpipeline, publicPortsForSubpipeline } from "@/features/flow/subpipeline";
 
 describe("pipeline design validation", () => {
   it("reports missing required inputs, parameters, outputs, and implementation issues", () => {
@@ -146,5 +147,79 @@ describe("pipeline design validation", () => {
       "invalid-flow-failure-policy",
       "missing-required-flow-output",
     ]));
+  });
+
+  it("validates a pinned reusable-pipeline reference and its cached interface", () => {
+    const reusable = conversationUnderstandingSubpipeline();
+    const definition = {
+      version: 2 as const,
+      reference: {
+        pipeline_uid: "conversation-pipeline",
+        pipeline_name: "Conversation Understanding",
+        version_uid: "version-1",
+        version_name: "Version 1",
+      },
+      interface: reusable.interface,
+      resolved_graph: reusable.graph,
+    };
+    const graph = normalizeGraph({
+      nodes: [
+        { id: "source", position: { x: 0, y: 0 }, data: { type: "source" } },
+        {
+          id: "subpipeline",
+          position: { x: 1, y: 0 },
+          data: {
+            type: "subpipeline",
+            ports: publicPortsForSubpipeline(definition),
+            subpipeline: definition,
+          },
+        },
+        { id: "destination", position: { x: 2, y: 0 }, data: { type: "destination" } },
+      ],
+      edges: [
+        { source: "source", target: "subpipeline", sourceHandle: "data", targetHandle: "audio" },
+        { source: "subpipeline", target: "destination", sourceHandle: "conversation_analysis", targetHandle: "data" },
+      ],
+    });
+
+    expect(validateGraph(graph.nodes, graph.edges).valid).toBe(true);
+    graph.nodes[1].data.ports.outputs = [];
+    expect(validateGraph(graph.nodes, graph.edges).issues).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "invalid-subpipeline-interface" })]),
+    );
+  });
+
+  it("treats incomplete wiring as a draft warning without hiding completion errors", () => {
+    const reusable = conversationUnderstandingSubpipeline();
+    const definition = {
+      version: 2 as const,
+      reference: {
+        pipeline_uid: "conversation-pipeline",
+        pipeline_name: "Conversation Understanding",
+        version_uid: "version-1",
+        version_name: "Version 1",
+      },
+      interface: reusable.interface,
+    };
+    const graph = normalizeGraph({
+      nodes: [{
+        id: "subpipeline",
+        position: { x: 0, y: 0 },
+        data: {
+          type: "subpipeline",
+          ports: publicPortsForSubpipeline(definition),
+          subpipeline: definition,
+        },
+      }],
+      edges: [],
+    });
+
+    const draftIssue = validateGraph(graph.nodes, graph.edges, { mode: "draft" }).issues
+      .find((issue) => issue.code === "missing-required-input");
+    const completeIssue = validateGraph(graph.nodes, graph.edges).issues
+      .find((issue) => issue.code === "missing-required-input");
+
+    expect(draftIssue?.severity).toBe("warning");
+    expect(completeIssue?.severity).toBe("error");
   });
 });

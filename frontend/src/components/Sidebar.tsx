@@ -39,6 +39,13 @@ import {
   getNodeDefinitionIcon,
 } from '@/features/nodes/registry/iconRegistry';
 import type { NodeDefinition } from '@/features/nodes/registry/types';
+import { ReusablePipelineManagerDialog } from '@/components/subpipeline/ReusablePipelineManagerDialog';
+import { publicPortsForSubpipeline } from '@/features/flow/subpipeline';
+import {
+  fetchReusablePipelines,
+  REUSABLE_PIPELINE_CATALOG_CHANGED_EVENT,
+  type ReusablePipelineSummary,
+} from '@/features/flow/subpipelinePersistence';
 
 interface PipelineOverview {
   version: string;
@@ -73,7 +80,9 @@ interface SidebarProps {
 
 type DragNodeType = {
   type: string;
-  data: ReturnType<typeof createNodeDataFromDefinition>;
+  data: ReturnType<typeof createNodeDataFromDefinition> & {
+    subpipeline?: Record<string, unknown>;
+  };
 };
 
 type DockerfileGenerationResponse = {
@@ -351,6 +360,16 @@ export function Sidebar({
   const [nodeDefinitions, setNodeDefinitions] = useState<NodeDefinition[]>(
     getFallbackNodeDefinitions,
   );
+  const [reusablePipelines, setReusablePipelines] = useState<ReusablePipelineSummary[]>([]);
+  const [reusablePipelineError, setReusablePipelineError] = useState("");
+  const [isReusablePipelineManagerOpen, setIsReusablePipelineManagerOpen] = useState(false);
+
+  const refreshReusablePipelineCatalog = async () => {
+    const pipelines = await fetchReusablePipelines();
+    setReusablePipelines(pipelines);
+    setReusablePipelineError("");
+    return pipelines;
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -367,6 +386,28 @@ export function Sidebar({
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadCatalog = () => {
+      fetchReusablePipelines()
+        .then((pipelines) => {
+          if (cancelled) return;
+          setReusablePipelines(pipelines);
+          setReusablePipelineError("");
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          setReusablePipelineError(error instanceof Error ? error.message : "Could not load reusable pipelines.");
+        });
+    };
+    loadCatalog();
+    window.addEventListener(REUSABLE_PIPELINE_CATALOG_CHANGED_EVENT, loadCatalog);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(REUSABLE_PIPELINE_CATALOG_CHANGED_EVENT, loadCatalog);
+    };
+  }, [workspaceResetKey]);
 
   // Cleanup blob URLs on unmount
   useEffect(() => {
@@ -755,6 +796,7 @@ export function Sidebar({
   };
 
   return (
+    <>
     <div className={cn("flex w-64 min-w-0 flex-col overflow-hidden border-r border-border bg-card", className)}>
       <Tabs value={activeTab} onValueChange={onTabChange} className="w-full">
         <TabsList className="grid h-12 w-full grid-cols-3 rounded-none border-b border-border p-1">
@@ -815,6 +857,76 @@ export function Sidebar({
                     })}
                   </div>
                 ))}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      Reusable pipelines
+                    </p>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-[11px]"
+                      onClick={() => setIsReusablePipelineManagerOpen(true)}
+                    >
+                      Manage
+                    </Button>
+                  </div>
+                  {reusablePipelineError && (
+                    <p className="rounded-md border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-700 dark:text-amber-300">
+                      {reusablePipelineError}
+                    </p>
+                  )}
+                  {reusablePipelines.length === 0 && !reusablePipelineError && (
+                    <p className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">
+                      Saved reusable pipelines appear here. Create one from a Subpipeline component.
+                    </p>
+                  )}
+                  {reusablePipelines.flatMap((pipeline) => pipeline.versions.map((version) => {
+                    const definition = {
+                      label: pipeline.name,
+                      description: pipeline.description || `Pinned reusable pipeline · ${version.name}`,
+                      type: "subpipeline" as const,
+                      definition_id: "core.subpipeline",
+                      definition_version: 1,
+                      implementation: {},
+                      template_label: "Subpipeline",
+                      template: { id: "core.subpipeline", name: "Subpipeline" },
+                      ports: publicPortsForSubpipeline({ interface: version.interface }),
+                      param: {},
+                      configuration_status: "valid" as const,
+                      subpipeline: {
+                        version: 2,
+                        reference: {
+                          pipeline_uid: pipeline.uid,
+                          pipeline_name: pipeline.name,
+                          version_uid: version.uid,
+                          version_name: version.name,
+                        },
+                        interface: version.interface,
+                        expanded: false,
+                      },
+                    };
+                    return (
+                      <div
+                        key={`${pipeline.uid}::${version.uid}`}
+                        draggable
+                        onDragStart={(event) => onDragStart(event, { type: "custom", data: definition })}
+                        className="flex cursor-move items-start gap-3 rounded-md border border-cyan-400/20 p-2.5 transition-colors hover:bg-muted/50"
+                      >
+                        <div className="rounded-md bg-cyan-500/10 p-1.5 text-cyan-600 dark:text-cyan-300">
+                          <LayoutGrid className="h-4 w-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <h4 className="truncate text-sm font-medium">{pipeline.name}</h4>
+                          <p className="mt-0.5 text-xs text-muted-foreground">
+                            {version.name} · {version.interface.inputs.length} in / {version.interface.outputs.length} out
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  }))}
+                </div>
               </div>
             </div>
           </div>
@@ -1190,5 +1302,12 @@ export function Sidebar({
         )}
       </ScrollArea>
     </div>
+    <ReusablePipelineManagerDialog
+      open={isReusablePipelineManagerOpen}
+      pipelines={reusablePipelines}
+      onOpenChange={setIsReusablePipelineManagerOpen}
+      onRefresh={refreshReusablePipelineCatalog}
+    />
+    </>
   );
 }

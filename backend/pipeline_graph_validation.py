@@ -6,6 +6,7 @@ from collections import defaultdict, deque
 from typing import Any
 
 from node_ports import ports_for_template
+from subpipeline_reference import subpipeline_reference
 from step_types import normalize_step_type
 
 
@@ -51,6 +52,18 @@ def _parameters(data: dict[str, Any]) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _subpipeline(data: dict[str, Any]) -> dict[str, Any]:
+    nested = data.get("subpipeline")
+    if isinstance(nested, dict):
+        return nested
+    encoded = data.get("subpipeline_json")
+    try:
+        parsed = json.loads(encoded) if isinstance(encoded, str) else {}
+    except (TypeError, ValueError):
+        parsed = {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _issue(
     category: str,
     code: str,
@@ -85,7 +98,7 @@ FLOW_EXPRESSION_PATTERN = re.compile(
 )
 
 
-def validate_pipeline_graph(graph: Any) -> dict[str, Any]:
+def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, Any]:
     """Validate the persisted graph contract before it is returned to the canvas."""
     if not isinstance(graph, dict):
         return {
@@ -216,6 +229,74 @@ def validate_pipeline_graph(graph: Any) -> dict[str, Any]:
                     "Repository implementation requires a repository URL.",
                     node_id=node_id,
                 ))
+
+        if kind == "subpipeline":
+            subpipeline = _subpipeline(data)
+            reference = subpipeline_reference(subpipeline)
+            if not reference["pipeline_uid"] or not reference["version_uid"]:
+                issues.append(_issue(
+                    "configuration",
+                    "missing-subpipeline-reference",
+                    "Subpipeline must reference a saved reusable pipeline version.",
+                    node_id=node_id,
+                ))
+            if str(subpipeline.get("resolution_error") or "").strip():
+                issues.append(_issue(
+                    "configuration",
+                    "unresolved-subpipeline-reference",
+                    str(subpipeline.get("resolution_error")),
+                    node_id=node_id,
+                ))
+            interface = subpipeline.get("interface")
+            interface = interface if isinstance(interface, dict) else {}
+            input_bindings = interface.get("inputs")
+            output_bindings = interface.get("outputs")
+            input_bindings = input_bindings if isinstance(input_bindings, list) else []
+            output_bindings = output_bindings if isinstance(output_bindings, list) else []
+            if not input_bindings or not output_bindings:
+                issues.append(_issue(
+                    "configuration",
+                    "missing-subpipeline-interface",
+                    "Referenced pipeline requires at least one public input and output.",
+                    node_id=node_id,
+                ))
+
+            def validate_public_contract(bindings: list[Any], direction: str) -> None:
+                public_ports = ports.get(direction, [])
+                for binding in bindings:
+                    if not isinstance(binding, dict):
+                        issues.append(_issue(
+                            "ports",
+                            "invalid-subpipeline-interface",
+                            "Referenced pipeline interface entry must be an object.",
+                            node_id=node_id,
+                        ))
+                        continue
+                    public_id = str(binding.get("id") or "").strip()
+                    public_port = next(
+                        (item for item in public_ports if str(item.get("id") or "") == public_id),
+                        None,
+                    )
+                    if not public_id or public_port is None:
+                        issues.append(_issue(
+                            "ports",
+                            "invalid-subpipeline-interface",
+                            f"Referenced pipeline {direction[:-1]} {public_id!r} is missing from the component contract.",
+                            node_id=node_id,
+                        ))
+                    elif not _port_types_compatible(
+                        public_port.get("type"),
+                        binding.get("type"),
+                    ):
+                        issues.append(_issue(
+                            "ports",
+                            "incompatible-subpipeline-interface",
+                            f"Referenced pipeline {direction[:-1]} {public_id!r} has an incompatible type.",
+                            node_id=node_id,
+                        ))
+
+            validate_public_contract(input_bindings, "inputs")
+            validate_public_contract(output_bindings, "outputs")
 
     if nodes and not any(kind == "source" for kind in kinds.values()):
         issues.append(_issue("graph", "missing-source", "A runnable pipeline requires a source."))

@@ -84,21 +84,42 @@ class NodeDefinitionInstanceTest(unittest.TestCase):
             definition_data_from_properties(properties),
         )
 
-    def test_round_trips_template_source_and_nested_graph_metadata(self):
+    def test_round_trips_template_source_and_reusable_pipeline_reference(self):
         data = {
             "template": {"id": "source.rest-api", "name": "REST API"},
             "source_config": {"base_url": "https://example.test"},
             "subpipeline": {
-                "expanded": False,
-                "graph": {"nodes": [], "edges": []},
+                "version": 2,
+                "reference": {
+                    "pipeline_uid": "reusable-1",
+                    "pipeline_name": "Conversation Understanding",
+                    "version_uid": "version-1",
+                    "version_name": "Version 1",
+                },
+                "interface": {"inputs": [], "outputs": []},
+                "resolved_graph": {"nodes": [{"id": "transient"}], "edges": []},
             },
         }
 
         properties = definition_properties_from_data(data)
         restored = definition_data_from_properties(properties)
 
-        self.assertEqual(data, restored)
+        self.assertEqual(data["template"], restored["template"])
+        self.assertEqual(data["source_config"], restored["source_config"])
+        self.assertEqual(data["subpipeline"]["reference"], restored["subpipeline"]["reference"])
+        self.assertNotIn("resolved_graph", restored["subpipeline"])
         self.assertTrue(all(key.endswith("_json") for key in properties))
+
+    def test_preserves_legacy_embedded_graph_until_it_is_converted(self):
+        legacy_graph = {"nodes": [{"id": "legacy-step"}], "edges": []}
+
+        properties = definition_properties_from_data({
+            "subpipeline": {"version": 1, "graph": legacy_graph, "expanded": False},
+        })
+        restored = definition_data_from_properties(properties)
+
+        self.assertEqual(1, restored["subpipeline"]["version"])
+        self.assertEqual(legacy_graph, restored["subpipeline"]["graph"])
 
     def test_dynamic_model_plan_marks_artifact_stale_when_revision_changes(self):
         model_plan = {

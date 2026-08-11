@@ -2,6 +2,7 @@ import type { Edge, Node } from "reactflow";
 
 import { normalizeImplementationKind, normalizeNodePorts, normalizeType } from "@/features/nodes/nodeSchema";
 import { findTemplateForType } from "@/features/nodes/templateCatalog";
+import { normalizeSubpipelineInterface } from "@/features/flow/subpipeline";
 
 export type ValidationCategory =
   | "configuration"
@@ -24,6 +25,8 @@ export type GraphValidationReport = {
   byNode: Record<string, ValidationIssue[]>;
 };
 
+export type GraphValidationMode = "draft" | "complete";
+
 const objectValue = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -37,8 +40,13 @@ const portTypesCompatible = (source: string, target: string) => {
 
 const FLOW_EXPRESSION_PATTERN = /^value(?:(?:\.[A-Za-z_][A-Za-z0-9_]*)|(?:\[(?:\d+|"[^"]+"|'[^']+')\]))*(?:\s*(?:==|!=|>=|<=|>|<)\s*(?:"[^"]*"|'[^']*'|-?\d+(?:\.\d+)?|true|false|null))?$/;
 
-export const validateGraph = (nodes: Node[], edges: Edge[]): GraphValidationReport => {
+export const validateGraph = (
+  nodes: Node[],
+  edges: Edge[],
+  options: { mode?: GraphValidationMode } = {},
+): GraphValidationReport => {
   const issues: ValidationIssue[] = [];
+  const wiringSeverity: ValidationIssue["severity"] = options.mode === "draft" ? "warning" : "error";
   const nodeById = new Map(nodes.map((node) => [String(node.id), node]));
   const portsByNode = new Map(nodes.map((node) => {
     const kind = normalizeType(node.data?.type);
@@ -61,7 +69,7 @@ export const validateGraph = (nodes: Node[], edges: Edge[]): GraphValidationRepo
         String(edge.target) === nodeId && String(edge.targetHandle || "") === port.id
       );
       if (!connected) add({
-        severity: "error",
+        severity: wiringSeverity,
         category: "ports",
         code: "missing-required-input",
         nodeId,
@@ -122,7 +130,7 @@ export const validateGraph = (nodes: Node[], edges: Edge[]): GraphValidationRepo
           String(edge.source) === nodeId && String(edge.sourceHandle || "") === port.id
         );
         if (!connected) add({
-          severity: "error",
+          severity: wiringSeverity,
           category: "ports",
           code: "missing-required-flow-output",
           nodeId,
@@ -193,24 +201,58 @@ export const validateGraph = (nodes: Node[], edges: Edge[]): GraphValidationRepo
     }
 
     if (kind === "subpipeline") {
-      const nested = objectValue(objectValue(data.subpipeline).graph);
-      const nestedNodes = Array.isArray(nested.nodes) ? nested.nodes as Node[] : [];
-      const nestedEdges = Array.isArray(nested.edges) ? nested.edges as Edge[] : [];
-      if (nestedNodes.length === 0) {
+      const subpipeline = objectValue(data.subpipeline);
+      const reference = objectValue(subpipeline.reference);
+      if (!String(reference.pipeline_uid || "").trim() || !String(reference.version_uid || "").trim()) {
         add({
-          severity: "warning",
-          category: "graph",
-          code: "empty-subpipeline",
+          severity: "error",
+          category: "configuration",
+          code: "missing-subpipeline-reference",
           nodeId,
-          message: "Subpipeline does not contain an internal graph yet.",
+          message: "Select or create a saved reusable pipeline version.",
         });
-      } else {
-        validateGraph(nestedNodes, nestedEdges).issues.forEach((issue) => add({
-          ...issue,
-          nodeId,
-          message: `Nested graph: ${issue.message}`,
-        }));
       }
+      if (String(subpipeline.resolution_error || "").trim()) {
+        add({
+          severity: "error",
+          category: "configuration",
+          code: "unresolved-subpipeline-reference",
+          nodeId,
+          message: String(subpipeline.resolution_error),
+        });
+      }
+      const referencedInterface = normalizeSubpipelineInterface(subpipeline.interface, {});
+      if (referencedInterface.inputs.length === 0 || referencedInterface.outputs.length === 0) {
+        add({
+          severity: "error",
+          category: "configuration",
+          code: "missing-subpipeline-interface",
+          nodeId,
+          message: "The referenced pipeline must expose at least one input and output.",
+        });
+      }
+      (["inputs", "outputs"] as const).forEach((direction) => {
+        referencedInterface[direction].forEach((binding) => {
+          const publicPort = ports[direction].find((port) => port.id === binding.id);
+          if (!publicPort) {
+            add({
+              severity: "error",
+              category: "ports",
+              code: "invalid-subpipeline-interface",
+              nodeId,
+              message: `Referenced pipeline ${direction.slice(0, -1)} “${binding.name}” is missing from this component.`,
+            });
+          } else if (!portTypesCompatible(publicPort.type, binding.type)) {
+            add({
+              severity: "error",
+              category: "ports",
+              code: "incompatible-subpipeline-interface",
+              nodeId,
+              message: `Referenced pipeline ${direction.slice(0, -1)} “${binding.name}” has an incompatible type.`,
+            });
+          }
+          });
+      });
     }
   });
 

@@ -30,8 +30,10 @@ interface NodeProps {
     implementation?: Record<string, unknown>;
     param?: Record<string, unknown>;
     subpipeline?: {
-      expanded?: boolean;
-      graph?: { nodes?: unknown[]; edges?: unknown[] };
+      reference?: {
+        pipeline_name?: string;
+        version_name?: string;
+      };
     };
   };
   selected: boolean;
@@ -230,9 +232,9 @@ export const CustomNode: React.FC<NodeProps> = ({ id, data, selected }) => {
         </div>
       )}
 
-      {visualType === 'subpipeline' && data.subpipeline?.expanded && (
+      {visualType === 'subpipeline' && data.subpipeline?.reference && (
         <div className="mt-2 rounded-md border border-cyan-400/15 bg-cyan-950/20 px-2 py-1.5 text-[9px] text-cyan-200">
-          Expanded nested graph · {Array.isArray(data.subpipeline.graph?.nodes) ? data.subpipeline.graph?.nodes.length : 0} components
+          References {data.subpipeline.reference.pipeline_name || 'reusable pipeline'} · {data.subpipeline.reference.version_name || 'pinned version'}
         </div>
       )}
 

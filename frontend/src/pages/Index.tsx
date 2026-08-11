@@ -19,6 +19,7 @@ import {
   setPipelineVersionAsMain,
   type PipelineVersionSummary,
 } from '@/features/flow/flowPersistence';
+import { notifyReusablePipelineCatalogChanged } from '@/features/flow/subpipelinePersistence';
 import { toast } from 'sonner';
 import {
   Settings,
@@ -440,14 +441,18 @@ const Index = () => {
     }
   }, []);
 
-  const onNodeUpdate = useCallback((id: string, data: FlowNodeData) => {
+  const onNodeUpdate = useCallback((
+    id: string,
+    data: FlowNodeData,
+    options?: { remapSubpipeline?: boolean },
+  ) => {
     setFlowNodes(prev => prev.map(node =>
       node.id === id ? { ...node, data: { ...node.data, ...data } } : node
     ));
     setSelectedNode(prev =>
       prev?.id === id ? { ...prev, data } : prev
     );
-    flowCanvasRef.current?.updateNode(id, data);
+    flowCanvasRef.current?.updateNode(id, data, options);
   }, []);
 
   const onNodesChange = useCallback((nodes: Node[]) => {
@@ -509,6 +514,11 @@ const Index = () => {
       }
 
       const data = await res.json() as ChatApiResponse;
+
+      // Agent turns may create a separately saved reusable pipeline. Refresh
+      // every mounted catalog consumer immediately instead of waiting for a
+      // page reload or a manual library refresh.
+      notifyReusablePipelineCatalogChanged();
 
       if (data.session_id && data.session_id !== chatSessionId) {
         setChatSessionId(data.session_id);

@@ -306,6 +306,63 @@ def _assistant_message_from_result(result) -> str:
     return ""
 
 
+INTERNAL_AGENT_MESSAGE_RE = re.compile(
+    r"^\s*(?:call\s*:\s*)?(?:create|configure|connect|disconnect|insert|delete|list|get|inspect|overview)"
+    r"_[a-z0-9_]+\s*\(",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_internal_agent_message(message: object) -> bool:
+    text = str(message or "").strip()
+    if not text:
+        return True
+    return bool(INTERNAL_AGENT_MESSAGE_RE.match(text))
+
+
+def _pipeline_design_completion_message(graph: dict) -> str:
+    raw_nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    nodes = [node for node in raw_nodes if isinstance(node, dict)]
+
+    def node_sort_key(node: dict) -> tuple[int, float, str]:
+        node_id = str(node.get("id") or "")
+        try:
+            return (0, float(node_id), node_id)
+        except ValueError:
+            position = node.get("position") if isinstance(node.get("position"), dict) else {}
+            return (1, float(position.get("x") or 0), node_id)
+
+    ordered_nodes = sorted(nodes, key=node_sort_key)
+    labels = []
+    reusable_references = []
+    for node in ordered_nodes:
+        data = node.get("data") if isinstance(node.get("data"), dict) else node
+        label = str(data.get("label") or node.get("id") or "Step").strip()
+        if label:
+            labels.append(label)
+        if str(data.get("type") or "").lower() != "subpipeline":
+            continue
+        definition = data.get("subpipeline") if isinstance(data.get("subpipeline"), dict) else {}
+        reference = definition.get("reference") if isinstance(definition.get("reference"), dict) else {}
+        pipeline_name = str(reference.get("pipeline_name") or label).strip()
+        version_name = str(reference.get("version_name") or "").strip()
+        if pipeline_name:
+            reusable_references.append(
+                f"{pipeline_name} ({version_name})" if version_name else pipeline_name
+            )
+
+    pipeline = graph.get("pipeline") if isinstance(graph.get("pipeline"), dict) else {}
+    pipeline_name = str(pipeline.get("label") or pipeline.get("name") or "Pipeline").strip()
+    message = f'The pipeline design "{pipeline_name}" is ready and validated.'
+    if labels:
+        visible_labels = labels[:10]
+        suffix = " → …" if len(labels) > len(visible_labels) else ""
+        message += "\n\nFlow: " + " → ".join(visible_labels) + suffix
+    if reusable_references:
+        message += "\n\nReusable pipeline: " + ", ".join(dict.fromkeys(reusable_references))
+    return message
+
+
 GRAPH_MUTATION_RE = re.compile(
     r"\b(add|build|change|clear|complete|connect|create|delete|design|draw|fix|"
     r"generate|heal|improve|insert|link|make|missing|modify|move|optimize|"
@@ -695,6 +752,10 @@ def _guardrail_repair_task(
         "at a time. If the attempted new design is structurally wrong, delete its steps "
         "and rebuild them in actual dependency order. A destination must remain terminal, "
         "and rest-api tasks require a real endpoint. Verify the final graph with overview."
+        " If an existing configured Subpipeline reports a missing required input, keep its "
+        "saved reference and repair the parent wiring: insert or connect an upstream Source "
+        "to that public input, then connect its output to downstream processing and a terminal "
+        "Destination. Do not recreate or repeatedly reconfigure the reusable pipeline."
         + (f"\n\nVALIDATION ERRORS:\n{error_context}" if error_context else "")
         + "\n\n"
         + _build_agent_task(user_message, canvas_graph, backend_graph)
@@ -1147,6 +1208,13 @@ def agentic_pipeline_editor():
                 "I couldn't safely apply that pipeline design, so I preserved the pipeline "
                 f"from before this request. Validation details: {reason}"
             )
+
+        if (
+            sync["guardrail_passed"]
+            and isinstance(after_graph, dict)
+            and _looks_like_internal_agent_message(assistant_message)
+        ):
+            assistant_message = _pipeline_design_completion_message(after_graph)
 
         if sync["guardrail_passed"] and isinstance(after_graph, dict):
             pipeline = after_graph.get("pipeline") if isinstance(after_graph.get("pipeline"), dict) else {}

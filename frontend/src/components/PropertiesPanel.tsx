@@ -3,6 +3,16 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -19,6 +29,7 @@ import {
 } from 'lucide-react';
 import { toast } from "sonner";
 import { FilePreviewDialog, PreviewType } from '@/components/properties/FilePreviewDialog';
+import { SubpipelineEditorDialog } from '@/components/subpipeline/SubpipelineEditorDialog';
 import { getTypeColor, getTypeIcon } from '@/components/properties/nodeAppearance';
 import { ChatbotConfig } from '@/services/chatbotService';
 import {
@@ -62,6 +73,23 @@ import {
 } from '@/features/nodes/nodePersistence';
 import { Node } from 'reactflow';
 import type { ValidationIssue } from '@/features/flow/flowValidation';
+import {
+  publicPortsForSubpipeline,
+  type SubpipelineDefinition,
+  type SubpipelineInterface,
+  type SubpipelineReference,
+  type ReusablePipelineSaveDraft,
+} from '@/features/flow/subpipeline';
+import {
+  attachReusablePipelineVersion,
+  fetchReusablePipelines,
+  fetchReusablePipelineVersion,
+  previewReusablePipelineAttachment,
+  saveReusablePipeline,
+  type ReusablePipelineAttachment,
+  type ReusablePipelineSummary,
+  type ReusablePipelineVersion,
+} from '@/features/flow/subpipelinePersistence';
 
 type NodeParamMap = Record<string, unknown>;
 type DraftKeyMap = Record<string, string>;
@@ -88,8 +116,13 @@ export type PropertyNodeData = {
   connected_ports?: { inputs?: string[]; outputs?: string[] };
   source_config?: Record<string, unknown>;
   subpipeline?: {
+    version?: number;
     expanded?: boolean;
-    graph?: { nodes: unknown[]; edges: unknown[] };
+    reference?: SubpipelineReference;
+    interface?: SubpipelineInterface;
+    resolved_graph?: { nodes: unknown[]; edges: unknown[] };
+    graph?: { nodes: unknown[]; edges: unknown[] }; // v1 compatibility only
+    resolution_error?: string;
   };
   [key: string]: unknown;
 };
@@ -157,7 +190,11 @@ const InspectorSection = ({
 
 interface PropertiesPanelProps {
   selectedNode: Node<PropertyNodeData> | null;
-  onNodeUpdate: (id: string, data: PropertyNodeData) => void;
+  onNodeUpdate: (
+    id: string,
+    data: PropertyNodeData,
+    options?: { remapSubpipeline?: boolean },
+  ) => void;
   onRemoveNode?: (nodeId: string) => void;
   activeChatbotConfig?: ChatbotConfig | null;
   isAdvancedMode?: boolean;
@@ -233,7 +270,20 @@ export function PropertiesPanel({
   const [implementationEntrypoint, setImplementationEntrypoint] = useState('');
   const [implementationReference, setImplementationReference] = useState('');
   const [sourceConfigDraft, setSourceConfigDraft] = useState('{}');
-  const [subpipelineGraphDraft, setSubpipelineGraphDraft] = useState('{\n  "nodes": [],\n  "edges": []\n}');
+  const [isSubpipelineEditorOpen, setIsSubpipelineEditorOpen] = useState(false);
+  const [subpipelineEditorGraph, setSubpipelineEditorGraph] = useState<{ nodes: unknown[]; edges: unknown[] }>({ nodes: [], edges: [] });
+  const [reusablePipelines, setReusablePipelines] = useState<ReusablePipelineSummary[]>([]);
+  const [selectedReusableVersion, setSelectedReusableVersion] = useState("");
+  const [isLoadingReusablePipelines, setIsLoadingReusablePipelines] = useState(false);
+  const [editingReusablePipelineUid, setEditingReusablePipelineUid] = useState("");
+  const [editingReusablePipelineName, setEditingReusablePipelineName] = useState("");
+  const [editingReusablePipelineDescription, setEditingReusablePipelineDescription] = useState("");
+  const [editingReusableVersionName, setEditingReusableVersionName] = useState("Version 1");
+  const [pendingAttachment, setPendingAttachment] = useState<ReusablePipelineAttachment | null>(null);
+  const [isAttachmentReviewOpen, setIsAttachmentReviewOpen] = useState(false);
+  const [isAttachingReusablePipeline, setIsAttachingReusablePipeline] = useState(false);
+  const [attachmentInputMapping, setAttachmentInputMapping] = useState<Record<string, string>>({});
+  const [attachmentOutputMapping, setAttachmentOutputMapping] = useState<Record<string, string>>({});
   const currentTemplate = String(
     selectedNode?.data?.template?.name
       || selectedNode?.data?.template_label
@@ -376,12 +426,6 @@ export function PropertiesPanel({
           || '',
       ));
       setSourceConfigDraft(JSON.stringify(selectedNode.data.source_config || {}, null, 2));
-      setSubpipelineGraphDraft(JSON.stringify(
-        selectedNode.data.subpipeline?.graph || { nodes: [], edges: [] },
-        null,
-        2,
-      ));
-
     } else {
       setLabel('');
       setDescription('');
@@ -396,7 +440,6 @@ export function PropertiesPanel({
       setImplementationEntrypoint("");
       setImplementationReference("");
       setSourceConfigDraft("{}");
-      setSubpipelineGraphDraft('{\n  "nodes": [],\n  "edges": []\n}');
     }
 
     // reset preview dialog
@@ -410,6 +453,39 @@ export function PropertiesPanel({
     setEditedContent('');
     setPreviewFileIndex(-1);
   }, [selectedNode, nodeType]);
+
+  const selectedSubpipelinePipelineUid = selectedNode?.data.subpipeline?.reference?.pipeline_uid || "";
+  const selectedSubpipelineVersionUid = selectedNode?.data.subpipeline?.reference?.version_uid || "";
+
+  useEffect(() => {
+    if (nodeType !== "subpipeline" || !selectedNode?.id) return;
+    let cancelled = false;
+    setIsLoadingReusablePipelines(true);
+    void fetchReusablePipelines()
+      .then((pipelines) => {
+        if (cancelled) return;
+        setReusablePipelines(pipelines);
+        setSelectedReusableVersion(
+          selectedSubpipelinePipelineUid && selectedSubpipelineVersionUid
+            ? `${selectedSubpipelinePipelineUid}::${selectedSubpipelineVersionUid}`
+            : "",
+        );
+      })
+      .catch((error) => {
+        if (!cancelled) toast.error("Could not load reusable pipelines", {
+          description: error instanceof Error ? error.message : "Unknown error",
+        });
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingReusablePipelines(false);
+      });
+    return () => { cancelled = true; };
+  }, [
+    nodeType,
+    selectedNode?.id,
+    selectedSubpipelinePipelineUid,
+    selectedSubpipelineVersionUid,
+  ]);
 
   const handleLabelChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setLabel(e.target.value);
@@ -504,23 +580,145 @@ export function PropertiesPanel({
     }
   };
 
-  const persistSubpipelineGraph = () => {
+  const applyReusablePipelineVersion = (
+    version: ReusablePipelineVersion,
+    options: { persist?: boolean } = {},
+  ) => {
+    const stableDefinition: SubpipelineDefinition = {
+      version: 2,
+      reference: version.reference,
+      interface: version.interface,
+      resolved_graph: version.graph,
+      expanded: false,
+    };
+    const nextPorts = publicPortsForSubpipeline(stableDefinition);
+    setPorts(nextPorts);
+    setSelectedReusableVersion(`${version.reference.pipeline_uid}::${version.reference.version_uid}`);
+    if (options.persist !== false) {
+      pushNodeUpdate({ ports: nextPorts, subpipeline: stableDefinition });
+    } else if (selectedNode) {
+      onNodeUpdate(selectedNode.id, {
+        ...selectedNode.data,
+        ports: nextPorts,
+        subpipeline: stableDefinition,
+      }, { remapSubpipeline: false });
+    }
+  };
+
+  const refreshReusablePipelineCatalog = async () => {
+    const pipelines = await fetchReusablePipelines();
+    setReusablePipelines(pipelines);
+    return pipelines;
+  };
+
+  const handleRefreshReusablePipelineCatalog = async () => {
     try {
-      const parsed = JSON.parse(subpipelineGraphDraft) as { nodes?: unknown; edges?: unknown };
-      if (!Array.isArray(parsed?.nodes) || !Array.isArray(parsed?.edges)) {
-        throw new Error('Nested graph JSON must contain nodes and edges arrays.');
-      }
-      pushNodeUpdate({
-        subpipeline: {
-          ...(selectedNode?.data.subpipeline || {}),
-          graph: { nodes: parsed.nodes, edges: parsed.edges },
-        },
+      setIsLoadingReusablePipelines(true);
+      await refreshReusablePipelineCatalog();
+    } catch (error) {
+      toast.error("Could not refresh reusable pipelines", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      setIsLoadingReusablePipelines(false);
+    }
+  };
+
+  const attachSelectedReusablePipeline = async () => {
+    const [pipelineUid, versionUid] = selectedReusableVersion.split("::");
+    if (!selectedNode || !pipelineUid || !versionUid) return;
+    try {
+      setIsLoadingReusablePipelines(true);
+      const preview = await previewReusablePipelineAttachment({
+        flowId: selectedNode.id,
+        pipelineUid,
+        versionUid,
+      });
+      setPendingAttachment(preview);
+      setAttachmentInputMapping(preview.compatibility.input_mapping);
+      setAttachmentOutputMapping(preview.compatibility.output_mapping);
+      setIsAttachmentReviewOpen(true);
+    } catch (error) {
+      toast.error("Could not review reusable pipeline version", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      setIsLoadingReusablePipelines(false);
+    }
+  };
+
+  const confirmReusablePipelineAttachment = async () => {
+    if (!selectedNode || !pendingAttachment) return;
+    try {
+      setIsAttachingReusablePipeline(true);
+      const attached = await attachReusablePipelineVersion({
+        flowId: selectedNode.id,
+        pipelineUid: pendingAttachment.reference.pipeline_uid,
+        versionUid: pendingAttachment.reference.version_uid,
+        inputMapping: attachmentInputMapping,
+        outputMapping: attachmentOutputMapping,
+      });
+      applyReusablePipelineVersion(attached, { persist: false });
+      setIsAttachmentReviewOpen(false);
+      setPendingAttachment(null);
+      toast.success("Subpipeline version updated", {
+        description: `${attached.reference.pipeline_name} · ${attached.reference.version_name}`,
       });
     } catch (error) {
-      toast.error('Invalid nested graph', {
-        description: error instanceof Error ? error.message : 'Enter a nested graph object.',
+      toast.error("Could not update Subpipeline version", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      setIsAttachingReusablePipeline(false);
+    }
+  };
+
+  const openReferencedPipeline = async () => {
+    const reference = selectedNode?.data.subpipeline?.reference;
+    const resolved = selectedNode?.data.subpipeline?.resolved_graph;
+    const legacy = selectedNode?.data.subpipeline?.graph;
+    try {
+      if (reference?.pipeline_uid && reference.version_uid) {
+        const version = await fetchReusablePipelineVersion(reference.pipeline_uid, reference.version_uid);
+        const reusable = reusablePipelines.find((pipeline) => pipeline.uid === reference.pipeline_uid);
+        setSubpipelineEditorGraph(version.graph);
+        setEditingReusablePipelineUid(reference.pipeline_uid);
+        setEditingReusablePipelineName(version.reference.pipeline_name);
+        setEditingReusablePipelineDescription(version.description || reusable?.description || "");
+        setEditingReusableVersionName(`Version ${(reusable?.versions.length || 0) + 1}`);
+      } else {
+        setSubpipelineEditorGraph(legacy || { nodes: [], edges: [] });
+        setEditingReusablePipelineUid("");
+        setEditingReusablePipelineName(label.trim() || "Reusable Pipeline");
+        setEditingReusablePipelineDescription(description.trim());
+        setEditingReusableVersionName("Version 1");
+      }
+      setIsSubpipelineEditorOpen(true);
+    } catch (error) {
+      toast.error("Could not open referenced pipeline", {
+        description: error instanceof Error ? error.message : "Unknown error",
       });
     }
+  };
+
+  const saveSubpipelineDefinition = async (draft: ReusablePipelineSaveDraft) => {
+    const saved = await saveReusablePipeline({
+      pipelineUid: editingReusablePipelineUid || undefined,
+      name: draft.name,
+      description: draft.description,
+      versionName: draft.versionName,
+      graph: draft.graph,
+    });
+    setEditingReusablePipelineUid(saved.reference.pipeline_uid);
+    setEditingReusablePipelineName(saved.reference.pipeline_name);
+    setEditingReusablePipelineDescription(draft.description);
+    const pipelines = await refreshReusablePipelineCatalog();
+    const savedPipeline = pipelines.find((pipeline) => pipeline.uid === saved.reference.pipeline_uid);
+    setEditingReusableVersionName(`Version ${(savedPipeline?.versions.length || 0) + 1}`);
+    setSelectedReusableVersion(`${saved.reference.pipeline_uid}::${saved.reference.version_uid}`);
+    toast.success(editingReusablePipelineUid ? "Reusable pipeline version saved" : "Reusable pipeline created", {
+      description: `${saved.reference.pipeline_name} · ${saved.reference.version_name}. Review and use this version when ready.`,
+    });
   };
 
   // Upload newly added files through the backend. Same filename replaces older entry.
@@ -1587,30 +1785,102 @@ export function PropertiesPanel({
             )}
 
             {nodeType === "subpipeline" && (
-              <InspectorSection
-                title="Nested Graph"
-                description="Subpipelines retain an independent reusable graph inside the Project JSON."
-              >
-                <Textarea
-                  value={subpipelineGraphDraft}
-                  onChange={(event) => setSubpipelineGraphDraft(event.target.value)}
-                  onBlur={persistSubpipelineGraph}
-                  className="min-h-36 font-mono text-xs"
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => pushNodeUpdate({
-                    subpipeline: {
-                      ...(selectedNode.data.subpipeline || {}),
-                      expanded: !selectedNode.data.subpipeline?.expanded,
-                    },
-                  })}
+              <>
+                <InspectorSection
+                  title="Referenced Pipeline"
+                  description="This component invokes a separately saved, versioned pipeline."
                 >
-                  {selectedNode.data.subpipeline?.expanded ? 'Collapse' : 'Expand'} subpipeline
-                </Button>
-              </InspectorSection>
+                  <div className="rounded-md border border-cyan-400/20 bg-cyan-500/5 p-3 text-xs">
+                    <div className="font-medium text-cyan-600 dark:text-cyan-300">
+                      {selectedNode.data.subpipeline?.reference?.pipeline_name || 'No reusable pipeline attached'}
+                    </div>
+                    <div className="mt-1 text-muted-foreground">
+                      {selectedNode.data.subpipeline?.reference?.version_name
+                        ? `${selectedNode.data.subpipeline.reference.version_name} · `
+                        : ''}
+                      {ports.inputs.length} input{ports.inputs.length === 1 ? '' : 's'} · {ports.outputs.length} output{ports.outputs.length === 1 ? '' : 's'}
+                    </div>
+                    {selectedNode.data.subpipeline?.resolution_error && (
+                      <div className="mt-2 text-red-500">{selectedNode.data.subpipeline.resolution_error}</div>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="reusable-pipeline-version">Saved pipeline version</Label>
+                    <select
+                      id="reusable-pipeline-version"
+                      className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                      value={selectedReusableVersion}
+                      disabled={isLoadingReusablePipelines}
+                      onChange={(event) => setSelectedReusableVersion(event.target.value)}
+                    >
+                      <option value="">Select a reusable pipeline…</option>
+                      {reusablePipelines.flatMap((pipeline) => pipeline.versions.map((version) => (
+                        <option key={`${pipeline.uid}::${version.uid}`} value={`${pipeline.uid}::${version.uid}`}>
+                          {pipeline.name} · {version.name}
+                        </option>
+                      )))}
+                    </select>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={!selectedReusableVersion || isLoadingReusablePipelines}
+                      onClick={() => { void attachSelectedReusablePipeline(); }}
+                    >
+                      Review selected version
+                    </Button>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => { void openReferencedPipeline(); }}
+                    >
+                      {selectedNode.data.subpipeline?.reference
+                        ? 'Open referenced pipeline'
+                        : selectedNode.data.subpipeline?.graph
+                          ? 'Convert embedded pipeline'
+                          : 'Create reusable pipeline'}
+                    </Button>
+                    {selectedNode.data.subpipeline?.reference && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          setSubpipelineEditorGraph({ nodes: [], edges: [] });
+                          setEditingReusablePipelineUid("");
+                          setEditingReusablePipelineName("Reusable Pipeline");
+                          setEditingReusablePipelineDescription("");
+                          setEditingReusableVersionName("Version 1");
+                          setIsSubpipelineEditorOpen(true);
+                        }}
+                      >
+                        Create new
+                      </Button>
+                    )}
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => { void handleRefreshReusablePipelineCatalog(); }}
+                    >
+                      Refresh library
+                    </Button>
+                  </div>
+                </InspectorSection>
+                <SubpipelineEditorDialog
+                  open={isSubpipelineEditorOpen}
+                  onOpenChange={setIsSubpipelineEditorOpen}
+                  pipelineUid={editingReusablePipelineUid}
+                  name={editingReusablePipelineName || label || "Reusable Pipeline"}
+                  description={editingReusablePipelineDescription}
+                  suggestedVersionName={editingReusableVersionName}
+                  reusablePipelines={reusablePipelines}
+                  graph={subpipelineEditorGraph}
+                  onSave={saveSubpipelineDefinition}
+                />
+              </>
             )}
 
             <InspectorSection
@@ -1632,6 +1902,87 @@ export function PropertiesPanel({
           </div>
         </div>
       )}
+
+      <AlertDialog open={isAttachmentReviewOpen} onOpenChange={setIsAttachmentReviewOpen}>
+        <AlertDialogContent className="max-w-2xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Review Subpipeline version change</AlertDialogTitle>
+            <AlertDialogDescription>
+              The reusable pipeline version and every affected connection will be updated together.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {pendingAttachment && (
+            <div className="max-h-[55vh] space-y-4 overflow-y-auto text-sm">
+              <div className="rounded-md border p-3">
+                <div className="font-medium">
+                  {pendingAttachment.reference.pipeline_name} · {pendingAttachment.reference.version_name}
+                </div>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  New contract: {pendingAttachment.interface.inputs.length} input{pendingAttachment.interface.inputs.length === 1 ? "" : "s"}
+                  {" · "}{pendingAttachment.interface.outputs.length} output{pendingAttachment.interface.outputs.length === 1 ? "" : "s"}
+                </div>
+              </div>
+              {pendingAttachment.compatibility.conflicts.length === 0 ? (
+                <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 text-emerald-700 dark:text-emerald-300">
+                  Connected ports have an unambiguous compatible mapping. No connections will be lost.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <p className="text-xs text-amber-600 dark:text-amber-300">
+                    Choose where each existing connection should move. Only type-compatible ports are available.
+                  </p>
+                  {pendingAttachment.compatibility.conflicts.map((conflict) => {
+                    const mapping = conflict.direction === "inputs" ? attachmentInputMapping : attachmentOutputMapping;
+                    const setMapping = conflict.direction === "inputs" ? setAttachmentInputMapping : setAttachmentOutputMapping;
+                    return (
+                      <div key={`${conflict.direction}-${conflict.port}`} className="space-y-1.5 rounded-md border p-3">
+                        <Label htmlFor={`mapping-${conflict.direction}-${conflict.port}`}>
+                          Existing {conflict.direction === "inputs" ? "input" : "output"} “{conflict.port}”
+                        </Label>
+                        <select
+                          id={`mapping-${conflict.direction}-${conflict.port}`}
+                          value={mapping[conflict.port] || ""}
+                          onChange={(event) => setMapping((current) => ({ ...current, [conflict.port]: event.target.value }))}
+                          className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                        >
+                          <option value="">Select a compatible target…</option>
+                          {conflict.candidates.map((candidate) => {
+                            const id = typeof candidate === "string" ? candidate : candidate.id;
+                            const text = typeof candidate === "string"
+                              ? candidate
+                              : `${candidate.name || candidate.id} · ${candidate.type}`;
+                            return <option key={id} value={id}>{text}</option>;
+                          })}
+                        </select>
+                        <p className="text-xs text-muted-foreground">{conflict.reason}</p>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isAttachingReusablePipeline}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={
+                isAttachingReusablePipeline
+                || !pendingAttachment
+                || pendingAttachment.compatibility.conflicts.some((conflict) => {
+                  const mapping = conflict.direction === "inputs" ? attachmentInputMapping : attachmentOutputMapping;
+                  return !mapping[conflict.port];
+                })
+              }
+              onClick={(event) => {
+                event.preventDefault();
+                void confirmReusablePipelineAttachment();
+              }}
+            >
+              {isAttachingReusablePipeline ? "Updating version…" : "Use this version"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <FilePreviewDialog
         open={Boolean(previewFileName)}

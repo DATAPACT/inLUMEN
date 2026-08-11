@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from subpipeline_reference import persisted_subpipeline_definition
+
 from .artifacts import (
     configuration_definition_id,
     configuration_hash,
@@ -80,7 +82,7 @@ def definition_properties_from_data(data: Any) -> dict[str, Any]:
     subpipeline = data.get("subpipeline")
     if isinstance(subpipeline, dict):
         properties["subpipeline_json"] = json.dumps(
-            subpipeline,
+            persisted_subpipeline_definition(subpipeline),
             ensure_ascii=False,
             sort_keys=True,
         )

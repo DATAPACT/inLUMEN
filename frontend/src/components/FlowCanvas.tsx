@@ -61,6 +61,7 @@ import {
 } from '@/features/flow/generationState';
 import { validateGraph, type ValidationIssue } from '@/features/flow/flowValidation';
 import { normalizeNodePorts, normalizeType } from '@/features/nodes/nodeSchema';
+import { remapSubpipelineParentEdges } from '@/features/flow/subpipeline';
 import {
   Dialog,
   DialogContent,
@@ -100,7 +101,11 @@ interface FlowCanvasProps {
 }
 
 export interface FlowCanvasRef {
-  updateNode: (id: string, data: Record<string, unknown>) => void;
+  updateNode: (
+    id: string,
+    data: Record<string, unknown>,
+    options?: { remapSubpipeline?: boolean },
+  ) => void;
   syncFromBackend: (graphData?: unknown) => Promise<NormalizedGraph>;
   getCurrentGraph: () => AgentGraphSnapshot;
   getCurrentVersionGraph: () => PipelineVersionGraph;
@@ -470,7 +475,10 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const activeGenerationStatus = effectiveGenerationStatus(generationJob);
   const activeGenerationPersistenceStatus = generationJob?.persistence?.status;
   const uploadedSampleDataAvailable = hasUploadedSampleData(nodes);
-  const designValidation = useMemo(() => validateGraph(nodes, edges), [edges, nodes]);
+  const designValidation = useMemo(
+    () => validateGraph(nodes, edges, { mode: "draft" }),
+    [edges, nodes],
+  );
   const displayedNodes = useMemo(() => nodes.map((node) => ({
     ...node,
     data: {
@@ -844,20 +852,59 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   }, [fetchGraphAndApply, generationJob, markLocalWrite]);
 
   // Expose updateNode 
-  const updateNode = useCallback((id: string, data: Record<string, unknown>) => {
+  const updateNode = useCallback((
+    id: string,
+    data: Record<string, unknown>,
+    options?: { remapSubpipeline?: boolean },
+  ) => {
     pushHistorySnapshot(undefined, { coalesceKey: `node:${id}:properties` });
     onCanvasEdited?.();
     markLocalWrite(1200);
+    const existingNode = nodes.find((node) => String(node.id) === String(id));
+    const isConfiguredSubpipeline = existingNode
+      && normalizeType(data.type ?? existingNode.data?.type) === "subpipeline"
+      && data.ports;
+    const nextNode = existingNode
+      ? { ...existingNode, data: { ...existingNode.data, ...data } }
+      : null;
     setNodes((nds) =>
       nds.map((node) => {
         if (node.id === id) {
-          const updatedNode = { ...node, data: { ...node.data, ...data } };
-          return updatedNode;
+          return { ...node, data: { ...node.data, ...data } };
         }
         return node;
       })
     );
-  }, [markLocalWrite, onCanvasEdited, pushHistorySnapshot]);
+    if (isConfiguredSubpipeline && nextNode && options?.remapSubpipeline !== false) {
+      const previousPorts = normalizeNodePorts(existingNode.data?.ports, "subpipeline");
+      const nextPorts = normalizeNodePorts(data.ports, "subpipeline");
+      const remappedEdges = remapSubpipelineParentEdges(id, edges, previousPorts, nextPorts);
+      const changedEdges = remappedEdges.flatMap((edge, index) => (
+        edge.sourceHandle !== edges[index].sourceHandle
+        || edge.targetHandle !== edges[index].targetHandle
+          ? [{ previous: edges[index], next: edge }]
+          : []
+      ));
+      if (changedEdges.length > 0) {
+        setEdges(remappedEdges);
+        changedEdges.forEach(({ previous, next }) => {
+          const sourceNode = String(next.source) === String(id)
+            ? nextNode
+            : nodes.find((node) => String(node.id) === String(next.source));
+          const targetNode = String(next.target) === String(id)
+            ? nextNode
+            : nodes.find((node) => String(node.id) === String(next.target));
+          if (!sourceNode || !targetNode) return;
+          void deleteEdgeFromBackend(sourceNode, targetNode, previous)
+            .then(() => addEdgeToBackend(sourceNode, targetNode, next))
+            .catch((error) => {
+            console.error("[FlowCanvas.tsx] Failed to remap Subpipeline connection:", error);
+            toast.error("Subpipeline contract saved, but a connection could not be remapped");
+          });
+        });
+      }
+    }
+  }, [edges, markLocalWrite, nodes, onCanvasEdited, pushHistorySnapshot]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const triggerImport = () => fileInputRef.current?.click();
 

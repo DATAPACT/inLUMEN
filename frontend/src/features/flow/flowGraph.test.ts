@@ -108,6 +108,47 @@ describe("flow graph normalization", () => {
     });
   });
 
+  it("restores an agent snapshot into renderable React Flow nodes", () => {
+    const graph = normalizeGraph({
+      nodes: [
+        { id: "audio", type: "source", label: "Audio Input", template: "Audio Recording" },
+        {
+          id: "transcribe",
+          type: "task",
+          label: "Transcription",
+          template: "Speech-to-Text",
+          implementation: { kind: "generated-code", task: "speech-to-text" },
+        },
+        { id: "output", type: "destination", label: "Analysis Output", template: "Structured Object" },
+      ],
+      edges: [
+        { source: "audio", source_port: "data", target: "transcribe", target_port: "input" },
+        { source: "transcribe", source_port: "output", target: "output", target_port: "data" },
+      ],
+    });
+
+    expect(graph.nodes).toHaveLength(3);
+    expect(graph.nodes[0]).toMatchObject({
+      id: "audio",
+      type: "custom",
+      position: { x: 0, y: 120 },
+      data: { type: "source", label: "Audio Input", template_label: "Audio Recording" },
+    });
+    expect(graph.nodes[1]).toMatchObject({
+      type: "custom",
+      position: { x: 280, y: 120 },
+      data: {
+        type: "task",
+        label: "Transcription",
+        implementation: { kind: "generated-code", task: "speech-to-text" },
+      },
+    });
+    expect(graph.edges).toEqual([
+      expect.objectContaining({ source: "audio", sourceHandle: "data", targetHandle: "input" }),
+      expect.objectContaining({ source: "transcribe", sourceHandle: "output", targetHandle: "data" }),
+    ]);
+  });
+
   it("preserves explicit port connections in agent snapshots", () => {
     const graph = normalizeGraph({
       nodes: [
