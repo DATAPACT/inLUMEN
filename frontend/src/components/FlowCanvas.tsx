@@ -53,6 +53,12 @@ import {
   type NormalizedGraph,
 } from '@/features/flow/flowGraph';
 import { createProjectDocument, projectDocumentToGraph } from '@/features/flow/projectIr';
+import {
+  effectiveGenerationStatus,
+  GENERATION_TERMINAL_STATUSES,
+  generationRunId,
+  isRestorableGenerationRun,
+} from '@/features/flow/generationState';
 import { validateGraph, type ValidationIssue } from '@/features/flow/flowValidation';
 import { normalizeNodePorts, normalizeType } from '@/features/nodes/nodeSchema';
 import {
@@ -211,21 +217,7 @@ const generationProgressPercent = (job: PipelineGenerationJob | null) => {
   return Math.max(10, Math.min(95, Math.round((completed / steps.length) * 100)));
 };
 
-const GENERATION_TERMINAL_STATUSES = new Set([
-  "valid",
-  "invalid",
-  "failed",
-  "cancelled",
-]);
-
 const ACTIVE_GENERATION_RUN_STORAGE_KEY = "inlumen-active-codegen-run-id";
-
-const effectiveGenerationStatus = (job: PipelineGenerationJob | null) => {
-  const outer = String(job?.status || "").toLowerCase();
-  if (GENERATION_TERMINAL_STATUSES.has(outer)) return outer;
-  const nested = String(job?.generation_run?.status || "").toLowerCase();
-  return nested || outer || "running";
-};
 
 const generationFailureMessage = (job: PipelineGenerationJob) => {
   const runError = Array.isArray(job.generation_run?.errors)
@@ -460,9 +452,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const [generationJob, setGenerationJob] = useState<PipelineGenerationJob | null>(null);
   const rememberGenerationJob = useCallback((job: PipelineGenerationJob) => {
     setGenerationJob(job);
-    const runId = String(job.run_id || job.generation_run?.run_id || "").trim();
+    const runId = generationRunId(job);
     if (runId) {
-      localStorage.setItem(ACTIVE_GENERATION_RUN_STORAGE_KEY, runId);
+      if (GENERATION_TERMINAL_STATUSES.has(effectiveGenerationStatus(job))) {
+        localStorage.removeItem(ACTIVE_GENERATION_RUN_STORAGE_KEY);
+      } else {
+        localStorage.setItem(ACTIVE_GENERATION_RUN_STORAGE_KEY, runId);
+      }
     }
     setIsGeneratingScripts(
       !GENERATION_TERMINAL_STATUSES.has(effectiveGenerationStatus(job)),
@@ -742,14 +738,14 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           );
         }
       }
+      if (restored && !isRestorableGenerationRun(restored)) {
+        localStorage.removeItem(ACTIVE_GENERATION_RUN_STORAGE_KEY);
+        restored = null;
+      }
       if (!restored) {
         try {
           const runs = await listPipelineScriptGenerationRuns(20);
-          restored =
-            runs.find(
-              (run) =>
-                !GENERATION_TERMINAL_STATUSES.has(effectiveGenerationStatus(run)),
-            ) || runs[0] || null;
+          restored = runs.find(isRestorableGenerationRun) || null;
         } catch (error) {
           console.warn(
             "[FlowCanvas.tsx] Could not discover background generation runs:",
