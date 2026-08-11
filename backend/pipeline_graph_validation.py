@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict, deque
 from typing import Any
 
-from node_ports import normalize_node_ports
+from node_ports import ports_for_template
 from step_types import normalize_step_type
 
 
@@ -38,6 +39,18 @@ def _implementation(data: dict[str, Any]) -> dict[str, Any]:
     return model_plan if isinstance(model_plan, dict) else {}
 
 
+def _parameters(data: dict[str, Any]) -> dict[str, Any]:
+    parameters = data.get("param") or data.get("parameters")
+    if isinstance(parameters, dict):
+        return parameters
+    encoded = data.get("param_json")
+    try:
+        parsed = json.loads(encoded) if isinstance(encoded, str) else {}
+    except (TypeError, ValueError):
+        parsed = {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _issue(
     category: str,
     code: str,
@@ -64,6 +77,12 @@ def _port_types_compatible(source: object, target: object) -> bool:
     right = str(target or "").strip().lower()
     wildcard = {"", "any", "unknown", "*"}
     return left in wildcard or right in wildcard or left == right
+
+
+FLOW_EXPRESSION_PATTERN = re.compile(
+    r'^value(?:(?:\.[A-Za-z_][A-Za-z0-9_]*)|(?:\[(?:\d+|"[^"]+"|\'[^\']+\')\]))*'
+    r'(?:\s*(?:==|!=|>=|<=|>|<)\s*(?:"[^"]*"|\'[^\']*\'|-?\d+(?:\.\d+)?|true|false|null))?$'
+)
 
 
 def validate_pipeline_graph(graph: Any) -> dict[str, Any]:
@@ -97,10 +116,57 @@ def validate_pipeline_graph(graph: Any) -> dict[str, Any]:
 
         data = _node_data(node)
         kind = normalize_step_type(data.get("type"), default="task")
-        ports = normalize_node_ports(data.get("ports") or data.get("ports_json"), kind)
+        template_label = str(data.get("template_label") or "").strip()
+        ports = ports_for_template(
+            data.get("ports") or data.get("ports_json"),
+            kind,
+            template_label,
+        )
         node_by_id[node_id] = data
         kinds[node_id] = kind
         ports_by_node[node_id] = ports
+
+        if kind == "flow":
+            parameters = _parameters(data)
+            if template_label not in {"Condition", "Parallel Map"}:
+                issues.append(_issue(
+                    "configuration",
+                    "missing-flow-behavior",
+                    "Choose a Flow behavior: Condition or Parallel Map.",
+                    node_id=node_id,
+                ))
+            elif template_label == "Condition":
+                expression = str(parameters.get("expression") or "").strip()
+                if not expression:
+                    issues.append(_issue(
+                        "configuration",
+                        "missing-required-parameter",
+                        "Condition requires parameter 'expression'.",
+                        node_id=node_id,
+                    ))
+                elif not FLOW_EXPRESSION_PATTERN.fullmatch(expression):
+                    issues.append(_issue(
+                        "configuration",
+                        "invalid-flow-expression",
+                        "Condition expressions must compare value (or value.field) with a literal.",
+                        node_id=node_id,
+                    ))
+            else:
+                concurrency = parameters.get("max_concurrency")
+                if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
+                    issues.append(_issue(
+                        "configuration",
+                        "invalid-flow-concurrency",
+                        "Parallel Map maximum concurrency must be a positive whole number.",
+                        node_id=node_id,
+                    ))
+                if str(parameters.get("failure_policy") or "") not in {"stop", "continue"}:
+                    issues.append(_issue(
+                        "configuration",
+                        "invalid-flow-failure-policy",
+                        "Parallel Map requires a valid item failure policy.",
+                        node_id=node_id,
+                    ))
 
         if kind == "task":
             implementation = _implementation(data)
@@ -267,6 +333,24 @@ def validate_pipeline_graph(graph: Any) -> dict[str, Any]:
                     f"Required input {str(port.get('name') or port_id)!r} is not connected.",
                     node_id=node_id,
                 ))
+        if kinds.get(node_id) == "flow":
+            for port in ports["outputs"]:
+                if not port.get("required"):
+                    continue
+                port_id = str(port.get("id") or "")
+                connected = any(
+                    str(edge.get("source") or "") == node_id
+                    and str(edge.get("sourceHandle") or edge.get("source_port") or "") == port_id
+                    for edge in edges
+                    if isinstance(edge, dict)
+                )
+                if not connected:
+                    issues.append(_issue(
+                        "ports",
+                        "missing-required-flow-output",
+                        f"Required Flow output {str(port.get('name') or port_id)!r} is not connected.",
+                        node_id=node_id,
+                    ))
 
     indegree = {node_id: len(incoming[node_id]) for node_id in node_by_id}
     queue = deque(node_id for node_id, degree in indegree.items() if degree == 0)

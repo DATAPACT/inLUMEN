@@ -41,6 +41,32 @@ The initial Flow template catalog contains Condition and Parallel Map. Wait,
 Retry, and Human Approval remain planned templates and do not require new graph
 kinds when introduced.
 
+### Using Flow components
+
+A Flow component changes routing or scheduling; it does not transform the value.
+New Flow components start as a Condition rather than as an ambiguous generic
+node.
+
+```text
+Validate records -> Condition -> when_true  -> Train model
+                              -> when_false -> Quarantine report
+```
+
+A Condition receives one `value`, evaluates its `expression`, and forwards the
+value through exactly one named output. Expressions use `value` or a field path
+and a literal comparison, for example `value.score >= 0.8` or
+`value.status == "valid"`. The `when_true` branch is required; `when_false` is
+optional when false values can be discarded.
+
+```text
+List documents -> Parallel Map (items -> item) -> Process one document
+```
+
+A Parallel Map receives an array through `items`. The branch connected to
+`item` is scheduled once for each element. `max_concurrency` limits simultaneous
+item runs, while `failure_policy` chooses whether one failed item stops the
+remaining work or allows the other items to continue.
+
 Definitions such as File, PostgreSQL, Data Cleaning, OCR, Speech-to-Text,
 Embeddings, LLM, Report, or Kafka are templates built on these kinds; they are
 not new graph types. The hierarchy is:
@@ -260,7 +286,7 @@ database and worker queue. Production sandbox execution should likewise use
 isolated workers or cluster jobs rather than expose a host Docker socket beyond
 the dedicated codegen service.
 
-For OpenRouter, use your OpenRouter API key after adding the provider key in OpenRouter settings. Short model aliases such as `gpt-oss-120b` are accepted by inLUMEN and normalized before the request is sent.
+For OpenRouter, use your OpenRouter API key after adding the provider key in OpenRouter settings. The model fields provide live autocomplete, per-million input/output token pricing, and Cerebras availability. Selecting a Cerebras-hosted model pins that specific chat or code-generation request to the `cerebras` OpenRouter provider; a Cerebras BYOK key configured as prioritized in OpenRouter is then attempted before shared capacity. Short model aliases such as `gpt-oss-120b` are accepted by inLUMEN and normalized before the request is sent.
 
 You can also use Ollama Cloud with base URL `https://ollama.com/v1` and an Ollama Cloud model such as `gpt-oss:120b`. For a custom on-prem service, select Custom / On premise and enter the OpenAI-compatible base URL, API key, and model name exposed by that service.
 

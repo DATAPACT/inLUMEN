@@ -35,6 +35,8 @@ const portTypesCompatible = (source: string, target: string) => {
   return !left || !right || ["any", "unknown", "*"].includes(left) || ["any", "unknown", "*"].includes(right) || left === right;
 };
 
+const FLOW_EXPRESSION_PATTERN = /^value(?:(?:\.[A-Za-z_][A-Za-z0-9_]*)|(?:\[(?:\d+|"[^"]+"|'[^']+')\]))*(?:\s*(?:==|!=|>=|<=|>|<)\s*(?:"[^"]*"|'[^']*'|-?\d+(?:\.\d+)?|true|false|null))?$/;
+
 export const validateGraph = (nodes: Node[], edges: Edge[]): GraphValidationReport => {
   const issues: ValidationIssue[] = [];
   const nodeById = new Map(nodes.map((node) => [String(node.id), node]));
@@ -52,6 +54,7 @@ export const validateGraph = (nodes: Node[], edges: Edge[]): GraphValidationRepo
     const parameters = objectValue(data.param || data.parameters);
     const templateName = String(objectValue(data.template).name || data.template_label || "");
     const template = findTemplateForType(kind, templateName);
+    const requiredParameterNames = new Set(template?.requiredParameters || []);
 
     ports.inputs.filter((port) => port.required).forEach((port) => {
       const connected = edges.some((edge) =>
@@ -75,7 +78,7 @@ export const validateGraph = (nodes: Node[], edges: Edge[]): GraphValidationRepo
     });
 
     Object.entries(parameters).forEach(([name, value]) => {
-      if (value == null || (typeof value === "string" && !value.trim())) add({
+      if (!requiredParameterNames.has(name) && (value == null || (typeof value === "string" && !value.trim()))) add({
         severity: "error",
         category: "configuration",
         code: "missing-parameter-value",
@@ -92,6 +95,59 @@ export const validateGraph = (nodes: Node[], edges: Edge[]): GraphValidationRepo
         message: `Template “${template.label}” requires parameter “${name}”.`,
       });
     });
+
+    if (kind === "flow") {
+      if (!template || templateName === "Flow") add({
+        severity: "error",
+        category: "configuration",
+        code: "missing-flow-behavior",
+        nodeId,
+        message: "Choose a Flow behavior: Condition or Parallel Map.",
+      });
+
+      if (
+        templateName === "Condition"
+        && String(parameters.expression || "").trim()
+        && !FLOW_EXPRESSION_PATTERN.test(String(parameters.expression).trim())
+      ) add({
+        severity: "error",
+        category: "configuration",
+        code: "invalid-flow-expression",
+        nodeId,
+        message: "Condition expressions must compare value (or value.field) with a literal.",
+      });
+
+      ports.outputs.filter((port) => port.required).forEach((port) => {
+        const connected = edges.some((edge) =>
+          String(edge.source) === nodeId && String(edge.sourceHandle || "") === port.id
+        );
+        if (!connected) add({
+          severity: "error",
+          category: "ports",
+          code: "missing-required-flow-output",
+          nodeId,
+          message: `Required Flow output “${port.name}” is not connected.`,
+        });
+      });
+
+      if (templateName === "Parallel Map") {
+        const concurrency = Number(parameters.max_concurrency);
+        if (!Number.isInteger(concurrency) || concurrency < 1) add({
+          severity: "error",
+          category: "configuration",
+          code: "invalid-flow-concurrency",
+          nodeId,
+          message: "Parallel Map maximum concurrency must be a positive whole number.",
+        });
+        if (!["stop", "continue"].includes(String(parameters.failure_policy || ""))) add({
+          severity: "error",
+          category: "configuration",
+          code: "invalid-flow-failure-policy",
+          nodeId,
+          message: "Parallel Map requires a valid item failure policy.",
+        });
+      }
+    }
 
     if (kind === "task") {
       const implementation = objectValue(data.implementation);

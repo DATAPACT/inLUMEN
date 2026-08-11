@@ -20,14 +20,14 @@ export const getTypeIcon = (type: string) => {
 export const getTypeColor = (type: string) => {
   switch (normalizeType(type)) {
     case 'source':
-      return 'bg-blue-500/20 text-blue-300 border-blue-500/30';
+      return 'node-type-badge node-type-badge-source';
     case 'task':
-      return 'bg-amber-500/20 text-amber-300 border-amber-500/30';
+      return 'node-type-badge node-type-badge-task';
     case 'destination':
-      return 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
+      return 'node-type-badge node-type-badge-destination';
     case 'flow':
-      return 'bg-purple-500/20 text-purple-300 border-purple-500/30';
+      return 'node-type-badge node-type-badge-flow';
     case 'subpipeline':
-      return 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30';
+      return 'node-type-badge node-type-badge-subpipeline';
   }
 };

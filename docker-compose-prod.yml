@@ -11,7 +11,7 @@ volumes:
 services:
   neo4j:
     image: neo4j:5-community
-    container_name: datapact_neo4j_db
+    container_name: inlumen_neo4j
     hostname: datapact-neo4j-db
     mem_limit: ${NEO4J_MEM_LIMIT:-2G}
     restart: unless-stopped
@@ -39,7 +39,7 @@ services:
 
   minio:
     image: minio/minio:latest
-    container_name: datapact_minio_db
+    container_name: inlumen_minio
     hostname: datapact-minio-db
     command: server --address 0.0.0.0:9000 --console-address ":9099" /data
     restart: unless-stopped
@@ -110,6 +110,7 @@ services:
     build:
       context: ./codegen
     image: ${INLUMEN_CODEGEN_IMAGE:-inlumen-codegen-service:local}
+    container_name: inlumen_codegen
     hostname: codegen
     restart: unless-stopped
     expose:

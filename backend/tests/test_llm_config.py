@@ -2,10 +2,11 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from llm_config import resolve_llm_config
+from llm_config import resolve_llm_config, select_model_client
 
 
 class LLMConfigTest(unittest.TestCase):
@@ -58,6 +59,24 @@ class LLMConfigTest(unittest.TestCase):
         self.assertEqual("openai/gpt-oss-120b", config.model)
         self.assertEqual("https://openrouter.ai/api/v1", config.base_url)
         self.assertEqual("session-secret", config.api_key)
+
+    @patch("llm_config.OpenAIChatCompletionClient")
+    def test_restricts_openrouter_to_selected_provider(self, client_mock):
+        config = resolve_llm_config({
+            "provider": "openrouter",
+            "model": "openai/gpt-oss-120b",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "session-secret",
+            "openrouter_provider_only": ["Cerebras"],
+        })
+
+        select_model_client(config)
+
+        self.assertEqual(("cerebras",), config.openrouter_provider_only)
+        self.assertEqual(
+            {"provider": {"only": ["cerebras"]}},
+            client_mock.call_args.kwargs["extra_body"],
+        )
 
 
 if __name__ == "__main__":

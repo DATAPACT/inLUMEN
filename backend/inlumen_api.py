@@ -1102,7 +1102,16 @@ def _build_pipeline_codegen_context(
         "graph": {
             "nodes": descriptors,
             "edges": [
-                {"source": str(edge.get("source")), "target": str(edge.get("target"))}
+                {
+                    "source": str(edge.get("source")),
+                    "target": str(edge.get("target")),
+                    "source_port": str(
+                        edge.get("sourceHandle") or edge.get("source_port") or ""
+                    ),
+                    "target_port": str(
+                        edge.get("targetHandle") or edge.get("target_port") or ""
+                    ),
+                }
                 for edge in edges
                 if isinstance(edge, dict) and edge.get("source") and edge.get("target")
             ],
@@ -1334,6 +1343,15 @@ def _save_chatbot_configs(configs: list[dict[str, Any]]) -> None:
 
 
 def _chatbot_config_response(config: dict[str, Any]) -> dict[str, Any]:
+    openrouter_provider_only = _chatbot_provider_only(
+        config.get("openrouterProviderOnly", config.get("openrouter_provider_only"))
+    )
+    codegen_openrouter_provider_only = _chatbot_provider_only(
+        config.get(
+            "codegenOpenrouterProviderOnly",
+            config.get("codegen_openrouter_provider_only"),
+        )
+    )
     response = {
         "id": str(config.get("id") or ""),
         "name": str(config.get("name") or ""),
@@ -1341,6 +1359,10 @@ def _chatbot_config_response(config: dict[str, Any]) -> dict[str, Any]:
         "model": str(config.get("model") or ""),
         "codegenModel": str(config.get("codegenModel") or config.get("codegen_model") or ""),
         "codegen_model": str(config.get("codegenModel") or config.get("codegen_model") or ""),
+        "openrouterProviderOnly": openrouter_provider_only,
+        "openrouter_provider_only": openrouter_provider_only,
+        "codegenOpenrouterProviderOnly": codegen_openrouter_provider_only,
+        "codegen_openrouter_provider_only": codegen_openrouter_provider_only,
         "baseUrl": str(config.get("baseUrl") or config.get("base_url") or ""),
         "base_url": str(config.get("baseUrl") or config.get("base_url") or ""),
         "system_prompt": str(config.get("system_prompt") or ""),
@@ -1352,6 +1374,15 @@ def _chatbot_config_response(config: dict[str, Any]) -> dict[str, Any]:
         response["readOnly"] = True
         response["read_only"] = True
     return response
+
+
+def _chatbot_provider_only(value: Any) -> list[str]:
+    values = value if isinstance(value, (list, tuple)) else str(value or "").split(",")
+    return list(dict.fromkeys(
+        str(item).strip().lower()
+        for item in values
+        if str(item).strip()
+    ))
 
 
 def _validate_chatbot_config_payload(
@@ -1370,6 +1401,27 @@ def _validate_chatbot_config_payload(
         or existing.get("codegen_model")
         or ""
     ).strip()
+    openrouter_provider_only = _chatbot_provider_only(
+        payload.get(
+            "openrouterProviderOnly",
+            payload.get(
+                "openrouter_provider_only",
+                existing.get("openrouterProviderOnly", existing.get("openrouter_provider_only")),
+            ),
+        )
+    )
+    codegen_openrouter_provider_only = _chatbot_provider_only(
+        payload.get(
+            "codegenOpenrouterProviderOnly",
+            payload.get(
+                "codegen_openrouter_provider_only",
+                existing.get(
+                    "codegenOpenrouterProviderOnly",
+                    existing.get("codegen_openrouter_provider_only"),
+                ),
+            ),
+        )
+    )
     base_url = str(
         payload.get("baseUrl")
         or payload.get("base_url")
@@ -1393,6 +1445,10 @@ def _validate_chatbot_config_payload(
         "model": model,
         "codegenModel": codegen_model,
         "codegen_model": codegen_model,
+        "openrouterProviderOnly": openrouter_provider_only,
+        "openrouter_provider_only": openrouter_provider_only,
+        "codegenOpenrouterProviderOnly": codegen_openrouter_provider_only,
+        "codegen_openrouter_provider_only": codegen_openrouter_provider_only,
         "baseUrl": base_url,
         "base_url": base_url,
         "system_prompt": str(payload.get("system_prompt") or existing.get("system_prompt") or ""),

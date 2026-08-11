@@ -9,6 +9,10 @@ import {
   normalizeSecretParamKeys,
   normalizeType,
 } from '@/features/nodes/nodeSchema';
+import {
+  defaultParametersForTemplate,
+  findTemplateForType,
+} from '@/features/nodes/templateCatalog';
 
 export type NormalizedGraph = {
   updated_at: string | null;
@@ -58,6 +62,28 @@ const fileNameFromUnknown = (file: unknown) => {
   return "";
 };
 
+const objectValue = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+
+const templateNameFromData = (data: Record<string, unknown>) =>
+  String(objectValue(data.template).name || data.template_label || "");
+
+const migrateFlowPorts = (data: Record<string, unknown>, nodeType: ReturnType<typeof normalizeType>) => {
+  const current = normalizeNodePorts(data.ports, nodeType);
+  if (nodeType !== "flow") return current;
+  const templateName = templateNameFromData(data);
+  const template = findTemplateForType("flow", templateName);
+  if (!template?.ports) return current;
+  const usesLegacyGenericContract =
+    current.inputs.length === 1 && current.inputs[0].id === "input"
+    && current.outputs.length === 1 && current.outputs[0].id === "output";
+  return usesLegacyGenericContract
+    ? normalizeNodePorts(template.ports, "flow")
+    : current;
+};
+
 export const normalizeGraph = (data: unknown): NormalizedGraph => {
   const parsedGraph = (data && typeof data === "object" ? data : {}) as {
     nodes?: unknown[];
@@ -73,6 +99,8 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
     if (node.id == null || String(node.id).trim() === "") return [];
     const position = node.position || { x: 0, y: 0 };
     const nodeType = normalizeType(node.data?.type);
+    const nodeData = (node.data || {}) as Record<string, unknown>;
+    const templateName = templateNameFromData(nodeData);
     const normalizedFiles = Array.isArray(node.data?.file_buckets)
       ? node.data.file_buckets
       : Array.isArray(node.data?.files)
@@ -90,7 +118,10 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
         label: node.data?.label || "",
         description: node.data?.description || "",
         type: nodeType,
-        ports: normalizeNodePorts(node.data?.ports, nodeType),
+        ports: migrateFlowPorts(nodeData, nodeType),
+        ...(nodeType === "flow" && findTemplateForType("flow", templateName)
+          ? { param: { ...defaultParametersForTemplate("flow", templateName), ...objectValue(nodeData.param) } }
+          : {}),
         files: normalizedFiles,
       },
     }];
@@ -115,9 +146,22 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
     const targetPorts = targetNode
       ? normalizeNodePorts(targetNode.data?.ports, normalizeType(targetNode.data?.type))
       : null;
-    const sourceHandle = String(edge.sourceHandle || edge.source_port || sourcePorts?.outputs[0]?.id || "");
-    const targetHandle = String(edge.targetHandle || edge.target_port || targetPorts?.inputs[0]?.id || "");
+    const requestedSourceHandle = String(edge.sourceHandle || edge.source_port || "");
+    const requestedTargetHandle = String(edge.targetHandle || edge.target_port || "");
+    const sourceHandle = requestedSourceHandle === "output"
+      && !sourcePorts?.outputs.some((port) => port.id === requestedSourceHandle)
+      ? String(sourcePorts?.outputs[0]?.id || "")
+      : String(requestedSourceHandle || sourcePorts?.outputs[0]?.id || "");
+    const targetHandle = requestedTargetHandle === "input"
+      && !targetPorts?.inputs.some((port) => port.id === requestedTargetHandle)
+      ? String(targetPorts?.inputs[0]?.id || "")
+      : String(requestedTargetHandle || targetPorts?.inputs[0]?.id || "");
     const edgeKey = `${source}:${sourceHandle}->${target}:${targetHandle}`;
+    const conditionBranch = sourceHandle === "when_true"
+      ? { label: "true", color: "#8b5cf6" }
+      : sourceHandle === "when_false"
+        ? { label: "false", color: "#0891b2" }
+        : null;
 
     if (!source || !target || source === target) return;
     if (!nodeIds.has(source) || !nodeIds.has(target)) return;
@@ -133,6 +177,33 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
       target,
       sourceHandle,
       targetHandle,
+      ...(conditionBranch
+        ? {
+          label: edge.label || conditionBranch.label,
+          labelStyle: {
+            fill: conditionBranch.color,
+            fontSize: 10,
+            fontWeight: 700,
+            ...(edge.labelStyle || {}),
+          },
+          labelBgStyle: {
+            fill: "hsl(var(--card))",
+            fillOpacity: 0.94,
+            ...(edge.labelBgStyle || {}),
+          },
+          labelBgPadding: edge.labelBgPadding || [5, 3],
+          labelBgBorderRadius: edge.labelBgBorderRadius ?? 5,
+          style: {
+            stroke: conditionBranch.color,
+            strokeWidth: 2,
+            ...(edge.style || {}),
+          },
+          data: {
+            ...objectValue(edge.data),
+            conditionBranch: sourceHandle,
+          },
+        }
+        : {}),
     });
   });
 

@@ -88,6 +88,8 @@ class NodeDescriptor(BaseModel):
     label: str = ""
     description: str = ""
     type: NodeKind = "custom"
+    template: str = ""
+    ports: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     parameters: dict[str, Any] = Field(default_factory=dict)
     implementation: dict[str, Any] = Field(default_factory=dict)
     files: list[FileDescriptor] = Field(default_factory=list)
@@ -96,6 +98,8 @@ class NodeDescriptor(BaseModel):
 class GraphEdge(BaseModel):
     source: str
     target: str
+    source_port: str = ""
+    target_port: str = ""
 
 
 class GraphContext(BaseModel):

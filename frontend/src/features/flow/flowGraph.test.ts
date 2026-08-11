@@ -134,6 +134,71 @@ describe("flow graph normalization", () => {
     ]);
   });
 
+  it("migrates legacy generic Flow contracts to their selected behavior", () => {
+    const graph = normalizeGraph({
+      nodes: [
+        { id: "source", position: { x: 0, y: 0 }, data: { type: "source" } },
+        {
+          id: "condition",
+          position: { x: 1, y: 0 },
+          data: {
+            type: "flow",
+            template_label: "Condition",
+            ports: {
+              inputs: [{ id: "input", name: "input", type: "any", required: true, description: "Flow input." }],
+              outputs: [{ id: "output", name: "output", type: "any", required: true, description: "Flow output." }],
+            },
+          },
+        },
+        { id: "destination", position: { x: 2, y: 0 }, data: { type: "destination" } },
+      ],
+      edges: [
+        { source: "source", target: "condition", sourceHandle: "data", targetHandle: "input" },
+        { source: "condition", target: "destination", sourceHandle: "output", targetHandle: "data" },
+      ],
+    });
+
+    expect(graph.nodes[1].data).toMatchObject({
+      param: { expression: "" },
+      ports: {
+        inputs: [{ id: "value" }],
+        outputs: [{ id: "when_true" }, { id: "when_false" }],
+      },
+    });
+    expect(graph.edges).toEqual([
+      expect.objectContaining({ targetHandle: "value" }),
+      expect.objectContaining({
+        sourceHandle: "when_true",
+        label: "true",
+        style: expect.objectContaining({ stroke: "#8b5cf6" }),
+        data: expect.objectContaining({ conditionBranch: "when_true" }),
+      }),
+    ]);
+  });
+
+  it("labels and distinguishes both Condition branches", () => {
+    const graph = normalizeGraph({
+      nodes: [
+        {
+          id: "condition",
+          position: { x: 0, y: 0 },
+          data: { type: "flow", template_label: "Condition" },
+        },
+        { id: "accepted", position: { x: 1, y: -1 }, data: { type: "task" } },
+        { id: "rejected", position: { x: 1, y: 1 }, data: { type: "task" } },
+      ],
+      edges: [
+        { source: "condition", target: "accepted", sourceHandle: "when_true", targetHandle: "input" },
+        { source: "condition", target: "rejected", sourceHandle: "when_false", targetHandle: "input" },
+      ],
+    });
+
+    expect(graph.edges).toEqual([
+      expect.objectContaining({ label: "true", style: expect.objectContaining({ stroke: "#8b5cf6" }) }),
+      expect.objectContaining({ label: "false", style: expect.objectContaining({ stroke: "#0891b2" }) }),
+    ]);
+  });
+
   it("prefers persisted file metadata so code and data roles survive polling", () => {
     const graph = normalizeGraph({
       nodes: [{

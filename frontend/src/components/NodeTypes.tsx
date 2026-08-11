@@ -28,6 +28,7 @@ interface NodeProps {
     ports?: Partial<NodePorts>;
     template_label?: string;
     implementation?: Record<string, unknown>;
+    param?: Record<string, unknown>;
     subpipeline?: {
       expanded?: boolean;
       graph?: { nodes?: unknown[]; edges?: unknown[] };
@@ -115,11 +116,13 @@ const PortList = ({
 
 export const CustomNode: React.FC<NodeProps> = ({ id, data, selected }) => {
   const display = useContext(PortDisplayContext);
-  const showPortDetails = display.advanced;
   const validationIssues = display.validationByNode[id] || [];
   const validationErrors = validationIssues.filter((issue) => issue.severity === 'error').length;
   const validationWarnings = validationIssues.filter((issue) => issue.severity === 'warning').length;
   const visualType = normalizeType(data.type);
+  // Flow behavior is encoded by named handles, so those handles stay visible
+  // and connectable even when the rest of the canvas is in Compact mode.
+  const showPortDetails = display.advanced || visualType === 'flow';
   const ports = normalizeNodePorts(data.ports, visualType);
   const style = TYPE_STYLES[visualType];
   const Icon = icons[visualType] || PanelLeft;
@@ -192,6 +195,16 @@ export const CustomNode: React.FC<NodeProps> = ({ id, data, selected }) => {
               showPortDetails ? 'line-clamp-2' : 'line-clamp-1',
             )}>
               {data.description}
+            </div>
+          )}
+
+          {visualType === 'flow' && (
+            <div className="mt-1 rounded bg-purple-500/10 px-1.5 py-1 text-[9px] leading-3 text-purple-200">
+              {templateLabel === 'Condition'
+                ? `If ${String(data.param?.expression || '…set an expression')}`
+                : templateLabel === 'Parallel Map'
+                  ? `One run per item · max ${String(data.param?.max_concurrency || 4)} at once`
+                  : 'Choose Condition or Parallel Map'}
             </div>
           )}
 

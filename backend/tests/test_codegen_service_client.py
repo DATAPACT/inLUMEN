@@ -228,6 +228,56 @@ class CodegenServiceClientTest(unittest.TestCase):
         self.assertEqual(900, constraints["max_runtime_seconds"])
         self.assertEqual(payload["options"], metadata["options"])
 
+    def test_pipeline_codegen_preserves_flow_behavior_ports_and_edge_handles(self):
+        payload, _metadata = inlumen_api._build_pipeline_codegen_payload(
+            {
+                "nodes": [
+                    {
+                        "id": "condition-1",
+                        "data": {
+                            "label": "Sentiment Route",
+                            "description": "Route negative sentiment.",
+                            "type": "flow",
+                            "template_label": "Condition",
+                            "param": {
+                                "expression": 'value.sentiment == "negative"'
+                            },
+                            "ports": {
+                                "inputs": [{"id": "value", "name": "value"}],
+                                "outputs": [
+                                    {"id": "when_true", "name": "true"},
+                                    {"id": "when_false", "name": "false"},
+                                ],
+                            },
+                        },
+                    },
+                    {
+                        "id": "complaint-1",
+                        "data": {
+                            "label": "Create Complaint",
+                            "type": "task",
+                        },
+                    },
+                ],
+                "edges": [
+                    {
+                        "source": "condition-1",
+                        "target": "complaint-1",
+                        "sourceHandle": "when_true",
+                        "targetHandle": "input",
+                    }
+                ],
+            },
+            {},
+        )
+
+        graph = payload["context"]["graph"]
+        condition = graph["nodes"][0]
+        self.assertEqual("Condition", condition["template"])
+        self.assertEqual("value", condition["ports"]["inputs"][0]["id"])
+        self.assertEqual("when_true", graph["edges"][0]["source_port"])
+        self.assertEqual("input", graph["edges"][0]["target_port"])
+
     def test_codegen_context_fingerprint_detects_background_graph_changes(self):
         context = {
             "graph": {

@@ -445,7 +445,7 @@ const Index = () => {
       node.id === id ? { ...node, data: { ...node.data, ...data } } : node
     ));
     setSelectedNode(prev =>
-      prev?.id === id ? { ...prev, data: { ...prev.data, ...data } } : prev
+      prev?.id === id ? { ...prev, data } : prev
     );
     flowCanvasRef.current?.updateNode(id, data);
   }, []);
@@ -955,11 +955,6 @@ const Index = () => {
   };
 
   const handleClearAll = async () => {
-    const confirmed = window.confirm(
-      "Clear the entire workspace? This will empty Main, delete all saved versions except Main, clear the chat session, and clean the provenance report."
-    );
-    if (!confirmed) return;
-
     if (activeVersionSaveTimeoutRef.current) {
       window.clearTimeout(activeVersionSaveTimeoutRef.current);
       activeVersionSaveTimeoutRef.current = null;
@@ -1108,7 +1103,7 @@ const Index = () => {
 
         {showFlowLayout ? (
           <ResizablePanelGroup direction="horizontal" className="min-w-0 flex-1">
-            <ResizablePanel defaultSize={rightPanel ? 72 : 100} minSize={45}>
+            <ResizablePanel id="canvas-panel" order={1} defaultSize={rightPanel ? 72 : 100} minSize={45}>
               <div className="h-full bg-background">
                 <WrappedFlowCanvas
                   onNodeSelect={onNodeSelect}
@@ -1131,8 +1126,15 @@ const Index = () => {
 
             {rightPanel && (
               <>
-                <ResizableHandle withHandle />
-                <ResizablePanel defaultSize={28} minSize={24} maxSize={42} className="min-w-[320px]">
+                <ResizableHandle id="right-panel-handle" withHandle />
+                <ResizablePanel
+                  id="right-panel"
+                  order={2}
+                  defaultSize={28}
+                  minSize={24}
+                  maxSize={42}
+                  className="min-w-[320px]"
+                >
                   {rightPanel === 'inspector' ? (
                     <PropertiesPanel
                       className="bg-card/95"

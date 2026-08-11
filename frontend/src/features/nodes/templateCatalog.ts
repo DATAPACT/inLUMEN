@@ -8,6 +8,7 @@ export type ComponentTemplate = {
   description?: string;
   ports?: NodePorts;
   requiredParameters?: string[];
+  defaultParameters?: Record<string, unknown>;
 };
 
 const port = (name: string, type: string, description: string, required = true) => ({
@@ -92,28 +93,42 @@ export const COMPONENT_TEMPLATE_CATALOG: Record<StepType, ComponentTemplate[]> =
     { id: "destination.report", value: "Report", label: "Report", ports: destinationPorts("report_data", "Dataset") },
     { id: "destination.notification", value: "Notification", label: "Notification", ports: destinationPorts("notification", "Message") },
   ]),
-  flow: categorized("Flow control", [
-    { id: "flow.generic", value: "Flow", label: "Generic flow" },
-    {
-      id: "flow.condition",
-      value: "Condition",
-      label: "Condition",
-      ports: {
-        inputs: [port("value", "any", "Value evaluated by the condition.")],
-        outputs: [
-          port("when_true", "any", "Value routed when the condition is true."),
-          port("when_false", "any", "Value routed when the condition is false.", false),
-        ],
+  flow: [
+    ...categorized("Flow control", [
+      {
+        id: "flow.condition",
+        value: "Condition",
+        label: "Condition",
+        description: "Evaluate an expression and route the input through the true or false branch.",
+        ports: {
+          inputs: [port("value", "any", "Value evaluated by the condition.")],
+          outputs: [
+            port("when_true", "any", "Value routed when the condition is true."),
+            port("when_false", "any", "Value routed when the condition is false.", false),
+          ],
+        },
+        requiredParameters: ["expression"],
+        defaultParameters: { expression: "" },
       },
-      requiredParameters: ["expression"],
-    },
-    {
-      id: "flow.parallel-map",
-      value: "Parallel Map",
-      label: "Parallel Map",
-      ports: taskPorts("items", "any[]", "mapped_items", "any[]"),
-    },
-  ]),
+      {
+        id: "flow.parallel-map",
+        value: "Parallel Map",
+        label: "Parallel Map",
+        description: "Fan out an array so the downstream branch runs once for each item.",
+        ports: taskPorts("items", "any[]", "item", "any"),
+        requiredParameters: ["max_concurrency"],
+        defaultParameters: { max_concurrency: 4, failure_policy: "stop" },
+      },
+    ]),
+    ...categorized("Legacy", [
+      {
+        id: "flow.generic",
+        value: "Flow",
+        label: "Generic flow (choose a behavior)",
+        description: "Compatibility template for older projects; select Condition or Parallel Map before using it.",
+      },
+    ]),
+  ],
   subpipeline: categorized("Subpipelines", [
     { id: "subpipeline.pipeline", value: "Subpipeline", label: "Subpipeline" },
   ]),
@@ -147,3 +162,7 @@ export const findTemplateForType = (type: StepType, value: unknown) => {
     template.value === normalized || template.id === normalized
   );
 };
+
+export const defaultParametersForTemplate = (type: StepType, value: unknown) => ({
+  ...(findTemplateForType(type, value)?.defaultParameters || {}),
+});

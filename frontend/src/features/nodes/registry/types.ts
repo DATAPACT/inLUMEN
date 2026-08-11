@@ -61,5 +61,6 @@ export type NodeDefinitionData = {
   template_label: string;
   template: { id: string; name: string; version?: number };
   ports: NodePorts;
+  param: Record<string, unknown>;
   configuration_status?: "unconfigured" | "valid" | "invalid";
 };

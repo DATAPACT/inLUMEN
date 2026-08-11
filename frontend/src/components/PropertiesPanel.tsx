@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import {
   Eye,
   EyeOff,
+  GitBranch,
   Loader2,
   LockKeyhole,
   PlusCircle,
@@ -46,6 +47,7 @@ import {
   NodePorts,
 } from '@/features/nodes/nodeSchema';
 import {
+  defaultParametersForTemplate,
   defaultTemplateForType,
   findTemplateForType,
   templateOptionsForType,
@@ -63,6 +65,7 @@ import type { ValidationIssue } from '@/features/flow/flowValidation';
 
 type NodeParamMap = Record<string, unknown>;
 type DraftKeyMap = Record<string, string>;
+const FLOW_PARAMETER_KEYS = new Set(["expression", "max_concurrency", "failure_policy"]);
 
 export type PropertyNodeData = {
   label?: string;
@@ -215,7 +218,9 @@ export function PropertiesPanel({
     () => new Set(),
   );
   const [draftKeys, setDraftKeys] = useState<DraftKeyMap>({});
-  const editableParamEntries = Object.entries(param).filter(([key]) => key !== "model_plan");
+  const editableParamEntries = Object.entries(param).filter(([key]) =>
+    key !== "model_plan" && !(nodeType === "flow" && FLOW_PARAMETER_KEYS.has(key))
+  );
   const [ports, setPorts] = useState<NodePorts>(() => normalizeNodePorts(undefined, nodeType));
   const [portContractUnlocked, setPortContractUnlocked] = useState(false);
   const [customPortTypeKeys, setCustomPortTypeKeys] = useState<Set<string>>(() => new Set());
@@ -234,6 +239,7 @@ export function PropertiesPanel({
       || selectedNode?.data?.template_label
       || defaultTemplateForType(nodeType),
   );
+  const currentTemplateDefinition = findTemplateForType(nodeType, currentTemplate);
   const templateOptions = templateOptionsForType(nodeType, currentTemplate);
   const filteredTemplateOptions = templateOptions.filter((option) => {
     const query = templateSearch.trim().toLowerCase();
@@ -254,6 +260,7 @@ export function PropertiesPanel({
     .map((file, index) => ({ file, index }))
     .filter(({ file }) => getNodeFileRole(file) === "data");
   const activeNodeIdRef = useRef<string | null>(selectedNode?.id ?? null);
+  const locallyProducedNodeDataRef = useRef(new WeakSet<object>());
 
   // preview/edit file dialog state
   const [previewFile, setPreviewFile] = useState<File | null>(null);
@@ -312,6 +319,7 @@ export function PropertiesPanel({
     next.ports = normalizeNodePorts(next.ports, nodeType);
 
     // 1) update local reactflow node
+    locallyProducedNodeDataRef.current.add(next);
     onNodeUpdate(selectedNode.id, next);
 
     // 2) update backend state (only allowed props)
@@ -321,12 +329,20 @@ export function PropertiesPanel({
 
   useEffect(() => {
     const nextNodeId = selectedNode?.id ?? null;
-    if (activeNodeIdRef.current !== nextNodeId) {
+    const nodeChanged = activeNodeIdRef.current !== nextNodeId;
+    if (nodeChanged) {
       setRevealedSecretParams(new Set());
       setPortContractUnlocked(false);
       setCustomPortTypeKeys(new Set());
       setTemplateSearch("");
       activeNodeIdRef.current = nextNodeId;
+    }
+    if (
+      !nodeChanged
+      && selectedNode
+      && locallyProducedNodeDataRef.current.has(selectedNode.data)
+    ) {
+      return;
     }
     if (selectedNode) {
       setLabel(selectedNode.data.label || '');
@@ -435,7 +451,17 @@ export function PropertiesPanel({
       });
       return;
     }
+    const nextParam = nodeType === "flow"
+      ? {
+          ...Object.fromEntries(Object.entries(param).filter(([key]) => !FLOW_PARAMETER_KEYS.has(key))),
+          ...defaultParametersForTemplate(nodeType, templateLabel),
+        }
+      : param;
+    const replaceGenericFlowLabel = nodeType === "flow" && ["Flow", "Condition", "Parallel Map"].includes(label);
+    const nextLabel = replaceGenericFlowLabel ? (template?.label || templateLabel) : label;
     setPorts(nextPorts);
+    setParam(nextParam);
+    if (nextLabel !== label) setLabel(nextLabel);
     setPortContractUnlocked(false);
     setCustomPortTypeKeys(new Set());
     pushNodeUpdate({
@@ -445,7 +471,14 @@ export function PropertiesPanel({
         name: templateLabel,
       },
       ports: nextPorts,
+      ...(nodeType === "flow" ? { param: nextParam, label: nextLabel } : {}),
     });
+  };
+
+  const setFlowParameter = (key: string, value: unknown) => {
+    const next = { ...param, [key]: value };
+    setParam(next);
+    pushNodeUpdate({ param: next, secret_params: secretParamKeys });
   };
 
   const updateImplementation = (patch: Record<string, unknown>) => {
@@ -1061,7 +1094,7 @@ export function PropertiesPanel({
                   : undefined}
             >
               {designValidationIssues.length === 0 ? (
-                <p className="text-xs text-emerald-500">No design-time issues on this component.</p>
+                <p className="text-xs text-[hsl(var(--success-foreground))]">No design-time issues on this component.</p>
               ) : (
                 <div className="space-y-1.5">
                   {designValidationIssues.map((issue, index) => (
@@ -1140,7 +1173,8 @@ export function PropertiesPanel({
                   ))}
                 </select>
                 <p className="text-xs text-muted-foreground">
-                  Categories help you find concrete templates; changing one never changes the structural graph kind.
+                  {currentTemplateDefinition?.description
+                    || "Categories help you find concrete templates; changing one never changes the structural graph kind."}
                 </p>
               </div>
 
@@ -1164,6 +1198,79 @@ export function PropertiesPanel({
                 />
               </div>
             </InspectorSection>
+
+            {nodeType === "flow" && (
+              <InspectorSection
+                id="inspector-flow"
+                title="Flow behavior"
+                description="Flow components control scheduling and routing; they do not transform the value themselves."
+                status={sectionStatus("configuration")}
+              >
+                {currentTemplate === "Condition" && (
+                  <div className="space-y-3">
+                    <div className="flex gap-2 rounded-md border border-purple-500/25 bg-purple-500/10 p-3 text-xs text-muted-foreground">
+                      <GitBranch className="mt-0.5 h-4 w-4 shrink-0 text-purple-400" />
+                      <p>The incoming value is forwarded through exactly one branch. Connect <strong className="text-foreground">when_true</strong>; connect <strong className="text-foreground">when_false</strong> when the rejected path needs handling.</p>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="flow-condition-expression">Expression</Label>
+                      <Textarea
+                        id="flow-condition-expression"
+                        value={String(param.expression ?? "")}
+                        onChange={(event) => setFlowParameter("expression", event.target.value)}
+                        placeholder={'value.status == "valid"'}
+                        className="min-h-20 font-mono text-xs"
+                      />
+                      <p className="text-[11px] text-muted-foreground">
+                        Use <code className="rounded bg-muted px-1 py-0.5">value</code> for the incoming value, for example <code className="rounded bg-muted px-1 py-0.5">value.score &gt;= 0.8</code>.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {currentTemplate === "Parallel Map" && (
+                  <div className="space-y-3">
+                    <div className="rounded-md border border-purple-500/25 bg-purple-500/10 p-3 text-xs text-muted-foreground">
+                      The <strong className="text-foreground">items</strong> input must be an array. The downstream branch connected to <strong className="text-foreground">item</strong> is scheduled once for each array item.
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-2">
+                        <Label htmlFor="flow-max-concurrency">Maximum concurrency</Label>
+                        <Input
+                          id="flow-max-concurrency"
+                          type="number"
+                          min={1}
+                          step={1}
+                          value={String(param.max_concurrency ?? "")}
+                          onChange={(event) => setFlowParameter(
+                            "max_concurrency",
+                            event.target.value === "" ? "" : Number(event.target.value),
+                          )}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="flow-failure-policy">If one item fails</Label>
+                        <select
+                          id="flow-failure-policy"
+                          className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                          value={String(param.failure_policy || "stop")}
+                          onChange={(event) => setFlowParameter("failure_policy", event.target.value)}
+                        >
+                          <option value="stop">Stop remaining items</option>
+                          <option value="continue">Continue other items</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {currentTemplate === "Flow" && (
+                  <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
+                    This compatibility template has no behavior. Select Condition or Parallel Map above.
+                  </div>
+                )}
+              </InspectorSection>
+            )}
 
             <InspectorSection
               id="inspector-ports"

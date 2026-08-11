@@ -427,7 +427,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     const savedEdges = localStorage.getItem('ai-flow-edges');
     return savedEdges ? JSON.parse(savedEdges) : [];
   });
-  const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const [showPortDetails, setShowPortDetails] = useState(
     () => localStorage.getItem('inlumen-show-port-details') === 'true',
   );
@@ -491,6 +490,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       },
     },
   })), [designValidation.byNode, edges, nodes]);
+  const displayedNodesRef = useRef(displayedNodes);
+  displayedNodesRef.current = displayedNodes;
   const displayedEdges = useMemo(() => edges.map((edge) => {
     const issues = designValidation.issues.filter((issue) => issue.edgeId === String(edge.id || ""));
     const hasError = issues.some((issue) => issue.severity === "error");
@@ -510,14 +511,24 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   }), [designValidation.issues, edges]);
   const validationErrors = designValidation.issues.filter((issue) => issue.severity === "error").length;
   const validationWarnings = designValidation.issues.filter((issue) => issue.severity === "warning").length;
+  const selectedNodeFeedbackSignature = (() => {
+    const selectedNodeId = selectedNodeIdRef.current;
+    if (!selectedNodeId) return "";
+    const selected = displayedNodes.find((node) => node.id === selectedNodeId);
+    return selected ? JSON.stringify({
+      validation_issues: selected.data.validation_issues,
+      connected_ports: selected.data.connected_ports,
+    }) : "missing";
+  })();
 
+  // Keep inspector feedback current without replacing its editable node data on
+  // every keystroke. This only runs when validation or connection state changes.
   useEffect(() => {
     const selectedNodeId = selectedNodeIdRef.current;
-    if (!selectedNodeId) return;
-    const refreshedSelection = displayedNodes.find((node) => node.id === selectedNodeId) || null;
-    setSelectedNode(refreshedSelection);
+    if (!selectedNodeId || !selectedNodeFeedbackSignature) return;
+    const refreshedSelection = displayedNodesRef.current.find((node) => node.id === selectedNodeId) || null;
     onNodeSelect(refreshedSelection, { openInspector: false });
-  }, [displayedNodes, onNodeSelect]);
+  }, [onNodeSelect, selectedNodeFeedbackSignature]);
 
   useEffect(() => {
     if (!uploadedSampleDataAvailable && scriptGenerationMode === "full") {
@@ -622,7 +633,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     if (selectedNodeId) {
       const refreshedSelection = g.nodes.find((node) => node.id === selectedNodeId) || null;
       selectedNodeIdRef.current = refreshedSelection?.id ?? null;
-      setSelectedNode(refreshedSelection);
       onNodeSelect(refreshedSelection, { openInspector: false });
     }
 
@@ -841,6 +851,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const updateNode = useCallback((id: string, data: Record<string, unknown>) => {
     pushHistorySnapshot(undefined, { coalesceKey: `node:${id}:properties` });
     onCanvasEdited?.();
+    markLocalWrite(1200);
     setNodes((nds) =>
       nds.map((node) => {
         if (node.id === id) {
@@ -850,14 +861,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         return node;
       })
     );
-    // Also update selected node 
-    setSelectedNode((prev) => {
-      if (prev?.id === id) {
-        return { ...prev, data: { ...prev.data, ...data } };
-      }
-      return prev;
-    });
-  }, [onCanvasEdited, pushHistorySnapshot]);
+  }, [markLocalWrite, onCanvasEdited, pushHistorySnapshot]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const triggerImport = () => fileInputRef.current?.click();
 
@@ -904,7 +908,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       ? nextNodes.find((node) => node.id === selectedNodeId) || null
       : null;
     selectedNodeIdRef.current = refreshedSelection?.id ?? null;
-    setSelectedNode(refreshedSelection);
     onNodeSelect(refreshedSelection, { openInspector: false });
 
     if (reactFlowInstance) {
@@ -1034,16 +1037,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       const newNodes = applyNodeChanges(changes, nodes);
       setNodes(newNodes);
 
-      if (selectedNode) {
-        const updatedSelectedNode = newNodes.find(n => n.id === selectedNode.id);
-        if (updatedSelectedNode) {
-          selectedNodeIdRef.current = updatedSelectedNode.id;
-          setSelectedNode(updatedSelectedNode);
-          onNodeSelect(updatedSelectedNode, { openInspector: false });
-        }
+      const selectedNodeId = selectedNodeIdRef.current;
+      if (selectedNodeId && removedNodeIds.includes(selectedNodeId)) {
+        selectedNodeIdRef.current = null;
+        onNodeSelect(null, { openInspector: false });
       }
     },
-    [nodes, selectedNode, onNodeSelect, markLocalWrite, onCanvasEdited, pushHistorySnapshot]
+    [nodes, onNodeSelect, markLocalWrite, onCanvasEdited, pushHistorySnapshot]
   );
 
   const onEdgesChange = useCallback(
@@ -1167,7 +1167,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
   const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
     selectedNodeIdRef.current = node.id;
-    setSelectedNode(node);
     onNodeSelect(node);
   }, [onNodeSelect]);
 
@@ -1179,7 +1178,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     const node = displayedNodes.find((candidate) => String(candidate.id) === String(nodeId || ""));
     if (node) {
       selectedNodeIdRef.current = node.id;
-      setSelectedNode(node);
       onNodeSelect(node);
       window.setTimeout(() => {
         const section = ["unknown-edge-port", "missing-edge-port"].includes(issue.code)
@@ -1196,7 +1194,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
   const onPaneClick = useCallback(() => {
     selectedNodeIdRef.current = null;
-    setSelectedNode(null);
     onNodeSelect(null);
   }, [onNodeSelect]);
 
@@ -1448,7 +1445,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     setNodes([]);
     setEdges([]);
     selectedNodeIdRef.current = null;
-    setSelectedNode(null);
     onNodeSelect(null);
     localStorage.removeItem('ai-flow');
     localStorage.removeItem('ai-flow-nodes');

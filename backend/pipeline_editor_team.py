@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from graph_client import run_neo4j_query
 from llm_config import LLMConfig, log_llm_selection, select_model_client
 from model_plans import resolve_implementation_plan
-from node_ports import ports_json
+from node_ports import default_input_port_id, ports_json_for_template
 from node_parameters import secret_params_json
 from step_types import normalize_step_type
 
@@ -26,6 +26,18 @@ SEMANTIC_IMPLEMENTATION_KIND_ALIASES = {
     "deterministic-processing": ("generated-code", "deterministic"),
     "deterministic_processing": ("generated-code", "deterministic"),
 }
+
+
+def _agent_query_returned_no_rows(result: object) -> bool:
+    if isinstance(result, (list, tuple)):
+        return len(result) == 0
+    if isinstance(result, str):
+        try:
+            decoded = json.loads(result)
+        except (TypeError, ValueError):
+            return False
+        return isinstance(decoded, list) and len(decoded) == 0
+    return False
 
 
 def normalize_agent_implementation(implementation: Any) -> dict[str, Any]:
@@ -337,21 +349,41 @@ def build_pipeline_editing_team(
             "source": "Source",
             "task": "Blank Task",
             "destination": "Destination",
-            "flow": "Flow",
+            "flow": "Condition",
             "subpipeline": "Subpipeline",
         }
+        resolved_template_label = template_label or default_template_labels[step_type]
+        param_obj = dict(parameters) if isinstance(parameters, dict) else {}
+        if step_type == "flow":
+            if resolved_template_label == "Condition":
+                expression = str(param_obj.get("expression") or "").strip()
+                if not expression:
+                    raise ValueError(
+                        "Condition Flow requires parameters.expression, for example "
+                        "value.sentiment == \"negative\"."
+                    )
+            elif resolved_template_label == "Parallel Map":
+                param_obj.setdefault("max_concurrency", 4)
+                param_obj.setdefault("failure_policy", "stop")
+            else:
+                raise ValueError(
+                    "Flow template must be Condition or Parallel Map; generic Flow has no behavior."
+                )
         props_lines = [
             f"type:       '{step_type}'",
             f"label:      '{label}'",
             f"description:'{description}'",
-            f"template_label:'{template_label or default_template_labels[step_type]}'",
+            f"template_label:'{resolved_template_label}'",
             "has_files: 'no'",
         ]
-        default_ports = ports_json(None, step_type).replace("\\", "\\\\").replace("'", "\\'")
+        default_ports = ports_json_for_template(
+            None,
+            step_type,
+            resolved_template_label,
+        ).replace("\\", "\\\\").replace("'", "\\'")
         props_lines.append(f"ports_json: '{default_ports}'")
         if step_type in ("source", "destination"):
             props_lines.append("content: ''")
-        param_obj = dict(parameters) if isinstance(parameters, dict) else {}
         if isinstance(implementation, dict) and implementation:
             implementation = normalize_agent_implementation(implementation)
             implementation = resolve_implementation_plan(
@@ -416,6 +448,11 @@ def build_pipeline_editing_team(
                 data.get("secret_parameters"),
             )
             props_str = ",\n            ".join(props_lines)
+            resolved_template = str(
+                data.get("template")
+                or ("Condition" if step_type == "flow" else "")
+            )
+            target_port = default_input_port_id(step_type, resolved_template).replace("'", "\\'")
             query = f"""
             OPTIONAL MATCH (candidate:PIPELINE {{status:'design'}})
             OPTIONAL MATCH (candidate)-[:HAS_STEP]->(candidateStep:STEP)
@@ -467,7 +504,14 @@ def build_pipeline_editing_team(
             }})
             MERGE (p)-[:HAS_STEP]->(s)
             FOREACH (_ IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |
-            MERGE (prev)-[:FLOWS_TO]->(s)
+            MERGE (prev)-[flow:FLOWS_TO]->(s)
+            SET flow.source_port = CASE
+                    WHEN prev.type = 'source' THEN 'data'
+                    WHEN prev.type = 'flow' AND toLower(coalesce(prev.template_label, '')) = 'condition' THEN 'when_true'
+                    WHEN prev.type = 'flow' AND toLower(coalesce(prev.template_label, '')) = 'parallel map' THEN 'item'
+                    ELSE 'output'
+                END,
+                flow.target_port = '{target_port}'
             )
             RETURN {{
             flow_id: s.flow_id,
@@ -484,6 +528,248 @@ def build_pipeline_editing_team(
             return repr(result)
         except Exception as exc:
             raise RuntimeError(f"create_step failed: {exc}") from exc
+
+    async def connect_steps(params: str) -> str:
+        """Creates or configures a port-aware connection between two existing steps.
+
+        params JSON:
+        {
+          "source_flow_id": "source step flow_id",
+          "target_flow_id": "target step flow_id",
+          "source_port": "output port id",
+          "target_port": "input port id",
+          "allow_fan_out": false
+        }
+
+        Standard handles are source.data, task.output/input, destination.data,
+        Condition.value/when_true/when_false, Parallel Map.items/item, and
+        subpipeline.input/output. Calling this for an existing source/target pair
+        updates that connection's handles. Use it to add every non-linear branch.
+        Flow steps may fan out by design. A non-Flow step may only gain a second
+        downstream target when allow_fan_out is explicitly true; omit it for
+        ordinary chains and branch merges.
+        """
+        try:
+            data = json.loads(params)
+
+            def required_value(name: str) -> str:
+                value = str(data.get(name) or "").strip()
+                if not value:
+                    raise ValueError(f"connect_steps requires {name}")
+                if not all(character.isalnum() or character in "_.-" for character in value):
+                    raise ValueError(f"connect_steps received an invalid {name}")
+                return value
+
+            source_flow_id = required_value("source_flow_id")
+            target_flow_id = required_value("target_flow_id")
+            source_port = required_value("source_port")
+            target_port = required_value("target_port")
+            allow_fan_out = data.get("allow_fan_out") is True
+            if source_flow_id == target_flow_id:
+                raise ValueError("connect_steps cannot connect a step to itself")
+
+            query = f"""
+            MATCH (p:PIPELINE {{status:'design'}})-[:HAS_STEP]->(source:STEP {{flow_id:'{source_flow_id}'}})
+            MATCH (p)-[:HAS_STEP]->(target:STEP {{flow_id:'{target_flow_id}'}})
+            WHERE source.type <> 'destination' AND target.type <> 'source'
+            OPTIONAL MATCH (source)-[:FLOWS_TO]->(existingTarget:STEP)
+            WITH p, source, target, collect(DISTINCT existingTarget) AS existingTargets
+            WHERE source.type = 'flow'
+               OR {str(allow_fan_out).lower()}
+               OR size(existingTargets) = 0
+               OR target IN existingTargets
+            MERGE (source)-[flow:FLOWS_TO]->(target)
+            SET flow.source_port = '{source_port}',
+                flow.target_port = '{target_port}',
+                p.updated_at = datetime()
+            WITH p, source, target, flow
+            OPTIONAL MATCH (source)-[trueConnection:FLOWS_TO]->(trueTarget:STEP)
+            WHERE source.type = 'flow'
+              AND toLower(coalesce(source.template_label, '')) = 'condition'
+              AND trueConnection.source_port = 'when_true'
+            OPTIONAL MATCH (source)-[falseConnection:FLOWS_TO]->(falseTarget:STEP)
+            WHERE source.type = 'flow'
+              AND toLower(coalesce(source.template_label, '')) = 'condition'
+              AND falseConnection.source_port = 'when_false'
+            OPTIONAL MATCH branchPath = (trueTarget)-[:FLOWS_TO*1..32]->(falseTarget)
+            WITH p, source, target, flow, trueTarget, falseTarget,
+                count(branchPath) > 0 AS falseTargetIsMerge
+            FOREACH (_ IN CASE
+                WHEN trueTarget IS NOT NULL AND falseTarget IS NOT NULL THEN [1]
+                ELSE []
+            END |
+                SET trueTarget.y = coalesce(source.y, 0.0) - 180.0,
+                    falseTarget.y = CASE
+                        WHEN falseTargetIsMerge THEN coalesce(source.y, 0.0)
+                        ELSE coalesce(source.y, 0.0) + 180.0
+                    END
+            )
+            RETURN {{
+            source_flow_id: source.flow_id,
+            source_label: source.label,
+            source_port: flow.source_port,
+            target_flow_id: target.flow_id,
+            target_label: target.label,
+            target_port: flow.target_port,
+            fan_out_allowed: source.type = 'flow' OR {str(allow_fan_out).lower()},
+            pipeline_updated_at: toString(p.updated_at),
+            branch_layout_applied: trueTarget IS NOT NULL AND falseTarget IS NOT NULL
+            }} AS connection;
+            """
+            result = await run_query(query, "connect_steps")
+            if _agent_query_returned_no_rows(result):
+                raise ValueError(
+                    "Connection rejected: this non-Flow step already has a different "
+                    "downstream target. Remove the shortcut or pass allow_fan_out:true "
+                    "only when the user explicitly requested independent consumers."
+                )
+            return repr(result)
+        except Exception as exc:
+            raise RuntimeError(f"connect_steps failed: {exc}") from exc
+
+    async def disconnect_steps(params: str) -> str:
+        """Deletes one exact port-aware connection between two existing steps.
+
+        params JSON:
+        {
+          "source_flow_id": "source step flow_id",
+          "target_flow_id": "target step flow_id",
+          "source_port": "output port id",
+          "target_port": "input port id"
+        }
+
+        All four fields are required so a repair cannot accidentally remove a
+        different branch or connection between the same pair of steps.
+        """
+        try:
+            data = json.loads(params)
+
+            def required_value(name: str) -> str:
+                value = str(data.get(name) or "").strip()
+                if not value:
+                    raise ValueError(f"disconnect_steps requires {name}")
+                if not all(character.isalnum() or character in "_.-" for character in value):
+                    raise ValueError(f"disconnect_steps received an invalid {name}")
+                return value
+
+            source_flow_id = required_value("source_flow_id")
+            target_flow_id = required_value("target_flow_id")
+            source_port = required_value("source_port")
+            target_port = required_value("target_port")
+            query = f"""
+            MATCH (p:PIPELINE {{status:'design'}})-[:HAS_STEP]->(source:STEP {{flow_id:'{source_flow_id}'}})
+            MATCH (p)-[:HAS_STEP]->(target:STEP {{flow_id:'{target_flow_id}'}})
+            MATCH (source)-[flow:FLOWS_TO]->(target)
+            WHERE coalesce(flow.source_port, '') = '{source_port}'
+              AND coalesce(flow.target_port, '') = '{target_port}'
+            WITH p, source, target, collect(flow) AS connections
+            FOREACH (connection IN connections | DELETE connection)
+            SET p.updated_at = datetime()
+            RETURN {{
+            source_flow_id: source.flow_id,
+            source_label: source.label,
+            source_port: '{source_port}',
+            target_flow_id: target.flow_id,
+            target_label: target.label,
+            target_port: '{target_port}',
+            deleted_connection_count: size(connections),
+            pipeline_updated_at: toString(p.updated_at)
+            }} AS disconnected;
+            """
+            result = await run_query(query, "disconnect_steps")
+            if _agent_query_returned_no_rows(result):
+                raise ValueError("No connection matched all four identifiers")
+            return repr(result)
+        except Exception as exc:
+            raise RuntimeError(f"disconnect_steps failed: {exc}") from exc
+
+    async def configure_flow_step(params: str) -> str:
+        """Configures an existing Flow step with executable behavior and ports.
+
+        params JSON for a condition:
+        {
+          "flow_id": "existing Flow step flow_id",
+          "behavior": "Condition",
+          "parameters": {"expression": "value.sentiment == \"negative\""}
+        }
+
+        params JSON for a parallel map:
+        {
+          "flow_id": "existing Flow step flow_id",
+          "behavior": "Parallel Map",
+          "parameters": {"max_concurrency": 4, "failure_policy": "stop"}
+        }
+
+        Existing generic connection handles are migrated to the selected
+        behavior. For Condition, use connect_steps afterward to identify every
+        requested when_true and when_false branch explicitly.
+        """
+        try:
+            data = json.loads(params)
+            flow_id = str(data.get("flow_id") or "").strip()
+            if not flow_id or not all(
+                character.isalnum() or character in "_.-" for character in flow_id
+            ):
+                raise ValueError("configure_flow_step requires a valid flow_id")
+            behavior = str(data.get("behavior") or "").strip()
+            if behavior not in {"Condition", "Parallel Map"}:
+                raise ValueError("Flow behavior must be Condition or Parallel Map")
+            parameters = (
+                dict(data.get("parameters"))
+                if isinstance(data.get("parameters"), dict)
+                else {}
+            )
+            if behavior == "Condition" and not str(parameters.get("expression") or "").strip():
+                raise ValueError("Condition Flow requires parameters.expression")
+            if behavior == "Parallel Map":
+                parameters.setdefault("max_concurrency", 4)
+                parameters.setdefault("failure_policy", "stop")
+
+            param_json = json.dumps(parameters, ensure_ascii=True, sort_keys=True)
+            escaped_param_json = param_json.replace("\\", "\\\\").replace("'", "\\'")
+            serialized_ports = ports_json_for_template(None, "flow", behavior)
+            escaped_ports = serialized_ports.replace("\\", "\\\\").replace("'", "\\'")
+            input_port = default_input_port_id("flow", behavior)
+            default_output_port = "when_true" if behavior == "Condition" else "item"
+            query = f"""
+            MATCH (p:PIPELINE {{status:'design'}})-[:HAS_STEP]->(flowStep:STEP {{flow_id:'{flow_id}'}})
+            WHERE flowStep.type = 'flow'
+            SET flowStep.template_label = '{behavior}',
+                flowStep.param_json = '{escaped_param_json}',
+                flowStep.ports_json = '{escaped_ports}',
+                p.updated_at = datetime()
+            WITH p, flowStep
+            OPTIONAL MATCH (:STEP)-[incoming:FLOWS_TO]->(flowStep)
+            WITH p, flowStep, collect(incoming) AS incomingFlows
+            OPTIONAL MATCH (flowStep)-[outgoing:FLOWS_TO]->(:STEP)
+            WITH p, flowStep, incomingFlows, collect(outgoing) AS outgoingFlows
+            FOREACH (connection IN incomingFlows |
+                SET connection.target_port = '{input_port}'
+            )
+            FOREACH (connection IN outgoingFlows |
+                SET connection.source_port = CASE
+                    WHEN '{behavior}' = 'Condition'
+                         AND connection.source_port IN ['when_true', 'when_false']
+                    THEN connection.source_port
+                    ELSE '{default_output_port}'
+                END
+            )
+            RETURN {{
+            flow_id: flowStep.flow_id,
+            uid: flowStep.uid,
+            label: flowStep.label,
+            behavior: flowStep.template_label,
+            parameters: flowStep.param_json,
+            ports: flowStep.ports_json,
+            migrated_incoming_connections: size(incomingFlows),
+            migrated_outgoing_connections: size(outgoingFlows),
+            pipeline_updated_at: toString(p.updated_at)
+            }} AS flow_step;
+            """
+            result = await run_query(query, "configure_flow_step")
+            return repr(result)
+        except Exception as exc:
+            raise RuntimeError(f"configure_flow_step failed: {exc}") from exc
 
     async def insert_step(params: str) -> str:
         """Inserts a STEP before an existing STEP.
@@ -709,20 +995,38 @@ def build_pipeline_editing_team(
     pipeline_editor = AssistantAgent(
         name="pipeline_editor",
         model_client=model_client,
-        tools=[create_pipeline, create_step, insert_step, delete_step, delete_all_steps, overview],
+        tools=[
+            create_pipeline,
+            create_step,
+            configure_flow_step,
+            connect_steps,
+            disconnect_steps,
+            insert_step,
+            delete_step,
+            delete_all_steps,
+            overview,
+        ],
         description="An agent that designs AI/data pipelines given a user request.",
         system_message="""You design AI/data pipelines using your registered tools. Use the tools to create or modify the persisted pipeline as requested by the user.
                           A PIPELINE is composed of one or several STEPs. Use overview to check if there are any pipelines. If the user request is unclear or incomplete, ask for more details.
                         - [overview]: calling this tool will give you an overview of the current pipeline content, if any.
                         - [create_pipeline]: calling this tool will create a pipeline.
                         - [create_step]: calling this tool will create a new step in a pipeline (will always place it last).
+                        - [configure_flow_step]: calling this tool will configure an existing Flow as Condition or Parallel Map and migrate its generic connection handles.
+                        - [connect_steps]: calling this tool will create or configure a connection between two steps using explicit output and input port ids. Use it for branches, merges, and to correct connection handles.
+                        - [disconnect_steps]: calling this tool will remove one exact connection identified by its source, target, and port ids. Use it to repair shortcuts, stale branches, and accidental duplicate paths.
                         - [insert_step]: calling this tool will insert a new step before an existing step. Use it instead of create_step when the user asks to add a step between existing steps (for example, "add preprocessing between ingestion and training") or as a new initial step (for example, "add an initial validation step"). For between-step insertion, pass after_flow_id and before_flow_id for directly connected steps. For initial insertion, pass only before_flow_id; the target must currently have no incoming FLOWS_TO edge.
                         - [delete_step]: calling this tool will delete a step in a pipeline.
                         - [delete_all_steps]: calling this tool will remove every step from the current design pipeline while keeping the pipeline itself. Use it only when the user asks to clear, empty, reset, delete all steps, remove everything from, or remove all nodes/steps in the pipeline.
                         Tool calls MUST use a single string argument named params. The value of params MUST be a JSON-encoded string matching the "params JSON" schema in the docstring.
-                        Graph writes are ordered operations. Call exactly ONE mutating tool at a time, wait for its result, and stop immediately to correct any failed tool call. Never batch create_pipeline, create_step, insert_step, or delete operations in one response.
+                        Graph writes are ordered operations. Call exactly ONE mutating tool at a time, wait for its result, and stop immediately to correct any failed tool call. Never batch create_pipeline, create_step, configure_flow_step, connect_steps, disconnect_steps, insert_step, or delete operations in one response.
                         When creating, designing, regenerating, or rebuilding a pipeline, call create_pipeline first with a concise generated name and a fresh 1-2 sentence description that summarizes the full intended pipeline. Do this before creating steps so the UI pipeline description is updated.
                         For a new pipeline, plan the complete dependency order before the first create_step call, then call create_step once per step in actual execution order from ingress to terminal delivery. Because create_step appends and connects to the current tail, calling it in reverse conceptual order creates a wrong graph.
+                        A Flow is executable control logic, not a label or decorative box. Never use the legacy generic template "Flow". Use template "Condition" with parameters.expression for routing, or template "Parallel Map" with max_concurrency and failure_policy for fan-out. Condition expressions must compare value or value.field with a literal, for example value.sentiment == "negative". The Condition input handle is value; its output handles are when_true and when_false. Parallel Map uses items and item.
+                        Keep the graph minimal: do not add shortcut or bypass edges. Only Flow steps fan out by default. A regular source, task, destination, or subpipeline should have at most one distinct downstream target unless the user explicitly asks for that step's output to feed multiple independent consumers; only then pass allow_fan_out:true to connect_steps.
+                        For a conditional request, make the exceptional branch the true branch when practical. Append that branch in execution order, then call connect_steps to add the alternate branch. Canonical condition example: for "if sentiment is negative, create a complaint and update stats; otherwise update stats", build Input -> Condition(expression: value.sentiment == "negative"); Condition.when_true -> Complaint.input -> Update Stats.input; Condition.when_false -> Update Stats.input; Update Stats.output -> Delivery.data. Those are the only edges. Complaint has exactly one outgoing edge, to Update Stats; never connect Complaint directly to Delivery. Both requested outcomes must appear as real FLOWS_TO connections; never merely describe branches in the chat.
+                        Canonical parallel-map example: for "resize every uploaded image independently, at most four at a time, continue if one image fails, then export", build Upload -> Parallel Map(template "Parallel Map", parameters max_concurrency:4 and failure_policy:"continue") -> Resize Image -> Export. Connect Upload.data -> Parallel Map.items, Parallel Map.item -> Resize Image.input, and Resize Image.output -> Export.data. The Parallel Map owns iteration; do not duplicate one Resize step per item and do not create condition-style true/false branches for a Parallel Map.
+                        When overview shows an existing generic Flow, repair it with configure_flow_step instead of creating a duplicate. Then use connect_steps to make the requested branch topology explicit.
                         The create_step and insert_step type MUST be one of: source, task, destination, flow, subpipeline. This set is structural and must not grow for technologies or business operations. Use source for external ingress adapters; task for processing and templates such as cleaning, OCR, speech-to-text, LLM, SQL, or API calls; destination for external delivery adapters; flow for conditions and parallel maps; and subpipeline for reusable pipelines.
                         Templates are metadata on a structural kind. Implementations are separate metadata and may be generated code, Python, SQL, a container, a Git repository, REST API, shell, custom, or a future runtime.
                         Always pass the most specific useful template for each step. Do not use generic template names such as Source, Task, or Destination when the requested capability identifies an adapter or operation. For example, remote-device REST ingestion uses source + REST API, preprocessing uses task + Data Cleaning, model training uses task + Model Training, and clinician email/SMS alerts use destination + Notification.

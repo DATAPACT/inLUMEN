@@ -29,10 +29,19 @@ describe("component template catalog", () => {
     ]));
     expect(COMPONENT_TEMPLATE_CATALOG.destination.map(({ value }) => value)).toContain("Notification");
     expect(COMPONENT_TEMPLATE_CATALOG.flow.map(({ value }) => value)).toEqual([
-      "Flow",
       "Condition",
       "Parallel Map",
+      "Flow",
     ]);
+    expect(defaultTemplateForType("flow")).toBe("Condition");
+    expect(COMPONENT_TEMPLATE_CATALOG.flow[0]).toMatchObject({
+      requiredParameters: ["expression"],
+      defaultParameters: { expression: "" },
+    });
+    expect(COMPONENT_TEMPLATE_CATALOG.flow[1]).toMatchObject({
+      requiredParameters: ["max_concurrency"],
+      defaultParameters: { max_concurrency: 4, failure_policy: "stop" },
+    });
   });
 
   it("keeps imported custom templates selectable without changing the catalog", () => {

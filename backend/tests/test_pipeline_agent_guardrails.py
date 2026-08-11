@@ -1,8 +1,9 @@
 import asyncio
+import json
 import unittest
 from pathlib import Path
 from sys import path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -11,7 +12,11 @@ from analytics_api import _build_graph_sync_guardrail, _clean_client_graph
 from graph_client import run_neo4j_query
 from llm_config import LLMConfig
 from local_api_client import LocalApiResponse
-from pipeline_editor_team import build_pipeline_editing_team, normalize_agent_implementation
+from pipeline_editor_team import (
+    _agent_query_returned_no_rows,
+    build_pipeline_editing_team,
+    normalize_agent_implementation,
+)
 from pipeline_graph_validation import validate_pipeline_graph
 
 
@@ -29,6 +34,21 @@ def edge(source, target, source_port, target_port):
         "target": str(target),
         "sourceHandle": source_port,
         "targetHandle": target_port,
+    }
+
+
+def flow_node(node_id, template, parameters):
+    return {
+        "id": str(node_id),
+        "type": "custom",
+        "position": {"x": 0, "y": 0},
+        "data": {
+            "type": "flow",
+            "label": template,
+            "description": template,
+            "template_label": template,
+            "param": parameters,
+        },
     }
 
 
@@ -113,8 +133,68 @@ class PipelineGraphValidationTest(unittest.TestCase):
         self.assertFalse(report["valid"])
         self.assertIn("missing-endpoint", {issue["code"] for issue in report["issues"]})
 
+    def test_condition_flow_uses_template_ports_and_real_branches(self):
+        graph = {
+            "nodes": [
+                node(1, "source", "Input"),
+                flow_node(2, "Condition", {"expression": 'value.sentiment == "negative"'}),
+                node(3, "task", "Complaint", GENERATED_CODE),
+                node(4, "task", "Statistics", GENERATED_CODE),
+                node(5, "destination", "Delivery"),
+            ],
+            "edges": [
+                edge(1, 2, "data", "value"),
+                edge(2, 3, "when_true", "input"),
+                edge(2, 4, "when_false", "input"),
+                edge(3, 4, "output", "input"),
+                edge(4, 5, "output", "data"),
+            ],
+        }
+
+        self.assertTrue(validate_pipeline_graph(graph)["valid"])
+
+    def test_parallel_map_uses_items_and_item_ports(self):
+        graph = {
+            "nodes": [
+                node(1, "source", "Image Upload"),
+                flow_node(2, "Parallel Map", {
+                    "max_concurrency": 4,
+                    "failure_policy": "continue",
+                }),
+                node(3, "task", "Resize Image", GENERATED_CODE),
+                node(4, "destination", "Export"),
+            ],
+            "edges": [
+                edge(1, 2, "data", "items"),
+                edge(2, 3, "item", "input"),
+                edge(3, 4, "output", "data"),
+            ],
+        }
+
+        self.assertTrue(validate_pipeline_graph(graph)["valid"])
+
+    def test_generic_flow_is_rejected_by_backend_guardrail(self):
+        graph = {
+            "nodes": [
+                node(1, "source", "Input"),
+                flow_node(2, "Flow", {}),
+                node(3, "destination", "Output"),
+            ],
+            "edges": [edge(1, 2, "data", "input"), edge(2, 3, "output", "data")],
+        }
+
+        report = validate_pipeline_graph(graph)
+
+        self.assertFalse(report["valid"])
+        self.assertIn("missing-flow-behavior", {issue["code"] for issue in report["issues"]})
+
 
 class PipelineAgentGuardrailTest(unittest.TestCase):
+    def test_empty_agent_query_result_is_detected_for_live_and_mocked_results(self):
+        self.assertTrue(_agent_query_returned_no_rows("[]"))
+        self.assertTrue(_agent_query_returned_no_rows([]))
+        self.assertFalse(_agent_query_returned_no_rows('[{"connection": {}}]'))
+
     def test_semantic_implementation_class_is_not_persisted_as_runtime_kind(self):
         normalized = normalize_agent_implementation({
             "kind": "trusted-pretrained-inference",
@@ -194,6 +274,138 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         select_model_client.assert_called_once_with(config, parallel_tool_calls=False)
         assistant_agent.assert_called_once()
         round_robin.assert_called_once()
+        tool_names = [tool.__name__ for tool in assistant_agent.call_args.kwargs["tools"]]
+        self.assertIn("connect_steps", tool_names)
+        self.assertIn("disconnect_steps", tool_names)
+        self.assertIn("configure_flow_step", tool_names)
+        system_message = assistant_agent.call_args.kwargs["system_message"]
+        self.assertIn("Condition.when_false", system_message)
+        self.assertIn('value.sentiment == "negative"', system_message)
+        self.assertIn("Complaint has exactly one outgoing edge", system_message)
+        self.assertIn("Parallel Map owns iteration", system_message)
+
+    @patch("pipeline_editor_team.RoundRobinGroupChat")
+    @patch("pipeline_editor_team.AssistantAgent")
+    @patch("pipeline_editor_team.select_model_client")
+    @patch("pipeline_editor_team.run_neo4j_query", new_callable=AsyncMock)
+    def test_connect_steps_persists_explicit_branch_handles(
+        self,
+        run_query,
+        select_model_client,
+        assistant_agent,
+        _round_robin,
+    ):
+        config = LLMConfig(
+            provider="openrouter",
+            model="test/model",
+            base_url="https://example.test/v1",
+            api_key="secret",
+        )
+        select_model_client.return_value = MagicMock()
+        run_query.return_value = [{"connection": {"source_port": "when_false"}}]
+
+        build_pipeline_editing_team(config)
+        connect_steps = next(
+            tool
+            for tool in assistant_agent.call_args.kwargs["tools"]
+            if tool.__name__ == "connect_steps"
+        )
+        asyncio.run(connect_steps(json.dumps({
+            "source_flow_id": "4",
+            "target_flow_id": "6",
+            "source_port": "when_false",
+            "target_port": "input",
+        })))
+
+        query = run_query.await_args.args[0]
+        self.assertIn("collect(DISTINCT existingTarget) AS existingTargets", query)
+        self.assertIn("source.type = 'flow'", query)
+        self.assertIn("OR false", query)
+        self.assertIn("MERGE (source)-[flow:FLOWS_TO]->(target)", query)
+        self.assertIn("flow.source_port = 'when_false'", query)
+        self.assertIn("flow.target_port = 'input'", query)
+        self.assertIn("trueTarget.y = coalesce(source.y, 0.0) - 180.0", query)
+        self.assertIn("falseTargetIsMerge", query)
+        self.assertEqual("connect_steps", run_query.await_args.args[1])
+
+    @patch("pipeline_editor_team.RoundRobinGroupChat")
+    @patch("pipeline_editor_team.AssistantAgent")
+    @patch("pipeline_editor_team.select_model_client")
+    @patch("pipeline_editor_team.run_neo4j_query", new_callable=AsyncMock)
+    def test_disconnect_steps_removes_only_the_exact_port_aware_edge(
+        self,
+        run_query,
+        select_model_client,
+        assistant_agent,
+        _round_robin,
+    ):
+        config = LLMConfig(
+            provider="openrouter",
+            model="test/model",
+            base_url="https://example.test/v1",
+            api_key="secret",
+        )
+        select_model_client.return_value = MagicMock()
+        run_query.return_value = [{"disconnected": {"deleted_connection_count": 1}}]
+
+        build_pipeline_editing_team(config)
+        disconnect_steps = next(
+            tool
+            for tool in assistant_agent.call_args.kwargs["tools"]
+            if tool.__name__ == "disconnect_steps"
+        )
+        asyncio.run(disconnect_steps(json.dumps({
+            "source_flow_id": "5",
+            "target_flow_id": "7",
+            "source_port": "output",
+            "target_port": "data",
+        })))
+
+        query = run_query.await_args.args[0]
+        self.assertIn("MATCH (source)-[flow:FLOWS_TO]->(target)", query)
+        self.assertIn("coalesce(flow.source_port, '') = 'output'", query)
+        self.assertIn("coalesce(flow.target_port, '') = 'data'", query)
+        self.assertIn("DELETE connection", query)
+        self.assertEqual("disconnect_steps", run_query.await_args.args[1])
+
+    @patch("pipeline_editor_team.RoundRobinGroupChat")
+    @patch("pipeline_editor_team.AssistantAgent")
+    @patch("pipeline_editor_team.select_model_client")
+    @patch("pipeline_editor_team.run_neo4j_query", new_callable=AsyncMock)
+    def test_configure_flow_step_migrates_generic_condition_handles(
+        self,
+        run_query,
+        select_model_client,
+        assistant_agent,
+        _round_robin,
+    ):
+        config = LLMConfig(
+            provider="openrouter",
+            model="test/model",
+            base_url="https://example.test/v1",
+            api_key="secret",
+        )
+        select_model_client.return_value = MagicMock()
+        run_query.return_value = [{"flow_step": {"behavior": "Condition"}}]
+
+        build_pipeline_editing_team(config)
+        configure_flow_step = next(
+            tool
+            for tool in assistant_agent.call_args.kwargs["tools"]
+            if tool.__name__ == "configure_flow_step"
+        )
+        asyncio.run(configure_flow_step(json.dumps({
+            "flow_id": "4",
+            "behavior": "Condition",
+            "parameters": {"expression": 'value.sentiment == "negative"'},
+        })))
+
+        query = run_query.await_args.args[0]
+        self.assertIn("flowStep.template_label = 'Condition'", query)
+        self.assertIn("connection.target_port = 'value'", query)
+        self.assertIn("['when_true', 'when_false']", query)
+        self.assertIn("'when_true'", query)
+        self.assertEqual("configure_flow_step", run_query.await_args.args[1])
 
     @patch("graph_client.dispatch_graph_request")
     def test_graph_client_raises_http_failures_as_tool_errors(self, dispatch_graph_request):

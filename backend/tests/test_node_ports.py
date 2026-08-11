@@ -11,6 +11,7 @@ from node_ports import (  # noqa: E402
     default_output_port_id,
     normalize_node_ports,
     ports_json,
+    ports_for_template,
 )
 
 
@@ -52,6 +53,16 @@ class NodePortsTest(unittest.TestCase):
         self.assertEqual("input", default_input_port_id("task"))
         self.assertEqual("data", default_input_port_id("destination"))
         self.assertEqual("", default_output_port_id("destination"))
+
+    def test_resolves_flow_template_ports_and_handles(self):
+        condition = ports_for_template(None, "flow", "Condition")
+
+        self.assertEqual("value", condition["inputs"][0]["id"])
+        self.assertEqual(["when_true", "when_false"], [port["id"] for port in condition["outputs"]])
+        self.assertEqual("value", default_input_port_id("flow", "Condition"))
+        self.assertEqual("when_true", default_output_port_id("flow", "Condition"))
+        self.assertEqual("items", default_input_port_id("flow", "Parallel Map"))
+        self.assertEqual("item", default_output_port_id("flow", "Parallel Map"))
 
 
 if __name__ == "__main__":

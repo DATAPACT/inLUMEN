@@ -6,7 +6,11 @@ import {
   type NodeDefinitionData,
 } from "@/features/nodes/registry/types";
 import { normalizeNodePorts } from "@/features/nodes/nodeSchema";
-import { defaultTemplateForType, findTemplateForType } from "@/features/nodes/templateCatalog";
+import {
+  defaultParametersForTemplate,
+  defaultTemplateForType,
+  findTemplateForType,
+} from "@/features/nodes/templateCatalog";
 
 const CORE_FALLBACK_DEFINITIONS: NodeDefinition[] = [
   {
@@ -150,8 +154,8 @@ export const createNodeDataFromDefinition = (
   const templateName = defaultTemplateForType(definition.base_type);
   const template = findTemplateForType(definition.base_type, templateName);
   return {
-    label: definition.palette.label,
-    description: definition.palette.description,
+    label: definition.base_type === "flow" ? (template?.label || definition.palette.label) : definition.palette.label,
+    description: template?.description || definition.palette.description,
     type: definition.base_type,
     definition_id: definition.id,
     definition_version: definition.version,
@@ -162,6 +166,7 @@ export const createNodeDataFromDefinition = (
       name: templateName,
     },
     ports: normalizeNodePorts(template?.ports, definition.base_type),
+    param: defaultParametersForTemplate(definition.base_type, templateName),
     ...(definition.editor.kind !== "default"
       ? { configuration_status: "unconfigured" as const }
       : {}),

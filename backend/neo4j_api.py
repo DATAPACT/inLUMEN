@@ -1010,6 +1010,9 @@ def _mutation_query_type(query_type: str | None) -> bool:
     return str(query_type or "") in {
         "create_pipeline",
         "create_step",
+        "configure_flow_step",
+        "connect_steps",
+        "disconnect_steps",
         "insert_initial_step",
         "insert_between_steps",
         "delete_step",
@@ -2742,8 +2745,11 @@ def neo4j_get_graph():
                 })
 
             edges = []
-            node_types_by_id = {
-                node["id"]: node["data"]["type"]
+            node_connection_profiles_by_id = {
+                node["id"]: (
+                    node["data"]["type"],
+                    node["data"].get("template_label") or "",
+                )
                 for node in nodes
             }
             for f in flows:
@@ -2753,12 +2759,10 @@ def neo4j_get_graph():
                     continue
                 src = str(src)
                 tgt = str(tgt)
-                source_port = f.get("source_port") or default_output_port_id(
-                    node_types_by_id.get(src)
-                )
-                target_port = f.get("target_port") or default_input_port_id(
-                    node_types_by_id.get(tgt)
-                )
+                source_profile = node_connection_profiles_by_id.get(src, ("task", ""))
+                target_profile = node_connection_profiles_by_id.get(tgt, ("task", ""))
+                source_port = f.get("source_port") or default_output_port_id(*source_profile)
+                target_port = f.get("target_port") or default_input_port_id(*target_profile)
                 edges.append({
                     "id": (
                         f"reactflow__edge-{src}-{source_port or 'default'}-"

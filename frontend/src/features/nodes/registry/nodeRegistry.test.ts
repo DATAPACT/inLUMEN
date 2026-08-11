@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  createNodeDataFromDefinition,
   getFallbackNodeDefinitions,
   groupNodeDefinitions,
 } from "@/features/nodes/registry/nodeRegistry";
@@ -37,5 +38,19 @@ describe("core node registry", () => {
       "flow",
       "subpipeline",
     ]);
+  });
+
+  it("creates a usable Condition when a Flow component is dragged in", () => {
+    const flowDefinition = getFallbackNodeDefinitions().find((definition) => definition.base_type === "flow")!;
+
+    expect(createNodeDataFromDefinition(flowDefinition)).toMatchObject({
+      label: "Condition",
+      template_label: "Condition",
+      param: { expression: "" },
+      ports: {
+        inputs: [{ id: "value" }],
+        outputs: [{ id: "when_true" }, { id: "when_false" }],
+      },
+    });
   });
 });

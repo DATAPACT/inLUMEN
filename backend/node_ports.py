@@ -25,6 +25,57 @@ DEFAULT_NODE_PORTS = {
 }
 
 
+FLOW_TEMPLATE_PORTS = {
+    "condition": {
+        "inputs": [
+            {
+                "id": "value",
+                "name": "value",
+                "type": "any",
+                "required": True,
+                "description": "Value evaluated by the condition.",
+            }
+        ],
+        "outputs": [
+            {
+                "id": "when_true",
+                "name": "when_true",
+                "type": "any",
+                "required": True,
+                "description": "Value routed when the condition is true.",
+            },
+            {
+                "id": "when_false",
+                "name": "when_false",
+                "type": "any",
+                "required": False,
+                "description": "Value routed when the condition is false.",
+            },
+        ],
+    },
+    "parallel map": {
+        "inputs": [
+            {
+                "id": "items",
+                "name": "items",
+                "type": "any[]",
+                "required": True,
+                "description": "Items to process concurrently.",
+            }
+        ],
+        "outputs": [
+            {
+                "id": "item",
+                "name": "item",
+                "type": "any",
+                "required": True,
+                "description": "One item supplied to the mapped branch.",
+            }
+        ],
+    },
+}
+
+
 def _copy_ports(ports: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [dict(port) for port in ports]
 
@@ -93,11 +144,31 @@ def ports_json(value: Any, step_type: object) -> str:
     )
 
 
-def default_input_port_id(step_type: object) -> str:
-    inputs = DEFAULT_NODE_PORTS[normalize_step_type(step_type)]["inputs"]
+def ports_for_template(
+    value: Any,
+    step_type: object,
+    template_label: object = "",
+) -> dict[str, list[dict[str, Any]]]:
+    kind = normalize_step_type(step_type)
+    template_key = str(template_label or "").strip().lower()
+    if value is None and kind == "flow" and template_key in FLOW_TEMPLATE_PORTS:
+        value = FLOW_TEMPLATE_PORTS[template_key]
+    return normalize_node_ports(value, kind)
+
+
+def ports_json_for_template(value: Any, step_type: object, template_label: object = "") -> str:
+    return json.dumps(
+        ports_for_template(value, step_type, template_label),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def default_input_port_id(step_type: object, template_label: object = "") -> str:
+    inputs = ports_for_template(None, step_type, template_label)["inputs"]
     return inputs[0]["id"] if inputs else ""
 
 
-def default_output_port_id(step_type: object) -> str:
-    outputs = DEFAULT_NODE_PORTS[normalize_step_type(step_type)]["outputs"]
+def default_output_port_id(step_type: object, template_label: object = "") -> str:
+    outputs = ports_for_template(None, step_type, template_label)["outputs"]
     return outputs[0]["id"] if outputs else ""
