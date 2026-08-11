@@ -9,6 +9,8 @@ import { WrappedFlowCanvas, FlowCanvasRef } from '@/components/FlowCanvas';
 import { ChatPanel } from '@/components/chat/ChatPanel';
 import { VersionsPanel } from '@/components/versions/VersionsPanel';
 import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
+import { sanitizeAssistantMessage } from '@/features/chat/messageSafety';
+import { CHAT_PROMPT_SUGGESTIONS } from '@/features/chat/promptSuggestions';
 import {
   MAIN_PIPELINE_VERSION_UID,
   clearPipelineWorkspace,
@@ -73,12 +75,12 @@ const CHAT_HISTORY_KEY = "inlumen-chat-history";
 const PIPELINE_PROMPT_KEY = "inlumen-pipeline-high-level-prompt";
 const PANEL_STATE_KEY = "inlumen-panel-preferences";
 const THEME_KEY = "inlumen-theme";
-const CHAT_PROMPT_SUGGESTIONS = [
-  "Design a remote patient monitoring pipeline with ingestion, preprocessing, model training, and alerting.",
-  "Create a document retrieval pipeline that ingests PDFs, chunks content, stores embeddings, and answers questions.",
-  "Build a fraud detection workflow with batch feature engineering, real-time scoring, and monitoring.",
-];
-
+const createChatTurnId = () => {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `turn-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+};
 type RightPanel = 'inspector' | 'chat' | 'versions' | null;
 
 type PanelPreferences = {
@@ -151,7 +153,12 @@ const normalizeSavedConversation = (value: unknown): ChatMessage[] => {
     const entry = message as Partial<ChatMessage>;
     if (entry.role !== "user" && entry.role !== "assistant") return [];
     if (typeof entry.content !== "string") return [];
-    return [{ role: entry.role, content: entry.content }];
+    return [{
+      role: entry.role,
+      content: entry.role === "assistant"
+        ? sanitizeAssistantMessage(entry.content)
+        : entry.content,
+    }];
   });
 };
 
@@ -178,7 +185,10 @@ type DragNodeType = {
 };
 
 type ChatApiResponse = {
+  turn_id?: string;
   session_id?: string;
+  status?: string;
+  rollback_applied?: boolean;
   assistant_message?: string;
   graph?: unknown;
   sync?: {
@@ -202,6 +212,7 @@ const Index = () => {
   const [activeTab, setActiveTab] = useState('lab'); // 'lab', 'overview', or 'simulate'
   const [userInput, setUserInput] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
   const [flowNodes, setFlowNodes] = useState<FlowNode[]>([]);
   const [conversation, setConversation] = useState<ChatMessage[]>(readSavedConversation);
   const [canvasSyncStatus, setCanvasSyncStatus] = useState<CanvasSyncStatus>({
@@ -213,6 +224,10 @@ const Index = () => {
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const flowCanvasRef = useRef<FlowCanvasRef>(null);
+  const activeChatTurnRef = useRef<{
+    turnId: string;
+    controller: AbortController;
+  } | null>(null);
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
   const [pipelineLastUpdate, setPipelineLastUpdate] = useState<string>('Never');
   const [pipelineCreatedAt, setPipelineCreatedAt] = useState<string>('Never');
@@ -471,6 +486,7 @@ const Index = () => {
   const activeConfig = selectedConfig || defaultConfig;
 
   const handleSendMessage = async () => {
+    if (isProcessing) return;
     const messageText = userInput;
 
     if (!messageText.trim()) {
@@ -482,6 +498,7 @@ const Index = () => {
 
     setUserInput('');
     setIsProcessing(true);
+    setIsStopping(false);
     toast("Processing your input", {
       description: "AI is thinking...",
     });
@@ -489,6 +506,9 @@ const Index = () => {
     const newUserMessage = { role: 'user' as const, content: messageText };
     const updatedConversation = [...conversation, newUserMessage];
     setConversation(updatedConversation);
+    const turnId = createChatTurnId();
+    const controller = new AbortController();
+    activeChatTurnRef.current = { turnId, controller };
 
     try {
       const activeCfg = selectedConfig || defaultConfig;
@@ -497,7 +517,9 @@ const Index = () => {
       const res = await apiFetch(`${INLUMEN_API_URL}/simple_chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
+          turn_id: turnId,
           session_id: chatSessionId || null,
           user_message: messageText,
           canvas_graph: canvasGraph,
@@ -507,6 +529,29 @@ const Index = () => {
           llm_config: buildLLMRequestConfig(activeCfg),
         }),
       });
+
+      if (res.status === 409) {
+        const stopped = await res.json() as ChatApiResponse;
+        if (stopped.status === "cancelled") {
+          const restored = stopped.rollback_applied !== false;
+          const message = stopped.assistant_message || (
+            restored
+              ? "Stopped. The pipeline from before this request was restored."
+              : "Stopped, but the previous pipeline could not be restored automatically."
+          );
+          setConversation(prev => [...prev, { role: 'assistant', content: message }]);
+          setCanvasSyncStatus({
+            state: restored ? 'warning' : 'error',
+            message,
+          });
+          if (restored) {
+            toast.info("Pipeline agent stopped", { description: message });
+          } else {
+            toast.error("Pipeline agent stopped with a rollback error", { description: message });
+          }
+          return;
+        }
+      }
 
       if (!res.ok) {
         const errText = await res.text();
@@ -524,7 +569,7 @@ const Index = () => {
         setChatSessionId(data.session_id);
       }
 
-      const responseText = data.assistant_message ?? "";
+      const responseText = sanitizeAssistantMessage(data.assistant_message);
       setConversation(prev => [...prev, { role: 'assistant', content: responseText }]);
 
       if (!flowCanvasRef.current) {
@@ -585,6 +630,9 @@ const Index = () => {
         });
       }
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
       console.error("Error processing request:", error);
       setCanvasSyncStatus({
         state: 'error',
@@ -594,7 +642,36 @@ const Index = () => {
         description: error instanceof Error ? error.message : "Unknown error occurred",
       });
     } finally {
+      if (activeChatTurnRef.current?.turnId === turnId) {
+        activeChatTurnRef.current = null;
+      }
       setIsProcessing(false);
+      setIsStopping(false);
+    }
+  };
+
+  const handleStopProcessing = async () => {
+    const activeTurn = activeChatTurnRef.current;
+    if (!activeTurn || isStopping) return;
+
+    setIsStopping(true);
+    try {
+      const response = await apiFetch(`${INLUMEN_API_URL}/simple_chat/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ turn_id: activeTurn.turnId }),
+      });
+      if (!response.ok) {
+        throw new Error(`Stop request failed (${response.status}): ${await response.text()}`);
+      }
+      toast.info("Stopping pipeline agent", {
+        description: "Cancelling the active turn and restoring the previous pipeline…",
+      });
+    } catch (error) {
+      setIsStopping(false);
+      toast.error("Could not stop the pipeline agent", {
+        description: error instanceof Error ? error.message : "Unknown error occurred",
+      });
     }
   };
 
@@ -1161,11 +1238,13 @@ const Index = () => {
                       conversationEndRef={conversationEndRef}
                       canvasSyncStatus={canvasSyncStatus}
                       isProcessing={isProcessing}
+                      isStopping={isStopping}
                       userInput={userInput}
                       promptSuggestions={CHAT_PROMPT_SUGGESTIONS}
                       formatConfigDescription={formatConfigDescription}
                       onUserInputChange={setUserInput}
                       onSendMessage={handleSendMessage}
+                      onStopProcessing={() => { void handleStopProcessing(); }}
                       onClearConversation={handleClearConversation}
                       onSaveConversation={handleSaveConversation}
                       onExportConversation={handleExportConversation}

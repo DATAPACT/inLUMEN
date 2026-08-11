@@ -1,6 +1,14 @@
 import type { Edge, Node } from "reactflow";
 
-import { normalizeImplementationKind, normalizeNodePorts, normalizeType } from "@/features/nodes/nodeSchema";
+import {
+  getStepTypeLabel,
+  getNodeFileName,
+  getNodeFileRole,
+  normalizeImplementationKind,
+  normalizeNodePorts,
+  normalizeType,
+  type NodeFileReference,
+} from "@/features/nodes/nodeSchema";
 import { findTemplateForType } from "@/features/nodes/templateCatalog";
 import { normalizeSubpipelineInterface } from "@/features/flow/subpipeline";
 
@@ -27,10 +35,54 @@ export type GraphValidationReport = {
 
 export type GraphValidationMode = "draft" | "complete";
 
+export type ValidationIssueSubject = {
+  label: string;
+  context: string;
+};
+
 const objectValue = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+
+const validationNodeSubject = (node: Node): ValidationIssueSubject => {
+  const data = objectValue(node.data);
+  const kind = normalizeType(data.type);
+  const kindLabel = getStepTypeLabel(kind);
+  const label = String(data.label || "").trim() || `Untitled ${kindLabel}`;
+  const template = String(objectValue(data.template).name || data.template_label || "").trim();
+  return {
+    label,
+    context: template && template.toLowerCase() !== kindLabel.toLowerCase()
+      ? `${kindLabel} · ${template}`
+      : kindLabel,
+  };
+};
+
+export const getValidationIssueSubject = (
+  issue: ValidationIssue,
+  nodes: Node[],
+  edges: Edge[],
+): ValidationIssueSubject => {
+  const node = issue.nodeId
+    ? nodes.find((candidate) => String(candidate.id) === String(issue.nodeId))
+    : undefined;
+  if (node) return validationNodeSubject(node);
+
+  const edge = issue.edgeId
+    ? edges.find((candidate) => String(candidate.id || "") === String(issue.edgeId))
+    : undefined;
+  if (edge) {
+    const source = nodes.find((candidate) => String(candidate.id) === String(edge.source));
+    const target = nodes.find((candidate) => String(candidate.id) === String(edge.target));
+    const sourceLabel = source ? validationNodeSubject(source).label : String(edge.source || "Unknown node");
+    const targetLabel = target ? validationNodeSubject(target).label : String(edge.target || "Unknown node");
+    return { label: `${sourceLabel} → ${targetLabel}`, context: "Connection" };
+  }
+
+  if (issue.nodeId) return { label: `Node ${issue.nodeId}`, context: "Component" };
+  return { label: "Pipeline", context: "Graph" };
+};
 
 const portTypesCompatible = (source: string, target: string) => {
   const left = source.trim().toLowerCase();
@@ -39,6 +91,13 @@ const portTypesCompatible = (source: string, target: string) => {
 };
 
 const FLOW_EXPRESSION_PATTERN = /^value(?:(?:\.[A-Za-z_][A-Za-z0-9_]*)|(?:\[(?:\d+|"[^"]+"|'[^']+')\]))*(?:\s*(?:==|!=|>=|<=|>|<)\s*(?:"[^"]*"|'[^']*'|-?\d+(?:\.\d+)?|true|false|null))?$/;
+
+const executableFilePattern = (implementationKind: string) => {
+  if (implementationKind === "python") return /\.py$/i;
+  if (implementationKind === "sql") return /\.sql$/i;
+  if (implementationKind === "shell") return /\.(?:sh|bash|zsh)$/i;
+  return /\.(?:py|sql|sh|bash|zsh|js|jsx|ts|tsx|java|go|rs|rb|php|r|scala|kt|kts|swift|lua|pl|ex|exs)$/i;
+};
 
 export const validateGraph = (
   nodes: Node[],
@@ -167,14 +226,28 @@ export const validateGraph = (
         nodeId,
         message: "Task implementation is not configured.",
       });
-      if (["python", "sql", "shell"].includes(kindValue)) {
-        const files = Array.isArray(data.files) ? data.files : [];
-        if (!String(implementation.entrypoint || "").trim() && files.length === 0) add({
-          severity: "warning",
+      if (["python", "sql", "shell", "generated-code"].includes(kindValue)) {
+        const codeFiles = Array.isArray(data.files)
+          ? data.files.filter((file) =>
+              getNodeFileRole(file as NodeFileReference) === "code"
+              && executableFilePattern(kindValue).test(
+                getNodeFileName(file as NodeFileReference),
+              )
+            )
+          : [];
+        if (codeFiles.length === 0) add({
+          severity: wiringSeverity,
+          category: "implementation",
+          code: "missing-code",
+          nodeId,
+          message: "No implementation code is attached. Generate code or upload a runtime package.",
+        });
+        else if (!String(implementation.entrypoint || "").trim()) add({
+          severity: wiringSeverity,
           category: "implementation",
           code: "missing-entrypoint",
           nodeId,
-          message: "Implementation has no entrypoint or attached code file.",
+          message: "Select the runtime package entrypoint.",
         });
       }
       if (kindValue === "container" && !String(implementation.image || "").trim()) add({

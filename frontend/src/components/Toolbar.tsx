@@ -99,7 +99,7 @@ export function Toolbar({
             <span className="ml-1 text-foreground">LUMEN</span>
           </h1>
           <p className="truncate text-[11px] text-muted-foreground">
-            Visual AI pipeline workspace
+            Visual AI pipeline design workspace
           </p>
         </div>
       </div>

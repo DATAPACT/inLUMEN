@@ -72,13 +72,6 @@ def definition_properties_from_data(data: Any) -> dict[str, Any]:
             ensure_ascii=False,
             sort_keys=True,
         )
-    source_config = data.get("source_config")
-    if isinstance(source_config, dict):
-        properties["source_config_json"] = json.dumps(
-            source_config,
-            ensure_ascii=False,
-            sort_keys=True,
-        )
     subpipeline = data.get("subpipeline")
     if isinstance(subpipeline, dict):
         properties["subpipeline_json"] = json.dumps(
@@ -99,8 +92,6 @@ def normalize_definition_properties(properties: dict[str, Any]) -> None:
     properties.pop("generated_artifact_json", None)
     properties.pop("template", None)
     properties.pop("template_json", None)
-    properties.pop("source_config", None)
-    properties.pop("source_config_json", None)
     properties.pop("subpipeline", None)
     properties.pop("subpipeline_json", None)
 
@@ -198,7 +189,6 @@ def definition_data_from_properties(properties: Any) -> dict[str, Any]:
         )
         data["generated_artifact"] = generated_artifact
     for property_name, data_name in (
-        ("source_config_json", "source_config"),
         ("subpipeline_json", "subpipeline"),
     ):
         encoded = properties.get(property_name)

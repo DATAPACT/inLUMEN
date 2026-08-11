@@ -22,6 +22,7 @@ from analytics_api import (
     agentic_generate_version_yamls,
     agentic_generate_yaml,
     agentic_pipeline_editor,
+    agentic_pipeline_editor_cancel,
     agentic_pipeline_editor_reset,
 )
 from attachment_validation import attachment_input_errors, read_attachment_probe
@@ -170,9 +171,21 @@ app.add_url_rule(
     methods=["POST", "OPTIONS"],
 )
 app.add_url_rule(
+    "/simple_chat/cancel",
+    endpoint="simple_chat_cancel",
+    view_func=agentic_pipeline_editor_cancel,
+    methods=["POST", "OPTIONS"],
+)
+app.add_url_rule(
     "/agentic_pipeline_editor/reset",
     endpoint="agentic_pipeline_editor_reset",
     view_func=agentic_pipeline_editor_reset,
+    methods=["POST", "OPTIONS"],
+)
+app.add_url_rule(
+    "/agentic_pipeline_editor/cancel",
+    endpoint="agentic_pipeline_editor_cancel",
+    view_func=agentic_pipeline_editor_cancel,
     methods=["POST", "OPTIONS"],
 )
 

@@ -48,6 +48,7 @@ import {
   isBrowserFile,
   typeHasContent,
   typeHasFiles,
+  typeSupportsInputFiles,
   isImagePreviewName,
   isTextPreviewName,
   isTextPreviewFile,
@@ -114,7 +115,6 @@ export type PropertyNodeData = {
   generated_artifact?: GeneratedArtifact;
   validation_issues?: ValidationIssue[];
   connected_ports?: { inputs?: string[]; outputs?: string[] };
-  source_config?: Record<string, unknown>;
   subpipeline?: {
     version?: number;
     expanded?: boolean;
@@ -240,9 +240,6 @@ export function PropertiesPanel({
   const [label, setLabel] = useState('');
   const [description, setDescription] = useState('');
 
-  // Source/destination boundary content.
-  const [content, setContent] = useState('');
-
   // Every runtime node can carry its script, requirements, and input files.
   const [files, setFiles] = useState<NodeFileReference[]>([]);
   const codeFileInputRef = useRef<HTMLInputElement>(null);
@@ -269,7 +266,6 @@ export function PropertiesPanel({
   const [implementationDependencies, setImplementationDependencies] = useState('');
   const [implementationEntrypoint, setImplementationEntrypoint] = useState('');
   const [implementationReference, setImplementationReference] = useState('');
-  const [sourceConfigDraft, setSourceConfigDraft] = useState('{}');
   const [isSubpipelineEditorOpen, setIsSubpipelineEditorOpen] = useState(false);
   const [subpipelineEditorGraph, setSubpipelineEditorGraph] = useState<{ nodes: unknown[]; edges: unknown[] }>({ nodes: [], edges: [] });
   const [reusablePipelines, setReusablePipelines] = useState<ReusablePipelineSummary[]>([]);
@@ -289,8 +285,10 @@ export function PropertiesPanel({
       || selectedNode?.data?.template_label
       || defaultTemplateForType(nodeType),
   );
+  const canManageInputFiles = typeSupportsInputFiles(nodeType);
   const currentTemplateDefinition = findTemplateForType(nodeType, currentTemplate);
   const templateOptions = templateOptionsForType(nodeType, currentTemplate);
+  const showTemplateSelector = templateOptions.length > 1;
   const filteredTemplateOptions = templateOptions.filter((option) => {
     const query = templateSearch.trim().toLowerCase();
     return !query
@@ -398,9 +396,6 @@ export function PropertiesPanel({
       setLabel(selectedNode.data.label || '');
       setDescription(selectedNode.data.description || '');
 
-      // content only for source/destination boundaries
-      setContent(typeHasContent(nodeType) ? (selectedNode.data.content || '') : '');
-
       // Runtime artifacts can be attached to any structural component.
       setFiles(typeHasFiles(nodeType) ? normalizeFileReferences(selectedNode.data.files) : []);
 
@@ -425,11 +420,9 @@ export function PropertiesPanel({
           || selectedNode.data.implementation?.endpoint
           || '',
       ));
-      setSourceConfigDraft(JSON.stringify(selectedNode.data.source_config || {}, null, 2));
     } else {
       setLabel('');
       setDescription('');
-      setContent('');
       setFiles([]);
       setParam({});
       setSecretParamKeys([]);
@@ -439,7 +432,6 @@ export function PropertiesPanel({
       setImplementationDependencies("");
       setImplementationEntrypoint("");
       setImplementationReference("");
-      setSourceConfigDraft("{}");
     }
 
     // reset preview dialog
@@ -492,14 +484,11 @@ export function PropertiesPanel({
     pushNodeUpdate({ label: e.target.value });
   };
 
-  const handleDescriptionChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleDescriptionChange = (
+    e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
+  ) => {
     setDescription(e.target.value);
     pushNodeUpdate({ description: e.target.value });
-  };
-
-  const handleContentChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setContent(e.target.value);
-    pushNodeUpdate({ content: e.target.value });
   };
 
   const handleImplementationKindChange = (kind: string) => {
@@ -564,20 +553,6 @@ export function PropertiesPanel({
         ...patch,
       },
     });
-  };
-
-  const persistSourceConfiguration = () => {
-    try {
-      const parsed = JSON.parse(sourceConfigDraft);
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        throw new Error('Source configuration must be a JSON object.');
-      }
-      pushNodeUpdate({ source_config: parsed as Record<string, unknown> });
-    } catch (error) {
-      toast.error('Invalid source configuration', {
-        description: error instanceof Error ? error.message : 'Enter a JSON object.',
-      });
-    }
   };
 
   const applyReusablePipelineVersion = (
@@ -1076,7 +1051,13 @@ export function PropertiesPanel({
     role: NodeFileRole,
     indexedFiles: Array<{ file: NodeFileReference; index: number }>,
     inputRef: React.RefObject<HTMLInputElement>,
-  ) => (
+  ) => {
+    const attachmentLabel = role === "code"
+      ? "Runtime Package"
+      : nodeType === "source"
+        ? "Pipeline Input"
+        : "Sample Input";
+    return (
     <div className="rounded-lg border border-dashed border-border p-3">
       <input
         ref={inputRef}
@@ -1093,12 +1074,12 @@ export function PropertiesPanel({
         className="w-full"
       >
         <Upload className="mr-2 h-4 w-4" />
-        Upload {role === "code" ? "Runtime Package" : "Test Fixture"} Files
+        Upload {attachmentLabel} Files
       </Button>
 
       {indexedFiles.length === 0 ? (
         <p className="mt-3 text-center text-xs text-muted-foreground">
-          No {role === "code" ? "runtime package" : "test fixture"} files attached.
+          No {attachmentLabel.toLowerCase()} files attached.
         </p>
       ) : (
         <div className="mt-3 space-y-2">
@@ -1130,7 +1111,8 @@ export function PropertiesPanel({
         </div>
       )}
     </div>
-  );
+    );
+  };
 
   const validationReport = selectedNode?.data.generated_artifact?.validation_report;
   const configurationStatus = selectedNode?.data.configuration_status || "unconfigured";
@@ -1148,7 +1130,8 @@ export function PropertiesPanel({
   const connectedPorts = selectedNode?.data.connected_ports || {};
   const isPortConnected = (direction: keyof NodePorts, portId: string) =>
     (connectedPorts[direction] || []).includes(portId);
-  const canCustomizePorts = isAdvancedMode && portContractUnlocked;
+  const referenceOwnsPortContract = nodeType === "subpipeline";
+  const canCustomizePorts = isAdvancedMode && portContractUnlocked && !referenceOwnsPortContract;
   const focusIssueSection = (issue: ValidationIssue) => {
     const section = ["unknown-edge-port", "missing-edge-port"].includes(issue.code)
       ? "ports"
@@ -1265,6 +1248,17 @@ export function PropertiesPanel({
     );
   };
 
+  const renderInputFilesSection = () => (
+    <InspectorSection
+      title={nodeType === "source" ? "Pipeline Input Files" : "Sample Inputs"}
+      description={nodeType === "source"
+        ? "Upload the actual files emitted by this source when the pipeline runs. Files selected from the Run tab override these attachments for that run."
+        : "Upload representative input files for inspection, code generation, and repeatable tests."}
+    >
+      {renderFileArea("data", indexedDataFiles, dataFileInputRef)}
+    </InspectorSection>
+  );
+
   return (
     <div className={cn("w-full border-l border-border bg-card text-card-foreground flex flex-col h-full", className)}>
       <div className="p-4 border-b border-border">
@@ -1344,37 +1338,39 @@ export function PropertiesPanel({
                 </Badge>
               </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="node-template" className="text-sm">
-                  Template
-                </Label>
-                {nodeType === "task" && (
-                  <Input
-                    value={templateSearch}
-                    onChange={(event) => setTemplateSearch(event.target.value)}
-                    placeholder="Search templates or categories"
-                    aria-label="Search templates"
-                  />
-                )}
-                <select
-                  id="node-template"
-                  className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-                  value={currentTemplate}
-                  onChange={(event) => handleTemplateChange(event.target.value)}
-                >
-                  {templateGroups.map((group) => (
-                    <optgroup key={group.category} label={group.category}>
-                      {group.options.map((option) => (
-                        <option key={option.value} value={option.value}>{option.label}</option>
-                      ))}
-                    </optgroup>
-                  ))}
-                </select>
-                <p className="text-xs text-muted-foreground">
-                  {currentTemplateDefinition?.description
-                    || "Categories help you find concrete templates; changing one never changes the structural graph kind."}
-                </p>
-              </div>
+              {showTemplateSelector && (
+                <div className="space-y-2">
+                  <Label htmlFor="node-template" className="text-sm">
+                    Template
+                  </Label>
+                  {nodeType === "task" && (
+                    <Input
+                      value={templateSearch}
+                      onChange={(event) => setTemplateSearch(event.target.value)}
+                      placeholder="Search templates or categories"
+                      aria-label="Search templates"
+                    />
+                  )}
+                  <select
+                    id="node-template"
+                    className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                    value={currentTemplate}
+                    onChange={(event) => handleTemplateChange(event.target.value)}
+                  >
+                    {templateGroups.map((group) => (
+                      <optgroup key={group.category} label={group.category}>
+                        {group.options.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    {currentTemplateDefinition?.description
+                      || "Categories help you find concrete templates; changing one never changes the structural graph kind."}
+                  </p>
+                </div>
+              )}
 
               <div className="space-y-2">
                 <Label htmlFor="node-label" className="text-sm">Label</Label>
@@ -1388,14 +1384,19 @@ export function PropertiesPanel({
 
               <div className="space-y-2">
                 <Label htmlFor="node-description" className="text-sm">Description</Label>
-                <Input
+                <Textarea
                   id="node-description"
                   value={description}
                   onChange={handleDescriptionChange}
-                  placeholder="Describe this pipeline component"
+                  placeholder={nodeType === "source"
+                    ? "Describe the incoming data and any important assumptions"
+                    : "Describe this pipeline component"}
+                  className="min-h-20 resize-y"
                 />
               </div>
             </InspectorSection>
+
+            {nodeType === "source" && canManageInputFiles && renderInputFilesSection()}
 
             {nodeType === "flow" && (
               <InspectorSection
@@ -1481,17 +1482,23 @@ export function PropertiesPanel({
               <div className="flex items-center justify-between gap-3 rounded-md border border-border/70 bg-background/60 p-2">
                 <div>
                   <Badge variant="outline">
-                    {canCustomizePorts ? "Customized" : "Template-managed"}
+                    {referenceOwnsPortContract
+                      ? "Referenced interface"
+                      : canCustomizePorts
+                        ? "Customized"
+                        : "Template-managed"}
                   </Badge>
                   <p className="mt-1 text-[11px] text-muted-foreground">
-                    {isAdvancedMode
-                      ? canCustomizePorts
-                        ? "Connected port names, types, and deletion remain protected."
-                        : "Unlock only when this component needs a non-standard contract."
-                      : "Switch the canvas to Advanced mode to customize this contract."}
+                    {referenceOwnsPortContract
+                      ? "Select a reusable pipeline version to update this contract."
+                      : isAdvancedMode
+                        ? canCustomizePorts
+                          ? "Connected port names, types, and deletion remain protected."
+                          : "Unlock only when this component needs a non-standard contract."
+                        : "Switch the canvas to Advanced mode to customize this contract."}
                   </p>
                 </div>
-                {isAdvancedMode && !portContractUnlocked && (
+                {isAdvancedMode && !portContractUnlocked && !referenceOwnsPortContract && (
                   <Button
                     type="button"
                     variant="outline"
@@ -1508,8 +1515,16 @@ export function PropertiesPanel({
 
             <InspectorSection
               id="inspector-configuration"
-              title="Parameters"
-              description="Static configuration stays on this component; only dynamic values belong on ports."
+              title={nodeType === "source"
+                ? "Source Configuration"
+                : nodeType === "destination"
+                  ? "Destination Configuration"
+                  : "Parameters"}
+              description={nodeType === "source"
+                ? "Configure how this source reads data; emitted values are described by its output ports."
+                : nodeType === "destination"
+                  ? "Configure how pipeline results are delivered; incoming values arrive through its input ports."
+                  : "Static configuration stays on this component; only dynamic values belong on ports."}
               status={configurationStatus === "invalid" ? "error" : sectionStatus("configuration")}
             >
               <div className="flex items-center justify-between">
@@ -1735,55 +1750,6 @@ export function PropertiesPanel({
               </InspectorSection>
             )}
 
-            {nodeType === "source" && (
-              <InspectorSection
-                title="Source Settings"
-                description="Use Parameters for ordinary source settings; the selected template defines the source contract."
-              >
-                {isAdvancedMode && (
-                  <div className="space-y-2 rounded-md border border-border/70 p-2">
-                    <Label htmlFor="source-configuration" className="text-sm">Advanced source settings (JSON)</Label>
-                    <Textarea
-                      id="source-configuration"
-                      value={sourceConfigDraft}
-                      onChange={(event) => setSourceConfigDraft(event.target.value)}
-                      onBlur={persistSourceConfiguration}
-                      className="min-h-28 font-mono text-xs"
-                    />
-                    <p className="text-xs text-muted-foreground">Only use this for source-specific settings that cannot be represented as Parameters.</p>
-                  </div>
-                )}
-                <div className="space-y-2">
-                  <Label htmlFor="node-content" className="text-sm">Source notes</Label>
-                  <Textarea
-                    id="node-content"
-                    value={content}
-                    onChange={handleContentChange}
-                    placeholder={`Describe the ${nodeType === "source" ? "source" : "destination"} data contract...`}
-                    className="h-24 resize-none"
-                  />
-                </div>
-              </InspectorSection>
-            )}
-
-            {nodeType === "destination" && (
-              <InspectorSection
-                title="Destination Settings"
-                description="Use Parameters for delivery settings; the selected template defines the destination contract."
-              >
-                <div className="space-y-2">
-                  <Label htmlFor="node-content" className="text-sm">Destination notes</Label>
-                  <Textarea
-                    id="node-content"
-                    value={content}
-                    onChange={handleContentChange}
-                    placeholder="Describe how pipeline results are delivered..."
-                    className="h-24 resize-none"
-                  />
-                </div>
-              </InspectorSection>
-            )}
-
             {nodeType === "subpipeline" && (
               <>
                 <InspectorSection
@@ -1883,12 +1849,7 @@ export function PropertiesPanel({
               </>
             )}
 
-            <InspectorSection
-              title="Test Fixtures"
-              description="Persisted fixtures support inspection, code generation, and repeatable tests. Supply actual input files from the Run tab; those are not attached to the node."
-            >
-              {canManageFiles && renderFileArea("data", indexedDataFiles, dataFileInputRef)}
-            </InspectorSection>
+            {nodeType === "task" && canManageInputFiles && renderInputFilesSection()}
 
           </div>
         </div>

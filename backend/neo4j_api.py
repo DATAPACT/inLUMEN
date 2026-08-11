@@ -221,7 +221,7 @@ def _parse_visible_graph(graph: dict) -> tuple[list[dict], list[dict]]:
             data.get("secret_params"),
             param_obj,
         )
-        if step_type in ("source", "destination"):
+        if step_type == "destination":
             props["content"] = str(data.get("content") or "")
         props["has_files"] = "yes" if files else str(data.get("has_files") or "no").lower().strip()
         # Preserve legacy adapter fields during migration without treating them
@@ -358,6 +358,7 @@ def _sync_graph_to_session(
         MERGE (s:STEP {flow_id: $flow_id})
         ON CREATE SET s.uid = randomUUID()
         SET s += $props
+        REMOVE s.source_config, s.source_config_json
         MERGE (p)-[:HAS_STEP]->(s)
         SET p.updated_at = CASE
             WHEN $touch_pipeline_updated_at THEN datetime()
@@ -1084,7 +1085,7 @@ def neo4j_add_node():
         properties["y"] = float(properties.get("y", 0) or 0)
     except Exception:
         properties["y"] = 0.0
-    if step_type in ("source", "destination"):
+    if step_type == "destination":
         properties.setdefault("content", "")
     properties.setdefault("has_files", "no")
     # Construct the Cypher query
@@ -1264,7 +1265,7 @@ def neo4j_update_node():
         param_obj,
     )
     normalize_definition_properties(properties)
-    if step_type in ("source", "destination"):
+    if step_type == "destination":
         properties["content"] =  properties.get("content", "")
     properties["has_files"] = str(properties.get("has_files") or "no").lower().strip()
     # Ensure we never attempt to store maps / File objects
@@ -1275,6 +1276,7 @@ def neo4j_update_node():
     MATCH (n:STEP {flow_id: $flow_id})
     OPTIONAL MATCH (p:PIPELINE)-[:HAS_STEP]->(n)
     SET n += $props
+    REMOVE n.source_config, n.source_config_json
     SET p.updated_at = datetime()
     RETURN n
     """
@@ -3121,7 +3123,7 @@ def neo4j_get_graph():
                     "file_buckets": files_for_step,
                 }
 
-                if "content" in props:
+                if step_kind == "destination" and "content" in props:
                     data["content"] = props.get("content") or ""
                 if "has_files" in props:
                     data["has_files"] = props.get("has_files")

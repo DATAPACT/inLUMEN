@@ -41,7 +41,6 @@ export type PipelineIrNode = {
   outputs: NodePort[];
   parameters: Record<string, unknown>;
   implementation?: Record<string, unknown>;
-  source_configuration?: Record<string, unknown>;
   sample_data?: unknown[];
   subpipeline?: {
     version: 2;
@@ -110,7 +109,6 @@ const graphToPipelineIr = (graph: NormalizedGraph): PipelineIr => ({
       outputs: ports.outputs,
       parameters: objectValue(data.param || data.parameters),
       ...(kind === "task" ? { implementation } : {}),
-      ...(kind === "source" ? { source_configuration: objectValue(data.source_config || data.source_configuration) } : {}),
       ...(files.length > 0 ? { sample_data: files } : {}),
       ...(kind === "subpipeline" && reference.pipeline_uid && reference.version_uid ? {
         subpipeline: {
@@ -160,7 +158,6 @@ const pipelineIrToGraphData = (pipeline: PipelineIr): { nodes: Node[]; edges: Ed
       ports: { inputs: node.inputs, outputs: node.outputs },
       param: objectValue(node.parameters),
       ...(node.kind === "task" ? { implementation: objectValue(node.implementation) } : {}),
-      ...(node.kind === "source" ? { source_config: objectValue(node.source_configuration) } : {}),
       ...(Array.isArray(node.sample_data) ? { files: node.sample_data } : {}),
       ...(node.kind === "subpipeline" && node.subpipeline ? {
         subpipeline: {

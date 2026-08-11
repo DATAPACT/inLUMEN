@@ -354,8 +354,11 @@ export const normalizeConfigurationStatus = (
 // in implementation metadata rather than by inventing another graph kind.
 export const typeHasFiles = (_type: StepType) => true;
 
+export const typeSupportsInputFiles = (type: StepType) =>
+  type === "source" || type === "task";
+
 export const typeHasContent = (type: StepType) =>
-  type === "source" || type === "destination";
+  type === "destination";
 
 export const pickBackendUpdatableProps = (
   nodeId: string,
@@ -380,9 +383,6 @@ export const pickBackendUpdatableProps = (
   }
   if (nodeData.template && typeof nodeData.template === "object" && !Array.isArray(nodeData.template)) {
     props.template = nodeData.template;
-  }
-  if (nodeType === "source" && nodeData.source_config && typeof nodeData.source_config === "object" && !Array.isArray(nodeData.source_config)) {
-    props.source_config = nodeData.source_config;
   }
   if (nodeType === "subpipeline" && nodeData.subpipeline && typeof nodeData.subpipeline === "object" && !Array.isArray(nodeData.subpipeline)) {
     props.subpipeline = nodeData.subpipeline;

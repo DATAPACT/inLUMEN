@@ -3,6 +3,21 @@ import asyncio
 from local_api_client import LocalApiResponse, dispatch_flask_request
 
 
+async def _await_uncancellable_executor(future):
+    """Finish an already-started thread operation before propagating cancellation."""
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError as cancellation:
+        current_task = asyncio.current_task()
+        if current_task is not None and hasattr(current_task, "uncancel"):
+            current_task.uncancel()
+        try:
+            await future
+        except Exception:
+            pass
+        raise cancellation
+
+
 def _auth_headers(authorization: str | None = None) -> dict:
     headers = {}
     if authorization:
@@ -192,7 +207,7 @@ async def run_neo4j_query(
             payload["provenance_context"] = provenance_context
         headers = _json_headers(authorization)
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
+        response = await _await_uncancellable_executor(loop.run_in_executor(
             None,
             lambda: dispatch_graph_request(
                 "neo4j_run_query",
@@ -200,7 +215,7 @@ async def run_neo4j_query(
                 json_payload=payload,
                 headers=headers,
             ),
-        )
+        ))
         response.raise_for_status()
         return response.text
     except Exception as exc:

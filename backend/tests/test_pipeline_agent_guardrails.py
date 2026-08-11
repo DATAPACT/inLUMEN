@@ -3,17 +3,20 @@ import json
 import unittest
 from pathlib import Path
 from sys import path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
 path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from analytics_api import (
-    _build_graph_sync_guardrail,
+from pipeline_agent.context import (
+    SAFE_INTERNAL_OUTPUT_MESSAGE,
+    _assistant_message_from_result,
     _clean_client_graph,
     _looks_like_internal_agent_message,
-    _pipeline_design_completion_message,
+    _safe_assistant_message,
 )
+from pipeline_agent.guardrails import _build_graph_sync_guardrail
 from graph_client import run_neo4j_query
 from llm_config import LLMConfig
 from local_api_client import LocalApiResponse
@@ -300,38 +303,47 @@ class PipelineGraphValidationTest(unittest.TestCase):
 
 
 class PipelineAgentGuardrailTest(unittest.TestCase):
-    def test_internal_tool_syntax_is_replaced_with_a_readable_pipeline_summary(self):
+    def test_only_model_text_messages_can_become_chat_content(self):
+        result = SimpleNamespace(messages=[
+            SimpleNamespace(
+                type="TextMessage",
+                source="pipeline_editor",
+                content="The selected model's own answer.",
+            ),
+            SimpleNamespace(
+                type="ToolCallSummaryMessage",
+                source="pipeline_editor",
+                content='{"tool":"overview","params":"{}"}[{"step":{}}]',
+            ),
+        ])
+
+        self.assertEqual(
+            "The selected model's own answer.",
+            _assistant_message_from_result(result),
+        )
+
+    def test_concatenated_tool_transcript_is_never_returned_as_chat_text(self):
+        leaked = (
+            '{"tool":"delete_step","params":"{\\"step_uid\\":\\"secret-step\\"}"}'
+            '[{"deleted_step":{"pipeline_updated_at":"2026-08-11T13:25:51Z",'
+            '"step_uid":"secret-step"}}]'
+            '{"tool":"overview","params":"{}"}'
+            '[{"step":{"ports_json":"{...}","implementation_json":"{...}"}}]'
+            "The pipeline is complete."
+        )
         graph = {
-            "pipeline": {"label": "Accounts Payable"},
-            "nodes": [
-                node(1, "source", "Invoice Batch Ingestion"),
-                {
-                    **node(2, "subpipeline", "Invoice Understanding"),
-                    "data": {
-                        **node(2, "subpipeline", "Invoice Understanding")["data"],
-                        "subpipeline": {
-                            "reference": {
-                                "pipeline_name": "Invoice Understanding",
-                                "version_name": "v1",
-                            },
-                        },
-                    },
-                },
-                node(3, "destination", "Accounting Export"),
-            ],
-            "edges": [],
+            "pipeline": {"label": "Safe Pipeline"},
+            "nodes": [node(1, "source", "Input"), node(2, "destination", "Output")],
+            "edges": [edge(1, 2, "data", "data")],
         }
 
-        self.assertTrue(_looks_like_internal_agent_message(
-            'call:connect_steps(params:{"source_flow_id":"2"})'
-        ))
-        message = _pipeline_design_completion_message(graph)
-        self.assertIn('"Accounts Payable" is ready and validated', message)
-        self.assertIn(
-            "Invoice Batch Ingestion → Invoice Understanding → Accounting Export",
-            message,
-        )
-        self.assertIn("Reusable pipeline: Invoice Understanding (v1)", message)
+        self.assertTrue(_looks_like_internal_agent_message(leaked))
+        safe = _safe_assistant_message(leaked, graph)
+
+        self.assertEqual(SAFE_INTERNAL_OUTPUT_MESSAGE, safe)
+        self.assertNotIn("delete_step", safe)
+        self.assertNotIn("secret-step", safe)
+        self.assertNotIn("ports_json", safe)
 
     def test_empty_agent_query_result_is_detected_for_live_and_mocked_results(self):
         self.assertTrue(_agent_query_returned_no_rows("[]"))
@@ -395,9 +407,32 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertEqual("invalid", sync["status"])
         self.assertTrue(any("endpoint" in message for message in sync["validation_errors"]))
 
-    @patch("pipeline_editor_team.RoundRobinGroupChat")
-    @patch("pipeline_editor_team.AssistantAgent")
-    @patch("pipeline_editor_team.select_model_client")
+    def test_guardrail_accepts_a_valid_model_chosen_graph_change(self):
+        before = {
+            "nodes": [node(1, "source", "Input")],
+            "edges": [],
+        }
+        after = {
+            "nodes": [
+                node(1, "source", "Input"),
+                node(2, "destination", "Unexpected Output"),
+            ],
+            "edges": [edge(1, 2, "data", "data")],
+        }
+
+        sync = _build_graph_sync_guardrail(
+            before,
+            after,
+            "Is this a good design? What would you improve?",
+        )
+
+        self.assertEqual("synced", sync["status"])
+        self.assertTrue(sync["guardrail_passed"])
+        self.assertTrue(sync["graph_safe_to_apply"])
+
+    @patch("pipeline_agent.team.RoundRobinGroupChat")
+    @patch("pipeline_agent.team.AssistantAgent")
+    @patch("pipeline_agent.team.select_model_client")
     def test_pipeline_tools_are_configured_for_serial_calls(
         self,
         select_model_client,
@@ -418,6 +453,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         assistant_agent.assert_called_once()
         round_robin.assert_called_once()
         tool_names = [tool.__name__ for tool in assistant_agent.call_args.kwargs["tools"]]
+        self.assertIn("list_pipeline_components", tool_names)
         self.assertIn("connect_steps", tool_names)
         self.assertIn("disconnect_steps", tool_names)
         self.assertIn("configure_flow_step", tool_names)
@@ -432,11 +468,22 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("another distinct saved PIPELINE", system_message)
         self.assertIn("Conversation Understanding", system_message)
         self.assertIn("create_step pins the reference", system_message)
+        self.assertIn("authoritative five structural boxes", system_message)
+        list_components = next(
+            tool
+            for tool in assistant_agent.call_args.kwargs["tools"]
+            if tool.__name__ == "list_pipeline_components"
+        )
+        component_catalog = json.loads(asyncio.run(list_components("{}")))
+        self.assertEqual(
+            {"source", "task", "destination", "flow", "subpipeline"},
+            {component["type"] for component in component_catalog["components"]},
+        )
 
-    @patch("pipeline_editor_team.RoundRobinGroupChat")
-    @patch("pipeline_editor_team.AssistantAgent")
-    @patch("pipeline_editor_team.select_model_client")
-    @patch("pipeline_editor_team.run_neo4j_query", new_callable=AsyncMock)
+    @patch("pipeline_agent.team.RoundRobinGroupChat")
+    @patch("pipeline_agent.team.AssistantAgent")
+    @patch("pipeline_agent.team.select_model_client")
+    @patch("pipeline_agent.tools.run_neo4j_query", new_callable=AsyncMock)
     def test_create_subpipeline_step_atomically_pins_saved_version_and_public_ports(
         self,
         run_query,
@@ -502,10 +549,10 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("referenced_version_uid: 'version-2'", create_query)
         self.assertIn("version-2", result)
 
-    @patch("pipeline_editor_team.RoundRobinGroupChat")
-    @patch("pipeline_editor_team.AssistantAgent")
-    @patch("pipeline_editor_team.select_model_client")
-    @patch("pipeline_editor_team.run_neo4j_query", new_callable=AsyncMock)
+    @patch("pipeline_agent.team.RoundRobinGroupChat")
+    @patch("pipeline_agent.team.AssistantAgent")
+    @patch("pipeline_agent.team.select_model_client")
+    @patch("pipeline_agent.tools.run_neo4j_query", new_callable=AsyncMock)
     def test_create_step_infers_parallel_map_from_an_unambiguous_label(
         self,
         run_query,
@@ -536,14 +583,98 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
 
         query = run_query.await_args.args[0]
         self.assertIn("template_label:'Parallel Map'", query)
+        self.assertIn("definition_id:'core.flow'", query)
+        self.assertIn("definition_version:1", query)
+        self.assertIn("OPTIONAL MATCH (p)-[:HAS_STEP]->(prev:STEP)", query)
         self.assertIn('"max_concurrency": 4', query)
         self.assertIn('"failure_policy": "stop"', query)
         self.assertIn("flow.target_port = 'items'", query)
 
-    @patch("pipeline_editor_team.RoundRobinGroupChat")
-    @patch("pipeline_editor_team.AssistantAgent")
-    @patch("pipeline_editor_team.select_model_client")
-    @patch("pipeline_editor_team.run_neo4j_query", new_callable=AsyncMock)
+    @patch("pipeline_agent.team.RoundRobinGroupChat")
+    @patch("pipeline_agent.team.AssistantAgent")
+    @patch("pipeline_agent.team.select_model_client")
+    @patch("pipeline_agent.tools.run_neo4j_query", new_callable=AsyncMock)
+    def test_insert_step_preserves_typed_connection_handles(
+        self,
+        run_query,
+        select_model_client,
+        assistant_agent,
+        _round_robin,
+    ):
+        config = LLMConfig(
+            provider="openrouter",
+            model="test/model",
+            base_url="https://example.test/v1",
+            api_key="secret",
+        )
+        select_model_client.return_value = MagicMock()
+        run_query.return_value = [{"step": {"flow_id": "3"}}]
+
+        build_pipeline_editing_team(config)
+        insert_step = next(
+            tool
+            for tool in assistant_agent.call_args.kwargs["tools"]
+            if tool.__name__ == "insert_step"
+        )
+        asyncio.run(insert_step(json.dumps({
+            "type": "task",
+            "label": "Validate Records",
+            "description": "Validate each incoming record.",
+            "implementation": GENERATED_CODE,
+            "after_flow_id": "1",
+            "before_flow_id": "2",
+        })))
+
+        query = run_query.await_args.args[0]
+        self.assertIn("MATCH (p:PIPELINE {status:'design'})", query)
+        self.assertIn("oldFlow.source_port AS oldSourcePort", query)
+        self.assertIn("oldFlow.target_port AS oldTargetPort", query)
+        self.assertIn("MERGE (after)-[incomingFlow:FLOWS_TO]->(s)", query)
+        self.assertIn("incomingFlow.target_port = 'input'", query)
+        self.assertIn("MERGE (s)-[outgoingFlow:FLOWS_TO]->(before)", query)
+        self.assertIn("outgoingFlow.source_port = 'output'", query)
+        self.assertEqual("insert_between_steps", run_query.await_args.args[1])
+
+    @patch("pipeline_agent.team.RoundRobinGroupChat")
+    @patch("pipeline_agent.team.AssistantAgent")
+    @patch("pipeline_agent.team.select_model_client")
+    @patch("pipeline_agent.tools.run_neo4j_query", new_callable=AsyncMock)
+    def test_delete_step_only_bridges_a_simple_chain_and_preserves_ports(
+        self,
+        run_query,
+        select_model_client,
+        assistant_agent,
+        _round_robin,
+    ):
+        config = LLMConfig(
+            provider="openrouter",
+            model="test/model",
+            base_url="https://example.test/v1",
+            api_key="secret",
+        )
+        select_model_client.return_value = MagicMock()
+        run_query.return_value = [{"deleted_step": {"step_uid": "step-2"}}]
+
+        build_pipeline_editing_team(config)
+        delete_step = next(
+            tool
+            for tool in assistant_agent.call_args.kwargs["tools"]
+            if tool.__name__ == "delete_step"
+        )
+        asyncio.run(delete_step(json.dumps({"step_uid": "step-2"})))
+
+        query = run_query.await_args.args[0]
+        self.assertIn("MATCH (p:PIPELINE {status:'design'})", query)
+        self.assertIn("WHEN size(incoming) = 1 AND size(outgoing) = 1", query)
+        self.assertIn("incoming[0].source_port", query)
+        self.assertIn("outgoing[0].target_port", query)
+        self.assertNotIn("FOREACH (p IN prevs", query)
+        self.assertEqual("delete_step", run_query.await_args.args[1])
+
+    @patch("pipeline_agent.team.RoundRobinGroupChat")
+    @patch("pipeline_agent.team.AssistantAgent")
+    @patch("pipeline_agent.team.select_model_client")
+    @patch("pipeline_agent.tools.run_neo4j_query", new_callable=AsyncMock)
     def test_connect_steps_persists_explicit_branch_handles(
         self,
         run_query,
@@ -586,10 +717,10 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("falseTargetIsMerge", query)
         self.assertEqual("connect_steps", run_query.await_args.args[1])
 
-    @patch("pipeline_editor_team.RoundRobinGroupChat")
-    @patch("pipeline_editor_team.AssistantAgent")
-    @patch("pipeline_editor_team.select_model_client")
-    @patch("pipeline_editor_team.run_neo4j_query", new_callable=AsyncMock)
+    @patch("pipeline_agent.team.RoundRobinGroupChat")
+    @patch("pipeline_agent.team.AssistantAgent")
+    @patch("pipeline_agent.team.select_model_client")
+    @patch("pipeline_agent.tools.run_neo4j_query", new_callable=AsyncMock)
     def test_disconnect_steps_removes_only_the_exact_port_aware_edge(
         self,
         run_query,
@@ -626,10 +757,10 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("DELETE connection", query)
         self.assertEqual("disconnect_steps", run_query.await_args.args[1])
 
-    @patch("pipeline_editor_team.RoundRobinGroupChat")
-    @patch("pipeline_editor_team.AssistantAgent")
-    @patch("pipeline_editor_team.select_model_client")
-    @patch("pipeline_editor_team.run_neo4j_query", new_callable=AsyncMock)
+    @patch("pipeline_agent.team.RoundRobinGroupChat")
+    @patch("pipeline_agent.team.AssistantAgent")
+    @patch("pipeline_agent.team.select_model_client")
+    @patch("pipeline_agent.tools.run_neo4j_query", new_callable=AsyncMock)
     def test_configure_flow_step_migrates_generic_condition_handles(
         self,
         run_query,
@@ -665,10 +796,10 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("'when_true'", query)
         self.assertEqual("configure_flow_step", run_query.await_args.args[1])
 
-    @patch("pipeline_editor_team.RoundRobinGroupChat")
-    @patch("pipeline_editor_team.AssistantAgent")
-    @patch("pipeline_editor_team.select_model_client")
-    @patch("pipeline_editor_team.run_neo4j_query", new_callable=AsyncMock)
+    @patch("pipeline_agent.team.RoundRobinGroupChat")
+    @patch("pipeline_agent.team.AssistantAgent")
+    @patch("pipeline_agent.team.select_model_client")
+    @patch("pipeline_agent.tools.run_neo4j_query", new_callable=AsyncMock)
     def test_configure_subpipeline_step_pins_saved_version_and_migrates_handles(
         self,
         run_query,
@@ -738,10 +869,10 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertEqual("inspect_subpipeline_contract", run_query.await_args_list[1].args[1])
         self.assertEqual("configure_subpipeline_step", run_query.await_args.args[1])
 
-    @patch("pipeline_editor_team.RoundRobinGroupChat")
-    @patch("pipeline_editor_team.AssistantAgent")
-    @patch("pipeline_editor_team.select_model_client")
-    @patch("pipeline_editor_team.run_neo4j_query", new_callable=AsyncMock)
+    @patch("pipeline_agent.team.RoundRobinGroupChat")
+    @patch("pipeline_agent.team.AssistantAgent")
+    @patch("pipeline_agent.team.select_model_client")
+    @patch("pipeline_agent.tools.run_neo4j_query", new_callable=AsyncMock)
     def test_create_reusable_pipeline_creates_separate_versioned_pipeline(
         self,
         run_query,

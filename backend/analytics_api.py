@@ -19,7 +19,7 @@ from artifact_content import (
 )
 from async_runtime import run_async
 from auth_middleware import require_auth
-from chat_state import clear_state_from_disk, load_state_from_disk, save_state_to_disk
+from chat_state import clear_state_from_disk
 from deployment_artifacts import (
     DeploymentArtifactValidationError,
     build_argo_workflow_yaml,
@@ -33,15 +33,14 @@ from deployment_agents import (
 from graph_client import (
     fetch_pipeline_graph,
     fetch_pipeline_versions,
-    save_active_pipeline_version,
-    sync_backend_to_canvas_graph,
 )
 from llm_config import llm_config_from_payload, log_llm_selection
-from pipeline_editor_team import build_pipeline_editing_team
-from pipeline_graph_validation import (
-    validate_pipeline_graph,
-    validation_issue_messages,
+from pipeline_agent.context import _clean_client_graph
+from pipeline_agent.cancellation import (
+    request_pipeline_turn_cancel,
+    run_cancellable_pipeline_turn,
 )
+from pipeline_agent.service import PipelineEditorTurnCancelled, run_pipeline_editor_turn
 from runtime_config import add_cors_headers
 
 app = Flask(__name__)
@@ -297,327 +296,6 @@ def _file_refs_from_version_graph(graph: dict) -> list[dict]:
     return refs
 
 
-def _assistant_message_from_result(result) -> str:
-    for msg in reversed(result.messages or []):
-        if getattr(msg, "source", None) in ("assistant", "assistant_agent") and hasattr(msg, "content"):
-            return msg.content
-    if result.messages:
-        return getattr(result.messages[-1], "content", "")
-    return ""
-
-
-INTERNAL_AGENT_MESSAGE_RE = re.compile(
-    r"^\s*(?:call\s*:\s*)?(?:create|configure|connect|disconnect|insert|delete|list|get|inspect|overview)"
-    r"_[a-z0-9_]+\s*\(",
-    re.IGNORECASE,
-)
-
-
-def _looks_like_internal_agent_message(message: object) -> bool:
-    text = str(message or "").strip()
-    if not text:
-        return True
-    return bool(INTERNAL_AGENT_MESSAGE_RE.match(text))
-
-
-def _pipeline_design_completion_message(graph: dict) -> str:
-    raw_nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
-    nodes = [node for node in raw_nodes if isinstance(node, dict)]
-
-    def node_sort_key(node: dict) -> tuple[int, float, str]:
-        node_id = str(node.get("id") or "")
-        try:
-            return (0, float(node_id), node_id)
-        except ValueError:
-            position = node.get("position") if isinstance(node.get("position"), dict) else {}
-            return (1, float(position.get("x") or 0), node_id)
-
-    ordered_nodes = sorted(nodes, key=node_sort_key)
-    labels = []
-    reusable_references = []
-    for node in ordered_nodes:
-        data = node.get("data") if isinstance(node.get("data"), dict) else node
-        label = str(data.get("label") or node.get("id") or "Step").strip()
-        if label:
-            labels.append(label)
-        if str(data.get("type") or "").lower() != "subpipeline":
-            continue
-        definition = data.get("subpipeline") if isinstance(data.get("subpipeline"), dict) else {}
-        reference = definition.get("reference") if isinstance(definition.get("reference"), dict) else {}
-        pipeline_name = str(reference.get("pipeline_name") or label).strip()
-        version_name = str(reference.get("version_name") or "").strip()
-        if pipeline_name:
-            reusable_references.append(
-                f"{pipeline_name} ({version_name})" if version_name else pipeline_name
-            )
-
-    pipeline = graph.get("pipeline") if isinstance(graph.get("pipeline"), dict) else {}
-    pipeline_name = str(pipeline.get("label") or pipeline.get("name") or "Pipeline").strip()
-    message = f'The pipeline design "{pipeline_name}" is ready and validated.'
-    if labels:
-        visible_labels = labels[:10]
-        suffix = " → …" if len(labels) > len(visible_labels) else ""
-        message += "\n\nFlow: " + " → ".join(visible_labels) + suffix
-    if reusable_references:
-        message += "\n\nReusable pipeline: " + ", ".join(dict.fromkeys(reusable_references))
-    return message
-
-
-GRAPH_MUTATION_RE = re.compile(
-    r"\b(add|build|change|clear|complete|connect|create|delete|design|draw|fix|"
-    r"generate|heal|improve|insert|link|make|missing|modify|move|optimize|"
-    r"recover|reconnect|refine|remove|repair|replace|restore|update)\b",
-    re.IGNORECASE,
-)
-
-
-def _message_expects_graph_change(user_message: str) -> bool:
-    return bool(GRAPH_MUTATION_RE.search(user_message or ""))
-
-
-def _graph_counts(graph: dict | None) -> tuple[int, int]:
-    if not isinstance(graph, dict):
-        return 0, 0
-    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
-    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
-    return len(nodes), len(edges)
-
-
-def _clip_text(value: object, limit: int = 500) -> str:
-    text = str(value or "").strip()
-    return text if len(text) <= limit else text[: limit - 1] + "..."
-
-
-def _safe_float(value: object, default: float = 0.0) -> float:
-    try:
-        return float(value or default)
-    except Exception:
-        return default
-
-
-def _node_payload(node: dict) -> dict:
-    data = node.get("data") if isinstance(node.get("data"), dict) else node
-    position = node.get("position") if isinstance(node.get("position"), dict) else {}
-    return {
-        "id": str(node.get("id", data.get("id", ""))),
-        "type": _clip_text(data.get("type", "")),
-        "label": _clip_text(data.get("label", "")),
-        "description": _clip_text(data.get("description", "")),
-        "content": _clip_text(data.get("content", "")),
-        "endpoint": _clip_text(data.get("endpoint", "")),
-        "database": _clip_text(data.get("database", "")),
-        "x": round(_safe_float(position.get("x", data.get("x", 0))), 2),
-        "y": round(_safe_float(position.get("y", data.get("y", 0))), 2),
-    }
-
-
-def _graph_signature(graph: dict | None) -> str:
-    if not isinstance(graph, dict):
-        return json.dumps({"nodes": [], "edges": []}, sort_keys=True)
-
-    cleaned = _clean_client_graph(graph) or {"nodes": [], "edges": []}
-    nodes = cleaned["nodes"]
-    edges = cleaned["edges"]
-    nodes.sort(key=lambda node: str(node.get("id") or ""))
-    edges.sort(key=lambda edge: (
-        str(edge.get("source") or ""),
-        str(edge.get("target") or ""),
-        str(edge.get("source_port") or ""),
-        str(edge.get("target_port") or ""),
-    ))
-    return json.dumps({"nodes": nodes, "edges": edges}, sort_keys=True)
-
-
-def _json_safe_copy(value: object, depth: int = 0) -> object:
-    if depth > 8:
-        return None
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    if isinstance(value, str):
-        return _clip_text(value, 8000)
-    if isinstance(value, list):
-        return [_json_safe_copy(item, depth + 1) for item in value[:200]]
-    if isinstance(value, dict):
-        return {
-            _clip_text(key, 120): _json_safe_copy(item, depth + 1)
-            for key, item in list(value.items())[:200]
-            if str(key or "").strip()
-        }
-    return _clip_text(value, 1000)
-
-
-def _clean_client_graph(value: object) -> dict | None:
-    if not isinstance(value, dict):
-        return None
-
-    cleaned_nodes = []
-    seen_node_ids: set[str] = set()
-    for raw_node in value.get("nodes") or []:
-        if not isinstance(raw_node, dict):
-            continue
-        payload = _node_payload(raw_node)
-        node_id = payload["id"].strip()
-        if not node_id or node_id in seen_node_ids:
-            continue
-        seen_node_ids.add(node_id)
-
-        node_data = raw_node.get("data") if isinstance(raw_node.get("data"), dict) else raw_node
-        for key in (
-            "ports",
-            "param",
-            "parameters",
-            "secret_params",
-            "implementation",
-            "template",
-            "template_label",
-            "definition_id",
-            "definition_version",
-            "configuration_status",
-            "generated_artifact",
-            "source_config",
-            "subpipeline",
-            "files",
-            "file_buckets",
-            "has_files",
-        ):
-            if key in node_data:
-                payload[key] = _json_safe_copy(node_data[key])
-        if not str(payload.get("template_label") or "").strip() and isinstance(
-            payload.get("template"), str
-        ):
-            payload["template_label"] = payload["template"]
-        cleaned_nodes.append(payload)
-
-    cleaned_edges = []
-    seen_edge_keys: set[tuple[str, str, str, str]] = set()
-    for raw_edge in value.get("edges") or []:
-        if not isinstance(raw_edge, dict):
-            continue
-        source = str(raw_edge.get("source", "")).strip()
-        target = str(raw_edge.get("target", "")).strip()
-        source_port = str(
-            raw_edge.get("sourceHandle") or raw_edge.get("source_port") or ""
-        ).strip()
-        target_port = str(
-            raw_edge.get("targetHandle") or raw_edge.get("target_port") or ""
-        ).strip()
-        edge_key = (source, target, source_port, target_port)
-        if (
-            not source
-            or not target
-            or source == target
-            or source not in seen_node_ids
-            or target not in seen_node_ids
-            or edge_key in seen_edge_keys
-        ):
-            continue
-        seen_edge_keys.add(edge_key)
-        cleaned_edges.append({
-            "source": source,
-            "target": target,
-            "source_port": source_port,
-            "target_port": target_port,
-        })
-
-    return {
-        "updated_at": value.get("updated_at") if isinstance(value.get("updated_at"), str) else None,
-        "settings": _json_safe_copy(value.get("settings")) if isinstance(value.get("settings"), dict) else {},
-        "nodes": cleaned_nodes,
-        "edges": cleaned_edges,
-    }
-
-
-def _graph_for_agent_context(graph: dict | None) -> dict:
-    if not isinstance(graph, dict):
-        return {"node_count": 0, "edge_count": 0, "nodes": [], "edges": []}
-    cleaned = _clean_client_graph(graph) or graph
-    raw_nodes = cleaned.get("nodes") if isinstance(cleaned.get("nodes"), list) else []
-    raw_edges = cleaned.get("edges") if isinstance(cleaned.get("edges"), list) else []
-    nodes = []
-    for node in raw_nodes:
-        summary = _node_payload(node)
-        template = node.get("template_label") or node.get("template")
-        if template:
-            summary["template"] = _clip_text(template, 160)
-        implementation = node.get("implementation")
-        if isinstance(implementation, dict):
-            summary["implementation"] = {
-                key: _clip_text(implementation.get(key), 240)
-                for key in ("kind", "task", "domain", "framework", "model_id")
-                if implementation.get(key)
-            }
-        nodes.append(summary)
-    edges = [
-        {
-            "source": edge.get("source"),
-            "target": edge.get("target"),
-            "source_port": edge.get("source_port"),
-            "target_port": edge.get("target_port"),
-        }
-        for edge in raw_edges
-        if isinstance(edge, dict)
-    ]
-    return {
-        "updated_at": cleaned.get("updated_at"),
-        "node_count": len(nodes),
-        "edge_count": len(edges),
-        "nodes": nodes,
-        "edges": edges,
-    }
-
-
-def _pipeline_metadata_for_agent_context(graph: dict | None) -> dict:
-    if not isinstance(graph, dict):
-        return {}
-    pipeline = graph.get("pipeline") if isinstance(graph.get("pipeline"), dict) else {}
-    if not pipeline:
-        return {}
-    return {
-        "uid": _clip_text(pipeline.get("uid", ""), 120),
-        "name": _clip_text(pipeline.get("name", "")),
-        "label": _clip_text(pipeline.get("label", "")),
-        "description": _clip_text(pipeline.get("description", ""), 1200),
-        "version": _clip_text(pipeline.get("version", "")),
-        "active_version_uid": _clip_text(pipeline.get("active_version_uid", ""), 120),
-        "active_version_name": _clip_text(pipeline.get("active_version_name", "")),
-        "step_count": pipeline.get("step_count"),
-    }
-
-
-def _build_agent_task(
-    user_message: str,
-    canvas_graph: dict | None,
-    backend_graph: dict | None,
-) -> str:
-    pipeline_metadata = (
-        _pipeline_metadata_for_agent_context(backend_graph)
-        or _pipeline_metadata_for_agent_context(canvas_graph)
-    )
-    return (
-        f"{user_message}\n\n"
-        "CURRENT PIPELINE METADATA (name, active version, and description):\n"
-        f"{json.dumps(pipeline_metadata, ensure_ascii=False)}\n\n"
-        "CURRENT VISIBLE CANVAS SNAPSHOT (authoritative UI state):\n"
-        f"{json.dumps(_graph_for_agent_context(canvas_graph), ensure_ascii=False)}\n\n"
-        "CURRENT BACKEND GRAPH SNAPSHOT (Neo4j state after canvas reconciliation):\n"
-        f"{json.dumps(_graph_for_agent_context(backend_graph), ensure_ascii=False)}\n\n"
-        "Answer and act from the visible canvas snapshot first. If the user asks for "
-        "current status, summarize this snapshot instead of relying on older chat "
-        "memory. If a tool is needed, the backend has already been reconciled to this "
-        "visible canvas before this turn."
-    )
-
-
-async def _safe_fetch_pipeline_graph() -> tuple[dict | None, str | None]:
-    try:
-        return await fetch_pipeline_graph(
-            authorization=_request_authorization_header(),
-        ), None
-    except Exception as exc:
-        print("[analytics_api.py] Failed to fetch pipeline graph for sync guardrail:", exc)
-        return None, str(exc)
-
-
 def _request_authorization_header() -> str | None:
     if not has_request_context():
         return None
@@ -636,130 +314,6 @@ def _pipeline_graph_from_payload_or_backend(data: dict) -> dict:
     )
 
 
-def _build_graph_sync_guardrail(
-    before_graph: dict | None,
-    after_graph: dict | None,
-    user_message: str,
-    fetch_error: str | None = None,
-    repaired: bool = False,
-) -> dict:
-    before_nodes, before_edges = _graph_counts(before_graph)
-    after_nodes, after_edges = _graph_counts(after_graph)
-    expected_graph_change = _message_expects_graph_change(user_message)
-    graph_changed = _graph_signature(before_graph) != _graph_signature(after_graph)
-    updated_at = after_graph.get("updated_at") if isinstance(after_graph, dict) else None
-    validation = (
-        validate_pipeline_graph(after_graph)
-        if expected_graph_change and after_nodes > 0 and not fetch_error
-        else {"valid": True, "issues": []}
-    )
-    validation_errors = validation_issue_messages(validation)
-
-    if fetch_error:
-        return {
-            "status": "degraded",
-            "guardrail_passed": False,
-            "graph_safe_to_apply": False,
-            "expected_graph_change": expected_graph_change,
-            "graph_changed": graph_changed,
-            "node_count": after_nodes,
-            "edge_count": after_edges,
-            "updated_at": updated_at,
-            "message": f"Agent replied, but graph sync verification failed: {fetch_error}",
-            "repaired": repaired,
-            "validation_errors": validation_errors,
-        }
-
-    if expected_graph_change and graph_changed and not validation["valid"]:
-        return {
-            "status": "invalid",
-            "guardrail_passed": False,
-            "graph_safe_to_apply": False,
-            "expected_graph_change": True,
-            "graph_changed": True,
-            "node_count": after_nodes,
-            "edge_count": after_edges,
-            "updated_at": updated_at,
-            "message": (
-                "The agent changed the graph, but the persisted result failed pipeline "
-                "validation: " + "; ".join(validation_errors)
-            ),
-            "repaired": repaired,
-            "validation_errors": validation_errors,
-        }
-
-    if expected_graph_change and not graph_changed:
-        return {
-            "status": "warning",
-            "guardrail_passed": False,
-            "graph_safe_to_apply": False,
-            "expected_graph_change": True,
-            "graph_changed": False,
-            "node_count": after_nodes,
-            "edge_count": after_edges,
-            "updated_at": updated_at,
-            "message": (
-                "The request looked like it should change the canvas, but no visible graph "
-                "change was persisted."
-            ),
-            "repaired": repaired,
-            "validation_errors": validation_errors,
-        }
-
-    if graph_changed:
-        return {
-            "status": "synced",
-            "guardrail_passed": True,
-            "graph_safe_to_apply": True,
-            "expected_graph_change": expected_graph_change,
-            "graph_changed": True,
-            "node_count": after_nodes,
-            "edge_count": after_edges,
-            "updated_at": updated_at,
-            "message": (
-                f"Canvas graph synced: {before_nodes}->{after_nodes} nodes, "
-                f"{before_edges}->{after_edges} edges."
-            ),
-            "repaired": repaired,
-            "validation_errors": [],
-        }
-
-    return {
-        "status": "unchanged",
-        "guardrail_passed": True,
-        "graph_safe_to_apply": True,
-        "expected_graph_change": expected_graph_change,
-        "graph_changed": False,
-        "node_count": after_nodes,
-        "edge_count": after_edges,
-        "updated_at": updated_at,
-        "message": f"Canvas graph checked: {after_nodes} nodes and {after_edges} edges.",
-        "repaired": repaired,
-        "validation_errors": [],
-    }
-
-
-def _guardrail_repair_task(
-    user_message: str,
-    canvas_graph: dict | None,
-    backend_graph: dict | None,
-    validation_errors: list[str] | None = None,
-) -> str:
-    error_context = "\n".join(f"- {error}" for error in validation_errors or [])
-    return (
-        "Guardrail repair: the previous turn did not persist a complete valid pipeline "
-        "for the user's request. Correct the persisted graph now. Use one mutating tool "
-        "at a time. If the attempted new design is structurally wrong, delete its steps "
-        "and rebuild them in actual dependency order. A destination must remain terminal, "
-        "and rest-api tasks require a real endpoint. Verify the final graph with overview."
-        " If an existing configured Subpipeline reports a missing required input, keep its "
-        "saved reference and repair the parent wiring: insert or connect an upstream Source "
-        "to that public input, then connect its output to downstream processing and a terminal "
-        "Destination. Do not recreate or repeatedly reconfigure the reusable pipeline."
-        + (f"\n\nVALIDATION ERRORS:\n{error_context}" if error_context else "")
-        + "\n\n"
-        + _build_agent_task(user_message, canvas_graph, backend_graph)
-    )
 
 
 @app.route("/agentic_generate_dockerfiles", methods=["POST", "OPTIONS"])
@@ -1090,6 +644,9 @@ def agentic_pipeline_editor():
         active_version_name = "Main"
 
     session_id = payload.get("session_id") or str(uuid.uuid4())
+    turn_id = str(payload.get("turn_id") or uuid.uuid4()).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", turn_id):
+        return jsonify({"error": "Invalid turn_id"}), 400
     try:
         llm_config = llm_config_from_payload(payload)
     except ValueError as exc:
@@ -1098,165 +655,67 @@ def agentic_pipeline_editor():
     log_llm_selection("User message sent to pipeline editor", llm_config)
     authorization = _request_authorization_header()
 
-    async def run_turn():
-        before_graph, before_graph_error = await _safe_fetch_pipeline_graph()
-        if before_graph_error:
-            raise RuntimeError(f"Could not read the persisted pipeline before the agent turn: {before_graph_error}")
-        if canvas_graph is not None:
-            try:
-                await sync_backend_to_canvas_graph(
-                    canvas_graph,
-                    active_version_uid,
-                    active_version_name,
-                    authorization=authorization,
-                )
-                before_graph, before_graph_error = await _safe_fetch_pipeline_graph()
-            except Exception as exc:
-                print("[analytics_api.py] Failed to reconcile backend to visible canvas:", exc)
-                raise RuntimeError(
-                    "The visible canvas could not be reconciled with the persisted graph; "
-                    "the agent turn was not started."
-                ) from exc
-            if before_graph_error:
-                raise RuntimeError(
-                    f"Could not verify the reconciled canvas before the agent turn: {before_graph_error}"
-                )
-
-        visible_before_graph = canvas_graph or before_graph
-        team = build_pipeline_editing_team(
-            llm_config=llm_config,
-            authorization=authorization,
-            provenance_context={
-                "user_query": user_message,
-                "session_id": session_id,
-            },
-        )
-        team_state = load_state_from_disk(session_id)
-        if team_state:
-            await team.load_state(team_state)
-        result = await team.run(task=_build_agent_task(user_message, canvas_graph, before_graph))
-        assistant_message = _assistant_message_from_result(result)
-        after_graph, after_graph_error = await _safe_fetch_pipeline_graph()
-        sync = _build_graph_sync_guardrail(
-            visible_before_graph,
-            after_graph,
-            user_message,
-            after_graph_error,
-        )
-
-        if (
-            sync["expected_graph_change"]
-            and not sync["guardrail_passed"]
-            and not after_graph_error
-        ):
-            repair_result = await team.run(task=_guardrail_repair_task(
-                user_message,
-                canvas_graph,
-                after_graph,
-                sync.get("validation_errors"),
-            ))
-            repair_message = _assistant_message_from_result(repair_result)
-            if repair_message:
-                assistant_message = repair_message
-            repaired_graph, repaired_graph_error = await _safe_fetch_pipeline_graph()
-            after_graph = repaired_graph
-            sync = _build_graph_sync_guardrail(
-                visible_before_graph,
-                after_graph,
-                user_message,
-                repaired_graph_error,
-                repaired=True,
-            )
-
-        if sync["expected_graph_change"] and not sync["guardrail_passed"]:
-            failed_messages = list(sync.get("validation_errors") or [])
-            rollback_error = None
-            try:
-                if not isinstance(visible_before_graph, dict):
-                    raise RuntimeError("No pre-turn graph snapshot is available.")
-                await sync_backend_to_canvas_graph(
-                    visible_before_graph,
-                    active_version_uid,
-                    active_version_name,
-                    authorization=authorization,
-                )
-                rollback_graph, rollback_fetch_error = await _safe_fetch_pipeline_graph()
-                if rollback_fetch_error or not isinstance(rollback_graph, dict):
-                    raise RuntimeError(rollback_fetch_error or "Rollback graph could not be read.")
-                after_graph = rollback_graph
-            except Exception as exc:
-                rollback_error = str(exc)
-                print("[analytics_api.py] Failed to roll back rejected agent graph:", exc)
-
-            rollback_nodes, rollback_edges = _graph_counts(after_graph)
-            reason = "; ".join(failed_messages) or sync.get("message") or "No valid graph change was persisted."
-            sync.update({
-                "status": "rejected",
-                "guardrail_passed": False,
-                "graph_safe_to_apply": False,
-                "rollback_applied": rollback_error is None,
-                "node_count": rollback_nodes,
-                "edge_count": rollback_edges,
-                "updated_at": after_graph.get("updated_at") if isinstance(after_graph, dict) else None,
-                "message": (
-                    f"The agent result was rejected and the pre-turn pipeline was preserved. {reason}"
-                    if rollback_error is None
-                    else f"The agent result was invalid and automatic rollback also failed: {rollback_error}"
-                ),
-            })
-            assistant_message = (
-                "I couldn't safely apply that pipeline design, so I preserved the pipeline "
-                f"from before this request. Validation details: {reason}"
-            )
-
-        if (
-            sync["guardrail_passed"]
-            and isinstance(after_graph, dict)
-            and _looks_like_internal_agent_message(assistant_message)
-        ):
-            assistant_message = _pipeline_design_completion_message(after_graph)
-
-        if sync["guardrail_passed"] and isinstance(after_graph, dict):
-            pipeline = after_graph.get("pipeline") if isinstance(after_graph.get("pipeline"), dict) else {}
-            version_uid_to_save = active_version_uid or str(pipeline.get("active_version_uid") or "main")
-            version_name_to_save = active_version_name or str(pipeline.get("active_version_name") or pipeline.get("version") or "")
-            if version_uid_to_save == "main":
-                version_name_to_save = "Main"
-            try:
-                await save_active_pipeline_version(
-                    after_graph,
-                    version_uid_to_save,
-                    version_name_to_save,
-                    authorization=authorization,
-                )
-            except Exception as exc:
-                print("[analytics_api.py] Failed to persist agent graph to active version:", exc)
-                sync["message"] = (
-                    (sync.get("message") or "Agent graph sync completed.")
-                    + f" Active version save failed: {exc}"
-                )
-                sync["guardrail_passed"] = False
-                # The live graph itself is still validated and safe to show even
-                # though its version snapshot could not be updated.
-                sync["graph_safe_to_apply"] = True
-
-        if sync["guardrail_passed"]:
-            new_state = await team.save_state()
-            save_state_to_disk(session_id, new_state)
-        else:
-            clear_state_from_disk(session_id)
-        return assistant_message, after_graph, sync
-
     try:
-        assistant_message, graph, sync = asyncio.run(run_turn())
+        turn = run_cancellable_pipeline_turn(
+            turn_id,
+            run_pipeline_editor_turn(
+                user_message=user_message,
+                canvas_graph=canvas_graph,
+                active_version_uid=active_version_uid,
+                active_version_name=active_version_name,
+                session_id=session_id,
+                llm_config=llm_config,
+                authorization=authorization,
+            ),
+        )
+        assistant_message, graph, sync = (
+            turn.assistant_message,
+            turn.graph,
+            turn.sync,
+        )
         return jsonify({
             "session_id": session_id,
+            "turn_id": turn_id,
             "assistant_message": assistant_message,
             "graph": graph,
             "sync": sync,
         }), 200
+    except PipelineEditorTurnCancelled as exc:
+        return jsonify({
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "status": "cancelled",
+            "rollback_applied": exc.rollback_applied,
+            "assistant_message": (
+                "Stopped. The pipeline from before this request was restored."
+                if exc.rollback_applied
+                else "Stopped, but the previous pipeline could not be restored automatically."
+            ),
+        }), 409
+    except asyncio.CancelledError:
+        return jsonify({
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "status": "cancelled",
+            "rollback_applied": True,
+            "assistant_message": "Stopped before the agent turn started.",
+        }), 409
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/simple_chat/cancel", methods=["POST", "OPTIONS"])
+@app.route("/agentic_pipeline_editor/cancel", methods=["POST", "OPTIONS"])
+@require_auth
+def agentic_pipeline_editor_cancel():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+
+    payload = request.get_json(force=True) or {}
+    turn_id = str(payload.get("turn_id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", turn_id):
+        return jsonify({"error": "A valid turn_id is required"}), 400
+    return jsonify(request_pipeline_turn_cancel(turn_id)), 202
 
 
 @app.route("/simple_chat/reset", methods=["POST", "OPTIONS"])

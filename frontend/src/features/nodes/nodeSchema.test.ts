@@ -14,6 +14,7 @@ import {
   normalizeSecretParamKeys,
   normalizeType,
   pickBackendUpdatableProps,
+  typeSupportsInputFiles,
 } from "@/features/nodes/nodeSchema";
 
 
@@ -100,6 +101,14 @@ describe("node schema compatibility", () => {
     expect(getNodeFileRole("observations.csv")).toBe("data");
   });
 
+  it("offers input-file attachments to every Source and Task", () => {
+    expect(typeSupportsInputFiles("task")).toBe(true);
+    expect(typeSupportsInputFiles("source")).toBe(true);
+    expect(typeSupportsInputFiles("destination")).toBe(false);
+    expect(typeSupportsInputFiles("flow")).toBe(false);
+    expect(typeSupportsInputFiles("subpipeline")).toBe(false);
+  });
+
   it("persists structural metadata without technology-specific graph types", () => {
     const properties = pickBackendUpdatableProps(
       "9",
@@ -139,6 +148,27 @@ describe("node schema compatibility", () => {
       definition_version: 2,
       implementation: { kind: "container", image: "example/asr:1" },
     });
+  });
+
+  it("uses parameters and description for sources without a secondary config channel", () => {
+    const properties = pickBackendUpdatableProps(
+      "source-1",
+      {
+        label: "Orders",
+        description: "CSV order files arriving each morning",
+        param: { delimiter: ";" },
+        content: "obsolete source notes",
+        source_config: { encoding: "windows-1252" },
+      },
+      "source",
+    );
+
+    expect(properties).toMatchObject({
+      description: "CSV order files arriving each morning",
+      param: { delimiter: ";" },
+    });
+    expect(properties).not.toHaveProperty("content");
+    expect(properties).not.toHaveProperty("source_config");
   });
 
   it("detects text and image previews", () => {

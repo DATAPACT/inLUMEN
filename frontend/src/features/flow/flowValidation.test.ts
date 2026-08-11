@@ -1,10 +1,42 @@
 import { describe, expect, it } from "vitest";
 
 import { normalizeGraph } from "@/features/flow/flowGraph";
-import { validateGraph } from "@/features/flow/flowValidation";
+import { getValidationIssueSubject, validateGraph } from "@/features/flow/flowValidation";
 import { conversationUnderstandingSubpipeline, publicPortsForSubpipeline } from "@/features/flow/subpipeline";
 
 describe("pipeline design validation", () => {
+  it("describes every issue with its node or connection subject", () => {
+    const nodes = [
+      {
+        id: "transcription",
+        position: { x: 0, y: 0 },
+        data: { type: "task", label: "Transcription", template_label: "Speech-to-Text" },
+      },
+      {
+        id: "sentiment",
+        position: { x: 1, y: 0 },
+        data: { type: "task", label: "Sentiment Analysis", template_label: "Sentiment Analysis" },
+      },
+    ];
+    const edges = [{ id: "transcription-sentiment", source: "transcription", target: "sentiment" }];
+
+    expect(getValidationIssueSubject({
+      severity: "warning",
+      category: "implementation",
+      code: "missing-code",
+      nodeId: "transcription",
+      message: "Missing code.",
+    }, nodes, edges)).toEqual({ label: "Transcription", context: "Task · Speech-to-Text" });
+
+    expect(getValidationIssueSubject({
+      severity: "error",
+      category: "graph",
+      code: "duplicate-edge",
+      edgeId: "transcription-sentiment",
+      message: "Duplicate connection.",
+    }, nodes, edges)).toEqual({ label: "Transcription → Sentiment Analysis", context: "Connection" });
+  });
+
   it("reports missing required inputs, parameters, outputs, and implementation issues", () => {
     const graph = normalizeGraph({
       nodes: [{
@@ -28,6 +60,86 @@ describe("pipeline design validation", () => {
       "missing-parameter-value",
       "missing-required-parameter",
       "missing-container-image",
+    ]));
+  });
+
+  it("keeps sample inputs separate from executable Task code", () => {
+    const graph = normalizeGraph({
+      nodes: [{
+        id: "task",
+        position: { x: 0, y: 0 },
+        data: {
+          type: "task",
+          implementation: { kind: "python", language: "python" },
+          files: [
+            { filename: "records.csv", role: "data" },
+            { filename: "requirements.txt", role: "code" },
+          ],
+        },
+      }],
+      edges: [],
+    });
+
+    const draftIssue = validateGraph(graph.nodes, graph.edges, { mode: "draft" }).issues
+      .find((issue) => issue.code === "missing-code");
+    const completeIssue = validateGraph(graph.nodes, graph.edges).issues
+      .find((issue) => issue.code === "missing-code");
+
+    expect(draftIssue?.severity).toBe("warning");
+    expect(completeIssue?.severity).toBe("error");
+
+    graph.nodes[0].data.files = [
+      { filename: "records.csv", role: "data" },
+      { filename: "main.py", role: "code" },
+    ];
+    const missingEntrypoint = validateGraph(graph.nodes, graph.edges, { mode: "draft" }).issues
+      .find((issue) => issue.code === "missing-entrypoint");
+    expect(missingEntrypoint?.severity).toBe("warning");
+
+    graph.nodes[0].data.implementation = {
+      ...graph.nodes[0].data.implementation,
+      entrypoint: "main.py",
+    };
+    expect(validateGraph(graph.nodes, graph.edges).issues).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ category: "implementation" }),
+      ]),
+    );
+  });
+
+  it("reports missing code independently on every code-backed Task", () => {
+    const graph = normalizeGraph({
+      nodes: [
+        {
+          id: "transcription",
+          position: { x: 0, y: 0 },
+          data: {
+            type: "task",
+            implementation: { kind: "python", language: "python" },
+          },
+        },
+        {
+          id: "sentiment",
+          position: { x: 1, y: 0 },
+          data: {
+            type: "task",
+            implementation: {
+              kind: "generated-code",
+              task: "text-classification",
+              execution_profile: "trusted_heavy_model",
+            },
+          },
+        },
+      ],
+      edges: [],
+    });
+
+    const report = validateGraph(graph.nodes, graph.edges, { mode: "draft" });
+    expect(report.byNode.transcription).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "missing-code", severity: "warning" }),
+    ]));
+    expect(report.byNode.sentiment).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "missing-code", severity: "warning" }),
     ]));
   });
 

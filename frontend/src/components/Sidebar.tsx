@@ -1117,7 +1117,7 @@ export function Sidebar({
                   </summary>
                   <div className="min-w-0 border-t border-border p-2">
                     <p className="mb-2 text-xs leading-snug text-muted-foreground">
-                      Use this only to replace the attached fixture on a File or User Upload source for this run.
+                      Replace the attached pipeline input on a Source for this run.
                     </p>
                     <label className="flex min-w-0 cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-border bg-background px-2 py-2 text-xs hover:bg-muted">
                       <Upload className="h-3.5 w-3.5 shrink-0" />
@@ -1155,7 +1155,7 @@ export function Sidebar({
                       </div>
                     ) : (
                       <p className="mt-2 text-xs leading-snug text-muted-foreground">
-                        No override: the source's attached test fixture is used.
+                        No override: the source's attached pipeline input is used.
                       </p>
                     )}
                   </div>

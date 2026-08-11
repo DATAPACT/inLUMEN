@@ -84,10 +84,9 @@ class NodeDefinitionInstanceTest(unittest.TestCase):
             definition_data_from_properties(properties),
         )
 
-    def test_round_trips_template_source_and_reusable_pipeline_reference(self):
+    def test_round_trips_template_and_reusable_pipeline_reference(self):
         data = {
             "template": {"id": "source.rest-api", "name": "REST API"},
-            "source_config": {"base_url": "https://example.test"},
             "subpipeline": {
                 "version": 2,
                 "reference": {
@@ -105,10 +104,20 @@ class NodeDefinitionInstanceTest(unittest.TestCase):
         restored = definition_data_from_properties(properties)
 
         self.assertEqual(data["template"], restored["template"])
-        self.assertEqual(data["source_config"], restored["source_config"])
         self.assertEqual(data["subpipeline"]["reference"], restored["subpipeline"]["reference"])
         self.assertNotIn("resolved_graph", restored["subpipeline"])
         self.assertTrue(all(key.endswith("_json") for key in properties))
+
+    def test_source_config_is_not_persisted_or_restored(self):
+        properties = definition_properties_from_data({
+            "source_config": {"base_url": "https://example.test"},
+        })
+        restored = definition_data_from_properties({
+            "source_config_json": '{"base_url":"https://legacy.test"}',
+        })
+
+        self.assertEqual({}, properties)
+        self.assertEqual({}, restored)
 
     def test_preserves_legacy_embedded_graph_until_it_is_converted(self):
         legacy_graph = {"nodes": [{"id": "legacy-step"}], "edges": []}

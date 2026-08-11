@@ -22,7 +22,22 @@ describe("Subpipeline contracts", () => {
         internal: { node: "conversation-output", port: "conversation_analysis" },
       }],
     });
-    expect(validateGraph(definition.graph.nodes, definition.graph.edges).valid).toBe(true);
+    const designValidation = validateGraph(
+      definition.graph.nodes,
+      definition.graph.edges,
+      { mode: "draft" },
+    );
+    expect(designValidation.valid).toBe(true);
+    [
+      "transcription",
+      "pii-redaction",
+      "sentiment-analysis",
+      "conversation-summary",
+    ].forEach((nodeId) => {
+      expect(designValidation.byNode[nodeId]).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "missing-code", severity: "warning" }),
+      ]));
+    });
   });
 
   it("derives public ports from nested boundaries and removes internal mappings", () => {

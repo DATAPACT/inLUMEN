@@ -59,7 +59,11 @@ import {
   generationRunId,
   isRestorableGenerationRun,
 } from '@/features/flow/generationState';
-import { validateGraph, type ValidationIssue } from '@/features/flow/flowValidation';
+import {
+  getValidationIssueSubject,
+  validateGraph,
+  type ValidationIssue,
+} from '@/features/flow/flowValidation';
 import { normalizeNodePorts, normalizeType } from '@/features/nodes/nodeSchema';
 import { remapSubpipelineParentEdges } from '@/features/flow/subpipeline';
 import {
@@ -1624,28 +1628,35 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
             </div>
           ) : (
             <div className="space-y-2">
-              {designValidation.issues.map((issue, index) => (
-                <button
-                  key={`${issue.code}-${issue.nodeId || issue.edgeId || index}`}
-                  type="button"
-                  onClick={() => openValidationIssue(issue)}
-                  className={cn(
-                    "flex w-full items-start gap-2 rounded-lg border p-3 text-left text-sm transition-colors hover:bg-muted/60",
-                    issue.severity === "error"
-                      ? "border-red-500/30 bg-red-500/5"
-                      : "border-amber-500/30 bg-amber-500/5",
-                  )}
-                >
-                  <AlertCircle className={cn(
-                    "mt-0.5 h-4 w-4 shrink-0",
-                    issue.severity === "error" ? "text-red-500" : "text-amber-500",
-                  )} />
-                  <span>
-                    <span className="block font-medium capitalize">{issue.severity} · {issue.category}</span>
-                    <span className="text-muted-foreground">{issue.message}</span>
-                  </span>
-                </button>
-              ))}
+              {designValidation.issues.map((issue, index) => {
+                const subject = getValidationIssueSubject(issue, displayedNodes, edges);
+                return (
+                  <button
+                    key={`${issue.code}-${issue.nodeId || issue.edgeId || index}`}
+                    type="button"
+                    onClick={() => openValidationIssue(issue)}
+                    aria-label={`${subject.label}: ${issue.message}`}
+                    className={cn(
+                      "flex w-full items-start gap-2 rounded-lg border p-3 text-left text-sm transition-colors hover:bg-muted/60",
+                      issue.severity === "error"
+                        ? "border-red-500/30 bg-red-500/5"
+                        : "border-amber-500/30 bg-amber-500/5",
+                    )}
+                  >
+                    <AlertCircle className={cn(
+                      "mt-0.5 h-4 w-4 shrink-0",
+                      issue.severity === "error" ? "text-red-500" : "text-amber-500",
+                    )} />
+                    <span className="min-w-0">
+                      <span className="block truncate font-semibold text-foreground">{subject.label}</span>
+                      <span className="block text-xs font-medium capitalize text-muted-foreground">
+                        {subject.context} · {issue.severity} · {issue.category}
+                      </span>
+                      <span className="mt-1 block text-muted-foreground">{issue.message}</span>
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           )}
         </DialogContent>
@@ -1677,7 +1688,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
                 builds the shared Dagster and Argo images from these packages.
               </p>
               <p className="text-xs text-muted-foreground">
-                To attach generated code: select a node, open Inspector, and use Runtime Package. Actual input files belong in the Run tab; Test Fixtures are only for repeatable design-time tests.
+                To attach generated code: select a node, open Inspector, and use Runtime Package. Source Input Files provide the pipeline input; Task Sample Inputs support code generation and repeatable tests. Run-tab files override source inputs for one run.
               </p>
             </div>
 

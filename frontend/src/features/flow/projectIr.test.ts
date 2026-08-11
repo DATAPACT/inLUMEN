@@ -58,6 +58,36 @@ describe("Project JSON Pipeline IR", () => {
     expect(roundTrip.edges[0]).toMatchObject({ sourceHandle: "data", targetHandle: "data" });
   });
 
+  it("does not export or restore obsolete source configuration", () => {
+    const graph = normalizeGraph({
+      nodes: [{
+        id: "source",
+        position: { x: 0, y: 0 },
+        data: {
+          type: "source",
+          source_config: { base_url: "https://legacy.test" },
+        },
+      }],
+      edges: [],
+    });
+
+    const document = createProjectDocument(graph);
+    expect(document.pipeline.nodes[0]).not.toHaveProperty("source_configuration");
+
+    const legacyDocument = {
+      ...document,
+      pipeline: {
+        ...document.pipeline,
+        nodes: document.pipeline.nodes.map((node) => ({
+          ...node,
+          source_configuration: { base_url: "https://legacy.test" },
+        })),
+      },
+    };
+    const restored = projectDocumentToGraph(legacyDocument);
+    expect(restored.nodes[0].data).not.toHaveProperty("source_config");
+  });
+
   it("round-trips a pinned reusable-pipeline reference and interface", () => {
     const reusable = conversationUnderstandingSubpipeline();
     const definition = {
