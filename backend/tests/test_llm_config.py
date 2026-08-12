@@ -77,6 +77,13 @@ class LLMConfigTest(unittest.TestCase):
             {"provider": {"only": ["cerebras"]}},
             client_mock.call_args.kwargs["extra_body"],
         )
+        self.assertEqual(
+            {
+                "HTTP-Referer": "https://github.com/DATAPACT/inLUMEN",
+                "X-OpenRouter-Title": "inLUMEN",
+            },
+            client_mock.call_args.kwargs["default_headers"],
+        )
 
 
 if __name__ == "__main__":

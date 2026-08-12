@@ -234,6 +234,7 @@ const Index = () => {
   const [configs, setConfigs] = useState<ChatbotConfig[]>([]);
   const [selectedConfig, setSelectedConfig] = useState<ChatbotConfig | null>(null);
   const [isConfigFormOpen, setIsConfigFormOpen] = useState(false);
+  const [isConfigMenuOpen, setIsConfigMenuOpen] = useState(false);
   const [configToEdit, setConfigToEdit] = useState<ChatbotConfig | undefined>(undefined);
   const [versionsRefreshKey, setVersionsRefreshKey] = useState(0);
   const [isRestoringVersion, setIsRestoringVersion] = useState(false);
@@ -814,12 +815,14 @@ const Index = () => {
   };
 
   const handleCreateConfig = () => {
+    setIsConfigMenuOpen(false);
     setConfigToEdit(undefined);
     setIsConfigFormOpen(true);
   };
 
   const handleEditConfig = (config: ChatbotConfig) => {
     if (config.readOnly) return;
+    setIsConfigMenuOpen(false);
     setConfigToEdit(config);
     setIsConfigFormOpen(true);
   };
@@ -1076,7 +1079,7 @@ const Index = () => {
         updatedAt,
       });
       toast.success("Workspace cleared", {
-        description: "Main is empty, saved versions are deleted, chat is reset, and provenance is clean.",
+        description: "Main is empty; versions, chat, provenance, and generation history are cleared.",
       });
     } catch (error) {
       console.error("Error clearing workspace:", error);
@@ -1206,6 +1209,7 @@ const Index = () => {
                   onActiveVersionNameChange={handleActiveVersionNameChange}
                   onPipelineDescriptionChange={setActivePipelineDescription}
                   onDisplayModeChange={setIsCanvasAdvanced}
+                  workspaceResetKey={workspaceResetKey}
                   flowCanvasRef={flowCanvasRef}
                 />
               </div>
@@ -1411,7 +1415,7 @@ const Index = () => {
                   {activeConfig.baseUrl}
                 </div>
               </div>
-              <DropdownMenu>
+              <DropdownMenu open={isConfigMenuOpen} onOpenChange={setIsConfigMenuOpen}>
                 <DropdownMenuTrigger asChild>
                   <Button variant="outline" className="w-full justify-between">
                     <span className="min-w-0 truncate text-left">

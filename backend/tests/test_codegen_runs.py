@@ -1,8 +1,10 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from codegen_runs import CodegenRunStore
+import inlumen_api
 
 
 class CodegenRunStoreTests(unittest.TestCase):
@@ -51,6 +53,25 @@ class CodegenRunStoreTests(unittest.TestCase):
             ["newer", "older"],
             [record["run_id"] for record in store.list(limit=10)],
         )
+
+    def test_workspace_cleanup_clears_gateway_and_private_service_history(self):
+        store = CodegenRunStore(":memory:")
+        store.put({"run_id": "old-run", "status": "valid"})
+
+        with (
+            patch.object(inlumen_api, "CODEGEN_RUN_STORE", store),
+            patch.object(
+                inlumen_api,
+                "_clear_codegen_pipeline_runs_request",
+                return_value={"status": "cleared", "deleted_count": 1},
+            ) as remote_clear,
+        ):
+            result = inlumen_api._clear_codegen_run_history()
+
+        self.assertEqual([], store.list(limit=10))
+        self.assertEqual("cleared", result["status"])
+        self.assertEqual(1, result["deleted_count"])
+        remote_clear.assert_called_once_with()
 
 
 if __name__ == "__main__":

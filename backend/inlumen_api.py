@@ -886,6 +886,51 @@ def _cancel_codegen_pipeline_run_request(run_id: str) -> dict[str, Any]:
     return parsed
 
 
+def _clear_codegen_pipeline_runs_request() -> dict[str, Any]:
+    http_request = Request(
+        f"{CODEGEN_SERVICE_URL}/v1/generate/pipeline-scripts/runs",
+        headers=_codegen_request_headers(include_content_type=False),
+        method="DELETE",
+    )
+    try:
+        with urlopen(
+            http_request,
+            timeout=min(CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS, 10),
+        ) as response:
+            response_payload = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Codegen service rejected history cleanup: {exc.code} {detail}"
+        ) from exc
+    except URLError as exc:
+        raise RuntimeError(
+            f"Codegen service unavailable at {CODEGEN_SERVICE_URL}: {exc}"
+        ) from exc
+    parsed = json.loads(response_payload)
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Codegen service returned an invalid cleanup response")
+    return parsed
+
+
+def _clear_codegen_run_history() -> dict[str, Any]:
+    """Clear gateway history even if the private service is unavailable."""
+    deleted_count = len(CODEGEN_RUN_STORE.list(limit=100))
+    remote_cleanup: dict[str, Any] | None = None
+    warning = ""
+    try:
+        remote_cleanup = _clear_codegen_pipeline_runs_request()
+    except Exception as exc:
+        warning = str(exc)
+    CODEGEN_RUN_STORE.clear()
+    return {
+        "status": "cleared",
+        "deleted_count": deleted_count,
+        "remote_cleanup": remote_cleanup,
+        **({"warning": warning} if warning else {}),
+    }
+
+
 def _prepare_codegen_request(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
@@ -2147,15 +2192,18 @@ def workspace_clear_all():
     if session_id:
         clear_state_from_disk(session_id)
         chat_reset = True
+    generation_cleanup = _clear_codegen_run_history()
 
     if isinstance(graph_payload, dict):
         graph_payload["storage_cleanup"] = storage_cleanup
         graph_payload["chat_reset"] = chat_reset
+        graph_payload["generation_cleanup"] = generation_cleanup
         return jsonify(graph_payload), graph_response.status_code
     return jsonify({
         "graph": graph_payload,
         "storage_cleanup": storage_cleanup,
         "chat_reset": chat_reset,
+        "generation_cleanup": generation_cleanup,
     }), graph_response.status_code
 
 
@@ -2426,7 +2474,10 @@ def pipeline_external_runtime_prompt():
         return _json_error(502, "external AI runtime prompt preparation failed", str(exc))
 
 
-@app.route("/api/pipeline/generation-runs", methods=["GET", "POST", "OPTIONS"])
+@app.route(
+    "/api/pipeline/generation-runs",
+    methods=["GET", "POST", "DELETE", "OPTIONS"],
+)
 @require_auth
 def pipeline_generation_runs():
     if request.method == "OPTIONS":
@@ -2444,6 +2495,8 @@ def pipeline_generation_runs():
                 ]
             }
         ), 200
+    if request.method == "DELETE":
+        return jsonify(_clear_codegen_run_history()), 200
     payload = _request_json()
     try:
         graph_response = _proxy(

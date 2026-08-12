@@ -46,6 +46,7 @@ from .schemas import (
     GenerateNodeScriptResponse,
     GeneratePipelineScriptsRequest,
     GeneratePipelineScriptsResponse,
+    GenerationUsage,
     GenerationContext,
     GraphContext,
     PipelineGeneratedNode,
@@ -73,6 +74,7 @@ from .validation import (
 GENERATOR_VERSION = "0.1.0"
 
 PipelineProgressCallback = Callable[[PipelineGenerationRun], Awaitable[None] | None]
+GenerationUsageCallback = Callable[[GenerationUsage], Awaitable[None] | None]
 
 
 async def emit_pipeline_progress(
@@ -110,8 +112,19 @@ def threadsafe_stage_callback(
 
 async def generate_node_script_bundle(
     request: GenerateNodeScriptRequest,
+    *,
+    usage_callback: GenerationUsageCallback | None = None,
 ) -> GenerateNodeScriptResponse:
     used_fallback = False
+    generation_usage = GenerationUsage()
+
+    async def record_usage(usage: GenerationUsage) -> None:
+        generation_usage.add(usage)
+        if usage_callback is not None:
+            callback_result = usage_callback(usage)
+            if inspect.isawaitable(callback_result):
+                await callback_result
+
     if request.llm_config is None:
         if not request.options.allow_deterministic_fallback:
             raise LLMGenerationError("Code-generation model configuration is required.")
@@ -119,7 +132,11 @@ async def generate_node_script_bundle(
         used_fallback = True
     else:
         try:
-            payload = await generate_node_payload(request.llm_config, request)
+            payload = await generate_node_payload(
+                request.llm_config,
+                request,
+                record_usage,
+            )
         except LLMGenerationError:
             if not request.options.allow_deterministic_fallback:
                 raise
@@ -139,6 +156,7 @@ async def generate_node_script_bundle(
                 request,
                 payload,
                 validation,
+                record_usage,
             )
         except LLMGenerationError:
             if not request.options.allow_deterministic_fallback:
@@ -178,6 +196,9 @@ async def generate_node_script_bundle(
         data_contract=data_contract,
         files=files,
         validation_report=validation,
+        generation_usage=(
+            generation_usage if generation_usage.request_count > 0 else None
+        ),
     )
     return GenerateNodeScriptResponse(
         flow_id=request.context.target_node.flow_id,
@@ -297,7 +318,15 @@ async def generate_pipeline_script_bundles_pipeline_first(
             )
             for node in plan["nodes"]
         ],
+        generation_usage=GenerationUsage(),
     )
+
+    async def record_usage(usage: GenerationUsage) -> None:
+        if run.generation_usage is None:
+            run.generation_usage = GenerationUsage()
+        run.generation_usage.add(usage)
+        await emit_pipeline_progress(progress_callback, run)
+
     await emit_pipeline_progress(progress_callback, run)
 
     await set_running_pipeline_stage(run, "pipeline_generation", progress_callback)
@@ -314,6 +343,7 @@ async def generate_pipeline_script_bundles_pipeline_first(
                 request.llm_config,
                 plan,
                 request.options.user_instruction,
+                record_usage,
             )
         except LLMGenerationError:
             if not request.options.allow_deterministic_fallback:
@@ -354,6 +384,7 @@ async def generate_pipeline_script_bundles_pipeline_first(
                 payload,
                 integration_validation,
                 request.options.user_instruction,
+                record_usage,
             )
         except LLMGenerationError:
             if not request.options.allow_deterministic_fallback:
@@ -1015,6 +1046,13 @@ async def generate_pipeline_script_bundles_node_first(
                 + ", ".join(config_targets)
             )
     run = PipelineGenerationRun(run_id=run_id or uuid.uuid4().hex)
+
+    async def record_usage(usage: GenerationUsage) -> None:
+        if run.generation_usage is None:
+            run.generation_usage = GenerationUsage()
+        run.generation_usage.add(usage)
+        await emit_pipeline_progress(progress_callback, run)
+
     edge_contracts: list[EdgeDataContract] = []
     outputs_by_node: dict[str, list[ExpectedArtifact]] = {}
     handoff_outputs_by_node: dict[str, list[FileDescriptor]] = {}
@@ -1214,7 +1252,8 @@ async def generate_pipeline_script_bundles_node_first(
                     # validated artifact for downstream nodes.
                     options=request.options,
                     llm_config=request.llm_config,
-                )
+                ),
+                usage_callback=record_usage,
             )
             artifact = node_response.generated_artifact
             step.stage = "static_validation"

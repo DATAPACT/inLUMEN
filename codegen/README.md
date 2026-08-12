@@ -29,6 +29,10 @@ Provider keys arrive in `X-LLM-API-Key`, are kept only in the active in-memory
 request, and are excluded from SQLite. A resumed run receives a fresh key from
 the currently selected inLUMEN model configuration.
 
+OpenRouter responses contribute provider-reported token counts and USD cost to
+each durable generation run. Requests also include OpenRouter app-attribution
+headers using the inLUMEN repository URL and `inLUMEN` title.
+
 ## Authentication
 
 Generation endpoints require the internal service bearer token configured with

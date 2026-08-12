@@ -216,7 +216,7 @@ def test_pipeline_codegen_generates_every_canonical_node_type(
 ) -> None:
     captured: dict = {}
 
-    async def fake_generate(_config, plan, _user_instruction):
+    async def fake_generate(_config, plan, _user_instruction, _usage_callback=None):
         captured["plan"] = plan
         return deterministic_pipeline_payload(plan)
 
@@ -257,7 +257,7 @@ def test_flow_and_subpipeline_context_survives_planning_and_compilation(
 ) -> None:
     captured: dict = {}
 
-    async def fake_generate(_config, plan, _user_instruction):
+    async def fake_generate(_config, plan, _user_instruction, _usage_callback=None):
         captured["plan"] = plan
         return deterministic_pipeline_payload(plan)
 

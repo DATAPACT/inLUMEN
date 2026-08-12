@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import inspect
 import json
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
 
 from .schemas import (
     GenerateNodeScriptRequest,
+    GenerationUsage,
     LLMConfig,
     ValidationReport,
 )
@@ -15,6 +18,50 @@ from .schemas import (
 
 class LLMGenerationError(RuntimeError):
     """Raised when the configured coding model cannot return a JSON artifact."""
+
+
+UsageCallback = Callable[[GenerationUsage], Awaitable[None] | None]
+
+
+def _openrouter_headers() -> dict[str, str]:
+    return {
+        "HTTP-Referer": "https://github.com/DATAPACT/inLUMEN",
+        "X-OpenRouter-Title": "inLUMEN",
+    }
+
+
+def _optional_nonnegative_number(value: Any, cast: type[int] | type[float]):
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        parsed = cast(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _usage_from_response(
+    payload: dict[str, Any],
+    *,
+    include_usd_cost: bool,
+) -> GenerationUsage:
+    raw = payload.get("usage")
+    if not isinstance(raw, dict):
+        return GenerationUsage(request_count=1)
+    return GenerationUsage(
+        request_count=1,
+        usage_reported_count=1,
+        prompt_tokens=_optional_nonnegative_number(raw.get("prompt_tokens"), int),
+        completion_tokens=_optional_nonnegative_number(
+            raw.get("completion_tokens"), int
+        ),
+        total_tokens=_optional_nonnegative_number(raw.get("total_tokens"), int),
+        cost_usd=(
+            _optional_nonnegative_number(raw.get("cost"), float)
+            if include_usd_cost
+            else None
+        ),
+    )
 
 
 def _chat_completions_url(base_url: str) -> str:
@@ -55,6 +102,7 @@ async def generate_json(
     *,
     system_prompt: str,
     user_prompt: str,
+    usage_callback: UsageCallback | None = None,
 ) -> dict[str, Any]:
     if not config.model.strip():
         raise LLMGenerationError("Code-generation model is not configured.")
@@ -83,6 +131,11 @@ async def generate_json(
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
+    if config.provider.strip().lower().replace("-", "_") in {
+        "openrouter",
+        "open_router",
+    }:
+        headers.update(_openrouter_headers())
     timeout = httpx.Timeout(max(1, config.timeout_seconds))
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -102,8 +155,29 @@ async def generate_json(
 
     try:
         response_payload = response.json()
+    except ValueError as exc:
+        raise LLMGenerationError(
+            "Coding model returned an unsupported chat-completions response."
+        ) from exc
+    if not isinstance(response_payload, dict):
+        raise LLMGenerationError(
+            "Coding model returned an unsupported chat-completions response."
+        )
+    if usage_callback is not None:
+        callback_result = usage_callback(
+            _usage_from_response(
+                response_payload,
+                include_usd_cost=(
+                    config.provider.strip().lower().replace("-", "_")
+                    in {"openrouter", "open_router"}
+                ),
+            )
+        )
+        if inspect.isawaitable(callback_result):
+            await callback_result
+    try:
         content = response_payload["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
+    except (KeyError, IndexError, TypeError) as exc:
         raise LLMGenerationError(
             "Coding model returned an unsupported chat-completions response."
         ) from exc
@@ -150,6 +224,7 @@ exec, os.system, or undeclared network access."""
 async def generate_node_payload(
     config: LLMConfig,
     request: GenerateNodeScriptRequest,
+    usage_callback: UsageCallback | None = None,
 ) -> dict[str, Any]:
     context = request.context.model_dump(mode="json")
     prompt = {
@@ -161,6 +236,7 @@ async def generate_node_payload(
         config,
         system_prompt=NODE_SYSTEM_PROMPT,
         user_prompt=json.dumps(prompt, ensure_ascii=False),
+        usage_callback=usage_callback,
     )
 
 
@@ -169,6 +245,7 @@ async def repair_node_payload(
     request: GenerateNodeScriptRequest,
     payload: dict[str, Any],
     validation: ValidationReport,
+    usage_callback: UsageCallback | None = None,
 ) -> dict[str, Any]:
     prompt = {
         "operation": "repair_node_runtime",
@@ -182,6 +259,7 @@ async def repair_node_payload(
         config,
         system_prompt=NODE_SYSTEM_PROMPT,
         user_prompt=json.dumps(prompt, ensure_ascii=False),
+        usage_callback=usage_callback,
     )
 
 
@@ -189,6 +267,7 @@ async def generate_pipeline_payload(
     config: LLMConfig,
     plan: dict[str, Any],
     user_instruction: str,
+    usage_callback: UsageCallback | None = None,
 ) -> dict[str, Any]:
     prompt = {
         "operation": "generate_canonical_pipeline",
@@ -199,6 +278,7 @@ async def generate_pipeline_payload(
         config,
         system_prompt=PIPELINE_SYSTEM_PROMPT,
         user_prompt=json.dumps(prompt, ensure_ascii=False),
+        usage_callback=usage_callback,
     )
 
 
@@ -208,6 +288,7 @@ async def repair_pipeline_payload(
     payload: dict[str, Any],
     validation: ValidationReport,
     user_instruction: str,
+    usage_callback: UsageCallback | None = None,
 ) -> dict[str, Any]:
     prompt = {
         "operation": "repair_canonical_pipeline",
@@ -221,4 +302,5 @@ async def repair_pipeline_payload(
         config,
         system_prompt=PIPELINE_SYSTEM_PROMPT,
         user_prompt=json.dumps(prompt, ensure_ascii=False),
+        usage_callback=usage_callback,
     )

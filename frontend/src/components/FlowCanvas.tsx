@@ -26,6 +26,7 @@ import {
   addEdgeToBackend,
   addNodeToBackend,
   cancelPipelineScriptGenerationRun,
+  clearPipelineScriptGenerationRuns,
   deleteEdgeFromBackend,
   deleteNodeFromBackend,
   fetchPipelineScriptGenerationRun,
@@ -106,6 +107,7 @@ interface FlowCanvasProps {
   onActiveVersionNameChange?: (versionName: string) => void;
   onPipelineDescriptionChange?: (description: string) => void;
   onDisplayModeChange?: (advanced: boolean) => void;
+  workspaceResetKey?: number;
 }
 
 export interface FlowCanvasRef {
@@ -270,6 +272,21 @@ const generationStatusLabel = (status: unknown) => {
   }[key] || key.replace(/_/g, " ");
 };
 
+const formatGenerationCost = (cost: number | null | undefined) => {
+  if (typeof cost !== "number" || !Number.isFinite(cost)) return "Not reported";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: cost > 0 && cost < 0.01 ? 4 : 2,
+    maximumFractionDigits: cost > 0 && cost < 0.0001 ? 8 : cost > 0 && cost < 0.01 ? 6 : 2,
+  }).format(cost);
+};
+
+const formatGenerationTokens = (tokens: number | null | undefined) => {
+  if (typeof tokens !== "number" || !Number.isFinite(tokens)) return "Not reported";
+  return new Intl.NumberFormat("en-US").format(tokens);
+};
+
 const getSnapshotFileRef = (file: unknown, nodeIdValue: string) => {
   if (typeof file === "string") return file;
   if (typeof File !== "undefined" && file instanceof File) return file.name;
@@ -421,6 +438,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   onActiveVersionNameChange,
   onPipelineDescriptionChange,
   onDisplayModeChange,
+  workspaceResetKey = 0,
 }, ref) => {
   const [nodes, setNodes] = useState<Node[]>(() => {
     const savedNodes = localStorage.getItem('ai-flow-nodes');
@@ -478,6 +496,28 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const [isRestoringGenerationCheckpoint, setIsRestoringGenerationCheckpoint] =
     useState(false);
   const [generationJob, setGenerationJob] = useState<PipelineGenerationJob | null>(null);
+  const generationHistoryResetVersionRef = useRef(0);
+  const resetGenerationHistoryState = useCallback(() => {
+    generationHistoryResetVersionRef.current += 1;
+    generationCancelRequestedRef.current = false;
+    handledGenerationRunsRef.current.clear();
+    generationPreflightRequestRef.current += 1;
+    localStorage.removeItem(ACTIVE_GENERATION_RUN_STORAGE_KEY);
+    setGenerationJob(null);
+    setRecentGenerationRuns([]);
+    setIsGeneratingScripts(false);
+    setIsCancellingScripts(false);
+    setIsScriptGenerationOpen(false);
+    setGenerationPreflight(null);
+    setGenerationPreflightError("");
+    setOverwriteProtectedCode(false);
+  }, []);
+  const previousWorkspaceResetKeyRef = useRef(workspaceResetKey);
+  useEffect(() => {
+    if (previousWorkspaceResetKeyRef.current === workspaceResetKey) return;
+    previousWorkspaceResetKeyRef.current = workspaceResetKey;
+    resetGenerationHistoryState();
+  }, [resetGenerationHistoryState, workspaceResetKey]);
   const rememberGenerationJob = useCallback((job: PipelineGenerationJob) => {
     setGenerationJob(job);
     const runId = generationRunId(job);
@@ -762,6 +802,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   useEffect(() => {
     let disposed = false;
     const restoreGenerationRun = async () => {
+      const resetVersion = generationHistoryResetVersionRef.current;
       const rememberedRunId = String(
         localStorage.getItem(ACTIVE_GENERATION_RUN_STORAGE_KEY) || "",
       ).trim();
@@ -791,7 +832,11 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           );
         }
       }
-      if (!disposed && restored) {
+      if (
+        !disposed
+        && restored
+        && resetVersion === generationHistoryResetVersionRef.current
+      ) {
         rememberGenerationJob(restored);
       }
     };
@@ -811,12 +856,18 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
     let disposed = false;
     let requestInFlight = false;
+    const resetVersion = generationHistoryResetVersionRef.current;
     const refresh = async () => {
       if (requestInFlight) return;
       requestInFlight = true;
       try {
         const latest = await fetchPipelineScriptGenerationRun(runId);
-        if (!disposed) rememberGenerationJob(latest);
+        if (
+          !disposed
+          && resetVersion === generationHistoryResetVersionRef.current
+        ) {
+          rememberGenerationJob(latest);
+        }
       } catch (error) {
         if (!disposed) {
           console.warn("[FlowCanvas.tsx] Generation progress refresh failed:", error);
@@ -1092,8 +1143,12 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   }, []);
 
   const loadRecentGenerationRuns = useCallback(async () => {
+    const resetVersion = generationHistoryResetVersionRef.current;
     try {
-      setRecentGenerationRuns(await listPipelineScriptGenerationRuns(8));
+      const runs = await listPipelineScriptGenerationRuns(8);
+      if (resetVersion === generationHistoryResetVersionRef.current) {
+        setRecentGenerationRuns(runs);
+      }
     } catch (error) {
       console.warn("[FlowCanvas.tsx] Could not load generation history:", error);
     }
@@ -1706,26 +1761,36 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   };
 
   const clearCanvas = async () => {
-    pushHistorySnapshot();
-    onCanvasEdited?.();
-    setNodes([]);
-    setEdges([]);
-    selectedNodeIdRef.current = null;
-    onNodeSelect(null);
-    localStorage.removeItem('ai-flow');
-    localStorage.removeItem('ai-flow-nodes');
-    localStorage.removeItem('ai-flow-edges');
-    nodeId = 1;
-    markLocalWrite(1200);
-    await rebuildBackendFromFlow([], []);
-    toast.success('Canvas cleared', {
-      description: 'All nodes and edges have been removed',
-    });
+    try {
+      await clearPipelineScriptGenerationRuns();
+      resetGenerationHistoryState();
+      pushHistorySnapshot();
+      onCanvasEdited?.();
+      setNodes([]);
+      setEdges([]);
+      selectedNodeIdRef.current = null;
+      onNodeSelect(null);
+      localStorage.removeItem('ai-flow');
+      localStorage.removeItem('ai-flow-nodes');
+      localStorage.removeItem('ai-flow-edges');
+      nodeId = 1;
+      markLocalWrite(1200);
+      await rebuildBackendFromFlow([], []);
+      toast.success('Canvas cleared', {
+        description: 'Nodes, edges, and generation history have been removed',
+      });
+    } catch (error) {
+      console.error('[FlowCanvas.tsx] Canvas cleanup failed:', error);
+      toast.error('Could not clear canvas', {
+        description: error instanceof Error ? error.message : 'Workspace cleanup failed.',
+      });
+    }
   };
 
   const generationSteps = generationJob?.generation_run?.steps || [];
   const generationProgress = generationProgressPercent(generationJob);
   const generationStatus = effectiveGenerationStatus(generationJob);
+  const generationUsage = generationJob?.generation_run?.generation_usage;
   const generationFailed = ["invalid", "failed"].includes(generationStatus);
   const repairableFailedStep = failedGenerationStep(generationJob);
   const canRepairFailedNode = Boolean(
@@ -2228,6 +2293,20 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
                     </span>
                   </div>
                   {isGeneratingScripts && <Progress value={generationProgress} className="mt-4" />}
+                  <div className="mt-4 grid grid-cols-2 gap-2 text-sm">
+                    <div className="rounded-md bg-background/60 p-3">
+                      <p className="text-xs text-muted-foreground">Generation cost</p>
+                      <p className="font-semibold">{formatGenerationCost(generationUsage?.cost_usd)}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {generationUsage?.request_count || 0} model request{generationUsage?.request_count === 1 ? "" : "s"}
+                      </p>
+                    </div>
+                    <div className="rounded-md bg-background/60 p-3">
+                      <p className="text-xs text-muted-foreground">Model tokens</p>
+                      <p className="font-semibold">{formatGenerationTokens(generationUsage?.total_tokens)}</p>
+                      <p className="text-xs text-muted-foreground">Provider-reported usage</p>
+                    </div>
+                  </div>
                   {generationSucceeded && (
                     <div className="mt-4 grid grid-cols-2 gap-2 text-sm">
                       <div className="rounded-md bg-background/60 p-3">
@@ -2414,6 +2493,7 @@ export const WrappedFlowCanvas = ({
   onActiveVersionNameChange,
   onPipelineDescriptionChange,
   onDisplayModeChange,
+  workspaceResetKey,
   flowCanvasRef,
 }: WrappedFlowCanvasProps) => (
   <ReactFlowProvider>
@@ -2432,6 +2512,7 @@ export const WrappedFlowCanvas = ({
       onActiveVersionNameChange={onActiveVersionNameChange}
       onPipelineDescriptionChange={onPipelineDescriptionChange}
       onDisplayModeChange={onDisplayModeChange}
+      workspaceResetKey={workspaceResetKey}
     />
   </ReactFlowProvider>
 );

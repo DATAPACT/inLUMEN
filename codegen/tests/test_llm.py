@@ -16,6 +16,12 @@ class FakeResponse:
 
     def json(self) -> dict:
         return {
+            "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 30,
+                "total_tokens": 150,
+                "cost": 0.0042,
+            },
             "choices": [
                 {
                     "message": {
@@ -28,6 +34,7 @@ class FakeResponse:
 
 def test_chat_completions_uses_dedicated_model_and_ephemeral_key(monkeypatch) -> None:
     captured: dict = {}
+    reported_usage = []
 
     class FakeClient:
         def __init__(self, **_kwargs) -> None:
@@ -52,18 +59,35 @@ def test_chat_completions_uses_dedicated_model_and_ephemeral_key(monkeypatch) ->
     )
 
     payload = asyncio.run(
-        generate_json(config, system_prompt="system", user_prompt="user")
+        generate_json(
+            config,
+            system_prompt="system",
+            user_prompt="user",
+            usage_callback=reported_usage.append,
+        )
     )
 
     assert payload == {"main_py": "print('ok')"}
     assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
     assert captured["body"]["model"] == "openai/gpt-5.2-codex"
     assert captured["headers"]["Authorization"] == "Bearer provider-secret"
+    assert captured["headers"]["HTTP-Referer"] == (
+        "https://github.com/DATAPACT/inLUMEN"
+    )
+    assert captured["headers"]["X-OpenRouter-Title"] == "inLUMEN"
+    assert reported_usage[0].model_dump() == {
+        "request_count": 1,
+        "usage_reported_count": 1,
+        "prompt_tokens": 120,
+        "completion_tokens": 30,
+        "total_tokens": 150,
+        "cost_usd": 0.0042,
+    }
     assert "provider-secret" not in config.model_dump_json()
 
 
 def test_node_endpoint_uses_ai_payload_without_generating_dockerfile(monkeypatch) -> None:
-    async def fake_generate(_config, request):
+    async def fake_generate(_config, request, _usage_callback=None):
         from app.generator import fallback_script_payload
 
         return fallback_script_payload(request)

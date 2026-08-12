@@ -160,7 +160,7 @@ def test_targeted_generation_forwards_llm_config(monkeypatch) -> None:
     targeted_payload["reusable_nodes"] = [reusable.model_dump(mode="json")]
     seen_models: list[str] = []
 
-    async def generate_from_config(config, request):
+    async def generate_from_config(config, request, _usage_callback=None):
         seen_models.append(config.model)
         return fallback_script_payload(request)
 

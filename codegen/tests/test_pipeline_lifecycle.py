@@ -123,6 +123,62 @@ def test_active_pipeline_job_can_be_cancelled(monkeypatch) -> None:
     assert cancelled_sandboxes == [run_id]
 
 
+def test_generation_history_cleanup_cancels_active_jobs(monkeypatch) -> None:
+    cancelled_sandboxes = []
+
+    async def slow_generation(
+        _request,
+        *,
+        run_id,
+        progress_callback,
+        **_kwargs,
+    ):
+        run = PipelineGenerationRun(
+            run_id=run_id,
+            steps=[
+                PipelineGenerationRunStep(
+                    flow_id="ingest",
+                    status="running",
+                    stage="pipeline_generation",
+                )
+            ],
+        )
+        await progress_callback(run)
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(main, "generate_pipeline_script_bundles", slow_generation)
+    monkeypatch.setattr(
+        main,
+        "cancel_sandbox_run",
+        lambda run_id: cancelled_sandboxes.append(run_id),
+    )
+
+    with TestClient(main.app) as client:
+        started = client.post(
+            "/v1/generate/pipeline-scripts/runs",
+            json=pipeline_payload("clear-history-test"),
+        )
+        run_id = started.json()["run_id"]
+        for _ in range(100):
+            current = client.get(
+                f"/v1/generate/pipeline-scripts/runs/{run_id}"
+            ).json()
+            if current.get("generation_run"):
+                break
+            time.sleep(0.01)
+
+        cleared = client.delete("/v1/generate/pipeline-scripts/runs")
+        remaining = client.get("/v1/generate/pipeline-scripts/runs").json()
+        missing = client.get(f"/v1/generate/pipeline-scripts/runs/{run_id}")
+
+    assert cleared.status_code == 200
+    assert cleared.json() == {"status": "cleared", "deleted_count": 1}
+    assert remaining == []
+    assert missing.status_code == 404
+    assert run_id not in main.PIPELINE_GENERATION_TASKS
+    assert cancelled_sandboxes == [run_id]
+
+
 def test_cancelled_status_wins_sandbox_shutdown_race(monkeypatch) -> None:
     async def generation_interrupted_by_teardown(
         _request,
@@ -206,6 +262,14 @@ def test_matching_valid_pipeline_run_uses_cache(monkeypatch) -> None:
     }
     assert second_body["generation_run"]["stage_timings_ms"] == {
         "validated_cache_lookup": 0
+    }
+    assert second_body["generation_run"]["generation_usage"] == {
+        "request_count": 0,
+        "usage_reported_count": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cost_usd": 0.0,
     }
 
 

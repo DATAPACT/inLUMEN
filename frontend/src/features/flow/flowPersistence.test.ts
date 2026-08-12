@@ -104,6 +104,28 @@ describe("background code generation", () => {
     );
   });
 
+  it("clears durable generation history through the collection endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      status: "cleared",
+      deleted_count: 3,
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    globalThis.fetch = fetchMock;
+    const { clearPipelineScriptGenerationRuns } = await import(
+      "@/features/flow/flowPersistence"
+    );
+
+    await clearPipelineScriptGenerationRuns();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toContain(
+      "/api/pipeline/generation-runs",
+    );
+    expect(fetchMock.mock.calls[0][1].method).toBe("DELETE");
+  });
+
   it("sends the dedicated code model instead of the chat model", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       run_id: "run-code",

@@ -19,6 +19,7 @@ from .schemas import (
     GenerateNodeScriptResponse,
     GeneratePipelineScriptsRequest,
     GeneratePipelineScriptsResponse,
+    GenerationUsage,
     LLMConfig,
     PipelineGenerationJobResponse,
     PipelineGenerationRun,
@@ -38,6 +39,7 @@ PIPELINE_JOB_STORE = PipelineJobStore(
 )
 PIPELINE_GENERATION_JOBS: dict[str, dict[str, Any]] = PIPELINE_JOB_STORE.load_all()
 PIPELINE_GENERATION_TASKS: dict[str, asyncio.Task[None]] = {}
+PIPELINE_GENERATION_PURGED_RUN_IDS: set[str] = set()
 PIPELINE_GENERATION_CACHE: OrderedDict[str, tuple[float, dict[str, Any]]] = (
     OrderedDict()
 )
@@ -87,6 +89,8 @@ def require_generation_model(
 
 
 def update_pipeline_job(run_id: str, **updates: Any) -> None:
+    if run_id in PIPELINE_GENERATION_PURGED_RUN_IDS:
+        return
     now = utc_now_iso()
     job = PIPELINE_GENERATION_JOBS.setdefault(
         run_id,
@@ -122,10 +126,12 @@ def clear_pipeline_job_llm_key(run_id: str) -> None:
     update_pipeline_job(run_id, request=safe_request)
 
 
-def clear_pipeline_job_state() -> None:
+def clear_pipeline_job_state(*, preserve_purged_run_ids: bool = False) -> None:
     """Clear job state for tests and explicit administrative resets."""
     PIPELINE_GENERATION_JOBS.clear()
     PIPELINE_JOB_STORE.clear()
+    if not preserve_purged_run_ids:
+        PIPELINE_GENERATION_PURGED_RUN_IDS.clear()
 
 
 def pipeline_cache_key(request: GeneratePipelineScriptsRequest) -> str:
@@ -165,6 +171,14 @@ def cached_pipeline_response(
     run.status = "valid"
     run.warnings = [*run.warnings, "Reused a matching validated pipeline result."]
     run.stage_timings_ms = {"validated_cache_lookup": 0}
+    run.generation_usage = GenerationUsage(
+        request_count=0,
+        usage_reported_count=0,
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        cost_usd=0.0,
+    )
     for step in run.steps:
         step.status = "valid"
         step.stage = "validated_cache_hit"
@@ -466,6 +480,44 @@ def list_pipeline_generation_runs(
     if not include_result:
         jobs = [{key: value for key, value in job.items() if key != "result"} for job in jobs]
     return [PipelineGenerationJobResponse.model_validate(job) for job in jobs]
+
+
+@app.delete(
+    "/v1/generate/pipeline-scripts/runs",
+    dependencies=SERVICE_AUTH,
+)
+async def clear_pipeline_generation_runs() -> dict[str, int | str]:
+    """Cancel active work and remove all durable generation history."""
+    run_ids = list(PIPELINE_GENERATION_JOBS)
+    active_run_ids = [
+        run_id
+        for run_id in run_ids
+        if str(PIPELINE_GENERATION_JOBS[run_id].get("status") or "").lower()
+        not in {"valid", "invalid", "failed", "cancelled"}
+    ]
+    for run_id in active_run_ids:
+        mark_pipeline_job_cancelled(run_id)
+    # Prevent callbacks from sandbox worker threads from recreating records
+    # after their owning workspace has been cleared.
+    PIPELINE_GENERATION_PURGED_RUN_IDS.update(run_ids)
+    if active_run_ids:
+        await asyncio.gather(
+            *(asyncio.to_thread(cancel_sandbox_run, run_id) for run_id in active_run_ids),
+            return_exceptions=True,
+        )
+    tasks = [
+        task
+        for run_id, task in list(PIPELINE_GENERATION_TASKS.items())
+        if run_id in active_run_ids
+    ]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    PIPELINE_GENERATION_TASKS.clear()
+    clear_pipeline_job_state(preserve_purged_run_ids=True)
+    PIPELINE_GENERATION_CACHE.clear()
+    return {"status": "cleared", "deleted_count": len(run_ids)}
 
 
 @app.post(

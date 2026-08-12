@@ -142,6 +142,14 @@ export type PipelineGenerationRun = {
   steps?: PipelineGenerationRunStep[];
   errors?: string[];
   warnings?: string[];
+  generation_usage?: {
+    request_count?: number;
+    usage_reported_count?: number;
+    prompt_tokens?: number | null;
+    completion_tokens?: number | null;
+    total_tokens?: number | null;
+    cost_usd?: number | null;
+  } | null;
 };
 
 export type PipelineGenerationJob = {
@@ -738,6 +746,25 @@ export const listPipelineScriptGenerationRuns = async (
   }
   const payload = await response.json().catch(() => ({ runs: [] }));
   return Array.isArray(payload?.runs) ? payload.runs : [];
+};
+
+export const clearPipelineScriptGenerationRuns = async (): Promise<void> => {
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/pipeline/generation-runs`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(async () => ({
+      error: await response.text().catch(() => ""),
+    }));
+    throw new Error(
+      formatPipelineGenerationError(
+        errorPayload,
+        response.status,
+        response.statusText,
+      ),
+    );
+  }
 };
 
 export const fetchPipelineScriptGenerationRun = async (

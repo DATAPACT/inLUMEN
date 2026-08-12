@@ -114,18 +114,18 @@ The picture below shows the component in the DATAPACT architecture.
 ![Component Diagram](./images/component-image.png)
 
 
-The current local deployment uses a simple gateway architecture. Frontend and CLI clients call only the backend gateway API; Neo4j, MinIO, and the OpenAI-compatible LLM provider remain behind the backend boundary.
+The current deployment uses a gateway architecture. Frontend and CLI/API clients call only the backend gateway API. The backend owns access to Neo4j and MinIO and brokers requests to the private code-generation service; local Compose also includes a deployment-validation service. Configured OpenRouter, Ollama Cloud, or custom OpenAI-compatible LLM providers remain external services reached through the backend/code-generation boundary.
 
 
-![Current inLUMEN Architecture](./images/current-architecture.svg)
+![Current inLUMEN Architecture](./images/current-architecture.png)
 
 ## **Component Definition**
 inLUMEN's core functionality is provided by LLM-powered agents that serve as helpful assistants in pipeline design, translating high-level business-level intents to pure AI/data pipeline design choices. inLUMEN agents reason on user intents and context, draw pipeline steps, and give recommandations according to compliance insights provided by the user or via tool integrations. They can also support deployment artitfact generation, making pipelines deployable. The chat dialog window enables human-machine interactions to co-design pipelines. inLUMEN integrates with external DATAPACT tools through public workflow and artifact APIs.
 
-[![inLUMEN Architecture](./images/conceptual_diagram_datapact_lumen.png)]
+![inLUMEN Architecture](./images/conceptual_diagram_datapact_lumen.png)
 
 ## **Screenshots**
-[![Dashboard](./images/dashboard.png)]
+![inLUMEN pipeline editor](./images/inlumen-editor.jpg)
 
 ## **Commercial Information**
 
@@ -291,7 +291,7 @@ database and worker queue. Production sandbox execution should likewise use
 isolated workers or cluster jobs rather than expose a host Docker socket beyond
 the dedicated codegen service.
 
-For OpenRouter, use your OpenRouter API key after adding the provider key in OpenRouter settings. The model fields provide live autocomplete, per-million input/output token pricing, and Cerebras availability. Selecting a Cerebras-hosted model pins that specific chat or code-generation request to the `cerebras` OpenRouter provider; a Cerebras BYOK key configured as prioritized in OpenRouter is then attempted before shared capacity. Short model aliases such as `gpt-oss-120b` are accepted by inLUMEN and normalized before the request is sent.
+For OpenRouter, use your OpenRouter API key after adding the provider key in OpenRouter settings. The model fields provide live autocomplete, per-million input/output token pricing, and Cerebras availability. Selecting a Cerebras-hosted model pins that specific chat or code-generation request to the `cerebras` OpenRouter provider; a Cerebras BYOK key configured as prioritized in OpenRouter is then attempted before shared capacity. Short model aliases such as `gpt-oss-120b` are accepted by inLUMEN and normalized before the request is sent. OpenRouter response usage is accumulated across generation and repair calls, then shown as USD cost and token usage in the generation run dialog. Chat and code-generation requests are automatically attributed to inLUMEN using the project repository URL and `inLUMEN` title.
 
 You can also use Ollama Cloud with base URL `https://ollama.com/v1` and an Ollama Cloud model such as `gpt-oss:120b`. For a custom on-prem service, select Custom / On premise and enter the OpenAI-compatible base URL, API key, and model name exposed by that service.
 

@@ -211,6 +211,28 @@ class ValidationReport(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class GenerationUsage(BaseModel):
+    """Provider-reported usage accumulated across one code-generation run."""
+
+    request_count: int = 0
+    usage_reported_count: int = 0
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    cost_usd: float | None = None
+
+    def add(self, usage: "GenerationUsage") -> None:
+        self.request_count += usage.request_count
+        self.usage_reported_count += usage.usage_reported_count
+        for field_name in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = getattr(usage, field_name)
+            if value is not None:
+                current = getattr(self, field_name)
+                setattr(self, field_name, (current or 0) + value)
+        if usage.cost_usd is not None:
+            self.cost_usd = (self.cost_usd or 0.0) + usage.cost_usd
+
+
 class GeneratedArtifact(BaseModel):
     status: Literal["current", "stale"] = "current"
     generator: str = "inlumen-codegen-service"
@@ -219,6 +241,7 @@ class GeneratedArtifact(BaseModel):
     data_contract: DataContract
     files: list[GeneratedFile]
     validation_report: ValidationReport
+    generation_usage: GenerationUsage | None = None
 
 
 class GenerateNodeScriptResponse(BaseModel):
@@ -287,6 +310,7 @@ class PipelineGenerationRun(BaseModel):
     errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     stage_timings_ms: dict[str, int] = Field(default_factory=dict)
+    generation_usage: GenerationUsage | None = None
 
 
 class GeneratePipelineScriptsResponse(BaseModel):
