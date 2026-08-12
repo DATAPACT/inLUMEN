@@ -357,6 +357,8 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         inputs_by_filename = {
             entry["filename"]: entry for entry in input_manifest["inputs"]
         }
+        # Explicit legacy binary declarations remain compatible; newly inferred
+        # WAV descriptors use the more specific audio kind.
         self.assertEqual("binary", inputs_by_filename["sample.wav"]["kind"])
         self.assertEqual("wav", inputs_by_filename["sample.wav"]["format"])
         binary_file = next(
@@ -569,7 +571,7 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
     def test_bundle_input_manifest_classifies_supported_modalities(self):
         payload = deepcopy(codegen_payload())
         additional_inputs = {
-            "document.pdf": "binary",
+            "document.pdf": "document",
             "photo.png": "image",
             "notes.txt": "text",
             "events.json": "json",

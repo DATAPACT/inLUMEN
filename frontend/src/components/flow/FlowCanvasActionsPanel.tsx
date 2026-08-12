@@ -118,10 +118,10 @@ export const FlowCanvasActionsPanel = ({
         variant="ghost"
         className="flex h-7 items-center gap-1 px-2"
         onClick={onGenerateScripts}
-        title={isGeneratingScripts ? "View background code-generation progress" : "Generate runtime scripts"}
+        title={isGeneratingScripts ? "View background code-generation progress" : "Generate runtime code"}
       >
         <Wand2 className={isGeneratingScripts ? "h-3.5 w-3.5 animate-pulse" : "h-3.5 w-3.5"} />
-        {isGeneratingScripts ? "View run" : "Scripts"}
+        {isGeneratingScripts ? "View run" : "Generate code"}
       </Button>
       <Button
         size="sm"

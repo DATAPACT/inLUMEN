@@ -10,6 +10,11 @@ describe("background generation state", () => {
   it("restores only a genuinely active generation run", () => {
     expect(isRestorableGenerationRun({ run_id: "queued-1", status: "queued" })).toBe(true);
     expect(isRestorableGenerationRun({ run_id: "running-1", status: "running" })).toBe(true);
+    expect(isRestorableGenerationRun({
+      run_id: "persisting-1",
+      status: "valid",
+      persistence: { status: "pending" },
+    })).toBe(true);
     expect(isRestorableGenerationRun({ run_id: "failed-1", status: "failed" })).toBe(false);
     expect(isRestorableGenerationRun({ run_id: "valid-1", status: "valid" })).toBe(false);
   });

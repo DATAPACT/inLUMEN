@@ -246,13 +246,30 @@ async def generate_pipeline_script_bundles(
     seed_nodes: list[PipelineGeneratedNode] | None = None,
 ) -> GeneratePipelineScriptsResponse:
     """Generate one canonical pipeline and compile it into node bundles."""
-    if request.options.generation_strategy == "node_first":
+    target_flow_ids = {
+        str(flow_id).strip()
+        for flow_id in request.options.target_flow_ids
+        if str(flow_id).strip()
+    }
+    request_reusable_nodes = [
+        PipelineGeneratedNode.model_validate(item)
+        for item in request.reusable_nodes
+        if isinstance(item, dict)
+    ]
+    reusable_by_flow_id = {
+        item.flow_id: item for item in request_reusable_nodes
+    }
+    reusable_by_flow_id.update({
+        item.flow_id: item for item in seed_nodes or []
+    })
+    if request.options.generation_strategy == "node_first" or target_flow_ids:
         return await generate_pipeline_script_bundles_node_first(
             request,
             run_id=run_id,
             progress_callback=progress_callback,
             start_from_flow_id=start_from_flow_id,
-            seed_nodes=seed_nodes,
+            seed_nodes=list(reusable_by_flow_id.values()),
+            target_flow_ids=target_flow_ids or None,
         )
     return await generate_pipeline_script_bundles_pipeline_first(
         request,
@@ -969,6 +986,7 @@ async def generate_pipeline_script_bundles_node_first(
     progress_callback: PipelineProgressCallback | None = None,
     start_from_flow_id: str | None = None,
     seed_nodes: list[PipelineGeneratedNode] | None = None,
+    target_flow_ids: set[str] | None = None,
 ) -> GeneratePipelineScriptsResponse:
     ordered_ids = topological_order(request.context.graph)
     nodes_by_id = {node.flow_id: node for node in request.context.graph.nodes}
@@ -979,6 +997,23 @@ async def generate_pipeline_script_bundles_node_first(
             )
         if nodes_by_id[start_from_flow_id].type == "config":
             raise ValueError("Cannot resume pipeline generation from a config node")
+    if target_flow_ids:
+        unknown_targets = sorted(target_flow_ids.difference(nodes_by_id))
+        if unknown_targets:
+            raise ValueError(
+                "Cannot target pipeline generation for unknown nodes: "
+                + ", ".join(unknown_targets)
+            )
+        config_targets = sorted(
+            flow_id
+            for flow_id in target_flow_ids
+            if nodes_by_id[flow_id].type == "config"
+        )
+        if config_targets:
+            raise ValueError(
+                "Config nodes cannot receive runtime bundles: "
+                + ", ".join(config_targets)
+            )
     run = PipelineGenerationRun(run_id=run_id or uuid.uuid4().hex)
     edge_contracts: list[EdgeDataContract] = []
     outputs_by_node: dict[str, list[ExpectedArtifact]] = {}
@@ -1001,6 +1036,9 @@ async def generate_pipeline_script_bundles_node_first(
                 continue
             is_before_resume_target = (
                 not resume_started and flow_id != start_from_flow_id
+            )
+            is_outside_target_scope = bool(
+                target_flow_ids and flow_id not in target_flow_ids
             )
             if flow_id == start_from_flow_id:
                 resume_started = True
@@ -1078,12 +1116,12 @@ async def generate_pipeline_script_bundles_node_first(
                 runtime_constraints=node_runtime_constraints,
             )
 
-            if is_before_resume_target:
+            if is_before_resume_target or is_outside_target_scope:
                 artifact = reusable_artifacts.get(flow_id)
                 if artifact is None:
                     raise ValueError(
-                        "Cannot resume pipeline generation before "
-                        f"{start_from_flow_id}: missing valid artifact for node {flow_id}"
+                        "Cannot reuse node "
+                        f"{flow_id}: a complete valid runtime artifact is required"
                     )
                 artifact = artifact.model_copy(deep=True)
                 step = PipelineGenerationRunStep(
@@ -1138,7 +1176,11 @@ async def generate_pipeline_script_bundles_node_first(
                     if artifact.validation_report.status == "valid"
                     else "invalid"
                 )
-                step.stage = "reused" if step.status == "valid" else "failed"
+                step.stage = (
+                    "reused_validated_bundle"
+                    if step.status == "valid"
+                    else "failed"
+                )
                 generated_nodes.append(
                     PipelineGeneratedNode(
                         flow_id=flow_id,
@@ -1166,9 +1208,12 @@ async def generate_pipeline_script_bundles_node_first(
             node_response = await generate_node_script_bundle(
                 GenerateNodeScriptRequest(
                     context=context,
-                    options=request.options.model_copy(
-                        update={"validation_mode": "static"}
-                    ),
+                    # Preserve the requested validation level here so runtime
+                    # failures participate in the node generator's repair loop.
+                    # The following handoff execution still materializes the
+                    # validated artifact for downstream nodes.
+                    options=request.options,
+                    llm_config=request.llm_config,
                 )
             )
             artifact = node_response.generated_artifact
@@ -1819,18 +1864,27 @@ def expected_outputs_for_node(
                 filename=f"{task_name}.json",
                 schema={
                     "type": "object",
-                    "required": ["question", "answer", "citations"],
+                    "required": ["answers"],
                     "properties": {
-                        "question": {"type": "string"},
-                        "answer": {"type": "string"},
-                        "citations": {
+                        "answers": {
                             "type": "array",
                             "items": {
                                 "type": "object",
-                                "required": ["source", "page"],
+                                "required": ["question", "answer", "citations"],
                                 "properties": {
-                                    "source": {"type": "string"},
-                                    "page": {"type": "integer"},
+                                    "question": {"type": "string"},
+                                    "answer": {"type": "string"},
+                                    "citations": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "required": ["source", "page"],
+                                            "properties": {
+                                                "source": {"type": "string"},
+                                                "page": {"type": "integer"},
+                                            },
+                                        },
+                                    },
                                 },
                             },
                         },
@@ -1838,6 +1892,24 @@ def expected_outputs_for_node(
                 },
                 semantic_role="grounded_answer",
                 description=f"Retrieved answer with source and page citations produced by {label}.",
+            )
+        ]
+    if task == "alerting":
+        return [
+            ExpectedArtifact(
+                name=task_name,
+                kind="json",
+                format="json",
+                filename=f"{task_name}.json",
+                schema={
+                    "type": "object",
+                    "required": ["alerts"],
+                    "properties": {
+                        "alerts": {"type": "array"},
+                    },
+                },
+                semantic_role="alerts",
+                description=f"Explicit patient alerts produced by {label}.",
             )
         ]
     if is_input_node_kind(node.type):
@@ -1937,7 +2009,7 @@ def expected_outputs_for_node(
                 description=f"Structured PDF content produced by {label}.",
             )
         ]
-    elif any(
+    elif task != "model_training" and any(
         keyword in label_text
         for keyword in ("preprocess", "clean", "normalize", "transform")
     ):
@@ -2374,7 +2446,9 @@ def main() -> None:
                 writer.writeheader()
                 for row in rows or [{{column: "" for column in columns}}]:
                     writer.writerow({{column: row.get(column, "") for column in columns}})
-        elif matching_input and spec.get("kind") in {{"table", "text", "image", "binary"}}:
+        elif matching_input and spec.get("kind") in {{
+            "table", "text", "image", "audio", "video", "document", "binary"
+        }}:
             shutil.copy2(source_path_for(matching_input, input_manifest_path), output_path)
         elif file_format in {{"pickle", "pkl"}}:
             with output_path.open("wb") as handle:

@@ -77,26 +77,70 @@ def input_boundary_function_source(node: dict[str, Any]) -> str:
     return textwrap.dedent(
         f"""
         def {function_name}(inputs, output_dir, context):
+            import base64
+            import json
             import shutil
             from pathlib import Path
 
             output = {output!r}
             candidates = [
-                Path(str(item.get("path") or ""))
+                (item, Path(str(item.get("path") or "")))
                 for item in inputs
                 if isinstance(item, dict)
             ]
-            source_path = next(
-                (path for path in candidates if path.is_file()),
-                None,
-            )
-            if source_path is None:
+            readable = [(item, path) for item, path in candidates if path.is_file()]
+            if not readable:
                 raise FileNotFoundError(
                     "The source adapter did not receive a readable input artifact."
                 )
             output_path = Path(output_dir) / str(output["filename"])
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_path, output_path)
+            if (
+                len(readable) > 1
+                and (
+                    str(output.get("kind") or "") == "json"
+                    or str(output.get("format") or "") == "json"
+                )
+            ):
+                package = {{"files": []}}
+                json_documents = []
+                for item, path in readable:
+                    filename = str(item.get("filename") or path.name)
+                    kind = str(item.get("kind") or "binary")
+                    file_format = str(item.get("format") or path.suffix.lstrip(".")).lower()
+                    package["files"].append({{
+                        "filename": filename,
+                        "kind": kind,
+                        "format": file_format,
+                        "size_bytes": path.stat().st_size,
+                    }})
+                    if file_format == "pdf":
+                        package.setdefault(
+                            "pdf_base64",
+                            base64.b64encode(path.read_bytes()).decode("ascii"),
+                        )
+                        package.setdefault("source", filename)
+                    elif kind == "json" or file_format == "json":
+                        value = json.loads(path.read_text(encoding="utf-8"))
+                        json_documents.append({{"filename": filename, "data": value}})
+                        if isinstance(value, dict):
+                            for key, nested_value in value.items():
+                                package.setdefault(str(key), nested_value)
+                    elif kind == "text" or file_format in {{"txt", "md"}}:
+                        package.setdefault("text", path.read_text(encoding="utf-8"))
+                    else:
+                        package.setdefault(
+                            "content_base64",
+                            base64.b64encode(path.read_bytes()).decode("ascii"),
+                        )
+                if json_documents:
+                    package["json_documents"] = json_documents
+                output_path.write_text(
+                    json.dumps(package, indent=2, sort_keys=True) + "\\n",
+                    encoding="utf-8",
+                )
+            else:
+                shutil.copy2(readable[0][1], output_path)
             return [{{**output, "path": str(output_path)}}]
         """
     ).strip()

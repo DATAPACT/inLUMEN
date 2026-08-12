@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from analytics_api import _write_validation_bundle
+from analytics_api import _read_run_output_files, _write_validation_bundle
 from artifact_content import decode_artifact_content, encode_artifact_bytes
 
 
@@ -99,6 +99,20 @@ class ArtifactContentTransportTest(unittest.TestCase):
                         }
                     ]
                 )
+
+    def test_run_outputs_include_typed_verifiable_descriptors(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "outputs" / "node-1"
+            output_dir.mkdir(parents=True)
+            (output_dir / "report.pdf").write_bytes(b"%PDF-sample")
+
+            [output] = _read_run_output_files(Path(temp_dir))
+
+        self.assertEqual("document", output["kind"])
+        self.assertEqual("pdf", output["format"])
+        self.assertEqual("application/pdf", output["content_type"])
+        self.assertEqual(len(b"%PDF-sample"), output["size_bytes"])
+        self.assertRegex(output["sha256"], r"^sha256:[a-f0-9]{64}$")
 
 
 if __name__ == "__main__":

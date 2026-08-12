@@ -188,6 +188,12 @@ export const projectDocumentToGraph = (value: unknown): NormalizedGraph => {
     return normalizeGraph(pipelineIrToGraphData(pipeline));
   }
 
+  if (candidate.schema_version) {
+    throw new Error(
+      `Unsupported Project JSON schema version: ${String(candidate.schema_version)}.`,
+    );
+  }
+
   // Compatibility migration for pre-IR Project JSON / raw React Flow exports.
   const legacyGraph = objectValue(candidate.graph);
   const source = Array.isArray(candidate.nodes) && Array.isArray(candidate.edges)

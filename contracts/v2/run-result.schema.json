@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inlumen:schema:run-result:1",
+  "title": "inLUMEN Pipeline Run Result",
+  "type": "object",
+  "required": ["schema_version", "run_id", "status", "engine", "created_at", "outputs"],
+  "properties": {
+    "schema_version": { "const": "inlumen.run-result@1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "pipeline_id": { "type": "string" },
+    "pipeline_version": { "type": "string" },
+    "status": { "enum": ["succeeded", "partial", "failed", "cancelled"] },
+    "engine": { "type": "string", "minLength": 1 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "run_spec": { "type": "string" },
+    "package_manager": { "type": "string" },
+    "outputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "filename"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "filename": { "type": "string", "minLength": 1 },
+          "kind": { "enum": ["table", "json", "text", "image", "audio", "video", "document", "model", "directory", "binary"] },
+          "format": { "type": "string" },
+          "content_type": { "type": "string" },
+          "size_bytes": { "type": "integer", "minimum": 0 },
+          "sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "details": {}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

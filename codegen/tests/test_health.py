@@ -6,6 +6,7 @@ import time
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.pipeline_compiler import _fallback_helpers
 from app.schemas import PipelineGenerationRun, PipelineGenerationRunStep
 
 
@@ -501,6 +502,50 @@ def test_deterministic_fallback_writes_required_metrics_schema(
     metrics = json.loads((output_dir / "modeltraining_metrics.json").read_text())
     assert metrics["target_column"] == "abnormal_condition"
     assert isinstance(metrics["metrics"], dict)
+
+
+def test_deterministic_fallback_does_not_copy_schema_incompatible_json(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "questions.json"
+    input_path.write_text(
+        json.dumps({"questions": ["What is the retention period?"]}),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "outputs"
+    namespace: dict[str, object] = {}
+    exec(_fallback_helpers(), namespace)
+
+    outputs = namespace["_inlumen_materialize"](
+        [{
+            "filename": input_path.name,
+            "path": str(input_path),
+            "kind": "json",
+            "format": "json",
+        }],
+        output_dir,
+        [{
+            "name": "document_chunking",
+            "filename": "document_chunking.json",
+            "kind": "json",
+            "format": "json",
+            "schema": {
+                "type": "object",
+                "required": ["chunks"],
+                "properties": {"chunks": {"type": "array"}},
+            },
+        }],
+        {},
+    )
+
+    assert outputs[0]["filename"] == "document_chunking.json"
+    assert json.loads(
+        (output_dir / "document_chunking.json").read_text(encoding="utf-8")
+    ) == {
+        "chunks": [],
+        "input_count": 1,
+        "status": "generated",
+    }
 
 
 def test_generate_pipeline_scripts_propagates_edge_contracts() -> None:

@@ -73,6 +73,40 @@ def test_write_sample_inputs_uses_embedded_binary_instead_of_fixture(
     assert (inputs_dir / "conversation.wav").read_bytes() == content
 
 
+def test_write_sample_inputs_treats_literal_json_text_as_content(tmp_path) -> None:
+    inputs_dir = tmp_path / "inputs"
+    inputs_dir.mkdir()
+    payload = {
+        "questions": [
+            "How long are generated run outputs retained by default?",
+            "Who must approve a production deployment?",
+            "What is the recovery point objective for pipeline metadata?",
+            "Does a staging deployment require approval?",
+        ],
+        "expected_facts": [
+            "30 days",
+            "one workspace administrator and one pipeline owner",
+            "15 minutes",
+            "No, but deployment validation must pass",
+        ],
+    }
+
+    write_sample_inputs(
+        inputs_dir / "input_manifest.json",
+        inputs_dir,
+        [
+            FileDescriptor(
+                filename="questions.json",
+                kind="json",
+                format="json",
+                sample=FileSample(text=json.dumps(payload, indent=2)),
+            )
+        ],
+    )
+
+    assert json.loads((inputs_dir / "questions.json").read_text()) == payload
+
+
 def test_validate_output_shape_rejects_missing_required_columns(tmp_path) -> None:
     output_path = tmp_path / "preprocessing.csv"
     output_path.write_text("patient_id,heart_rate\np1,80\n", encoding="utf-8")
@@ -93,6 +127,18 @@ def test_validate_output_shape_rejects_missing_required_columns(tmp_path) -> Non
             "Found columns: patient_id, heart_rate"
         )
     ]
+
+
+def test_validate_output_shape_checks_first_class_audio_outputs(tmp_path) -> None:
+    output_path = tmp_path / "speech.wav"
+    output_path.write_bytes(b"not-a-wave-file")
+
+    errors = validate_output_shape(
+        output_path,
+        ExpectedArtifact(name="speech", kind="audio", format="wav"),
+    )
+
+    assert errors == ["Audio output speech is not a valid WAV file."]
 
 
 def test_validate_output_shape_rejects_missing_json_required_keys(tmp_path) -> None:

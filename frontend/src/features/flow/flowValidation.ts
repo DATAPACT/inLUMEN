@@ -99,6 +99,16 @@ const executableFilePattern = (implementationKind: string) => {
   return /\.(?:py|sql|sh|bash|zsh|js|jsx|ts|tsx|java|go|rs|rb|php|r|scala|kt|kts|swift|lua|pl|ex|exs)$/i;
 };
 
+const getEntrypointTokens = (value: unknown) => {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => String(entry ?? "").trim())
+      .filter((entry) => entry.length > 0);
+  }
+  const single = String(value ?? "").trim();
+  return single.length > 0 ? [single] : [];
+};
+
 export const validateGraph = (
   nodes: Node[],
   edges: Edge[],
@@ -219,6 +229,7 @@ export const validateGraph = (
     if (kind === "task") {
       const implementation = objectValue(data.implementation);
       const kindValue = normalizeImplementationKind(implementation.kind);
+      const generatedArtifact = objectValue(data.generated_artifact);
       if (!implementation.kind) add({
         severity: "error",
         category: "implementation",
@@ -242,7 +253,10 @@ export const validateGraph = (
           nodeId,
           message: "No implementation code is attached. Generate code or upload a runtime package.",
         });
-        else if (!String(implementation.entrypoint || "").trim()) add({
+        else if (
+          getEntrypointTokens(implementation.entrypoint).length === 0
+          && getEntrypointTokens(generatedArtifact.entrypoint).length === 0
+        ) add({
           severity: wiringSeverity,
           category: "implementation",
           code: "missing-entrypoint",

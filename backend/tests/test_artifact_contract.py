@@ -10,8 +10,8 @@ from artifact_contract import classify_artifact
 class ArtifactContractTest(unittest.TestCase):
     def test_supported_format_matrix(self):
         expected = {
-            "audio.wav": ("binary", "wav"),
-            "document.pdf": ("binary", "pdf"),
+            "audio.wav": ("audio", "wav"),
+            "document.pdf": ("document", "pdf"),
             "image.png": ("image", "png"),
             "notes.txt": ("text", "txt"),
             "records.json": ("json", "json"),
@@ -19,6 +19,7 @@ class ArtifactContractTest(unittest.TestCase):
             "rows.csv": ("table", "csv"),
             "rows.parquet": ("table", "parquet"),
             "workbook.xlsx": ("table", "xlsx"),
+            "video.mp4": ("video", "mp4"),
             "archive.zip": ("binary", "zip"),
         }
         for filename, (kind, file_format) in expected.items():
@@ -36,7 +37,7 @@ class ArtifactContractTest(unittest.TestCase):
 
     def test_legacy_file_kind_is_reclassified(self):
         self.assertEqual(
-            {"kind": "binary", "format": "wav"},
+            {"kind": "audio", "format": "wav"},
             classify_artifact("recording.wav", kind="file", file_format="wav"),
         )
 

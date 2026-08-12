@@ -314,10 +314,8 @@ def validate_pipeline_with_docker(
                 inherited_inputs: list[FileDescriptor] = []
                 for parent_id, outputs in produced_outputs.items():
                     for output in outputs:
-                        source_path = (
-                            Path(str(output.sample.text)) if output.sample else None
-                        )
-                        if source_path and source_path.exists():
+                        source_path = existing_sample_file(output.sample)
+                        if source_path is not None:
                             relative = Path(parent_id) / source_path.name
                             target_path = inputs_dir / relative
                             target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -380,8 +378,8 @@ def persist_descriptors_for_handoff(
 ) -> list[FileDescriptor]:
     persisted: list[FileDescriptor] = []
     for descriptor in descriptors:
-        source_path = Path(str(descriptor.sample.text)) if descriptor.sample else None
-        if source_path is None or not source_path.exists():
+        source_path = existing_sample_file(descriptor.sample)
+        if source_path is None:
             continue
         handoff_dir.mkdir(parents=True, exist_ok=True)
         target_path = handoff_dir / source_path.name
@@ -452,6 +450,20 @@ def validation_workspace(flow_id: str):
     )
 
 
+def existing_sample_file(sample: FileSample | None) -> Path | None:
+    """Return a real sample file without mistaking inline sample text for a path."""
+    raw_path = str(sample.text or "").strip() if sample else ""
+    if not raw_path:
+        return None
+    try:
+        candidate = Path(raw_path)
+        return candidate if candidate.is_file() else None
+    except (OSError, ValueError):
+        # JSON/text descriptors store literal content in ``sample.text``. Long or
+        # multi-line values are valid samples but are not valid filesystem paths.
+        return None
+
+
 def write_sample_inputs(
     manifest_path: Path,
     inputs_dir: Path,
@@ -463,16 +475,8 @@ def write_sample_inputs(
         path = inputs_dir / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
-            sample_path = (
-                Path(str(file_item.sample.text))
-                if file_item.sample and file_item.sample.text
-                else None
-            )
-            if (
-                sample_path is not None
-                and sample_path.exists()
-                and sample_path.is_file()
-            ):
+            sample_path = existing_sample_file(file_item.sample)
+            if sample_path is not None:
                 shutil.copy2(sample_path, path)
             elif write_embedded_media(path, file_item) or fetch_configured_input(path, file_item):
                 pass
@@ -1299,7 +1303,7 @@ def validate_output_shape(path: Path, expected: ExpectedArtifact) -> list[str]:
             return schema_errors
     elif expected.kind == "model" and path.stat().st_size == 0:
         return [f"Model output {expected.name} is empty."]
-    elif expected.kind in {"image", "binary"}:
+    elif expected.kind in {"image", "audio", "video", "document", "binary"}:
         if path.stat().st_size == 0:
             return [f"Binary output {expected.name} is empty."]
         header = path.read_bytes()[:16]

@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import { normalizeGraph } from "@/features/flow/flowGraph";
 import {
@@ -9,6 +11,16 @@ import {
 import { conversationUnderstandingSubpipeline, publicPortsForSubpipeline } from "@/features/flow/subpipeline";
 
 describe("Project JSON Pipeline IR", () => {
+  it("uses the published Project JSON schema version", () => {
+    const schema = JSON.parse(readFileSync(resolve(
+      process.cwd(),
+      "../contracts/v2/project.schema.json",
+    ), "utf8"));
+    expect(PROJECT_IR_SCHEMA_VERSION).toBe(
+      schema.properties.schema_version.const,
+    );
+  });
+
   it("exports structural kind, template, implementation, and contracts separately", () => {
     const graph = normalizeGraph({
       nodes: [{
@@ -56,6 +68,13 @@ describe("Project JSON Pipeline IR", () => {
     const roundTrip = projectDocumentToGraph(createProjectDocument(migrated));
     expect(roundTrip.nodes.map((node) => node.data.type)).toEqual(["source", "destination"]);
     expect(roundTrip.edges[0]).toMatchObject({ sourceHandle: "data", targetHandle: "data" });
+  });
+
+  it("rejects an explicitly unsupported project schema version", () => {
+    expect(() => projectDocumentToGraph({
+      schema_version: "inlumen.project@99",
+      pipeline: { nodes: [], connections: [] },
+    })).toThrow("Unsupported Project JSON schema version: inlumen.project@99");
   });
 
   it("does not export or restore obsolete source configuration", () => {

@@ -131,4 +131,77 @@ describe("background code generation", () => {
     expect(body.llm_config.model).not.toBe("openai/gpt-oss-120b");
     expect(body.llm_config.api_key).toBe("provider-secret");
   });
+
+  it("sends incremental scope and overwrite safeguards with a generation run", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      run_id: "run-scoped",
+      status: "queued",
+    }), {
+      status: 202,
+      headers: { "Content-Type": "application/json" },
+    }));
+    globalThis.fetch = fetchMock;
+    const { startPipelineScriptGenerationRun } = await import(
+      "@/features/flow/flowPersistence"
+    );
+
+    await startPipelineScriptGenerationRun({
+      name: "Code model",
+      provider: "openrouter",
+      model: "openai/gpt-oss-120b",
+      codegenModel: "openai/gpt-5.2-codex",
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "provider-secret",
+    }, {
+      mode: "draft",
+      scope: "selected",
+      selectedFlowIds: ["task-2"],
+      overwriteManualCode: true,
+      checkpointVersionUid: "checkpoint-1",
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.generation_scope).toBe("selected");
+    expect(body.selected_flow_ids).toEqual(["task-2"]);
+    expect(body.overwrite_manual_code).toBe(true);
+    expect(body.checkpoint_version_uid).toBe("checkpoint-1");
+  });
+
+  it("requests a pipeline generation preflight for the selected scope", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      scope: "selected",
+      nodes: [],
+      node_count: 1,
+      target_flow_ids: ["task-2"],
+      target_count: 1,
+      selected_flow_ids: ["task-2"],
+      reusable_flow_ids: [],
+      reused_count: 0,
+      replacement_flow_ids: [],
+      replacement_count: 0,
+      protected_flow_ids: [],
+      protected_count: 0,
+      sample_data: {},
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    globalThis.fetch = fetchMock;
+    const { preparePipelineScriptGeneration } = await import(
+      "@/features/flow/flowPersistence"
+    );
+
+    await preparePipelineScriptGeneration({
+      scope: "selected",
+      selectedFlowIds: ["task-2"],
+    });
+
+    expect(fetchMock.mock.calls[0][0]).toContain(
+      "/api/pipeline/generation-preflight",
+    );
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      generation_scope: "selected",
+      selected_flow_ids: ["task-2"],
+    });
+  });
 });

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inlumen:schema:node-output-manifest:1",
+  "title": "inLUMEN Node Output Manifest",
+  "type": "object",
+  "required": ["schema_version", "outputs"],
+  "properties": {
+    "schema_version": { "const": "inlumen.output-manifest@1" },
+    "flow_id": { "type": "string" },
+    "outputs": { "type": "array", "items": { "$ref": "#/$defs/artifact" } }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "required": ["kind", "format"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "filename": { "type": "string" },
+        "kind": {
+          "enum": ["table", "json", "text", "image", "audio", "video", "document", "model", "directory", "binary"]
+        },
+        "format": { "type": "string", "minLength": 1 },
+        "content_type": { "type": "string", "minLength": 1 },
+        "semantic_role": { "type": "string" },
+        "path": { "type": "string", "minLength": 1 },
+        "uri": { "type": "string", "format": "uri" },
+        "inline_value": {},
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "schema": { "type": "object" },
+        "columns": { "type": "array", "items": { "type": "string" } },
+        "required_columns": { "type": "array", "items": { "type": "string" } }
+      },
+      "anyOf": [
+        { "required": ["name"] },
+        { "required": ["filename"] }
+      ],
+      "allOf": [
+        {
+          "anyOf": [
+            { "required": ["path"] },
+            { "required": ["uri"] },
+            { "required": ["inline_value"] }
+          ]
+        }
+      ],
+      "additionalProperties": true
+    }
+  }
+}

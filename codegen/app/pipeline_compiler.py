@@ -707,6 +707,21 @@ def _inlumen_default_json(schema, inputs, context):
     return result
 
 
+def _inlumen_json_satisfies_schema(path, schema):
+    if not isinstance(schema, dict) or not schema:
+        return True
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    required = schema.get("required", [])
+    if schema.get("type") == "object" and not isinstance(value, dict):
+        return False
+    return not isinstance(required, list) or all(
+        key in value for key in required
+    )
+
+
 def _inlumen_materialize(inputs, output_dir, specs, context):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -729,7 +744,16 @@ def _inlumen_materialize(inputs, output_dir, specs, context):
         )
         if matching and matching.get("path"):
             source = Path(str(matching["path"]))
-            if source.is_file():
+            if (
+                source.is_file()
+                and (
+                    file_format != "json"
+                    or _inlumen_json_satisfies_schema(
+                        source,
+                        spec.get("schema") or {},
+                    )
+                )
+            ):
                 shutil.copy2(source, path)
         if not path.exists():
             if file_format in {"pickle", "pkl"}:

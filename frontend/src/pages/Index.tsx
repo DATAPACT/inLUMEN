@@ -1228,6 +1228,9 @@ const Index = () => {
                       selectedNode={selectedNode}
                       onNodeUpdate={onNodeUpdate}
                       onRemoveNode={handleRemoveNode}
+                      onGenerateCode={(nodeId) => {
+                        flowCanvasRef.current?.openCodeGeneration([nodeId]);
+                      }}
                       activeChatbotConfig={activeConfig}
                       isAdvancedMode={isCanvasAdvanced}
                     />

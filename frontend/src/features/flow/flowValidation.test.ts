@@ -105,6 +105,33 @@ describe("pipeline design validation", () => {
         expect.objectContaining({ category: "implementation" }),
       ]),
     );
+
+    const generatedArtifactGraph = normalizeGraph({
+      nodes: [{
+        id: "generated-code",
+        position: { x: 0, y: 0 },
+        data: {
+          type: "task",
+          implementation: { kind: "generated-code", language: "python" },
+          files: [
+            { filename: "main.py", role: "code" },
+            { filename: "requirements.txt", role: "code" },
+            { filename: "node-manifest.json", role: "code" },
+            { filename: "validation-report.json", role: "code" },
+          ],
+          generated_artifact: {
+            status: "current",
+            entrypoint: ["python", "/app/main.py"],
+          },
+        },
+      }],
+      edges: [],
+    });
+    expect(validateGraph(generatedArtifactGraph.nodes, generatedArtifactGraph.edges).issues).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "missing-entrypoint" }),
+      ]),
+    );
   });
 
   it("reports missing code independently on every code-backed Task", () => {

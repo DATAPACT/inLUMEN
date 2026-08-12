@@ -17,6 +17,7 @@ from artifact_content import (
     encode_artifact_bytes,
     verify_artifact_integrity,
 )
+from artifact_contract import classify_artifact
 from async_runtime import run_async
 from auth_middleware import require_auth
 from chat_state import clear_state_from_disk
@@ -188,6 +189,7 @@ def _read_validation_bundle_files(bundle_root: Path) -> list[dict]:
                 "path": relative,
                 "filename": path.name,
                 "flow_id": "",
+                **classify_artifact(path.name),
                 **encoded,
                 "role": "runtime",
                 **(
@@ -219,6 +221,7 @@ def _read_run_output_files(bundle_root: Path) -> list[dict]:
                 "path": relative,
                 "filename": path.name,
                 "flow_id": "",
+                **classify_artifact(path.name),
                 **encoded,
                 "role": "run-output",
                 **(
@@ -529,6 +532,9 @@ def agentic_generate_deployment_bundle():
                         {
                             "path": output["path"],
                             "filename": output["filename"],
+                            "kind": output.get("kind"),
+                            "format": output.get("format"),
+                            "content_type": output.get("content_type"),
                             "size_bytes": output.get("size_bytes"),
                             "sha256": output.get("sha256"),
                         }

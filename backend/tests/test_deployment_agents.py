@@ -1,7 +1,9 @@
 import base64
 import inspect
 import io
+import json
 import sys
+import tempfile
 import unittest
 import wave
 from pathlib import Path
@@ -13,7 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from async_runtime import run_async  # noqa: E402
 
 try:
-    from deployment_agents import generate_dockerfiles_with_agent  # noqa: E402
+    from deployment_agents import (  # noqa: E402
+        _managed_adapter_main_source,
+        generate_dockerfiles_with_agent,
+    )
 except ModuleNotFoundError as exc:  # pragma: no cover - depends on optional app deps.
     generate_dockerfiles_with_agent = None
     IMPORT_ERROR = exc
@@ -22,6 +27,51 @@ else:
 
 
 class DeploymentAgentsTest(unittest.TestCase):
+    def test_managed_source_adapter_packages_multiple_input_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pdf_path = root / "knowledge.pdf"
+            pdf_bytes = b"%PDF-1.4\nmanaged adapter fixture\n"
+            pdf_path.write_bytes(pdf_bytes)
+            questions_path = root / "questions.json"
+            questions_path.write_text(
+                json.dumps({"questions": ["What is retained?"]}),
+                encoding="utf-8",
+            )
+            output_dir = root / "outputs"
+            output_dir.mkdir()
+            namespace = {"__name__": "managed_adapter_test"}
+            exec(
+                _managed_adapter_main_source(
+                    {"kind": "source", "label": "PDF Knowledge Source"}
+                ),
+                namespace,
+            )
+
+            outputs = namespace["_source_outputs"](
+                [
+                    {
+                        "filename": pdf_path.name,
+                        "path": str(pdf_path),
+                        "kind": "binary",
+                        "format": "pdf",
+                    },
+                    {
+                        "filename": questions_path.name,
+                        "path": str(questions_path),
+                        "kind": "json",
+                        "format": "json",
+                    },
+                ],
+                output_dir,
+            )
+
+            payload = json.loads((output_dir / "source-package.json").read_text())
+            self.assertEqual(pdf_bytes, base64.b64decode(payload["pdf_base64"]))
+            self.assertEqual("knowledge.pdf", payload["source"])
+            self.assertEqual(["What is retained?"], payload["questions"])
+            self.assertEqual("source-package.json", outputs[0]["filename"])
+
     @unittest.skipIf(
         generate_dockerfiles_with_agent is None,
         f"deployment agent dependencies are unavailable: {IMPORT_ERROR}",

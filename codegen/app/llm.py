@@ -117,9 +117,12 @@ PEP 508 strings), outputs (array), implementation_plan (object), and notes
 (array of strings). Never return Markdown or a Dockerfile. The program must
 read INLUMEN_INPUT_MANIFEST and INLUMEN_CONTEXT_PATH, write artifacts beneath
 INLUMEN_OUTPUT_DIR, and write an inlumen.output-manifest@1 JSON document to
-INLUMEN_OUTPUT_MANIFEST. Use only allowed packages and honor every output
-schema, semantic role, filename, and reviewed implementation plan. Do not use
-subprocess, eval, exec, os.system, or undeclared network access."""
+INLUMEN_OUTPUT_MANIFEST. That manifest must use an `outputs` array (never an
+`artifacts` array), and every item must include the exact declared output
+`name`, `filename`, `path`, `kind`, and `format`. Use only allowed packages and
+honor every output schema, semantic role, filename, and reviewed implementation
+plan. Do not use subprocess, eval, exec, os.system, or undeclared network
+access."""
 
 
 PIPELINE_SYSTEM_PROMPT = """You are the inLumen production pipeline code-generation engine.

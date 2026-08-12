@@ -1,0 +1,16 @@
+{
+  "schema_version": "inlumen.output-manifest@1",
+  "flow_id": "example-node",
+  "outputs": [
+    { "name": "records", "filename": "records.parquet", "path": "outputs/records.parquet", "kind": "table", "format": "parquet", "content_type": "application/vnd.apache.parquet", "semantic_role": "predictions" },
+    { "name": "summary", "filename": "summary.json", "path": "outputs/summary.json", "kind": "json", "format": "json", "content_type": "application/json", "schema": { "type": "object" } },
+    { "name": "log", "filename": "summary.txt", "path": "outputs/summary.txt", "kind": "text", "format": "txt", "content_type": "text/plain" },
+    { "name": "plot", "filename": "plot.png", "path": "outputs/plot.png", "kind": "image", "format": "png", "content_type": "image/png" },
+    { "name": "speech", "filename": "speech.wav", "path": "outputs/speech.wav", "kind": "audio", "format": "wav", "content_type": "audio/wav" },
+    { "name": "preview", "filename": "preview.mp4", "uri": "s3://example-bucket/runs/run-1/preview.mp4", "kind": "video", "format": "mp4", "content_type": "video/mp4" },
+    { "name": "report", "filename": "report.pdf", "path": "outputs/report.pdf", "kind": "document", "format": "pdf", "content_type": "application/pdf" },
+    { "name": "classifier", "filename": "classifier.onnx", "uri": "s3://example-bucket/models/classifier.onnx", "kind": "model", "format": "onnx", "content_type": "application/octet-stream", "size_bytes": 42, "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    { "name": "site", "filename": "site", "path": "outputs/site", "kind": "directory", "format": "directory", "content_type": "inode/directory" },
+    { "name": "archive", "filename": "payload.bin", "path": "outputs/payload.bin", "kind": "binary", "format": "binary", "content_type": "application/octet-stream" }
+  ]
+}

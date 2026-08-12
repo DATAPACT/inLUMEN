@@ -17,7 +17,18 @@ NodeKind = Literal[
     "flow",
     "subpipeline",
 ]
-ArtifactKind = Literal["table", "json", "text", "image", "model", "directory", "binary"]
+ArtifactKind = Literal[
+    "table",
+    "json",
+    "text",
+    "image",
+    "audio",
+    "video",
+    "document",
+    "model",
+    "directory",
+    "binary",
+]
 ValidationStatus = Literal["valid", "invalid", "not_run"]
 ValidationMode = Literal["static", "unit", "edge", "pipeline_sample"]
 PipelineGenerationStrategy = Literal["pipeline_first", "node_first"]
@@ -164,6 +175,11 @@ class GenerationOptions(BaseModel):
         in {"1", "true", "yes", "on"}
     )
     generation_strategy: PipelineGenerationStrategy = "pipeline_first"
+    # When populated, the pipeline service regenerates only these nodes and
+    # replays validated bundles for the rest of the graph.  Keeping this on the
+    # generation contract (rather than only filtering persistence) preserves
+    # end-to-end contract and sample execution validation.
+    target_flow_ids: list[str] = Field(default_factory=list)
 
 
 class GenerateNodeScriptRequest(BaseModel):
@@ -227,6 +243,10 @@ class GeneratePipelineScriptsRequest(BaseModel):
     context: PipelineGenerationContext
     options: GenerationOptions = Field(default_factory=GenerationOptions)
     llm_config: LLMConfig | None = None
+    # Stored artifacts are supplied as JSON because PipelineGeneratedNode is
+    # declared below this request type.  The generator validates every entry
+    # before it is eligible for reuse.
+    reusable_nodes: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ResumePipelineGenerationRunRequest(BaseModel):

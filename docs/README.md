@@ -103,6 +103,11 @@ Docker Compose) and optional Argo Workflow are adapters derived from that contra
 YAML is not an internal representation and the canvas deliberately accepts
 JSON project imports only; generated YAML remains export-only.
 
+The normative V2 export schemas are published in
+[`contracts/v2`](../contracts/v2/README.md). The architecture, format choices,
+compatibility rules, and current-surface inventory are recorded in
+[ADR 0001](./adr/0001-export-output-contracts.md).
+
 ## **Architecture**
 The picture below shows the component in the DATAPACT architecture.
 

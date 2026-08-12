@@ -19,4 +19,10 @@ export const generationRunId = (job: PipelineGenerationJob | null) =>
 
 export const isRestorableGenerationRun = (job: PipelineGenerationJob | null) =>
   Boolean(generationRunId(job))
-  && !GENERATION_TERMINAL_STATUSES.has(effectiveGenerationStatus(job));
+  && (
+    !GENERATION_TERMINAL_STATUSES.has(effectiveGenerationStatus(job))
+    || (
+      effectiveGenerationStatus(job) === "valid"
+      && job?.persistence?.status === "pending"
+    )
+  );

@@ -246,6 +246,114 @@ class CodegenServiceClientTest(unittest.TestCase):
         self.assertEqual(900, constraints["max_runtime_seconds"])
         self.assertEqual(payload["options"], metadata["options"])
 
+    def test_codegen_preflight_targets_missing_nodes_and_reuses_current_packages(self):
+        graph = {
+            "nodes": [
+                {
+                    "id": "current",
+                    "data": {
+                        "label": "Current task",
+                        "type": "task",
+                        "generated_artifact": {
+                            "status": "current",
+                            "generator": "inlumen-codegen-service",
+                            "files": [{"filename": "main.py"}],
+                            "validation_report": {"status": "valid"},
+                        },
+                    },
+                },
+                {
+                    "id": "missing",
+                    "data": {"label": "Missing task", "type": "task"},
+                },
+                {
+                    "id": "manual",
+                    "data": {
+                        "label": "Manual task",
+                        "type": "task",
+                        "files": [{"filename": "main.py", "role": "code"}],
+                    },
+                },
+            ],
+            "edges": [],
+        }
+
+        preflight = inlumen_api._pipeline_codegen_preflight(
+            graph,
+            {"generation_scope": "missing_changed"},
+        )
+
+        self.assertEqual(["missing"], preflight["target_flow_ids"])
+        self.assertEqual(["current"], preflight["reusable_flow_ids"])
+        self.assertEqual(0, preflight["protected_count"])
+        self.assertTrue(preflight["requires_full_generation"])
+
+    def test_codegen_preflight_requires_approval_for_manual_replacement(self):
+        graph = {
+            "nodes": [
+                {
+                    "id": "manual",
+                    "data": {
+                        "label": "Manual task",
+                        "type": "task",
+                        "files": [{"filename": "main.py", "role": "code"}],
+                    },
+                }
+            ],
+            "edges": [],
+        }
+
+        preflight = inlumen_api._pipeline_codegen_preflight(
+            graph,
+            {"generation_scope": "all"},
+        )
+        metadata = {
+            "preflight": preflight,
+            "overwrite_manual_code": False,
+        }
+
+        self.assertEqual(["manual"], preflight["protected_flow_ids"])
+        self.assertIsNotNone(inlumen_api._pipeline_codegen_conflict(metadata))
+        metadata["overwrite_manual_code"] = True
+        self.assertIsNone(inlumen_api._pipeline_codegen_conflict(metadata))
+
+    def test_partial_generation_reports_only_packages_that_were_actually_reused(self):
+        generated_nodes = [
+            {
+                "flow_id": flow_id,
+                "generated_artifact": {
+                    "files": [{"filename": "main.py", "content": "print('ok')\n"}],
+                    "validation_report": {"status": "valid"},
+                },
+            }
+            for flow_id in ("selected", "validation-candidate", "reused")
+        ]
+        response = {
+            "nodes": generated_nodes,
+            "integration_validation": {"status": "valid"},
+            "generation_run": {"run_id": "run-1", "status": "valid"},
+        }
+        graph = {
+            "nodes": [{"id": item["flow_id"], "data": {"type": "task"}} for item in generated_nodes],
+            "edges": [],
+        }
+
+        with (
+            patch.object(inlumen_api, "_persist_codegen_run_report", return_value=response["generation_run"]),
+            patch.object(inlumen_api, "_persist_codegen_artifact", side_effect=lambda _flow_id, artifact, _graph: artifact),
+        ):
+            is_valid, finalized = inlumen_api._finalize_pipeline_codegen_response(
+                response,
+                graph,
+                persist_flow_ids={"selected"},
+                reused_flow_ids={"reused"},
+            )
+
+        self.assertTrue(is_valid)
+        self.assertEqual(["selected"], finalized["attached_flow_ids"])
+        self.assertEqual(["reused"], finalized["reused_flow_ids"])
+        self.assertEqual(["selected"], [node["flow_id"] for node in finalized["nodes"]])
+
     def test_pipeline_codegen_preserves_flow_behavior_ports_and_edge_handles(self):
         payload, _metadata = inlumen_api._build_pipeline_codegen_payload(
             {

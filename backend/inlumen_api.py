@@ -443,9 +443,36 @@ def _codegen_run_summary(local_run: dict[str, Any]) -> dict[str, Any]:
         ),
         "mode": metadata.get("generation_mode", ""),
         "data_awareness": metadata.get("data_awareness", {}),
+        "generation_scope": metadata.get("generation_scope", "all"),
+        "target_flow_ids": metadata.get("target_flow_ids", []),
+        "reusable_flow_ids": metadata.get("reusable_flow_ids", []),
+        "preflight": metadata.get("preflight", {}),
+        "model": metadata.get("model", {}),
+        "checkpoint_version_uid": metadata.get("checkpoint_version_uid", ""),
         "persistence": persistence,
         "created_at": local_run.get("created_at"),
         "updated_at": local_run.get("updated_at"),
+    }
+
+
+def _codegen_run_response_metadata(
+    local_run: dict[str, Any] | None,
+) -> dict[str, Any]:
+    metadata = (
+        local_run.get("metadata")
+        if isinstance(local_run, dict)
+        and isinstance(local_run.get("metadata"), dict)
+        else {}
+    )
+    return {
+        "mode": metadata.get("generation_mode", ""),
+        "data_awareness": metadata.get("data_awareness", {}),
+        "generation_scope": metadata.get("generation_scope", "all"),
+        "target_flow_ids": metadata.get("target_flow_ids", []),
+        "reusable_flow_ids": metadata.get("reusable_flow_ids", []),
+        "preflight": metadata.get("preflight", {}),
+        "model": metadata.get("model", {}),
+        "checkpoint_version_uid": metadata.get("checkpoint_version_uid", ""),
     }
 
 
@@ -982,6 +1009,7 @@ def _persist_codegen_artifact(
         and str(item.get("filename") or "").strip() not in new_filenames
     }
     stored_files = []
+    file_hashes: dict[str, str] = {}
     bucket = f"files-step-id-{node_id}".lower()
     for file_item in files:
         if not isinstance(file_item, dict):
@@ -1024,6 +1052,9 @@ def _persist_codegen_artifact(
                 "role": "code",
             }
         )
+        file_hashes[filename] = "sha256:" + hashlib.sha256(
+            content.encode("utf-8")
+        ).hexdigest()
 
     for filename in sorted(stale_filenames):
         storage_response = _proxy(
@@ -1053,6 +1084,17 @@ def _persist_codegen_artifact(
         "configuration_hash": artifact.get("configuration_hash")
         or _codegen_configuration_hash(graph, node_id, artifact),
         "files": stored_files,
+        "file_hashes": file_hashes,
+        "provenance": {
+            **(
+                artifact.get("provenance")
+                if isinstance(artifact.get("provenance"), dict)
+                else {}
+            ),
+            "origin": "ai_generated",
+            "user_modified": False,
+            "attached_at": _utc_now_iso(),
+        },
     }
     graph_response = _proxy(
         dispatch_graph_request,
@@ -1066,6 +1108,60 @@ def _persist_codegen_artifact(
     )
     graph_response.raise_for_status()
     return generated_artifact
+
+
+def _mark_codegen_artifact_user_modified(node_id: str) -> None:
+    """Best-effort ownership marker used by generation overwrite protection."""
+    try:
+        graph_response = _proxy(
+            dispatch_graph_request,
+            "neo4j_get_graph",
+            method="GET",
+            data=b"",
+        )
+        graph_response.raise_for_status()
+        graph = _upstream_json(graph_response)
+        nodes = graph.get("nodes") if isinstance(graph, dict) else []
+        node = next(
+            (
+                item
+                for item in nodes or []
+                if isinstance(item, dict) and _node_flow_id(item) == node_id
+            ),
+            None,
+        )
+        data = _node_data(node) if isinstance(node, dict) else {}
+        artifact = (
+            deepcopy(data.get("generated_artifact"))
+            if isinstance(data.get("generated_artifact"), dict)
+            else None
+        )
+        if artifact is None:
+            return
+        artifact["provenance"] = {
+            **(
+                artifact.get("provenance")
+                if isinstance(artifact.get("provenance"), dict)
+                else {}
+            ),
+            "user_modified": True,
+            "modified_at": _utc_now_iso(),
+        }
+        update_response = _proxy(
+            dispatch_graph_request,
+            "neo4j_update_generated_artifact",
+            method="POST",
+            data=b"",
+            json_payload={
+                "flow_id": node_id,
+                "generated_artifact": artifact,
+            },
+        )
+        update_response.raise_for_status()
+    except Exception:
+        # File writes remain authoritative even if the ownership annotation
+        # cannot be recorded because a dependency is temporarily unavailable.
+        return
 
 
 def _persist_codegen_run_report(run_report: Any) -> dict[str, Any] | None:
@@ -1207,10 +1303,251 @@ def _pipeline_sample_data_summary(graph: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+PIPELINE_CODEGEN_SCOPES = {"missing_changed", "selected", "all"}
+
+
+def _node_flow_id(node: dict[str, Any]) -> str:
+    data = _node_data(node)
+    return str(
+        node.get("id") or data.get("flow_id") or data.get("id") or ""
+    ).strip()
+
+
+def _node_codegen_file_names(node: dict[str, Any]) -> list[str]:
+    data = _node_data(node)
+    raw_files = (
+        data.get("file_buckets")
+        if isinstance(data.get("file_buckets"), list)
+        else data.get("files")
+    )
+    if not isinstance(raw_files, list):
+        return []
+    names: list[str] = []
+    for item in raw_files:
+        if isinstance(item, str):
+            filename = item.strip()
+            role = ""
+        elif isinstance(item, dict):
+            filename = str(item.get("filename") or item.get("name") or "").strip()
+            role = str(item.get("role") or "").strip().lower()
+        else:
+            continue
+        if filename and (role == "code" or _is_codegen_runtime_file(filename)):
+            names.append(filename)
+    return sorted(set(names))
+
+
+def _node_codegen_preflight_item(node: dict[str, Any]) -> dict[str, Any]:
+    data = _node_data(node)
+    flow_id = _node_flow_id(node)
+    artifact = (
+        data.get("generated_artifact")
+        if isinstance(data.get("generated_artifact"), dict)
+        else {}
+    )
+    validation_report = (
+        artifact.get("validation_report")
+        if isinstance(artifact.get("validation_report"), dict)
+        else {}
+    )
+    provenance = (
+        artifact.get("provenance")
+        if isinstance(artifact.get("provenance"), dict)
+        else {}
+    )
+    generator = str(artifact.get("generator") or "").strip()
+    artifact_status = str(artifact.get("status") or "").strip().lower()
+    validation_status = _validation_status(validation_report)
+    code_files = _node_codegen_file_names(node)
+    is_inlumen_generated = generator == "inlumen-codegen-service"
+    user_modified = bool(provenance.get("user_modified"))
+    reusable = (
+        is_inlumen_generated
+        and artifact_status == "current"
+        and validation_status == "valid"
+        and bool(artifact.get("files"))
+        and not user_modified
+    )
+    if user_modified:
+        runtime_status = "modified"
+        ownership = "user"
+    elif code_files and not is_inlumen_generated:
+        runtime_status = "manual"
+        ownership = "user"
+    elif reusable:
+        runtime_status = "current"
+        ownership = "generated"
+    elif artifact:
+        runtime_status = "stale" if artifact_status == "stale" else "invalid"
+        ownership = "generated"
+    else:
+        runtime_status = "missing"
+        ownership = "none"
+    return {
+        "flow_id": flow_id,
+        "label": str(data.get("label") or flow_id),
+        "type": normalize_step_type(data.get("type")),
+        "runtime_status": runtime_status,
+        "ownership": ownership,
+        "reusable": reusable,
+        "code_files": code_files,
+        "validation_status": validation_status or "not_run",
+    }
+
+
+def _pipeline_codegen_preflight(
+    graph: dict[str, Any],
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    request_payload = payload if isinstance(payload, dict) else {}
+    scope = str(request_payload.get("generation_scope") or "missing_changed").strip()
+    if scope not in PIPELINE_CODEGEN_SCOPES:
+        scope = "missing_changed"
+    selected_flow_ids = {
+        str(flow_id).strip()
+        for flow_id in request_payload.get("selected_flow_ids") or []
+        if str(flow_id).strip()
+    }
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    items = [
+        _node_codegen_preflight_item(node)
+        for node in nodes
+        if isinstance(node, dict)
+        and _node_flow_id(node)
+        and normalize_step_type(_node_data(node).get("type")) != "config"
+    ]
+    all_flow_ids = {item["flow_id"] for item in items}
+    selected_flow_ids.intersection_update(all_flow_ids)
+    if scope == "all":
+        target_flow_ids = set(all_flow_ids)
+    elif scope == "selected":
+        target_flow_ids = set(selected_flow_ids)
+    else:
+        target_flow_ids = {
+            item["flow_id"]
+            for item in items
+            if not item["reusable"] and item["runtime_status"] != "manual"
+        }
+    protected_flow_ids = {
+        item["flow_id"]
+        for item in items
+        if item["flow_id"] in target_flow_ids
+        and item["ownership"] == "user"
+    }
+    replacement_flow_ids = {
+        item["flow_id"]
+        for item in items
+        if item["flow_id"] in target_flow_ids
+        and item["runtime_status"] != "missing"
+    }
+    reusable_flow_ids = {
+        item["flow_id"]
+        for item in items
+        if item["flow_id"] not in target_flow_ids and item["reusable"]
+    }
+    non_reusable_outside_scope = {
+        item["flow_id"]
+        for item in items
+        if item["flow_id"] not in target_flow_ids and not item["reusable"]
+    }
+    requires_full_generation = (
+        bool(non_reusable_outside_scope)
+        or scope == "all"
+        or (bool(all_flow_ids) and target_flow_ids == all_flow_ids)
+    )
+    sample_data = _pipeline_sample_data_summary(graph)
+    return {
+        "scope": scope,
+        "nodes": items,
+        "node_count": len(items),
+        "target_flow_ids": sorted(target_flow_ids),
+        "target_count": len(target_flow_ids),
+        "selected_flow_ids": sorted(selected_flow_ids),
+        "reusable_flow_ids": sorted(reusable_flow_ids),
+        "reused_count": len(reusable_flow_ids),
+        "replacement_flow_ids": sorted(replacement_flow_ids),
+        "replacement_count": len(replacement_flow_ids),
+        "protected_flow_ids": sorted(protected_flow_ids),
+        "protected_count": len(protected_flow_ids),
+        "requires_full_generation": requires_full_generation,
+        "candidate_flow_ids": sorted(
+            all_flow_ids if requires_full_generation else target_flow_ids
+        ),
+        "candidate_count": (
+            len(all_flow_ids) if requires_full_generation else len(target_flow_ids)
+        ),
+        "sample_data": sample_data,
+    }
+
+
+def _hydrate_reusable_codegen_node(
+    node: dict[str, Any],
+) -> dict[str, Any] | None:
+    data = _node_data(node)
+    artifact = (
+        deepcopy(data.get("generated_artifact"))
+        if isinstance(data.get("generated_artifact"), dict)
+        else {}
+    )
+    if (
+        str(artifact.get("status") or "").lower() != "current"
+        or _validation_status(artifact.get("validation_report")) != "valid"
+    ):
+        return None
+    hydrated_files: list[dict[str, Any]] = []
+    for file_item in artifact.get("files") or []:
+        if not isinstance(file_item, dict):
+            continue
+        filename = str(file_item.get("filename") or "").strip()
+        if not filename:
+            continue
+        content = file_item.get("content")
+        if not isinstance(content, str):
+            bucket = str(
+                file_item.get("bucket")
+                or f"files-step-id-{_node_flow_id(node)}"
+            ).strip().lower()
+            bucket_id = bucket.removeprefix("files-step-id-")
+            try:
+                response = _proxy(
+                    dispatch_object_request,
+                    "minio_read_file",
+                    method="GET",
+                    params={"bucket_id": bucket_id, "filename": filename},
+                    data=b"",
+                )
+                response.raise_for_status()
+                content = response.content.decode("utf-8")
+            except Exception:
+                return None
+        hydrated_files.append(
+            {
+                "filename": filename,
+                "content": content,
+                "content_type": str(
+                    file_item.get("content_type") or "text/plain"
+                ),
+            }
+        )
+    if not hydrated_files:
+        return None
+    artifact["files"] = hydrated_files
+    return {
+        "flow_id": _node_flow_id(node),
+        "generated_artifact": artifact,
+    }
+
+
 def _build_pipeline_codegen_payload(
     graph: dict[str, Any],
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    preflight = _pipeline_codegen_preflight(graph, payload)
+    llm_config = (
+        payload.get("llm_config")
+        if isinstance(payload.get("llm_config"), dict)
+        else {}
+    )
     include_sample_data = payload.get("include_sample_data", True) is not False
     validation_mode = str(payload.get("validation_mode") or "pipeline_sample").strip()
     if validation_mode not in {"static", "unit", "edge", "pipeline_sample"}:
@@ -1241,6 +1578,29 @@ def _build_pipeline_codegen_payload(
             "\n\nHIGH-LEVEL PIPELINE REQUEST:\n"
             + high_level_prompt
         )
+    target_flow_ids = list(preflight["target_flow_ids"])
+    reusable_nodes: list[dict[str, Any]] = []
+    if target_flow_ids and not preflight["requires_full_generation"]:
+        nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+        reusable_ids = set(preflight["reusable_flow_ids"])
+        for node in nodes:
+            if not isinstance(node, dict) or _node_flow_id(node) not in reusable_ids:
+                continue
+            hydrated = _hydrate_reusable_codegen_node(node)
+            if hydrated is None:
+                reusable_nodes = []
+                preflight["requires_full_generation"] = True
+                preflight["candidate_flow_ids"] = [
+                    item["flow_id"] for item in preflight["nodes"]
+                ]
+                preflight["candidate_count"] = preflight["node_count"]
+                break
+            reusable_nodes.append(hydrated)
+    if preflight["requires_full_generation"]:
+        reusable_nodes = []
+    elif target_flow_ids:
+        generation_strategy = "node_first"
+
     options = {
         "persist": False,
         "repair_attempts": repair_attempts,
@@ -1249,12 +1609,27 @@ def _build_pipeline_codegen_payload(
         "generation_strategy": generation_strategy,
         "allow_deterministic_fallback": bool(payload.get("allow_deterministic_fallback")),
         "user_instruction": user_instruction,
+        "target_flow_ids": (
+            target_flow_ids if generation_strategy == "node_first" else []
+        ),
     }
     metadata = {
         "generation_mode": str(payload.get("generation_mode") or "").strip(),
         "data_awareness": _pipeline_sample_data_summary(graph),
         "high_level_prompt": high_level_prompt,
         "options": options,
+        "generation_scope": preflight["scope"],
+        "target_flow_ids": target_flow_ids,
+        "reusable_flow_ids": preflight["reusable_flow_ids"],
+        "preflight": preflight,
+        "overwrite_manual_code": bool(payload.get("overwrite_manual_code")),
+        "checkpoint_version_uid": str(
+            payload.get("checkpoint_version_uid") or ""
+        ).strip(),
+        "model": {
+            "provider": str(llm_config.get("provider") or ""),
+            "model": str(llm_config.get("model") or ""),
+        },
     }
     return (
         {
@@ -1264,14 +1639,42 @@ def _build_pipeline_codegen_payload(
             ),
             "options": options,
             "llm_config": payload.get("llm_config"),
+            "reusable_nodes": reusable_nodes,
         },
         metadata,
     )
 
 
+def _pipeline_codegen_conflict(
+    metadata: dict[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    preflight = (
+        metadata.get("preflight")
+        if isinstance(metadata.get("preflight"), dict)
+        else {}
+    )
+    target_flow_ids = preflight.get("target_flow_ids") or []
+    if not target_flow_ids:
+        return (
+            "No runtime packages need generation for the selected scope.",
+            preflight,
+        )
+    protected_flow_ids = preflight.get("protected_flow_ids") or []
+    if protected_flow_ids and not metadata.get("overwrite_manual_code"):
+        return (
+            "The selected scope includes manually edited or uploaded code. "
+            "Explicit replacement approval is required.",
+            preflight,
+        )
+    return None
+
+
 def _finalize_pipeline_codegen_response(
     codegen_response: dict[str, Any],
     graph: dict[str, Any],
+    *,
+    persist_flow_ids: set[str] | None = None,
+    reused_flow_ids: set[str] | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     generated_nodes = (
         codegen_response.get("nodes")
@@ -1314,6 +1717,7 @@ def _finalize_pipeline_codegen_response(
         )
 
     persisted_nodes = []
+    run_id = str((generation_run or {}).get("run_id") or "").strip()
     for item in generated_nodes:
         if not isinstance(item, dict):
             continue
@@ -1321,6 +1725,12 @@ def _finalize_pipeline_codegen_response(
         artifact = item.get("generated_artifact")
         if not flow_id or not isinstance(artifact, dict):
             continue
+        if persist_flow_ids is not None and flow_id not in persist_flow_ids:
+            continue
+        artifact = {
+            **artifact,
+            **({"generation_run_id": run_id} if run_id else {}),
+        }
         persisted_nodes.append(
             {
                 "flow_id": flow_id,
@@ -1335,6 +1745,10 @@ def _finalize_pipeline_codegen_response(
         True,
         {
             "nodes": persisted_nodes,
+            "reused_flow_ids": sorted(reused_flow_ids or set()),
+            "attached_flow_ids": [
+                item["flow_id"] for item in persisted_nodes
+            ],
             "edges": codegen_response.get("edges", []),
             "integration_validation": integration_validation,
             "generation_run": generation_run,
@@ -1925,11 +2339,17 @@ def pipeline_generate_scripts():
         if not codegen_context["graph"]["nodes"]:
             return _json_error(422, "pipeline graph has no nodes")
 
-        codegen_payload, _metadata = _build_pipeline_codegen_payload(graph, payload)
+        codegen_payload, metadata = _build_pipeline_codegen_payload(graph, payload)
+        conflict = _pipeline_codegen_conflict(metadata)
+        if conflict:
+            message, details = conflict
+            return _json_error(409, message, details)
         codegen_response = _post_codegen_pipeline_request(codegen_payload)
         is_valid, response_payload = _finalize_pipeline_codegen_response(
             codegen_response,
             graph,
+            persist_flow_ids=set(metadata.get("target_flow_ids") or []),
+            reused_flow_ids=set(metadata.get("reusable_flow_ids") or []),
         )
         if not is_valid:
             return _json_error(
@@ -1940,6 +2360,30 @@ def pipeline_generate_scripts():
         return jsonify(response_payload), 200
     except Exception as exc:
         return _json_error(502, "pipeline script generation failed", str(exc))
+
+
+@app.route(
+    "/api/pipeline/generation-preflight",
+    methods=["POST", "OPTIONS"],
+)
+@require_auth
+def pipeline_generation_preflight():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    try:
+        graph_response = _proxy(
+            dispatch_graph_request,
+            "neo4j_get_graph",
+            method="GET",
+            data=b"",
+        )
+        graph_response.raise_for_status()
+        graph = _upstream_json(graph_response)
+        graph = graph if isinstance(graph, dict) else {}
+        preflight = _pipeline_codegen_preflight(graph, _request_json())
+        return jsonify(preflight), 200
+    except Exception as exc:
+        return _json_error(502, "pipeline generation preflight failed", str(exc))
 
 
 @app.route("/api/pipeline/external-runtime-prompt", methods=["POST", "OPTIONS"])
@@ -2012,6 +2456,10 @@ def pipeline_generation_runs():
         graph = _upstream_json(graph_response)
         graph = graph if isinstance(graph, dict) else {}
         codegen_payload, metadata = _build_pipeline_codegen_payload(graph, payload)
+        conflict = _pipeline_codegen_conflict(metadata)
+        if conflict:
+            message, details = conflict
+            return _json_error(409, message, details)
         if not codegen_payload["context"]["graph"]["nodes"]:
             return _json_error(422, "pipeline graph has no nodes")
 
@@ -2036,8 +2484,7 @@ def pipeline_generation_runs():
         return jsonify(
             {
                 **codegen_run,
-                "mode": metadata["generation_mode"],
-                "data_awareness": metadata["data_awareness"],
+                **_codegen_run_response_metadata({"metadata": metadata}),
                 "persistence": {"status": "pending"},
             }
         ), 202
@@ -2116,8 +2563,7 @@ def pipeline_generation_run_resume(run_id: str):
         return jsonify(
             {
                 **codegen_run,
-                "mode": metadata["generation_mode"],
-                "data_awareness": metadata.get("data_awareness", {}),
+                **_codegen_run_response_metadata({"metadata": metadata}),
                 "persistence": {"status": "pending"},
             }
         ), 202
@@ -2146,12 +2592,7 @@ def pipeline_generation_run(run_id: str):
             return jsonify(
                 {
                     **codegen_run,
-                    "mode": (local_run or {})
-                    .get("metadata", {})
-                    .get("generation_mode", ""),
-                    "data_awareness": (local_run or {})
-                    .get("metadata", {})
-                    .get("data_awareness", {}),
+                    **_codegen_run_response_metadata(local_run),
                     "persistence": {"status": "cancelled"},
                 }
             ), 200
@@ -2165,11 +2606,7 @@ def pipeline_generation_run(run_id: str):
             CODEGEN_RUN_STORE.put(local_run)
         response_payload = {
             **codegen_run,
-            "mode": (local_run or {}).get("metadata", {}).get("generation_mode", ""),
-            "data_awareness": (local_run or {}).get("metadata", {}).get(
-                "data_awareness",
-                {},
-            ),
+            **_codegen_run_response_metadata(local_run),
             "persistence": {"status": "pending"},
         }
         status = str(codegen_run.get("status") or "").strip().lower()
@@ -2256,6 +2693,14 @@ def pipeline_generation_run(run_id: str):
         is_valid, finalized = _finalize_pipeline_codegen_response(
             result,
             local_run["graph"],
+            persist_flow_ids=(
+                set(local_run.get("metadata", {}).get("target_flow_ids") or [])
+                if local_run.get("metadata", {}).get("target_flow_ids") is not None
+                else None
+            ),
+            reused_flow_ids=set(
+                local_run.get("metadata", {}).get("reusable_flow_ids") or []
+            ),
         )
         local_run["updated_at"] = _utc_now_iso()
         if is_valid:
@@ -2353,6 +2798,9 @@ def node_files(node_id: str):
         if not graph_response.ok:
             return _response_from_upstream(graph_response)
 
+        if file_role == "code" or _is_codegen_runtime_file(uploaded_filename):
+            _mark_codegen_artifact_user_modified(node_id)
+
         return jsonify({
             "file": _upstream_json(storage_response),
             "graph": _upstream_json(graph_response),
@@ -2388,6 +2836,9 @@ def node_files(node_id: str):
     if not graph_response.ok:
         return _response_from_upstream(graph_response)
 
+    if _is_codegen_runtime_file(filename):
+        _mark_codegen_artifact_user_modified(node_id)
+
     return jsonify({
         "file": _upstream_json(storage_response),
         "graph": _upstream_json(graph_response),
@@ -2420,6 +2871,8 @@ def node_text_file(node_id: str):
         },
     )
     if storage_response.ok:
+        if _is_codegen_runtime_file(filename):
+            _mark_codegen_artifact_user_modified(node_id)
         _proxy(
             dispatch_graph_request,
             "neo4j_record_provenance_event",

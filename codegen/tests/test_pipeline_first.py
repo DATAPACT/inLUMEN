@@ -15,10 +15,13 @@ from app.generator import (
     deterministic_pipeline_payload,
     evaluate_pipeline_draft,
     expected_outputs_for_node,
+    fallback_script_payload,
+    generate_pipeline_script_bundles,
     normalize_pipeline_payload,
     normalize_requirements,
 )
 from app.main import app
+from app.llm import NODE_SYSTEM_PROMPT
 from app.multimodal import build_multimodal_user_content
 from app.pipeline_compiler import (
     compile_pipeline_nodes,
@@ -43,6 +46,7 @@ from app.task_profiles import (
 from app.trusted_adapters import (
     apply_trusted_adapters,
     faster_whisper_function_source,
+    input_boundary_function_source,
     roberta_sentiment_function_source,
 )
 
@@ -85,6 +89,91 @@ def file_content(node: dict, filename: str) -> str:
         for item in node["generated_artifact"]["files"]
         if item["filename"] == filename
     )
+
+
+def test_node_prompt_requires_canonical_output_manifest_shape() -> None:
+    assert "must use an `outputs` array" in NODE_SYSTEM_PROMPT
+    assert "exact declared output" in NODE_SYSTEM_PROMPT
+
+
+def test_targeted_generation_reuses_validated_packages() -> None:
+    initial_payload = pipeline_payload()
+    initial_payload["options"] = {
+        "validation_mode": "static",
+        "allow_deterministic_fallback": True,
+    }
+    initial = asyncio.run(
+        generate_pipeline_script_bundles(
+            GeneratePipelineScriptsRequest.model_validate(initial_payload)
+        )
+    )
+    reusable = next(
+        node for node in initial.nodes if node.flow_id == "ingest"
+    )
+    targeted_payload = pipeline_payload()
+    targeted_payload["options"] = {
+        "validation_mode": "static",
+        "allow_deterministic_fallback": True,
+        "generation_strategy": "node_first",
+        "target_flow_ids": ["resize"],
+    }
+    targeted_payload["reusable_nodes"] = [reusable.model_dump(mode="json")]
+
+    targeted = asyncio.run(
+        generate_pipeline_script_bundles(
+            GeneratePipelineScriptsRequest.model_validate(targeted_payload)
+        )
+    )
+
+    steps = {step.flow_id: step for step in targeted.generation_run.steps}
+    assert steps["ingest"].attempts == 0
+    assert steps["ingest"].stage == "reused_validated_bundle"
+    assert steps["ingest"].status == "valid"
+    assert steps["resize"].attempts == 1
+    assert steps["resize"].status == "valid"
+
+
+def test_targeted_generation_forwards_llm_config(monkeypatch) -> None:
+    initial_payload = pipeline_payload()
+    initial_payload["options"] = {
+        "validation_mode": "static",
+        "allow_deterministic_fallback": True,
+    }
+    initial = asyncio.run(
+        generate_pipeline_script_bundles(
+            GeneratePipelineScriptsRequest.model_validate(initial_payload)
+        )
+    )
+    reusable = next(node for node in initial.nodes if node.flow_id == "ingest")
+    targeted_payload = pipeline_payload()
+    targeted_payload["llm_config"] = {
+        "provider": "test",
+        "model": "test-code-model",
+        "base_url": "https://example.invalid/v1",
+        "api_key": "test-key",
+    }
+    targeted_payload["options"] = {
+        "validation_mode": "static",
+        "generation_strategy": "node_first",
+        "target_flow_ids": ["resize"],
+    }
+    targeted_payload["reusable_nodes"] = [reusable.model_dump(mode="json")]
+    seen_models: list[str] = []
+
+    async def generate_from_config(config, request):
+        seen_models.append(config.model)
+        return fallback_script_payload(request)
+
+    monkeypatch.setattr("app.generator.generate_node_payload", generate_from_config)
+
+    targeted = asyncio.run(
+        generate_pipeline_script_bundles(
+            GeneratePipelineScriptsRequest.model_validate(targeted_payload)
+        )
+    )
+
+    assert targeted.generation_run.status == "valid"
+    assert seen_models == ["test-code-model"]
 
 
 def reviewed_audio_pipeline_payload() -> dict:
@@ -427,7 +516,7 @@ def test_model_training_contract_includes_row_level_predictions() -> None:
         NodeDescriptor(
             flow_id="train",
             label="Patient Health Model Training",
-            description="Train a deterioration classifier.",
+            description="Train a deterioration classifier on preprocessed vitals data.",
             type="task",
         ),
         ["alert"],
@@ -946,7 +1035,24 @@ def test_document_pipeline_tasks_receive_semantic_runtime_contracts() -> None:
     assert embeddings[0].semantic_role == "embedding_records"
     assert embeddings[0].kind == "json"
     assert answers[0].semantic_role == "grounded_answer"
-    assert answers[0].schema["required"] == ["question", "answer", "citations"]
+    assert answers[0].schema["required"] == ["answers"]
+    assert answers[0].schema["properties"]["answers"]["items"]["required"] == [
+        "question",
+        "answer",
+        "citations",
+    ]
+    answer_profile = task_profile_payload(
+        NodeDescriptor(
+            flow_id="answer",
+            label="Question Answering",
+            type="task",
+        ),
+        [FileDescriptor(filename="index.json", kind="json", format="json")],
+    )
+    assert any(
+        "questions array carried inside an upstream index" in rule
+        for rule in answer_profile["implementation_rules"]
+    )
 
     chunk_profile = task_profile_payload(
         NodeDescriptor(
@@ -1188,6 +1294,68 @@ def test_pipeline_boundary_nodes_use_compiler_owned_adapters() -> None:
     assert "item.get('path')" in source
     assert "'status': 'delivered'" in source
     assert "'alerts'" in source
+
+
+def test_input_boundary_packages_pdf_and_questions_for_downstream_tasks(tmp_path) -> None:
+    pdf_path = tmp_path / "knowledge.pdf"
+    pdf_bytes = b"%PDF-1.4\nreal fixture\n"
+    pdf_path.write_bytes(pdf_bytes)
+    questions_path = tmp_path / "questions.json"
+    questions_path.write_text(
+        json.dumps({"questions": ["What is retained?"]}),
+        encoding="utf-8",
+    )
+    node_plan = {
+        "flow_id": "source",
+        "function_name": "node_source",
+        "outputs": [
+            {
+                "name": "source_package",
+                "filename": "source_package.json",
+                "kind": "json",
+                "format": "json",
+            }
+        ],
+    }
+    namespace: dict[str, object] = {}
+    exec(input_boundary_function_source(node_plan), namespace)
+
+    outputs = namespace["node_source"](
+        [
+            {
+                "path": str(pdf_path),
+                "filename": pdf_path.name,
+                "kind": "binary",
+                "format": "pdf",
+            },
+            {
+                "path": str(questions_path),
+                "filename": questions_path.name,
+                "kind": "json",
+                "format": "json",
+            },
+        ],
+        tmp_path / "outputs",
+        {},
+    )
+
+    payload = json.loads((tmp_path / "outputs" / "source_package.json").read_text())
+    assert base64.b64decode(payload["pdf_base64"]) == pdf_bytes
+    assert payload["source"] == "knowledge.pdf"
+    assert payload["questions"] == ["What is retained?"]
+    assert outputs[0]["filename"] == "source_package.json"
+
+
+def test_alert_task_semantics_override_stale_classical_ml_plan() -> None:
+    node = NodeDescriptor(
+        flow_id="alert",
+        label="Patient Alert Evaluation",
+        description="Create patient notifications from risk predictions.",
+        type="task",
+        implementation={"execution_profile": "classical_ml"},
+    )
+
+    assert classify_node_task(node, []) == "alerting"
 
 
 def test_pipeline_compiler_injects_omitted_reviewed_dependencies() -> None:

@@ -321,11 +321,17 @@ IMAGE_FORMATS = {
     "tiff",
     "svg",
 }
+AUDIO_FORMATS = {"aac", "flac", "m4a", "mp3", "ogg", "opus", "wav"}
+VIDEO_FORMATS = {"avi", "mkv", "mov", "mp4", "mpeg", "mpg", "webm"}
+DOCUMENT_FORMATS = {"doc", "docx", "odp", "odt", "pdf", "ppt", "pptx"}
 CANONICAL_ARTIFACT_KINDS = {
     "table",
     "json",
     "text",
     "image",
+    "audio",
+    "video",
+    "document",
     "model",
     "directory",
     "binary",
@@ -349,6 +355,12 @@ def _canonical_artifact(
         inferred_kind = "text"
     elif normalized_format in IMAGE_FORMATS:
         inferred_kind = "image"
+    elif normalized_format in AUDIO_FORMATS:
+        inferred_kind = "audio"
+    elif normalized_format in VIDEO_FORMATS:
+        inferred_kind = "video"
+    elif normalized_format in DOCUMENT_FORMATS:
+        inferred_kind = "document"
     else:
         inferred_kind = "binary"
     declared_kind = str(kind or "").strip().lower()

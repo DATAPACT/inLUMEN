@@ -111,7 +111,17 @@ TASK_PROFILES = {
         name="question_answering",
         guidance=(
             "Answer only from the supplied searchable index and preserve source and page citations.",
+            "Return one grounded answer entry for every supplied question.",
+            "Read the questions array carried inside an upstream index or retrieval artifact when no separate questions file reaches this node.",
             "Fail clearly when the retrieved context does not support an answer.",
+        ),
+    ),
+    "alerting": TaskProfile(
+        name="alerting",
+        guidance=(
+            "Evaluate real upstream predictions or vitals into an explicit alerts list.",
+            "Preserve patient identity and include a risk level and measured reason for every alert.",
+            "Do not train or serialize another model in an alerting task.",
         ),
     ),
     "model_training": TaskProfile(
@@ -188,6 +198,8 @@ def classify_node_task(
         return "ingestion"
     if any(token in text for token in ("report", "result compilation")):
         return "report"
+    if any(token in text for token in ("alert", "notify", "notification", "warning")):
+        return "alerting"
     if raw_plan.get("execution_profile") == "classical_ml":
         return "model_training"
     if any(

@@ -534,7 +534,8 @@ def _deterministic_python_dockerfile(
 
 def _managed_adapter_main_source(adapter_spec: dict[str, Any]) -> str:
     embedded_spec = json.dumps(adapter_spec, sort_keys=True)
-    return f'''import json
+    return f'''import base64
+import json
 import os
 import shutil
 from pathlib import Path
@@ -553,7 +554,7 @@ def _read_entries(manifest_path: Path):
 
 
 def _source_outputs(entries, output_dir: Path):
-    outputs = []
+    resolved = []
     for index, entry in enumerate(entries):
         filename = Path(
             str(entry.get("filename") or entry.get("name") or f"input-{{index + 1}}")
@@ -563,6 +564,57 @@ def _source_outputs(entries, output_dir: Path):
             source_path = Path(os.environ["INLUMEN_INPUT_MANIFEST"]).parent / source_path
         if not source_path.is_file():
             raise FileNotFoundError(f"Source adapter input does not exist: {{source_path}}")
+        resolved.append((entry, filename, source_path))
+
+    if len(resolved) > 1:
+        package = {{"files": []}}
+        json_documents = []
+        for entry, filename, source_path in resolved:
+            kind = str(entry.get("kind") or "binary")
+            file_format = str(
+                entry.get("format") or source_path.suffix.lstrip(".")
+            ).lower()
+            package["files"].append({{
+                "filename": filename,
+                "kind": kind,
+                "format": file_format,
+                "size_bytes": source_path.stat().st_size,
+            }})
+            if file_format == "pdf":
+                package.setdefault(
+                    "pdf_base64",
+                    base64.b64encode(source_path.read_bytes()).decode("ascii"),
+                )
+                package.setdefault("source", filename)
+            elif kind == "json" or file_format == "json":
+                with source_path.open("r", encoding="utf-8") as handle:
+                    value = json.load(handle)
+                json_documents.append({{"filename": filename, "data": value}})
+                if isinstance(value, dict):
+                    for key, nested_value in value.items():
+                        package.setdefault(str(key), nested_value)
+            elif kind == "text" or file_format in {{"txt", "md"}}:
+                package.setdefault("text", source_path.read_text(encoding="utf-8"))
+            else:
+                package.setdefault(
+                    "content_base64",
+                    base64.b64encode(source_path.read_bytes()).decode("ascii"),
+                )
+        if json_documents:
+            package["json_documents"] = json_documents
+        package_path = output_dir / "source-package.json"
+        with package_path.open("w", encoding="utf-8") as handle:
+            json.dump(package, handle, indent=2, sort_keys=True)
+        return [{{
+            "name": "source_package",
+            "filename": package_path.name,
+            "path": str(package_path.resolve()),
+            "kind": "json",
+            "format": "json",
+        }}]
+
+    outputs = []
+    for entry, filename, source_path in resolved:
         destination_path = output_dir / filename
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_path, destination_path)

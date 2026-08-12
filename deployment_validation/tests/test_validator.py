@@ -285,8 +285,8 @@ class DeploymentInputContractValidationTest(unittest.TestCase):
 
     def test_repair_classifies_multimodal_files_without_descriptors(self):
         expected = {
-            "audio.wav": "binary",
-            "document.pdf": "binary",
+            "audio.wav": "audio",
+            "document.pdf": "document",
             "image.png": "image",
             "notes.txt": "text",
             "records.json": "json",

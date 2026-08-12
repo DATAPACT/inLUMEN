@@ -67,10 +67,54 @@ export type PipelineOverviewMetadata = {
   updated_at?: string | null;
 };
 
-export type PipelineScriptGenerationMode = "fast" | "generic" | "full";
+export type PipelineScriptGenerationMode = "draft" | "validated";
+export type PipelineScriptGenerationScope = "missing_changed" | "selected" | "all";
+
+export type PipelineGenerationPreflightNode = {
+  flow_id: string;
+  label: string;
+  type?: string;
+  runtime_status: "missing" | "current" | "stale" | "invalid" | "manual" | "modified";
+  ownership: "none" | "generated" | "user";
+  reusable: boolean;
+  code_files?: string[];
+  validation_status?: string;
+};
+
+export type PipelineGenerationPreflight = {
+  scope: PipelineScriptGenerationScope;
+  nodes: PipelineGenerationPreflightNode[];
+  node_count: number;
+  target_flow_ids: string[];
+  target_count: number;
+  selected_flow_ids: string[];
+  reusable_flow_ids: string[];
+  reused_count: number;
+  replacement_flow_ids: string[];
+  replacement_count: number;
+  protected_flow_ids: string[];
+  protected_count: number;
+  requires_full_generation?: boolean;
+  candidate_flow_ids?: string[];
+  candidate_count?: number;
+  sample_data: {
+    has_sample_data?: boolean;
+    sample_file_count?: number;
+    sample_nodes?: Array<{
+      flow_id?: string;
+      label?: string;
+      type?: string;
+      files?: Array<{ filename?: string; kind?: string; format?: string }>;
+    }>;
+  };
+};
 
 export type PipelineScriptGenerationOptions = {
   mode?: PipelineScriptGenerationMode;
+  scope?: PipelineScriptGenerationScope;
+  selectedFlowIds?: string[];
+  overwriteManualCode?: boolean;
+  checkpointVersionUid?: string;
   includeSampleData?: boolean;
   validationMode?: "static" | "unit" | "edge" | "pipeline_sample";
   generationStrategy?: "auto" | "single_pass" | "per_node";
@@ -109,6 +153,12 @@ export type PipelineGenerationJob = {
   result?: unknown;
   error?: string | null;
   mode?: string;
+  generation_scope?: PipelineScriptGenerationScope;
+  target_flow_ids?: string[];
+  reusable_flow_ids?: string[];
+  preflight?: PipelineGenerationPreflight;
+  model?: { provider?: string; model?: string };
+  checkpoint_version_uid?: string;
   data_awareness?: {
     has_sample_data?: boolean;
     sample_file_count?: number;
@@ -544,11 +594,43 @@ const buildPipelineGenerationPayload = (
     include_sample_data: options.includeSampleData ?? true,
     validation_mode: options.validationMode ?? "pipeline_sample",
     generation_strategy: options.generationStrategy ?? "auto",
-    generation_mode: options.mode ?? "full",
+    generation_mode: options.mode ?? "validated",
+    generation_scope: options.scope ?? "missing_changed",
+    selected_flow_ids: options.selectedFlowIds ?? [],
+    overwrite_manual_code: options.overwriteManualCode ?? false,
+    checkpoint_version_uid: options.checkpointVersionUid ?? "",
     allow_deterministic_fallback: options.allowDeterministicFallback ?? false,
     repair_attempts: options.repairAttempts ?? 7,
     high_level_prompt: options.userInstruction?.trim() || "",
   };
+};
+
+export const preparePipelineScriptGeneration = async (
+  options: Pick<
+    PipelineScriptGenerationOptions,
+    "scope" | "selectedFlowIds"
+  > = {},
+): Promise<PipelineGenerationPreflight> => {
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/pipeline/generation-preflight`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        generation_scope: options.scope ?? "missing_changed",
+        selected_flow_ids: options.selectedFlowIds ?? [],
+      }),
+    },
+  );
+  if (!response.ok) {
+    const payload = await response.json().catch(async () => ({
+      error: await response.text().catch(() => ""),
+    }));
+    throw new Error(
+      formatPipelineGenerationError(payload, response.status, response.statusText),
+    );
+  }
+  return response.json();
 };
 
 export const prepareExternalRuntimePrompt = async (

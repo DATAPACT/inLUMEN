@@ -30,16 +30,20 @@ import {
   deleteNodeFromBackend,
   fetchPipelineScriptGenerationRun,
   listPipelineScriptGenerationRuns,
+  preparePipelineScriptGeneration,
   fetchPipelineVersions,
   fetchPipelineGraph,
   fetchPipelineUpdatedAt,
   restoreBackendGraphHistory,
   resumePipelineScriptGenerationRun,
+  restorePipelineVersion,
   startPipelineScriptGenerationRun,
   type PipelineVersionGraph,
   type PipelineVersionSummary,
   type PipelineGenerationJob,
+  type PipelineGenerationPreflight,
   type PipelineScriptGenerationMode,
+  type PipelineScriptGenerationScope,
   rebuildBackendFromFlow,
   savePipelineVersion,
   updateNodePositionInBackend,
@@ -113,6 +117,7 @@ export interface FlowCanvasRef {
   syncFromBackend: (graphData?: unknown) => Promise<NormalizedGraph>;
   getCurrentGraph: () => AgentGraphSnapshot;
   getCurrentVersionGraph: () => PipelineVersionGraph;
+  openCodeGeneration: (selectedFlowIds?: string[]) => void;
 }
 
 let nodeId = 1;
@@ -157,21 +162,15 @@ const generationModeOptions: Array<{
   icon: typeof Zap;
 }> = [
   {
-    value: "fast",
-    title: "Fast draft",
-    description: "Generate quickly with static checks. Sample inputs are optional.",
+    value: "draft",
+    title: "Draft",
+    description: "Generate packages and run static syntax, dependency, manifest, and contract checks.",
     icon: Zap,
   },
   {
-    value: "generic",
-    title: "Generic draft",
-    description: "Generate reusable scripts without reading uploaded sample data.",
-    icon: AlertCircle,
-  },
-  {
-    value: "full",
-    title: "Full data-aware",
-    description: "Run with uploaded inputs, validate each node, and repair failures.",
+    value: "validated",
+    title: "Validated",
+    description: "Execute with attached sample inputs and automatically repair validation failures.",
     icon: Database,
   },
 ];
@@ -180,17 +179,7 @@ const modeToGenerationOptions = (
   mode: PipelineScriptGenerationMode,
   hasInputFiles: boolean,
 ) => {
-  if (mode === "fast") {
-    return {
-      mode,
-      includeSampleData: hasInputFiles,
-      validationMode: "static" as const,
-      generationStrategy: "single_pass" as const,
-      allowDeterministicFallback: false,
-      repairAttempts: 0,
-    };
-  }
-  if (mode === "generic") {
+  if (mode === "draft") {
     return {
       mode,
       includeSampleData: false,
@@ -202,11 +191,11 @@ const modeToGenerationOptions = (
   }
   return {
     mode,
-    includeSampleData: true,
+    includeSampleData: hasInputFiles,
     validationMode: "pipeline_sample" as const,
     generationStrategy: "single_pass" as const,
     allowDeterministicFallback: false,
-    repairAttempts: 7,
+    repairAttempts: 4,
   };
 };
 
@@ -261,11 +250,24 @@ const generationStageLabel = (stage: unknown) => {
     sandbox_execution: "executing sample in sandbox",
     node_compilation: "extracting independent nodes",
     compiled_independent_bundle: "complete",
+    reused_validated_bundle: "reused validated package",
     validated_cache_hit: "reused validated result",
     complete: "complete",
     cancelled: "cancelled",
   };
   return labels[key] || key.replace(/_/g, " ");
+};
+
+const generationStatusLabel = (status: unknown) => {
+  const key = String(status || "running").toLowerCase();
+  return {
+    queued: "Queued",
+    running: "In progress",
+    valid: "Validated",
+    invalid: "Validation failed",
+    failed: "Failed",
+    cancelled: "Stopped",
+  }[key] || key.replace(/_/g, " ");
 };
 
 const getSnapshotFileRef = (file: unknown, nodeIdValue: string) => {
@@ -457,21 +459,45 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const [isValidationOpen, setIsValidationOpen] = useState(false);
   const [scriptGenerationPrompt, setScriptGenerationPrompt] = useState("");
   const [scriptGenerationMode, setScriptGenerationMode] =
-    useState<PipelineScriptGenerationMode>("full");
+    useState<PipelineScriptGenerationMode>("validated");
+  const [scriptGenerationScope, setScriptGenerationScope] =
+    useState<PipelineScriptGenerationScope>("missing_changed");
+  const [scriptGenerationSelectedFlowIds, setScriptGenerationSelectedFlowIds] =
+    useState<string[]>([]);
+  const [generationPreflight, setGenerationPreflight] =
+    useState<PipelineGenerationPreflight | null>(null);
+  const [isGenerationPreflightLoading, setIsGenerationPreflightLoading] =
+    useState(false);
+  const generationPreflightRequestRef = useRef(0);
+  const [generationPreflightError, setGenerationPreflightError] = useState("");
+  const [overwriteProtectedCode, setOverwriteProtectedCode] = useState(false);
+  const [recentGenerationRuns, setRecentGenerationRuns] =
+    useState<PipelineGenerationJob[]>([]);
+  const [isCreatingGenerationCheckpoint, setIsCreatingGenerationCheckpoint] =
+    useState(false);
+  const [isRestoringGenerationCheckpoint, setIsRestoringGenerationCheckpoint] =
+    useState(false);
   const [generationJob, setGenerationJob] = useState<PipelineGenerationJob | null>(null);
   const rememberGenerationJob = useCallback((job: PipelineGenerationJob) => {
     setGenerationJob(job);
     const runId = generationRunId(job);
+    const status = effectiveGenerationStatus(job);
+    const awaitingPersistence = status === "valid" && job.persistence?.status === "pending";
+    const complete = GENERATION_TERMINAL_STATUSES.has(status) && !awaitingPersistence;
     if (runId) {
-      if (GENERATION_TERMINAL_STATUSES.has(effectiveGenerationStatus(job))) {
+      setRecentGenerationRuns((current) => [
+        job,
+        ...current.filter((item) => generationRunId(item) !== runId),
+      ].slice(0, 8));
+    }
+    if (runId) {
+      if (complete) {
         localStorage.removeItem(ACTIVE_GENERATION_RUN_STORAGE_KEY);
       } else {
         localStorage.setItem(ACTIVE_GENERATION_RUN_STORAGE_KEY, runId);
       }
     }
-    setIsGeneratingScripts(
-      !GENERATION_TERMINAL_STATUSES.has(effectiveGenerationStatus(job)),
-    );
+    setIsGeneratingScripts(!complete);
   }, []);
   const activeGenerationRunId = String(
     generationJob?.run_id || generationJob?.generation_run?.run_id || "",
@@ -539,8 +565,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   }, [onNodeSelect, selectedNodeFeedbackSignature]);
 
   useEffect(() => {
-    if (!uploadedSampleDataAvailable && scriptGenerationMode === "full") {
-      setScriptGenerationMode("generic");
+    if (!uploadedSampleDataAvailable && scriptGenerationMode === "validated") {
+      setScriptGenerationMode("draft");
     }
   }, [scriptGenerationMode, uploadedSampleDataAvailable]);
 
@@ -1038,12 +1064,99 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     }
   }, [applyHistorySnapshot, createHistorySnapshot, syncHistoryAvailability]);
 
+  const loadGenerationPreflight = useCallback(async (
+    scope: PipelineScriptGenerationScope,
+    selectedFlowIds: string[],
+  ) => {
+    const requestId = ++generationPreflightRequestRef.current;
+    setIsGenerationPreflightLoading(true);
+    setGenerationPreflightError("");
+    try {
+      const prepared = await preparePipelineScriptGeneration({
+        scope,
+        selectedFlowIds,
+      });
+      if (requestId !== generationPreflightRequestRef.current) return;
+      setGenerationPreflight(prepared);
+    } catch (error) {
+      if (requestId !== generationPreflightRequestRef.current) return;
+      setGenerationPreflight(null);
+      setGenerationPreflightError(
+        error instanceof Error ? error.message : "Could not inspect the pipeline.",
+      );
+    } finally {
+      if (requestId === generationPreflightRequestRef.current) {
+        setIsGenerationPreflightLoading(false);
+      }
+    }
+  }, []);
+
+  const loadRecentGenerationRuns = useCallback(async () => {
+    try {
+      setRecentGenerationRuns(await listPipelineScriptGenerationRuns(8));
+    } catch (error) {
+      console.warn("[FlowCanvas.tsx] Could not load generation history:", error);
+    }
+  }, []);
+
+  const openCodeGeneration = useCallback((selectedFlowIds: string[] = []) => {
+    if (isGeneratingScripts) {
+      setIsScriptGenerationOpen(true);
+      return;
+    }
+    const normalizedSelectedIds = Array.from(new Set(
+      selectedFlowIds.map((flowId) => String(flowId).trim()).filter(Boolean),
+    ));
+    const nextScope: PipelineScriptGenerationScope = normalizedSelectedIds.length > 0
+      ? "selected"
+      : "missing_changed";
+    setScriptGenerationSelectedFlowIds(normalizedSelectedIds);
+    setScriptGenerationScope(nextScope);
+    setScriptGenerationPrompt(String(pipelinePrompt || "").trim());
+    setScriptGenerationMode(uploadedSampleDataAvailable ? "validated" : "draft");
+    setOverwriteProtectedCode(false);
+    setGenerationJob(null);
+    generationPreflightRequestRef.current += 1;
+    setGenerationPreflight(null);
+    setIsGenerationPreflightLoading(true);
+    setGenerationPreflightError("");
+    setIsScriptGenerationOpen(true);
+    void loadRecentGenerationRuns();
+  }, [
+    isGeneratingScripts,
+    loadRecentGenerationRuns,
+    pipelinePrompt,
+    uploadedSampleDataAvailable,
+  ]);
+
+  useEffect(() => {
+    if (!isScriptGenerationOpen || isGeneratingScripts || generationJob) return;
+    void loadGenerationPreflight(
+      scriptGenerationScope,
+      scriptGenerationSelectedFlowIds,
+    );
+  }, [
+    generationJob,
+    isGeneratingScripts,
+    isScriptGenerationOpen,
+    loadGenerationPreflight,
+    scriptGenerationScope,
+    scriptGenerationSelectedFlowIds,
+  ]);
+
   useImperativeHandle(ref, () => ({
     updateNode,
     syncFromBackend,
     getCurrentGraph,
     getCurrentVersionGraph: createSerializableFlow,
-  }), [createSerializableFlow, getCurrentGraph, syncFromBackend, updateNode]);
+    openCodeGeneration,
+  }), [
+    createSerializableFlow,
+    getCurrentGraph,
+    openCodeGeneration,
+    syncFromBackend,
+    updateNode,
+  ]);
 
   useEffect(() => {
     localStorage.setItem('ai-flow-nodes', JSON.stringify(nodes));
@@ -1344,24 +1457,58 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     }
   };
 
-  const handleGeneratePipelineScripts = () => {
-    if (isGeneratingScripts) {
-      setIsScriptGenerationOpen(true);
-      return;
-    }
-    setScriptGenerationPrompt(String(pipelinePrompt || "").trim());
-    setScriptGenerationMode(uploadedSampleDataAvailable ? "full" : "generic");
-    setIsScriptGenerationOpen(true);
-  };
+  const handleGeneratePipelineScripts = () => openCodeGeneration();
 
   const handleRunPipelineScriptGeneration = async () => {
-    if (isGeneratingScripts) return;
-    const mode =
-      scriptGenerationMode === "full" && !uploadedSampleDataAvailable
-        ? "generic"
-        : scriptGenerationMode;
+    if (
+      isGeneratingScripts
+      || isCreatingGenerationCheckpoint
+      || !generationPreflight
+      || generationPreflight.target_count === 0
+    ) return;
+    const sampleDataAvailable = Boolean(
+      generationPreflight.sample_data?.has_sample_data,
+    );
+    const mode = scriptGenerationMode === "validated" && !sampleDataAvailable
+      ? "draft"
+      : scriptGenerationMode;
+    if (generationPreflight.protected_count > 0 && !overwriteProtectedCode) {
+      toast.error("Replacement approval required", {
+        description: "Confirm replacement of user-owned runtime code before generating.",
+      });
+      return;
+    }
+    if (validationErrors > 0) {
+      toast.error("Resolve pipeline errors first", {
+        description: `${validationErrors} design-time error${validationErrors === 1 ? "" : "s"} block safe code generation.`,
+      });
+      return;
+    }
+    let checkpointVersionUid = "";
+    if (generationPreflight.replacement_count > 0) {
+      try {
+        setIsCreatingGenerationCheckpoint(true);
+        const checkpoint = await savePipelineVersion(
+          `Before code generation ${new Date().toLocaleString()}`,
+          createSerializableFlow(),
+        );
+        checkpointVersionUid = checkpoint.uid;
+        onVersionSaved?.(checkpoint);
+      } catch (error) {
+        toast.error("Could not create a restore point", {
+          description: error instanceof Error ? error.message : "Generation was not started.",
+        });
+        return;
+      } finally {
+        setIsCreatingGenerationCheckpoint(false);
+      }
+    }
     const options = {
-      ...modeToGenerationOptions(mode, uploadedSampleDataAvailable),
+      ...modeToGenerationOptions(mode, sampleDataAvailable),
+      scope: scriptGenerationScope,
+      selectedFlowIds: scriptGenerationSelectedFlowIds,
+      overwriteManualCode: overwriteProtectedCode,
+      checkpointVersionUid,
       userInstruction: scriptGenerationPrompt.trim(),
     };
     generationCancelRequestedRef.current = false;
@@ -1376,6 +1523,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         throw new Error("Pipeline generation run did not return a run id.");
       }
       rememberGenerationJob(started);
+      void loadRecentGenerationRuns();
       toast.info("Runtime generation started", {
         description: "This runs in the background. You can close this panel and return at any time.",
       });
@@ -1410,10 +1558,11 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         activeChatbotConfig,
         {
           flowId: failedFlowId,
-          repairAttempts: 7,
+          repairAttempts: 4,
         },
       );
       rememberGenerationJob(started);
+      void loadRecentGenerationRuns();
       toast.info("Node repair started", {
         description: "The repair is running in the background.",
       });
@@ -1454,6 +1603,76 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       });
     } finally {
       setIsCancellingScripts(false);
+    }
+  };
+
+  const handleViewGenerationRun = async (run: PipelineGenerationJob) => {
+    const runId = generationRunId(run);
+    if (!runId) return;
+    try {
+      const loaded = await fetchPipelineScriptGenerationRun(runId);
+      rememberGenerationJob(loaded);
+      setIsScriptGenerationOpen(true);
+    } catch (error) {
+      toast.error("Could not open generation run", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  };
+
+  const handleViewGeneratedCode = () => {
+    const persistedResult = generationJob?.persistence?.result as
+      | {
+        nodes?: Array<{ flow_id?: string }>;
+        attached_flow_ids?: string[];
+      }
+      | undefined;
+    const targetFlowIds = Array.from(new Set([
+      ...(generationJob?.target_flow_ids || []),
+      ...(generationJob?.preflight?.target_flow_ids || []),
+      ...(persistedResult?.attached_flow_ids || []),
+      ...(persistedResult?.nodes || []).map((node) => node.flow_id || ""),
+      ...(generationJob?.generation_run?.steps || []).map((step) => step.flow_id || ""),
+    ].map((flowId) => String(flowId).trim()).filter(Boolean)));
+    const taskTarget = targetFlowIds.find((flowId) => {
+      const node = displayedNodesRef.current.find(
+        (candidate) => String(candidate.id) === String(flowId),
+      );
+      return node && normalizeType(node.data?.type) === "task";
+    });
+    const flowId = String(taskTarget || targetFlowIds[0] || "").trim();
+    if (!flowId) return;
+    const node = displayedNodesRef.current.find(
+      (candidate) => String(candidate.id) === flowId,
+    );
+    if (!node) return;
+    selectedNodeIdRef.current = node.id;
+    onNodeSelect(node, { openInspector: true });
+    setIsScriptGenerationOpen(false);
+  };
+
+  const handleRestoreGenerationCheckpoint = async () => {
+    const checkpointVersionUid = String(
+      generationJob?.checkpoint_version_uid || "",
+    ).trim();
+    if (!checkpointVersionUid || isRestoringGenerationCheckpoint) return;
+    try {
+      setIsRestoringGenerationCheckpoint(true);
+      const restored = await restorePipelineVersion(checkpointVersionUid);
+      await syncFromBackend(restored.graph);
+      onActiveVersionChange?.(restored.version.uid);
+      onActiveVersionNameChange?.(restored.version.name);
+      onPipelineDescriptionChange?.(restored.version.description || "");
+      toast.success("Generated packages were undone", {
+        description: `Restored ${restored.version.name}.`,
+      });
+      setIsScriptGenerationOpen(false);
+    } catch (error) {
+      toast.error("Could not restore the generation checkpoint", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      setIsRestoringGenerationCheckpoint(false);
     }
   };
 
@@ -1514,6 +1733,59 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       generationFailed &&
       repairableFailedStep?.flow_id &&
       generationJob.result,
+  );
+  const generationPersistenceResult = generationJob?.persistence?.result as
+    | {
+      nodes?: Array<{ flow_id?: string }>;
+      attached_flow_ids?: string[];
+      reused_flow_ids?: string[];
+    }
+    | undefined;
+  const attachedGenerationCount = Array.isArray(
+    generationPersistenceResult?.attached_flow_ids,
+  )
+    ? generationPersistenceResult.attached_flow_ids.length
+    : Array.isArray(generationPersistenceResult?.nodes)
+      ? generationPersistenceResult.nodes.length
+      : 0;
+  const reusedGenerationCount = Array.isArray(
+    generationPersistenceResult?.reused_flow_ids,
+  )
+    ? generationPersistenceResult.reused_flow_ids.length
+    : generationJob?.reusable_flow_ids?.length || 0;
+  const generationCompleted = Boolean(
+    generationJob && GENERATION_TERMINAL_STATUSES.has(generationStatus),
+  );
+  const generationSucceeded = Boolean(
+    generationCompleted
+    && generationStatus === "valid"
+    && generationJob?.persistence?.status === "persisted",
+  );
+  const generationSampleDataAvailable = Boolean(
+    generationPreflight?.sample_data?.has_sample_data
+    ?? uploadedSampleDataAvailable,
+  );
+  const selectedGenerationLabel = scriptGenerationSelectedFlowIds.length === 1
+    ? displayedNodes.find(
+      (node) => String(node.id) === scriptGenerationSelectedFlowIds[0],
+    )?.data?.label || `Node ${scriptGenerationSelectedFlowIds[0]}`
+    : `${scriptGenerationSelectedFlowIds.length} selected nodes`;
+  const codegenModelName = activeChatbotConfig?.codegenModel?.trim() || "";
+  const canStartGeneration = Boolean(
+    generationPreflight
+    && generationPreflight.target_count > 0
+    && !isGenerationPreflightLoading
+    && !generationPreflightError
+    && validationErrors === 0
+    && codegenModelName
+    && (
+      generationPreflight.protected_count === 0
+      || overwriteProtectedCode
+    )
+    && (
+      scriptGenerationMode !== "validated"
+      || generationSampleDataAvailable
+    )
   );
 
   return (
@@ -1666,189 +1938,416 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         open={isScriptGenerationOpen}
         onOpenChange={setIsScriptGenerationOpen}
       >
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Add Node Scripts</DialogTitle>
+        <DialogContent className="flex max-h-[90vh] flex-col overflow-hidden p-0 sm:max-w-2xl">
+          <DialogHeader className="px-6 pt-6">
+            <DialogTitle>
+              {!generationJob
+                ? "Generate runtime code"
+                : isGeneratingScripts
+                  ? "Generating runtime code"
+                  : generationSucceeded
+                    ? "Runtime code attached"
+                    : generationStatus === "cancelled"
+                      ? "Generation stopped"
+                      : "Generation needs attention"}
+            </DialogTitle>
             <DialogDescription>
-              inLUMEN uses the configured code-generation model to create runtime
-              packages, then validates them. Background runs continue when this panel is closed.
+              {!generationJob
+                ? "Choose the scope and validation level. inLUMEN validates generated packages before attaching them."
+                : isGeneratingScripts
+                  ? "The run continues in the background when this panel is closed."
+                  : generationSucceeded
+                    ? "Validated packages were attached automatically to the selected scope."
+                    : "No invalid candidate packages were attached."}
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4">
-            <div className="space-y-2 rounded-md border border-border bg-muted/20 p-3 text-sm">
-              <p className="font-medium">Files to attach to each node</p>
-              <div className="grid gap-1 text-muted-foreground">
-                <p><code className="text-foreground">main.py</code> — the node script</p>
-                <p><code className="text-foreground">requirements.txt</code> — only when packages are needed</p>
-                <p><code className="text-foreground">node-manifest.json</code> — runtime and data contract metadata</p>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Dockerfiles are not attached to nodes. The deployment exporter
-                builds the shared Dagster and Argo images from these packages.
-              </p>
-              <p className="text-xs text-muted-foreground">
-                To attach generated code: select a node, open Inspector, and use Runtime Package. Source Input Files provide the pipeline input; Task Sample Inputs support code generation and repeatable tests. Run-tab files override source inputs for one run.
-              </p>
-            </div>
-
-            <div className="grid gap-2">
-              <Label htmlFor="pipeline-runtime-prompt">
-                What should the pipeline do?
-              </Label>
-              <Textarea
-                id="pipeline-runtime-prompt"
-                value={scriptGenerationPrompt}
-                onChange={(event) => setScriptGenerationPrompt(event.target.value)}
-                placeholder="Describe the result you want."
-                disabled={isGeneratingScripts}
-                className="min-h-24"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <div className="flex items-center justify-between gap-3">
-                <Label>Generation mode</Label>
-                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                  {uploadedSampleDataAvailable ? (
-                    <>
-                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
-                      Input data detected
-                    </>
-                  ) : (
-                    <>
-                      <AlertCircle className="h-3.5 w-3.5 text-amber-500" />
-                      No input data attached
-                    </>
-                  )}
-                </span>
-              </div>
-              <RadioGroup
-                value={scriptGenerationMode}
-                onValueChange={(value) =>
-                  setScriptGenerationMode(value as PipelineScriptGenerationMode)
-                }
-                className="grid gap-2"
-              >
-                {generationModeOptions.map((option) => {
-                  const Icon = option.icon;
-                  const disabled =
-                    option.value === "full" && !uploadedSampleDataAvailable;
-                  return (
-                    <Label
-                      key={option.value}
-                      htmlFor={`script-generation-${option.value}`}
+          <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+            {!generationJob ? (
+              <div className="space-y-5">
+                {isGenerationPreflightLoading && !generationPreflight ? (
+                  <div className="flex items-center gap-2 rounded-md border border-border p-4 text-sm text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Inspecting runtime packages and sample inputs…
+                  </div>
+                ) : generationPreflightError ? (
+                  <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+                    {generationPreflightError}
+                  </div>
+                ) : generationPreflight && (
+                  <div className="grid grid-cols-2 gap-2 text-sm">
+                    <div className="rounded-md border border-border bg-muted/20 p-3">
+                      <p className="text-xs text-muted-foreground">Packages to attach</p>
+                      <p className="mt-1 font-semibold">{generationPreflight.target_count}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {(generationPreflight.candidate_count || 0) > generationPreflight.target_count
+                          ? `${generationPreflight.candidate_count} candidates generated for pipeline validation`
+                          : `${generationPreflight.reused_count} validated package${generationPreflight.reused_count === 1 ? "" : "s"} reused`}
+                      </p>
+                    </div>
+                    <div className="rounded-md border border-border bg-muted/20 p-3">
+                      <p className="text-xs text-muted-foreground">Code model</p>
+                      <p className={cn("mt-1 truncate font-semibold", !codegenModelName && "text-destructive")}>
+                        {codegenModelName || "Not configured"}
+                      </p>
+                      <p className="text-xs text-muted-foreground">{activeChatbotConfig?.provider || "Open Settings to configure"}</p>
+                    </div>
+                    <div className="rounded-md border border-border bg-muted/20 p-3">
+                      <p className="text-xs text-muted-foreground">Sample inputs</p>
+                      <p className="mt-1 font-semibold">
+                        {generationPreflight.sample_data?.sample_file_count || 0} attached
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {generationSampleDataAvailable ? "Available for execution" : "Static validation only"}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
                       className={cn(
-                        "flex cursor-pointer items-start gap-3 rounded-md border border-border p-3 transition-colors",
-                        scriptGenerationMode === option.value &&
-                          "border-primary bg-primary/10",
-                        disabled && "cursor-not-allowed opacity-50",
+                        "rounded-md border border-border bg-muted/20 p-3 text-left",
+                        validationErrors > 0 && "border-destructive/40 bg-destructive/5",
                       )}
+                      onClick={() => {
+                        setIsScriptGenerationOpen(false);
+                        setIsValidationOpen(true);
+                      }}
                     >
-                      <RadioGroupItem
-                        id={`script-generation-${option.value}`}
-                        value={option.value}
-                        disabled={disabled || isGeneratingScripts}
-                        className="mt-1"
-                      />
-                      <Icon className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-                      <span className="grid gap-1">
-                        <span className="font-medium">{option.title}</span>
-                        <span className="text-sm font-normal text-muted-foreground">
-                          {option.description}
-                        </span>
-                      </span>
-                    </Label>
-                  );
-                })}
-              </RadioGroup>
-              {!uploadedSampleDataAvailable && (
-                <p className="text-xs text-muted-foreground">
-                  Attach an input file to its first consumer node to enable Full data-aware.
-                </p>
-              )}
-            </div>
-
-            {generationJob && (
-              <div className="space-y-3 rounded-md border border-border p-3">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="font-medium">
-                    Run {String(generationJob.run_id || "").slice(0, 8)}
-                  </span>
-                  <span className="text-muted-foreground">
-                    {generationStatus}
-                  </span>
-                </div>
-                <Progress value={generationProgress} />
-                {isGeneratingScripts && (
-                  <p className="text-xs text-muted-foreground">
-                    You can close this panel. Use Scripts → View run to return to it.
-                  </p>
+                      <p className="text-xs text-muted-foreground">Pipeline design</p>
+                      <p className="mt-1 font-semibold">
+                        {validationErrors > 0
+                          ? `${validationErrors} blocking error${validationErrors === 1 ? "" : "s"}`
+                          : validationWarnings > 0
+                            ? `${validationWarnings} warning${validationWarnings === 1 ? "" : "s"}`
+                            : "Ready"}
+                      </p>
+                      <p className="text-xs text-muted-foreground">Open validation</p>
+                    </button>
+                  </div>
                 )}
-                {generationSteps.length > 0 && (
-                  <div className="max-h-40 space-y-2 overflow-auto pr-1">
-                    {generationSteps.map((step) => (
-                      <div
-                        key={`${step.flow_id}-${step.stage}`}
-                        className="flex items-center justify-between gap-3 text-sm"
+
+                <div className="space-y-2">
+                  <Label>Scope</Label>
+                  <RadioGroup
+                    value={scriptGenerationScope}
+                    onValueChange={(value) => {
+                      generationPreflightRequestRef.current += 1;
+                      setScriptGenerationScope(value as PipelineScriptGenerationScope);
+                      setGenerationPreflight(null);
+                      setIsGenerationPreflightLoading(true);
+                      setGenerationPreflightError("");
+                      setOverwriteProtectedCode(false);
+                    }}
+                    className="grid gap-2"
+                  >
+                    {[
+                      {
+                        value: "missing_changed",
+                        title: "Missing or changed",
+                        description: "Generate only packages that are absent, stale, or invalid. Reuse validated packages.",
+                        disabled: false,
+                      },
+                      {
+                        value: "selected",
+                        title: scriptGenerationSelectedFlowIds.length > 0
+                          ? `Selected: ${selectedGenerationLabel}`
+                          : "Selected nodes",
+                        description: "Attach only the node scope opened from the Inspector. A full plan may be generated for pipeline validation.",
+                        disabled: scriptGenerationSelectedFlowIds.length === 0,
+                      },
+                      {
+                        value: "all",
+                        title: "Entire pipeline",
+                        description: "Regenerate every runtime package from one coherent pipeline plan.",
+                        disabled: false,
+                      },
+                    ].map((option) => (
+                      <Label
+                        key={option.value}
+                        htmlFor={`script-scope-${option.value}`}
+                        className={cn(
+                          "flex cursor-pointer items-start gap-3 rounded-md border border-border p-3 transition-colors",
+                          scriptGenerationScope === option.value && "border-primary bg-primary/10",
+                          option.disabled && "cursor-not-allowed opacity-50",
+                        )}
                       >
-                        <span className="truncate">
-                          Node {step.flow_id || "?"} - {generationStageLabel(step.stage)}
+                        <RadioGroupItem
+                          id={`script-scope-${option.value}`}
+                          value={option.value}
+                          disabled={option.disabled || isGenerationPreflightLoading}
+                          className="mt-1"
+                        />
+                        <span className="grid gap-1">
+                          <span className="font-medium">{option.title}</span>
+                          <span className="text-sm font-normal text-muted-foreground">{option.description}</span>
                         </span>
-                        <span className="shrink-0 text-xs text-muted-foreground">
-                          {step.status || "pending"}
-                        </span>
-                      </div>
+                      </Label>
+                    ))}
+                  </RadioGroup>
+                </div>
+
+                <div className="grid gap-2">
+                  <Label htmlFor="pipeline-runtime-prompt">Additional generation instructions <span className="font-normal text-muted-foreground">(optional)</span></Label>
+                  <Textarea
+                    id="pipeline-runtime-prompt"
+                    value={scriptGenerationPrompt}
+                    onChange={(event) => setScriptGenerationPrompt(event.target.value)}
+                    placeholder="Add implementation constraints, preferred libraries, or performance requirements."
+                    className="min-h-20"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <Label>Validation</Label>
+                    <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      {generationSampleDataAvailable ? (
+                        <><CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" /> Sample execution available</>
+                      ) : (
+                        <><AlertCircle className="h-3.5 w-3.5 text-amber-500" /> No sample inputs</>
+                      )}
+                    </span>
+                  </div>
+                  <RadioGroup
+                    value={scriptGenerationMode}
+                    onValueChange={(value) => setScriptGenerationMode(value as PipelineScriptGenerationMode)}
+                    className="grid gap-2"
+                  >
+                    {generationModeOptions.map((option) => {
+                      const Icon = option.icon;
+                      const disabled = option.value === "validated" && !generationSampleDataAvailable;
+                      return (
+                        <Label
+                          key={option.value}
+                          htmlFor={`script-generation-${option.value}`}
+                          className={cn(
+                            "flex cursor-pointer items-start gap-3 rounded-md border border-border p-3 transition-colors",
+                            scriptGenerationMode === option.value && "border-primary bg-primary/10",
+                            disabled && "cursor-not-allowed opacity-50",
+                          )}
+                        >
+                          <RadioGroupItem
+                            id={`script-generation-${option.value}`}
+                            value={option.value}
+                            disabled={disabled}
+                            className="mt-1"
+                          />
+                          <Icon className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                          <span className="grid gap-1">
+                            <span className="font-medium">{option.title}</span>
+                            <span className="text-sm font-normal text-muted-foreground">{option.description}</span>
+                          </span>
+                        </Label>
+                      );
+                    })}
+                  </RadioGroup>
+                </div>
+
+                {generationPreflight && generationPreflight.protected_count > 0 && (
+                  <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+                    <p className="font-medium text-amber-600 dark:text-amber-300">
+                      {generationPreflight.protected_count} package{generationPreflight.protected_count === 1 ? " contains" : "s contain"} user-owned code
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      inLUMEN will not replace uploaded or manually edited runtime code without explicit approval.
+                    </p>
+                    <label className="mt-3 flex items-start gap-2">
+                      <input
+                        type="checkbox"
+                        checked={overwriteProtectedCode}
+                        onChange={(event) => setOverwriteProtectedCode(event.target.checked)}
+                        className="mt-0.5"
+                      />
+                      <span>I understand and want to replace the protected packages. A restore point will be created first.</span>
+                    </label>
+                  </div>
+                )}
+
+                {generationPreflight?.target_count === 0 && !isGenerationPreflightLoading && (
+                  <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-600">
+                    All runtime packages in this scope are current and validated.
+                  </div>
+                )}
+
+                <details className="rounded-md border border-border bg-muted/10 p-3 text-sm">
+                  <summary className="cursor-pointer font-medium">What will be created and validated?</summary>
+                  <div className="mt-3 space-y-2 text-xs text-muted-foreground">
+                    <p>Each generated package contains <code className="text-foreground">main.py</code>, an optional <code className="text-foreground">requirements.txt</code>, <code className="text-foreground">node-manifest.json</code>, and a validation report.</p>
+                    <p>Packages are attached only after the selected pipeline scope passes contract validation. Deployment Dockerfiles remain exporter-managed.</p>
+                    {generationPreflight?.sample_data?.sample_nodes?.map((sampleNode) => (
+                      <p key={sampleNode.flow_id}>
+                        <span className="font-medium text-foreground">{sampleNode.label || sampleNode.flow_id}:</span>{" "}
+                        {(sampleNode.files || []).map((file) => file.filename).filter(Boolean).join(", ")}
+                      </p>
                     ))}
                   </div>
+                </details>
+
+                {recentGenerationRuns.length > 0 && (
+                  <div className="space-y-2">
+                    <Label>Recent runs</Label>
+                    <div className="divide-y divide-border rounded-md border border-border">
+                      {recentGenerationRuns.slice(0, 4).map((run) => (
+                        <button
+                          key={generationRunId(run)}
+                          type="button"
+                          onClick={() => { void handleViewGenerationRun(run); }}
+                          className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-muted/50"
+                        >
+                          <span className="min-w-0">
+                            <span className="block truncate font-medium">
+                              {run.target_flow_ids?.length || run.preflight?.target_count || "Pipeline"} package scope
+                            </span>
+                            <span className="block text-xs text-muted-foreground">
+                              {run.created_at ? new Date(run.created_at).toLocaleString() : `Run ${generationRunId(run).slice(0, 8)}`}
+                            </span>
+                          </span>
+                          <span className="shrink-0 text-xs text-muted-foreground">{generationStatusLabel(effectiveGenerationStatus(run))}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 )}
-                {generationFailed && (
-                  <div
-                    role="alert"
-                    className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-                  >
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className={cn(
+                  "rounded-lg border p-4",
+                  generationSucceeded
+                    ? "border-emerald-500/30 bg-emerald-500/10"
+                    : generationFailed
+                      ? "border-destructive/40 bg-destructive/10"
+                      : "border-border bg-muted/20",
+                )}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="font-semibold">{generationStatusLabel(generationStatus)}</p>
+                      <p className="text-xs text-muted-foreground">Run {generationRunId(generationJob).slice(0, 8)}</p>
+                    </div>
+                    <span className="rounded-full border border-border bg-background/70 px-2 py-1 text-xs capitalize">
+                      {generationJob.generation_scope?.replace(/_/g, " ") || generationJob.mode || "pipeline"}
+                    </span>
+                  </div>
+                  {isGeneratingScripts && <Progress value={generationProgress} className="mt-4" />}
+                  {generationSucceeded && (
+                    <div className="mt-4 grid grid-cols-2 gap-2 text-sm">
+                      <div className="rounded-md bg-background/60 p-3">
+                        <p className="text-xs text-muted-foreground">Attached</p>
+                        <p className="font-semibold">{attachedGenerationCount} package{attachedGenerationCount === 1 ? "" : "s"}</p>
+                      </div>
+                      <div className="rounded-md bg-background/60 p-3">
+                        <p className="text-xs text-muted-foreground">Reused</p>
+                        <p className="font-semibold">{reusedGenerationCount} package{reusedGenerationCount === 1 ? "" : "s"}</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {generationSteps.length > 0 && (
+                  <div className="space-y-2">
+                    <Label>{isGeneratingScripts ? "Progress" : "Node results"}</Label>
+                    <div className="divide-y divide-border rounded-md border border-border">
+                      {generationSteps.map((step) => {
+                        const nodeLabel = displayedNodes.find((node) => String(node.id) === String(step.flow_id))?.data?.label;
+                        return (
+                          <div key={`${step.flow_id}-${step.stage}`} className="flex items-center justify-between gap-3 px-3 py-2 text-sm">
+                            <span className="min-w-0 truncate">
+                              <span className="font-medium">{nodeLabel || `Node ${step.flow_id || "?"}`}</span>
+                              <span className="ml-2 text-xs text-muted-foreground">{generationStageLabel(step.stage)}</span>
+                            </span>
+                            <span className={cn(
+                              "shrink-0 text-xs",
+                              step.status === "valid" ? "text-emerald-500" : step.status === "invalid" || step.status === "failed" ? "text-destructive" : "text-muted-foreground",
+                            )}>
+                              {generationStatusLabel(step.status || "running")}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {(generationFailed || (
+                  generationCompleted
+                  && !generationSucceeded
+                  && generationStatus !== "cancelled"
+                )) && (
+                  <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
                     {generationFailureMessage(generationJob)}
                   </div>
+                )}
+
+                {isGeneratingScripts && (
+                  <p className="text-sm text-muted-foreground">
+                    You can close this panel and continue working. Use Generate code → View run to return.
+                  </p>
                 )}
               </div>
             )}
           </div>
 
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => { void handleCancelPipelineScriptGeneration(); }}
-              disabled={isCancellingScripts}
-            >
-              {isCancellingScripts && (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              )}
-              {isGeneratingScripts ? "Stop generation" : "Close"}
-            </Button>
-            {canRepairFailedNode && (
-              <Button
-                variant="outline"
-                onClick={() => { void handleRepairFailedPipelineNode(); }}
-                disabled={isGeneratingScripts}
-              >
-                {isGeneratingScripts && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                Retry Node {repairableFailedStep?.flow_id}
-              </Button>
+          <DialogFooter className="border-t border-border px-6 pb-6 pt-4">
+            {!generationJob ? (
+              <>
+                <Button variant="outline" onClick={() => setIsScriptGenerationOpen(false)}>Close</Button>
+                <Button
+                  onClick={() => { void handleRunPipelineScriptGeneration(); }}
+                  disabled={!canStartGeneration || isCreatingGenerationCheckpoint}
+                >
+                  {(isGenerationPreflightLoading || isCreatingGenerationCheckpoint) && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  {isCreatingGenerationCheckpoint ? "Creating restore point" : "Generate and attach"}
+                </Button>
+              </>
+            ) : isGeneratingScripts ? (
+              <>
+                <Button variant="outline" onClick={() => setIsScriptGenerationOpen(false)}>Close and continue</Button>
+                <Button
+                  variant="destructive"
+                  onClick={() => { void handleCancelPipelineScriptGeneration(); }}
+                  disabled={isCancellingScripts}
+                >
+                  {isCancellingScripts && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Stop generation
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button variant="outline" onClick={() => setIsScriptGenerationOpen(false)}>Close</Button>
+                {generationSucceeded && generationJob.checkpoint_version_uid && (
+                  <Button
+                    variant="outline"
+                    onClick={() => { void handleRestoreGenerationCheckpoint(); }}
+                    disabled={isRestoringGenerationCheckpoint}
+                  >
+                    {isRestoringGenerationCheckpoint && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                    Undo attachment
+                  </Button>
+                )}
+                {canRepairFailedNode && (
+                  <Button variant="outline" onClick={() => { void handleRepairFailedPipelineNode(); }}>
+                    Retry {displayedNodes.find((node) => String(node.id) === String(repairableFailedStep?.flow_id))?.data?.label || `Node ${repairableFailedStep?.flow_id}`}
+                  </Button>
+                )}
+                {generationSucceeded ? (
+                  <Button onClick={handleViewGeneratedCode}>View generated code</Button>
+                ) : generationStatus !== "cancelled" ? (
+                  <Button onClick={() => {
+                    const previousScope = generationJob.generation_scope || "missing_changed";
+                    const selectedIds = previousScope === "selected" ? generationJob.target_flow_ids || [] : [];
+                    generationPreflightRequestRef.current += 1;
+                    setScriptGenerationScope(previousScope);
+                    setScriptGenerationSelectedFlowIds(selectedIds);
+                    setGenerationPreflight(null);
+                    setIsGenerationPreflightLoading(true);
+                    setGenerationPreflightError("");
+                    setOverwriteProtectedCode(false);
+                    setGenerationJob(null);
+                  }}>
+                    Adjust and retry
+                  </Button>
+                ) : null}
+              </>
             )}
-            <Button
-              onClick={() => { void handleRunPipelineScriptGeneration(); }}
-              disabled={
-                isGeneratingScripts ||
-                (scriptGenerationMode === "full" && !uploadedSampleDataAvailable)
-              }
-            >
-              {isGeneratingScripts && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              {isGeneratingScripts
-                ? "Generating"
-                : generationFailed
-                  ? "Retry all"
-                  : "Generate and attach"}
-            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

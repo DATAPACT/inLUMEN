@@ -154,6 +154,24 @@ const withNodeFileRole = (
   return { ...file, role };
 };
 
+const normalizeEntrypoint = (value: unknown) => {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => String(entry ?? "").trim())
+      .filter((entry) => entry.length > 0);
+  }
+  const single = String(value ?? "").trim();
+  return single.length > 0 ? [single] : [];
+};
+
+const getEntrypointHint = (data: PropertyNodeData) => {
+  const configuredEntrypoint = String(data.implementation?.entrypoint || "").trim();
+  if (configuredEntrypoint) return configuredEntrypoint;
+  const generatedEntrypoint = normalizeEntrypoint(data.generated_artifact?.entrypoint);
+  if (generatedEntrypoint.length === 0) return "";
+  return generatedEntrypoint.join(" ");
+};
+
 const InspectorSection = ({
   id,
   title,
@@ -196,6 +214,7 @@ interface PropertiesPanelProps {
     options?: { remapSubpipeline?: boolean },
   ) => void;
   onRemoveNode?: (nodeId: string) => void;
+  onGenerateCode?: (nodeId: string) => void;
   activeChatbotConfig?: ChatbotConfig | null;
   isAdvancedMode?: boolean;
   className?: string;
@@ -229,6 +248,7 @@ export function PropertiesPanel({
   selectedNode,
   onNodeUpdate,
   onRemoveNode,
+  onGenerateCode,
   activeChatbotConfig,
   isAdvancedMode = false,
   className,
@@ -413,7 +433,7 @@ export function PropertiesPanel({
           ? selectedNode.data.implementation.dependencies.map(String).join(', ')
           : '',
       );
-      setImplementationEntrypoint(String(selectedNode.data.implementation?.entrypoint || ''));
+      setImplementationEntrypoint(getEntrypointHint(selectedNode.data as PropertyNodeData));
       setImplementationReference(String(
         selectedNode.data.implementation?.image
           || selectedNode.data.implementation?.repository
@@ -865,6 +885,10 @@ export function PropertiesPanel({
 
   const handleGenerateScript = async () => {
     if (!selectedNode || !canGenerateScript || isGeneratingScript) return;
+    if (onGenerateCode) {
+      onGenerateCode(selectedNode.id);
+      return;
+    }
     setIsGeneratingScript(true);
     try {
       const result = await generateNodeScript(selectedNode.id, activeChatbotConfig);

@@ -23,8 +23,22 @@ TEXT_FORMATS = frozenset(
 IMAGE_FORMATS = frozenset(
     {"png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "svg"}
 )
+AUDIO_FORMATS = frozenset({"aac", "flac", "m4a", "mp3", "ogg", "opus", "wav"})
+VIDEO_FORMATS = frozenset({"avi", "mkv", "mov", "mp4", "mpeg", "mpg", "webm"})
+DOCUMENT_FORMATS = frozenset({"doc", "docx", "odp", "odt", "pdf", "ppt", "pptx"})
 CANONICAL_ARTIFACT_KINDS = frozenset(
-    {"table", "json", "text", "image", "model", "directory", "binary"}
+    {
+        "table",
+        "json",
+        "text",
+        "image",
+        "audio",
+        "video",
+        "document",
+        "model",
+        "directory",
+        "binary",
+    }
 )
 
 
@@ -46,6 +60,12 @@ def artifact_kind_for_format(file_format: Any) -> str:
         return "text"
     if normalized in IMAGE_FORMATS:
         return "image"
+    if normalized in AUDIO_FORMATS:
+        return "audio"
+    if normalized in VIDEO_FORMATS:
+        return "video"
+    if normalized in DOCUMENT_FORMATS:
+        return "document"
     return "binary"
 
 
