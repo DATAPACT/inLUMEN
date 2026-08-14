@@ -114,7 +114,7 @@ The picture below shows the component in the DATAPACT architecture.
 ![Component Diagram](./images/component-image.png)
 
 
-The current deployment uses a gateway architecture. Frontend and CLI/API clients call only the backend gateway API. The backend owns access to Neo4j and MinIO and brokers requests to the private code-generation service; local Compose also includes a deployment-validation service. Configured OpenRouter, Ollama Cloud, or custom OpenAI-compatible LLM providers remain external services reached through the backend/code-generation boundary.
+The current deployment uses a gateway architecture. Frontend and CLI/API clients call only the backend gateway API. The backend owns access to Neo4j and MinIO and brokers code generation and deployment validation through one private codegen service. Configured OpenRouter, Ollama Cloud, or custom OpenAI-compatible LLM providers remain external services reached through the backend/codegen boundary.
 
 
 ![Current inLUMEN Architecture](./images/current-architecture.png)
@@ -175,7 +175,6 @@ During development, run a smaller part of the suite by selecting a component:
 ```bash
 python scripts/run_tests.py --component backend
 python scripts/run_tests.py --component codegen
-python scripts/run_tests.py --component deployment-validation
 python scripts/run_tests.py --component frontend
 python scripts/run_tests.py --component compose
 ```
@@ -198,19 +197,15 @@ Step 1: Clone this repository on your computer.
 
 Step 2: Navigate to the cloned project directory.
 
-Step 3: Optional but recommended: copy `.env.example` to `.env` and adjust only the values you need.
+Step 3: Copy `.env.example` to `.env`, set the public backend URL, and replace the two token placeholders. Static-token authentication is enabled by default; uncomment the Keycloak block and set `AUTH_ENABLED=true` when deploying with Keycloak. The same `.env` file is used by both the development and production Compose stacks. Neo4J, MinIO, and codegen routing remain private and use Compose-owned defaults.
 
 The Docker setup derives frontend API URLs, Neo4J URI, and MinIO endpoint from the Compose service names, ports, and credential values, so you do not need separate `NEO4J_URI`, `MINIO_ENDPOINT`, or `VITE_*_API_URL` entries for normal local use. The backend sends permissive CORS headers by default.
 
-Common values you may change include:
-- `FRONTEND_PORT`, `INLUMEN_API_PORT`
-- `INLUMEN_API_PUBLIC_URL` when the browser frontend needs to call a separate deployed backend URL
-- `NEO4J_AUTH`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`
-- `NEO4J_MEM_LIMIT`, `NEO4J_HEAP_INITIAL_SIZE`, `NEO4J_HEAP_MAX_SIZE`, and `NEO4J_PAGECACHE_SIZE` if Docker Desktop has limited memory available
-- `API_AUTH_TOKEN` for the gateway API and Swagger/OpenAPI documentation when Keycloak auth is disabled
-- `AUTH_ENABLED` plus the Keycloak values when enabling authentication
+The sample contains the public backend URL and API tokens, with Keycloak configuration ready as a commented optional block. Shared frontend/backend ports and development-only inspection ports are also included as commented overrides. Compose provides their defaults together with memory, Neo4J and MinIO credentials, internal service URLs, storage paths, timeouts, and development watchers.
 
-For Keycloak SSO, set `AUTH_ENABLED=true` and configure `KEYCLOAK_JWKS_URL`, `KEYCLOAK_ISSUER`, and `KEYCLOAK_AUDIENCE` in the root `.env`. For a local Keycloak on port `8081`, the default frontend client values are `VITE_KEYCLOAK_URL=http://localhost:8081`, `VITE_KEYCLOAK_REALM=inlumen`, and `VITE_KEYCLOAK_CLIENT_ID=inlumen-frontend`. The same frontend still supports the embedded toolbox contract: when loaded in an iframe it waits for an `SSO_TOKEN` postMessage and infers the toolbox parent origin, so `VITE_TOOLBOX_ORIGIN` is not normally needed; it remains supported in `frontend/.env` only as a fallback for deployments that hide iframe referrers. Standalone frontend setups can also keep using `VITE_AUTH_ENABLED` and `VITE_INLUMEN_API_URL` in `frontend/.env`; Docker Compose derives those values from the root `.env` unless explicitly overridden.
+The browser uses `INLUMEN_API_PUBLIC_URL`. The backend reaches codegen privately as `http://codegen:8010`, including when the Compose project runs on a VM behind Cloudflare; the frontend never calls codegen directly.
+
+Set `AUTH_ENABLED=false` for local static-token authentication or keep it `true` for Keycloak. Advanced deployments can still override any Compose variable directly; for example, a separately hosted codegen service can set `INLUMEN_CODEGEN_SERVICE_URL`.
 
 Step 4: Run the following command to build the docker containers:
 ```
@@ -272,7 +267,10 @@ model remains independent. inLUMEN sends non-secret provider/model metadata in
 the request and forwards the provider credential to codegen in an ephemeral
 header; the credential is excluded from durable job snapshots. Generated code
 is checked against reviewed task profiles, trusted adapters, package policy,
-data contracts, and sandbox validation before it is persisted.
+data contracts, and sandbox validation before it is persisted. The same private
+service validates and optionally repairs generated Dagster and Argo deployment
+bundles, so deployment validation requires no additional container or public
+port.
 
 Codegen remains independently deployable without frontend changes. Set:
 

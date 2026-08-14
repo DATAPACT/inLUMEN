@@ -202,31 +202,21 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
                     "Task implementation does not identify an implementation kind.",
                     node_id=node_id,
                 ))
-            if implementation_kind == "rest-api" and not str(
-                implementation.get("endpoint") or data.get("endpoint") or ""
-            ).strip():
+            elif implementation_kind not in {"python", "generated-code"}:
                 issues.append(_issue(
                     "implementation",
-                    "missing-endpoint",
-                    "REST API implementation requires an endpoint.",
+                    "unsupported-task-implementation",
+                    f"Legacy {implementation_kind} Task implementations are unsupported. "
+                    "Migrate this Task to a managed Python package.",
                     node_id=node_id,
                 ))
-            if implementation_kind == "container" and not str(
-                implementation.get("image") or ""
-            ).strip():
+            implementation_language = str(implementation.get("language") or "").strip().lower()
+            if implementation_language and implementation_language not in {"python", "python3"}:
                 issues.append(_issue(
                     "implementation",
-                    "missing-container-image",
-                    "Container implementation requires an image.",
-                    node_id=node_id,
-                ))
-            if implementation_kind == "repository" and not str(
-                implementation.get("repository") or implementation.get("url") or ""
-            ).strip():
-                issues.append(_issue(
-                    "implementation",
-                    "missing-repository",
-                    "Repository implementation requires a repository URL.",
+                    "unsupported-task-language",
+                    f"Legacy {implementation_language} Task implementations are unsupported. "
+                    "Migrate this Task to Python.",
                     node_id=node_id,
                 ))
 

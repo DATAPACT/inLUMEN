@@ -7,7 +7,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from artifact_content import decode_artifact_content, verify_artifact_integrity
 from artifact_contract import classify_artifact
+from node_parameters import normalize_secret_param_keys
 from node_ports import normalize_node_ports
+from node_secrets import runtime_secret_name
 from step_types import normalize_step_type
 
 try:
@@ -68,6 +70,32 @@ def _json_object(value: Any) -> dict:
     except (TypeError, ValueError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _step_secret_parameters(step: dict[str, Any]) -> list[str]:
+    return normalize_secret_param_keys(
+        step.get("secret_params"),
+        step.get("param") if isinstance(step.get("param"), dict) else {},
+    )
+
+
+def _step_runtime_parameters(step: dict[str, Any]) -> dict[str, Any]:
+    secret_names = set(_step_secret_parameters(step))
+    return {
+        str(key): value
+        for key, value in (step.get("param") or {}).items()
+        if str(key).strip()
+        and str(key) != "model_plan"
+        and str(key) not in secret_names
+    }
+
+
+def _kubernetes_secret_key(step_id: Any, parameter_name: Any) -> str:
+    node_fragment = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(step_id or "")).strip("-.")
+    parameter_fragment = re.sub(
+        r"[^A-Za-z0-9_.-]+", "-", str(parameter_name or "")
+    ).strip("-.")
+    return f"{node_fragment}.{parameter_fragment}"
 
 
 def _sanitize_fragment(value: Any, fallback: str) -> str:
@@ -183,14 +211,35 @@ def _files_from_step_data(data: dict, flow_id: str) -> List[dict]:
     if file_refs:
         return file_refs
 
-    for filename in data.get("files") or []:
-        if not isinstance(filename, str) or not filename.strip():
+    for entry in data.get("files") or []:
+        if isinstance(entry, str):
+            filename = entry.strip()
+            metadata = {}
+        elif isinstance(entry, dict):
+            filename = _clean_string(entry.get("filename") or entry.get("name"))
+            metadata = entry
+        else:
             continue
+        if not filename:
+            continue
+        role = _clean_string(metadata.get("role")).lower()
         file_refs.append(
             {
-                "filename": filename.strip(),
-                "bucket": f"files-step-id-{flow_id}",
+                "filename": filename,
+                "bucket": _clean_string(metadata.get("bucket"))
+                or f"files-step-id-{flow_id}",
                 "step_id": flow_id,
+                **({"role": role} if role in {"code", "data"} else {}),
+                **(
+                    {"snapshot_bucket": _clean_string(metadata.get("snapshot_bucket"))}
+                    if _clean_string(metadata.get("snapshot_bucket"))
+                    else {}
+                ),
+                **(
+                    {"snapshot_object": _clean_string(metadata.get("snapshot_object"))}
+                    if _clean_string(metadata.get("snapshot_object"))
+                    else {}
+                ),
             }
         )
     return file_refs
@@ -229,6 +278,10 @@ def extract_pipeline_steps(pipeline_graph: Optional[dict], files: Any = None) ->
             "endpoint": _clean_string(step_data.get("endpoint")),
             "database": _clean_string(step_data.get("database")),
             "param": step_data.get("param") if isinstance(step_data.get("param"), dict) else {},
+            "secret_params": normalize_secret_param_keys(
+                step_data.get("secret_params") or step_data.get("secret_params_json"),
+                step_data.get("param") if isinstance(step_data.get("param"), dict) else {},
+            ),
             "definition_id": _clean_string(step_data.get("definition_id")),
             "definition_version": step_data.get("definition_version"),
             "implementation": (
@@ -289,6 +342,10 @@ def extract_pipeline_steps(pipeline_graph: Optional[dict], files: Any = None) ->
             "endpoint": _clean_string(data.get("endpoint")),
             "database": _clean_string(data.get("database")),
             "param": param,
+            "secret_params": normalize_secret_param_keys(
+                data.get("secret_params") or data.get("secret_params_json"),
+                param,
+            ),
             "definition_id": _clean_string(data.get("definition_id")),
             "definition_version": data.get("definition_version"),
             "implementation": (
@@ -318,6 +375,7 @@ def extract_pipeline_steps(pipeline_graph: Optional[dict], files: Any = None) ->
                 "endpoint": "",
                 "database": "",
                 "param": {},
+                "secret_params": [],
                 "definition_id": "",
                 "definition_version": None,
                 "implementation": {},
@@ -1011,6 +1069,28 @@ def _build_codegen_argo_workflow_object(
             env.append({"name": "INLUMEN_STEP_LABEL", "value": step["label"]})
         if step.get("description"):
             env.append({"name": "INLUMEN_STEP_DESCRIPTION", "value": step["description"]})
+        runtime_parameters = _step_runtime_parameters(step)
+        if runtime_parameters:
+            env.append({
+                "name": "INLUMEN_PARAMS_JSON",
+                "value": json.dumps(runtime_parameters, ensure_ascii=False, sort_keys=True),
+            })
+        for key, value in sorted(runtime_parameters.items()):
+            env_name = "INLUMEN_PARAM_" + re.sub(r"[^A-Za-z0-9]+", "_", key).upper().strip("_")
+            if env_name != "INLUMEN_PARAM_":
+                env.append({"name": env_name, "value": str(value)})
+        for key in _step_secret_parameters(step):
+            env_name = "INLUMEN_PARAM_" + re.sub(r"[^A-Za-z0-9]+", "_", key).upper().strip("_")
+            if env_name != "INLUMEN_PARAM_":
+                env.append({
+                    "name": env_name,
+                    "valueFrom": {
+                        "secretKeyRef": {
+                            "name": "inlumen-runtime-secrets",
+                            "key": _kubernetes_secret_key(step_id, key),
+                        },
+                    },
+                })
 
         annotations = {
             "inlumen.ai/flow-id": step_id,
@@ -1189,11 +1269,28 @@ def build_argo_workflow_object(
                     "value": json.dumps([entry["filename"] for entry in step["files"]]),
                 }
             )
-        for key, value in sorted((step.get("param") or {}).items()):
-            env_name = "INLUMEN_PARAM_" + re.sub(r"[^A-Za-z0-9]+", "_", str(key)).upper().strip("_")
-            if env_name == "INLUMEN_PARAM_":
-                continue
-            env.append({"name": env_name, "value": str(value)})
+        runtime_parameters = _step_runtime_parameters(step)
+        if runtime_parameters:
+            env.append({
+                "name": "INLUMEN_PARAMS_JSON",
+                "value": json.dumps(runtime_parameters, ensure_ascii=False, sort_keys=True),
+            })
+        for key, value in sorted(runtime_parameters.items()):
+            env_name = "INLUMEN_PARAM_" + re.sub(r"[^A-Za-z0-9]+", "_", key).upper().strip("_")
+            if env_name != "INLUMEN_PARAM_":
+                env.append({"name": env_name, "value": str(value)})
+        for key in _step_secret_parameters(step):
+            env_name = "INLUMEN_PARAM_" + re.sub(r"[^A-Za-z0-9]+", "_", key).upper().strip("_")
+            if env_name != "INLUMEN_PARAM_":
+                env.append({
+                    "name": env_name,
+                    "valueFrom": {
+                        "secretKeyRef": {
+                            "name": "inlumen-runtime-secrets",
+                            "key": _kubernetes_secret_key(step_id, key),
+                        },
+                    },
+                })
 
         annotations = {
             "inlumen.ai/flow-id": step_id,
@@ -1578,6 +1675,7 @@ def _dagster_shell_command_component_source() -> str:
     return '''import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -1908,6 +2006,8 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
     output_manifest_path: str
     context_path: str = ""
     arguments: list[str] = []
+    parameters: dict = {}
+    secret_environment: dict = {}
 
     def build_defs(self, context: dg.ComponentLoadContext) -> dg.Definitions:
         deps = [dg.AssetKey(asset_key) for asset_key in self.upstream_assets]
@@ -1950,6 +2050,35 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
                 if not context_path.is_absolute():
                     context_path = project_root / context_path
                 env["INLUMEN_CONTEXT_PATH"] = str(context_path)
+            runtime_parameters = {
+                str(key): value
+                for key, value in self.parameters.items()
+                if str(key).strip() and str(key) != "model_plan"
+            }
+            if runtime_parameters:
+                env["INLUMEN_PARAMS_JSON"] = json.dumps(
+                    runtime_parameters,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            for key, value in sorted(runtime_parameters.items()):
+                env_name = "INLUMEN_PARAM_" + re.sub(
+                    r"[^A-Za-z0-9]+", "_", key
+                ).upper().strip("_")
+                if env_name != "INLUMEN_PARAM_":
+                    env[env_name] = str(value)
+            for key, source_env_name in sorted(self.secret_environment.items()):
+                target_env_name = "INLUMEN_PARAM_" + re.sub(
+                    r"[^A-Za-z0-9]+", "_", str(key)
+                ).upper().strip("_")
+                if target_env_name == "INLUMEN_PARAM_":
+                    continue
+                secret_value = os.environ.get(str(source_env_name), "")
+                if not secret_value:
+                    raise RuntimeError(
+                        f"Sensitive parameter {key!r} is not configured for {self.asset_key}."
+                    )
+                env[target_env_name] = secret_value
 
             started_at = time.monotonic()
             process = subprocess.Popen(
@@ -2699,6 +2828,9 @@ services:
 
   dagster-code:
     build: *dagster-build
+    env_file:
+      - path: .env
+        required: false
     command:
       - dagster
       - api
@@ -2843,6 +2975,7 @@ def _deployment_bundle_readme_content(
     *,
     targets: Dict[str, bool],
     has_model_requirements: bool = False,
+    secret_environment_names: Sequence[str] = (),
 ) -> str:
     dagster_section = ""
     if targets.get("dagster"):
@@ -2883,18 +3016,29 @@ argo submit argo/workflow.yaml -p pipeline-image=YOUR_REGISTRY/inlumen-pipeline:
 The workflow still requires an Argo-enabled cluster and an artifact repository. Split images only when nodes genuinely have incompatible dependency environments.
 """
 
+    secrets_section = ""
+    if secret_environment_names:
+        formatted_names = "\n".join(f"- `{name}`" for name in secret_environment_names)
+        secrets_section = f"""
+## Sensitive parameters
+
+Copy `.env.example` to `.env` and provide the listed values before local execution. Values are never included in this bundle. For Argo, create the `inlumen-runtime-secrets` Kubernetes Secret using the keys referenced by `argo/workflow.yaml`.
+
+{formatted_names}
+"""
+
     return f"""# InLumen Deployment Bundle
 
 This bundle was generated deterministically from persisted InLumen runtime artifacts.
 
 ## Layout
 
-- `inputs/`: inputs for this execution and `input_manifest.json`
+- `inputs/`: files attached to Source nodes and `input_manifest.json`
 - `nodes/`: per-node runtime source, requirements, and manifests (no node Dockerfiles)
 - `outputs/`: per-node output folders used during local Dagster execution
 - `run-spec.json`: engine-neutral node, port, input, output, and runtime contract
 - `bundle-manifest.json`: machine-readable bundle index
-{dagster_section}{argo_section}"""
+{dagster_section}{argo_section}{secrets_section}"""
 
 
 def _dagster_definitions_source() -> str:
@@ -3308,6 +3452,14 @@ def build_dagster_project_files(
                     "output_manifest_path": f"{output_dir}/output_manifest.json",
                     "context_path": context_path,
                     "arguments": [],
+                    "parameters": {
+                        str(key): value
+                        for key, value in _step_runtime_parameters(step).items()
+                    },
+                    "secret_environment": {
+                        key: runtime_secret_name(step_id, key)
+                        for key in _step_secret_parameters(step)
+                    },
                 },
             }
         )
@@ -3619,6 +3771,15 @@ def build_run_spec(
             "outputs": ports.get("outputs") or [],
             "parents": dependencies.get(step_id) or [],
             "output_path": f"outputs/{node_dir}",
+            "parameters": _step_runtime_parameters(step),
+            "secret_parameters": [
+                {
+                    "name": key,
+                    "environment": runtime_secret_name(step_id, key),
+                    "argo_secret_key": _kubernetes_secret_key(step_id, key),
+                }
+                for key in _step_secret_parameters(step)
+            ],
         }
         if node_kind == "task":
             node_entry["package"] = {
@@ -3632,15 +3793,9 @@ def build_run_spec(
                 "environment_hash": dependency_hash,
             }
         else:
-            adapter_parameters = (
-                dict(step.get("param"))
-                if isinstance(step.get("param"), dict)
-                else {}
-            )
-            adapter_parameters.pop("model_plan", None)
             node_entry["adapter"] = {
                 "template": step.get("template") or "",
-                "parameters": adapter_parameters,
+                "parameters": _step_runtime_parameters(step),
                 "settings": {
                     key: value
                     for key, value in {
@@ -3692,8 +3847,8 @@ def build_run_spec(
         "run_inputs": {
             "path": "inputs",
             "manifest": "inputs/input_manifest.json",
-            "lifecycle": "per-run",
-            "fixture_policy": "node attachments are design-time test fixtures",
+            "lifecycle": "source-owned",
+            "fixture_policy": "files are attached to Source nodes",
         },
         "outputs": {"path": "outputs", "manifest_name": "output_manifest.json"},
         "engines": engines,
@@ -3747,6 +3902,11 @@ def build_deployment_bundle_files(
     ordered_ids = _topological_order(step_ids, explicit_edges)
     dependencies = _dependency_lookup(step_ids, explicit_edges)
     steps_by_id = {step["flow_id"]: step for step in steps}
+    secret_environment_names = sorted({
+        runtime_secret_name(step["flow_id"], key)
+        for step in steps
+        for key in _step_secret_parameters(step)
+    })
 
     bundle_files: List[dict] = []
     node_entries = []
@@ -3905,11 +4065,22 @@ def build_deployment_bundle_files(
             _deployment_bundle_readme_content(
                 targets=selected_targets,
                 has_model_requirements=has_model_requirements,
+                secret_environment_names=secret_environment_names,
             ),
             role="bundle-readme",
             content_type="text/markdown;charset=utf-8",
         )
     )
+
+    if secret_environment_names:
+        bundle_files.append(
+            _bundle_file(
+                ".env.example",
+                "\n".join(f"{name}=" for name in secret_environment_names) + "\n",
+                role="secret-environment-example",
+                content_type="text/plain;charset=utf-8",
+            )
+        )
 
     run_spec = build_run_spec(
         steps=steps,
@@ -3941,8 +4112,13 @@ def build_deployment_bundle_files(
             "path": "inputs",
             "manifest": "inputs/input_manifest.json",
             "file_count": len(root_input_files),
-            "lifecycle": "per-run",
+            "lifecycle": "source-owned",
         },
+        "sensitive_parameters": [
+            reference
+            for node in run_spec["nodes"]
+            for reference in node.get("secret_parameters", [])
+        ],
         "outputs": {
             "path": "outputs",
             "per_node": [entry["output_path"] for entry in node_entries],

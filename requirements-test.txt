@@ -1,3 +1,2 @@
 -r backend/requirements.txt
 -e ./codegen[dev]
--e ./deployment_validation

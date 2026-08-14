@@ -160,8 +160,8 @@
   }
 
   .node-port-handle {
-    width: 9px !important;
-    height: 9px !important;
+    width: 11px !important;
+    height: 11px !important;
     border: 2px solid rgb(15 23 42) !important;
     background: rgb(148 163 184) !important;
     box-shadow: 0 0 0 1px rgb(148 163 184 / 0.45);

@@ -167,7 +167,7 @@ export function Toolbar({
             className="h-8 text-xs text-destructive hover:text-destructive"
             onClick={() => setIsClearWarningOpen(true)}
             disabled={isClearingAll}
-            title="Clear canvas, chat, and saved versions"
+            title="Permanently clear the entire workspace"
           >
             <Trash2 className="h-3.5 w-3.5 mr-1" />
             <span className="hidden sm:inline">{isClearingAll ? "Clearing..." : "Clear all"}</span>
@@ -180,9 +180,10 @@ export function Toolbar({
                   <p>This action cannot be undone. It will permanently:</p>
                   <ul className="list-disc space-y-1 pl-5">
                     <li>empty the Main pipeline canvas,</li>
-                    <li>delete every saved version except Main,</li>
+                    <li>delete every saved and reusable pipeline version,</li>
+                    <li>remove all pipeline files and generated packages,</li>
                     <li>clear the current chat session, and</li>
-                    <li>reset the provenance report.</li>
+                    <li>delete all Neo4j graph data and provenance.</li>
                   </ul>
                 </div>
               </AlertDialogDescription>

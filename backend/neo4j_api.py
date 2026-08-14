@@ -5,6 +5,7 @@ import uuid
 import json
 import os
 import tempfile
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 from runtime_config import add_cors_headers, get_neo4j_settings
@@ -15,7 +16,11 @@ from node_ports import (
     normalize_node_ports,
     ports_json,
 )
-from node_parameters import normalize_secret_param_keys, secret_params_json
+from node_parameters import (
+    normalize_secret_param_keys,
+    secret_params_json,
+    without_secret_param_values,
+)
 from minio_access import create_bucket, list_objects, read_object_bytes, remove_object, upload_object
 from model_plans import resolve_implementation_plan
 from node_definitions.instance import (
@@ -26,7 +31,6 @@ from node_definitions.instance import (
 from pipeline_graph_validation import validate_pipeline_graph
 from subpipeline_reference import (
     derive_subpipeline_interface,
-    missing_explicit_port_contracts,
     normalize_reusable_pipeline_graph,
     plan_subpipeline_port_migration,
     public_ports_for_interface,
@@ -212,13 +216,15 @@ def _parse_visible_graph(graph: dict) -> tuple[list[dict], list[dict]]:
                 description=str(data.get("description") or ""),
             )
         # Parameters are inspector metadata for every structural node kind.
+        secret_param_keys = data.get("secret_params")
+        param_obj = without_secret_param_values(param_obj, secret_param_keys)
         props["param_json"] = json.dumps(
             param_obj,
             ensure_ascii=False,
             sort_keys=True,
         )
         props["secret_params_json"] = secret_params_json(
-            data.get("secret_params"),
+            secret_param_keys,
             param_obj,
         )
         if step_type == "destination":
@@ -285,6 +291,64 @@ def _clear_active_steps(session) -> list[str]:
     DETACH DELETE step
     """)
     return flow_ids
+
+
+def _deep_clear_workspace(session) -> dict[str, Any]:
+    """Delete every persisted graph entity and return cleanup targets.
+
+    Clear all is intentionally stronger than clearing the active canvas. In
+    particular it must not leave the design PIPELINE node, its Main version,
+    reusable pipelines, FILE nodes, or provenance entities behind.
+    """
+    step_record = session.run("""
+    MATCH (step:STEP)
+    WHERE step.flow_id IS NOT NULL
+    RETURN collect(DISTINCT toString(step.flow_id)) AS flow_ids
+    """).single()
+    version_record = session.run("""
+    MATCH (version:PIPELINE_VERSION)
+    WHERE version.uid IS NOT NULL
+    RETURN collect(DISTINCT toString(version.uid)) AS version_uids
+    """).single()
+    count_record = session.run("""
+    MATCH (entity)
+    RETURN count(entity) AS entity_count
+    """).single()
+    provenance_record = session.run("""
+    MATCH (event:PROVENANCE_EVENT)
+    RETURN count(event) AS provenance_event_count
+    """).single()
+
+    flow_ids = step_record["flow_ids"] if step_record and step_record["flow_ids"] else []
+    version_uids = (
+        version_record["version_uids"]
+        if version_record and version_record["version_uids"]
+        else []
+    )
+    entity_count = int(
+        count_record["entity_count"]
+        if count_record and count_record["entity_count"] is not None
+        else 0
+    )
+    provenance_event_count = int(
+        provenance_record["provenance_event_count"]
+        if provenance_record and provenance_record["provenance_event_count"] is not None
+        else 0
+    )
+
+    for version_uid in version_uids:
+        _delete_version_file_snapshots(version_uid)
+
+    session.run("""
+    MATCH (entity)
+    DETACH DELETE entity
+    """).consume()
+    return {
+        "flow_ids": flow_ids,
+        "version_uids": version_uids,
+        "entity_count": entity_count,
+        "provenance_event_count": provenance_event_count,
+    }
 
 
 def _sync_graph_to_session(
@@ -1066,13 +1130,15 @@ def neo4j_add_node():
     properties.setdefault("y", 0)
     properties["ports_json"] = ports_json(properties.pop("ports", None), step_type)
     param_obj = properties.pop("param", {})
+    secret_param_keys = properties.pop("secret_params", None)
+    param_obj = without_secret_param_values(param_obj, secret_param_keys)
     properties["param_json"] = json.dumps(
-        param_obj if isinstance(param_obj, dict) else {},
+        param_obj,
         ensure_ascii=False,
         sort_keys=True,
     )
     properties["secret_params_json"] = secret_params_json(
-        properties.pop("secret_params", None),
+        secret_param_keys,
         param_obj,
     )
     normalize_definition_properties(properties)
@@ -1255,13 +1321,15 @@ def neo4j_update_node():
     properties["description"] = properties.get("description", "")
     properties["ports_json"] = ports_json(properties.pop("ports", None), step_type)
     param_obj = properties.pop("param", {})
+    secret_param_keys = properties.pop("secret_params", None)
+    param_obj = without_secret_param_values(param_obj, secret_param_keys)
     properties["param_json"] = json.dumps(
-        param_obj if isinstance(param_obj, dict) else {},
+        param_obj,
         ensure_ascii=False,
         sort_keys=True,
     )
     properties["secret_params_json"] = secret_params_json(
-        properties.pop("secret_params", None),
+        secret_param_keys,
         param_obj,
     )
     normalize_definition_properties(properties)
@@ -1383,56 +1451,38 @@ def neo4j_clear_nodes():
 def neo4j_clear_pipeline_workspace():
     if request.method == 'OPTIONS':
         return jsonify({}), 200
-    print("[neo4j_api.py] Clearing pipeline workspace, preserving Main.")
+    print("[neo4j_api.py] Deep-clearing the pipeline workspace.")
     try:
         with driver.session() as session:
-            pipeline_uid = _ensure_design_pipeline(session)
-            deleted_step_flow_ids = _clear_active_steps(session)
+            cleanup = _deep_clear_workspace(session)
 
-            deleted_version_record = session.run("""
-            MATCH (p:PIPELINE {uid: $pipeline_uid})-[:HAS_VERSION]->(v:PIPELINE_VERSION)
-            WHERE coalesce(v.is_main, false) = false AND v.uid <> $main_uid
-            RETURN collect(toString(v.uid)) AS uids
-            """, pipeline_uid=pipeline_uid, main_uid=MAIN_VERSION_UID).single()
-            deleted_version_uids = (
-                deleted_version_record["uids"]
-                if deleted_version_record and deleted_version_record["uids"]
-                else []
-            )
-            for version_uid in deleted_version_uids:
-                _delete_version_file_snapshots(version_uid)
-
-            session.run("""
-            MATCH (p:PIPELINE {uid: $pipeline_uid})-[:HAS_VERSION]->(v:PIPELINE_VERSION)
-            WHERE coalesce(v.is_main, false) = false AND v.uid <> $main_uid
-            DETACH DELETE v
-            """, pipeline_uid=pipeline_uid, main_uid=MAIN_VERSION_UID).single()
-
-            sync_result = _sync_graph_to_session(
-                session,
-                _empty_pipeline_graph(),
-                version_name=MAIN_VERSION_NAME,
-                active_version_uid=MAIN_VERSION_UID,
-            )
-            main_version = _upsert_main_pipeline_version(
-                session,
-                pipeline_uid,
-                _empty_pipeline_graph(),
-                sync_result.get("updated_at"),
-                description="",
-            )
-            graph = _empty_pipeline_graph(
-                main_version.get("updated_at") if isinstance(main_version, dict) else sync_result.get("updated_at")
-            )
-            deleted_provenance_event_count = _clear_pipeline_provenance(session, pipeline_uid)
+        cleared_at = datetime.now(timezone.utc).isoformat()
+        graph = _empty_pipeline_graph(cleared_at)
+        # Give the client a fresh local Main state without recreating a Neo4j
+        # node. The first later edit lazily creates a new design pipeline.
+        main_version = {
+            "uid": MAIN_VERSION_UID,
+            "name": MAIN_VERSION_NAME,
+            "version": MAIN_VERSION_NAME,
+            "version_index": 0,
+            "is_main": True,
+            "node_count": 0,
+            "edge_count": 0,
+            "file_count": 0,
+            "description": "",
+            "created_at": cleared_at,
+            "updated_at": cleared_at,
+            "pipeline_updated_at": cleared_at,
+        }
 
         return jsonify({
             "status": "ok",
             "message": "Pipeline workspace cleared",
-            "deleted_step_flow_ids": deleted_step_flow_ids,
-            "deleted_version_uids": deleted_version_uids,
-            "deleted_version_count": len(deleted_version_uids),
-            "deleted_provenance_event_count": deleted_provenance_event_count,
+            "deleted_step_flow_ids": cleanup["flow_ids"],
+            "deleted_version_uids": cleanup["version_uids"],
+            "deleted_version_count": len(cleanup["version_uids"]),
+            "deleted_entity_count": cleanup["entity_count"],
+            "deleted_provenance_event_count": cleanup["provenance_event_count"],
             "provenance_cleared": True,
             "version": main_version,
             "graph": graph,
@@ -1984,12 +2034,6 @@ def neo4j_reusable_pipelines():
     version_name = str(payload.get("version_name") or "").strip() or "Version 1"
     if not name:
         return jsonify({"error": "Reusable pipeline name is required"}), 400
-    missing_ports = missing_explicit_port_contracts(graph)
-    if missing_ports:
-        return jsonify({
-            "error": "Every reusable-pipeline component requires an explicit typed port contract",
-            "components": missing_ports,
-        }), 422
     graph = normalize_reusable_pipeline_graph(graph)
     report = validate_pipeline_graph(graph)
     if not report.get("valid"):

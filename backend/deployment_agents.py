@@ -110,12 +110,6 @@ async def generate_dockerfiles_with_agent(
     codegen_dockerfiles: list[dict[str, Any]] = []
     artifact_errors: list[str] = []
     for step in steps:
-        if _is_managed_adapter(step):
-            runtime_artifact, dockerfile = _managed_adapter_runtime(step)
-            codegen_runtime_artifacts.append(runtime_artifact)
-            codegen_dockerfiles.append(dockerfile)
-            continue
-
         codegen_artifact = (
             _codegen_artifact_from_persisted_files(step)
             if require_attached_runtime
@@ -142,6 +136,12 @@ async def generate_dockerfiles_with_agent(
             except DeploymentArtifactValidationError as exc:
                 artifact_errors.extend(exc.errors)
                 continue
+            codegen_runtime_artifacts.append(runtime_artifact)
+            codegen_dockerfiles.append(dockerfile)
+            continue
+
+        if _is_managed_adapter(step):
+            runtime_artifact, dockerfile = _managed_adapter_runtime(step)
             codegen_runtime_artifacts.append(runtime_artifact)
             codegen_dockerfiles.append(dockerfile)
             continue
@@ -458,6 +458,10 @@ async def _read_root_input_files(
 
 
 def _codegen_artifact_from_persisted_files(step: dict[str, Any]) -> dict[str, Any] | None:
+    artifact = step.get("generated_artifact")
+    provenance = artifact.get("provenance") if isinstance(artifact, dict) else None
+    if isinstance(provenance, dict) and provenance.get("user_modified") is True:
+        return None
     files = step.get("files") if isinstance(step.get("files"), list) else []
     filenames = {
         str(item.get("filename") or "").strip()
@@ -792,6 +796,9 @@ async def _read_attached_python_runtime(
         filename = str(file_ref.get("filename") or "").strip()
         if not filename:
             continue
+        lower_filename = filename.lower()
+        if lower_filename in {"node-manifest.json", "validation-report.json"} or lower_filename.startswith("dockerfile."):
+            continue
         if not _is_attached_runtime_file(file_ref):
             fixture_descriptors.append(
                 {
@@ -917,6 +924,9 @@ def _codegen_artifact_for_step(step: dict[str, Any]) -> dict[str, Any] | None:
         return None
     generator = str(artifact.get("generator") or "").strip()
     if generator != CODEGEN_GENERATOR:
+        return None
+    provenance = artifact.get("provenance")
+    if isinstance(provenance, dict) and provenance.get("user_modified") is True:
         return None
     return artifact
 

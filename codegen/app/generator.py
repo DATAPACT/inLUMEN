@@ -7,6 +7,7 @@ import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -46,8 +47,8 @@ from .schemas import (
     GenerateNodeScriptResponse,
     GeneratePipelineScriptsRequest,
     GeneratePipelineScriptsResponse,
-    GenerationUsage,
     GenerationContext,
+    GenerationUsage,
     GraphContext,
     PipelineGeneratedNode,
     PipelineGenerationRun,
@@ -81,6 +82,18 @@ async def emit_pipeline_progress(
     callback: PipelineProgressCallback | None,
     run: PipelineGenerationRun,
 ) -> None:
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    running_step = next(
+        (step for step in reversed(run.steps) if step.status == "running"),
+        None,
+    )
+    if running_step is not None and run.current_stage != running_step.stage:
+        run.current_stage = running_step.stage
+        run.stage_started_at = now
+    if run.stage_started_at is None:
+        run.stage_started_at = now
+    run.progress_updated_at = now
+    run.progress_revision += 1
     if callback is None:
         return
     result = callback(run)
@@ -93,6 +106,9 @@ async def set_running_pipeline_stage(
     stage: str,
     callback: PipelineProgressCallback | None,
 ) -> None:
+    if run.current_stage != stage:
+        run.current_stage = stage
+        run.stage_started_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     for step in run.steps:
         if step.status == "running":
             step.stage = stage
@@ -252,6 +268,7 @@ async def build_and_validate_node(
                 validation_report=validation,
             ),
             input_files=request.context.available_inputs,
+            parameters=request.context.target_node.parameters,
             timeout_seconds=request.context.runtime_constraints.max_runtime_seconds,
         )
         merge_validation_report(validation, execution_report)
@@ -543,6 +560,8 @@ async def generate_pipeline_script_bundles_pipeline_first(
             f"Compiled node {flow_id} is invalid." for flow_id in invalid_nodes
         )
     run.status = "invalid" if integration_validation.status == "invalid" else "valid"
+    run.current_stage = "complete"
+    run.stage_started_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     run.errors = list(integration_validation.errors)
     run.warnings = list(integration_validation.warnings)
     await emit_pipeline_progress(progress_callback, run)
@@ -856,7 +875,7 @@ async def evaluate_pipeline_draft(
                     execution.checks.append("model_free_subpipeline_sample_run")
                 execution.warnings.append(
                     "Executed the model-free portion of the pipeline against "
-                    "sample inputs; external model nodes remain deferred."
+                    "attached Source input files; external model nodes remain deferred."
                 )
                 merge_validation_report(validation, execution)
         else:
@@ -1045,7 +1064,10 @@ async def generate_pipeline_script_bundles_node_first(
                 "Config nodes cannot receive runtime bundles: "
                 + ", ".join(config_targets)
             )
-    run = PipelineGenerationRun(run_id=run_id or uuid.uuid4().hex)
+    run = PipelineGenerationRun(
+        run_id=run_id or uuid.uuid4().hex,
+        current_stage="preparing_nodes",
+    )
 
     async def record_usage(usage: GenerationUsage) -> None:
         if run.generation_usage is None:
@@ -1333,6 +1355,8 @@ async def generate_pipeline_script_bundles_node_first(
         if step.validation_report is not None:
             merge_validation_report(integration_validation, step.validation_report)
     run.status = "invalid" if integration_validation.status == "invalid" else "valid"
+    run.current_stage = "complete"
+    run.stage_started_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     run.errors = list(integration_validation.errors)
     run.warnings = list(integration_validation.warnings)
     await emit_pipeline_progress(progress_callback, run)

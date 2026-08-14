@@ -110,7 +110,19 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
     def graph(self):
         return {
             "nodes": [
-                {"id": "1", "data": {"label": "Ingestion", "type": "input"}},
+                {
+                    "id": "1",
+                    "data": {
+                        "label": "Ingestion",
+                        "type": "input",
+                        "param": {
+                            "language": "en",
+                            "api_key": "do-not-export",
+                            "model_plan": {"internal": True},
+                        },
+                        "secret_params": ["api_key"],
+                    },
+                },
                 {"id": "2", "data": {"label": "Preprocessing", "type": "action"}},
             ],
             "edges": [{"source": "1", "target": "2"}],
@@ -210,6 +222,29 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
                 if item["name"] == "INLUMEN_INPUT_MANIFEST"
             ),
         )
+        env = {
+            item["name"]: item["value"]
+            for item in workflow["spec"]["templates"][1]["container"]["env"]
+            if "value" in item
+        }
+        self.assertEqual('{"language": "en"}', env["INLUMEN_PARAMS_JSON"])
+        self.assertEqual("en", env["INLUMEN_PARAM_LANGUAGE"])
+        self.assertNotIn("INLUMEN_PARAM_MODEL_PLAN", env)
+        secret_env = next(
+            item
+            for item in workflow["spec"]["templates"][1]["container"]["env"]
+            if item["name"] == "INLUMEN_PARAM_API_KEY"
+        )
+        self.assertEqual(
+            {
+                "secretKeyRef": {
+                    "name": "inlumen-runtime-secrets",
+                    "key": "1.api_key",
+                },
+            },
+            secret_env["valueFrom"],
+        )
+        self.assertNotIn("do-not-export", json.dumps(workflow))
 
     def test_codegen_workflow_yaml_is_deterministic(self):
         yaml_text = build_argo_workflow_yaml(self.graph(), codegen_payload())
@@ -240,6 +275,15 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             'upstream_assets:\n    - "node_1_ingestion"',
             by_path["dagster_project/src/inlumen_dagster_project/defs/node_2_preprocessing/defs.yaml"],
         )
+        self.assertIn(
+            'parameters:\n    language: "en"',
+            by_path["dagster_project/src/inlumen_dagster_project/defs/node_1_ingestion/defs.yaml"],
+        )
+        self.assertIn(
+            'secret_environment:\n    api_key: "INLUMEN_SECRET_1_API_KEY"',
+            by_path["dagster_project/src/inlumen_dagster_project/defs/node_1_ingestion/defs.yaml"],
+        )
+        self.assertNotIn("do-not-export", "\n".join(by_path.values()))
         self.assertIn('"inputs"', by_path["dagster_project/storage/inputs/input_manifest.json"])
         self.assertIn('"filename": "vital_signs_short.csv"', by_path["dagster_project/storage/inputs/input_manifest.json"])
         self.assertIn('"path": "storage/inputs/vital_signs_short.csv"', by_path["dagster_project/storage/inputs/input_manifest.json"])
@@ -544,7 +588,7 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertIn("inputs/sample.wav", by_path)
         self.assertNotIn("nodes/node-1-ingestion/sample.wav", by_path)
         self.assertEqual(2, bundle["manifest"]["inputs"]["file_count"])
-        self.assertEqual("per-run", bundle["manifest"]["inputs"]["lifecycle"])
+        self.assertEqual("source-owned", bundle["manifest"]["inputs"]["lifecycle"])
         self.assertIn(
             "./inputs:/workspace/inputs:ro",
             by_path["docker-compose.yml"]["content"],

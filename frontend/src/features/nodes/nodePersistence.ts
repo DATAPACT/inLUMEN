@@ -33,6 +33,41 @@ export const updateNodePropertiesInBackend = async (
   }
 };
 
+export const fetchConfiguredNodeSecrets = async (nodeId: string) => {
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/nodes/${encodeURIComponent(nodeId)}/secrets`,
+    { method: "GET" },
+  );
+  if (!response.ok) throw new Error(`Could not read secret status (${response.status})`);
+  const payload = await response.json().catch(() => ({}));
+  return Array.isArray(payload?.configured)
+    ? payload.configured.map((name: unknown) => String(name || "").trim()).filter(Boolean)
+    : [];
+};
+
+export const storeNodeSecret = async (nodeId: string, name: string, value: string) => {
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/nodes/${encodeURIComponent(nodeId)}/secrets/${encodeURIComponent(name)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    },
+  );
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(String(payload?.error || `Could not store ${name} securely`));
+  }
+};
+
+export const deleteNodeSecret = async (nodeId: string, name: string) => {
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/nodes/${encodeURIComponent(nodeId)}/secrets/${encodeURIComponent(name)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) throw new Error(`Could not remove secret ${name} (${response.status})`);
+};
+
 export const uploadNodeFile = async (nodeId: string, file: File, role?: NodeFileRole) => {
   try {
     const form = new FormData();

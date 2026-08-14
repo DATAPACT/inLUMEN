@@ -191,7 +191,12 @@ PEP 508 strings), outputs (array), implementation_plan (object), and notes
 (array of strings). Never return Markdown or a Dockerfile. The program must
 read INLUMEN_INPUT_MANIFEST and INLUMEN_CONTEXT_PATH, write artifacts beneath
 INLUMEN_OUTPUT_DIR, and write an inlumen.output-manifest@1 JSON document to
-INLUMEN_OUTPUT_MANIFEST. That manifest must use an `outputs` array (never an
+INLUMEN_OUTPUT_MANIFEST. Regular node parameters are available as JSON in
+INLUMEN_PARAMS_JSON and individually as INLUMEN_PARAM_<NAME>. Sensitive
+parameter names are listed in target_node.secret_parameters; their values are
+available only from the corresponding INLUMEN_PARAM_<NAME> environment variable
+at runtime. Never print, persist, or return a sensitive value. That manifest
+must use an `outputs` array (never an
 `artifacts` array), and every item must include the exact declared output
 `name`, `filename`, `path`, `kind`, and `format`. Use only allowed packages and
 honor every output schema, semantic role, filename, and reviewed implementation
@@ -210,7 +215,8 @@ and must return a list of output descriptor dictionaries. Top-level code may
 contain imports, literal constants, classes, and function definitions only.
 Every input is a descriptor dictionary. Read its `path` value; never assume a
 descriptor `filename` exists in the process working directory and never open a
-hard-coded input filename directly. Boundary source and destination functions
+hard-coded input filename directly. Read node parameters from
+context["parameters"]. Boundary source and destination functions
 may be replaced by compiler-owned adapters, while task functions remain the
 coding model's implementation.
 Keep the module concise and return complete, valid Python: close every string,

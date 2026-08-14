@@ -59,7 +59,7 @@ export const ChatPanel = ({
     : conversation.length > 0
       ? `${conversation.length} message${conversation.length === 1 ? "" : "s"} in session`
       : "Ready to design";
-  const hasConversation = conversation.length > 0 || isProcessing;
+  const hasConversation = conversation.length > 0 || isProcessing || isStopping;
   const showSyncStatus =
     canvasSyncStatus.state === 'warning' || canvasSyncStatus.state === 'error';
   const syncStatusClass =
@@ -184,7 +184,7 @@ export const ChatPanel = ({
                 </div>
               ))}
 
-              {isProcessing && (
+              {(isProcessing || isStopping) && (
                 <div className="flex justify-start">
                   <div className="max-w-[90%] space-y-1.5">
                     <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
@@ -249,20 +249,23 @@ export const ChatPanel = ({
             <div className="mt-2 flex items-center justify-end border-t border-border pt-2">
               <Button
                 onClick={isProcessing ? onStopProcessing : onSendMessage}
-                disabled={isProcessing ? isStopping : !userInput.trim()}
+                disabled={isStopping || (!isProcessing && !userInput.trim())}
                 className={cn(
                   "h-9 rounded-xl px-3.5 font-semibold hover:opacity-95",
-                  isProcessing
+                  isProcessing || isStopping
                     ? "bg-rose-500 text-white shadow-[0_18px_40px_rgba(244,63,94,0.2)] hover:bg-rose-500"
                     : "bg-[linear-gradient(135deg,#34d399,#0f766e)] text-slate-950 shadow-[0_18px_40px_rgba(16,185,129,0.22)]",
                 )}
               >
-                {isProcessing ? (
+                {isStopping ? (
                   <>
-                    {isStopping
-                      ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-                      : <Square className="h-4 w-4 fill-current" />}
-                    {isStopping ? "Stopping…" : "Stop"}
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                    Restoring…
+                  </>
+                ) : isProcessing ? (
+                  <>
+                    <Square className="h-4 w-4 fill-current" />
+                    Stop
                   </>
                 ) : (
                   <>

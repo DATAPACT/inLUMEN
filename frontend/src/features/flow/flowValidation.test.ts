@@ -26,7 +26,7 @@ describe("pipeline design validation", () => {
       code: "missing-code",
       nodeId: "transcription",
       message: "Missing code.",
-    }, nodes, edges)).toEqual({ label: "Transcription", context: "Task · Speech-to-Text" });
+    }, nodes, edges)).toEqual({ label: "Transcription", context: "Task" });
 
     expect(getValidationIssueSubject({
       severity: "error",
@@ -37,7 +37,7 @@ describe("pipeline design validation", () => {
     }, nodes, edges)).toEqual({ label: "Transcription → Sentiment Analysis", context: "Connection" });
   });
 
-  it("reports missing required inputs, parameters, outputs, and implementation issues", () => {
+  it("reports missing required inputs, outputs, and implementation issues", () => {
     const graph = normalizeGraph({
       nodes: [{
         id: "task",
@@ -57,13 +57,93 @@ describe("pipeline design validation", () => {
     expect(codes).toEqual(expect.arrayContaining([
       "missing-required-input",
       "missing-output",
-      "missing-parameter-value",
-      "missing-required-parameter",
-      "missing-container-image",
+      "unsupported-task-implementation",
     ]));
   });
 
-  it("keeps sample inputs separate from executable Task code", () => {
+  it("does not validate hidden implementation presets as user parameters", () => {
+    const graph = normalizeGraph({
+      nodes: [{
+        id: "llm",
+        position: { x: 0, y: 0 },
+        data: { type: "task", template_label: "LLM", param: { model: "" } },
+      }],
+      edges: [],
+    });
+
+    expect(validateGraph(graph.nodes, graph.edges).issues).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "missing-required-parameter" }),
+      ]),
+    );
+
+    expect(graph.nodes[0].data).not.toHaveProperty("implementation_override");
+  });
+
+  it("keeps old Source adapter metadata out of conceptual validation", () => {
+    const graph = normalizeGraph({
+      nodes: [{
+        id: "audio-source",
+        position: { x: 0, y: 0 },
+        data: {
+          type: "source",
+          label: "Audio Upload",
+          template_label: "REST API",
+          configuration_status: "unconfigured",
+          param: { url: "", method: "GET" },
+        },
+      }],
+      edges: [],
+    });
+
+    expect(validateGraph(graph.nodes, graph.edges).issues).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "missing-required-parameter" }),
+      ]),
+    );
+    expect(getValidationIssueSubject({
+      severity: "warning",
+      category: "configuration",
+      code: "example",
+      nodeId: "audio-source",
+      message: "Example",
+    }, graph.nodes, graph.edges)).toEqual({ label: "Audio Upload", context: "Source" });
+
+    expect(graph.nodes[0].data).not.toHaveProperty("implementation_override");
+  });
+
+  it("marks a file Source incomplete until its input file is attached", () => {
+    const graph = normalizeGraph({
+      nodes: [{
+        id: "upload",
+        position: { x: 0, y: 0 },
+        data: {
+          type: "source",
+          template_label: "User Upload",
+          files: [{ filename: "main.py", role: "code" }],
+        },
+      }],
+      edges: [],
+    });
+
+    expect(validateGraph(graph.nodes, graph.edges).issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "missing-source-input-file", severity: "error" }),
+      ]),
+    );
+
+    graph.nodes[0].data.files = [
+      { filename: "main.py", role: "code" },
+      { filename: "audio.wav", role: "data" },
+    ];
+    expect(validateGraph(graph.nodes, graph.edges).issues).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "missing-source-input-file" }),
+      ]),
+    );
+  });
+
+  it("keeps legacy Task data attachments separate from executable code", () => {
     const graph = normalizeGraph({
       nodes: [{
         id: "task",
@@ -84,22 +164,20 @@ describe("pipeline design validation", () => {
       .find((issue) => issue.code === "missing-code");
     const completeIssue = validateGraph(graph.nodes, graph.edges).issues
       .find((issue) => issue.code === "missing-code");
+    const reusableDesignIssue = validateGraph(
+      graph.nodes,
+      graph.edges,
+      { mode: "complete", requireRuntime: false },
+    ).issues.find((issue) => issue.code === "missing-code");
 
     expect(draftIssue?.severity).toBe("warning");
     expect(completeIssue?.severity).toBe("error");
+    expect(reusableDesignIssue?.severity).toBe("warning");
 
     graph.nodes[0].data.files = [
       { filename: "records.csv", role: "data" },
       { filename: "main.py", role: "code" },
     ];
-    const missingEntrypoint = validateGraph(graph.nodes, graph.edges, { mode: "draft" }).issues
-      .find((issue) => issue.code === "missing-entrypoint");
-    expect(missingEntrypoint?.severity).toBe("warning");
-
-    graph.nodes[0].data.implementation = {
-      ...graph.nodes[0].data.implementation,
-      entrypoint: "main.py",
-    };
     expect(validateGraph(graph.nodes, graph.edges).issues).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ category: "implementation" }),
@@ -132,6 +210,27 @@ describe("pipeline design validation", () => {
         expect.objectContaining({ code: "missing-entrypoint" }),
       ]),
     );
+  });
+
+  it("preserves unsupported legacy metadata while requiring Python migration", () => {
+    const legacyImplementation = {
+      kind: "container",
+      language: "javascript",
+      image: "registry.example/legacy-task:1",
+      entrypoint: "node index.js",
+    };
+    const graph = normalizeGraph({
+      nodes: [{
+        id: "legacy-task",
+        position: { x: 0, y: 0 },
+        data: { type: "task", implementation: legacyImplementation },
+      }],
+      edges: [],
+    });
+
+    const codes = validateGraph(graph.nodes, graph.edges).issues.map((issue) => issue.code);
+    expect(codes).toContain("unsupported-task-implementation");
+    expect(graph.nodes[0].data.implementation).toEqual(legacyImplementation);
   });
 
   it("reports missing code independently on every code-backed Task", () => {

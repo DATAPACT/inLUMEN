@@ -101,8 +101,8 @@ describe("node schema compatibility", () => {
     expect(getNodeFileRole("observations.csv")).toBe("data");
   });
 
-  it("offers input-file attachments to every Source and Task", () => {
-    expect(typeSupportsInputFiles("task")).toBe(true);
+  it("offers pipeline input files only to Sources", () => {
+    expect(typeSupportsInputFiles("task")).toBe(false);
     expect(typeSupportsInputFiles("source")).toBe(true);
     expect(typeSupportsInputFiles("destination")).toBe(false);
     expect(typeSupportsInputFiles("flow")).toBe(false);
@@ -148,6 +148,24 @@ describe("node schema compatibility", () => {
       definition_version: 2,
       implementation: { kind: "container", image: "example/asr:1" },
     });
+  });
+
+  it("never includes sensitive parameter values in backend updates", () => {
+    const properties = pickBackendUpdatableProps(
+      "secure-node",
+      {
+        label: "API source",
+        param: { endpoint: "https://example.test", api_key: "do-not-persist" },
+        secret_params: ["api_key"],
+      },
+      "source",
+    );
+
+    expect(properties.param).toEqual({
+      endpoint: "https://example.test",
+      api_key: "",
+    });
+    expect(properties.secret_params).toEqual(["api_key"]);
   });
 
   it("uses parameters and description for sources without a secondary config channel", () => {

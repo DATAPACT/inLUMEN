@@ -122,8 +122,8 @@ export const CustomNode: React.FC<NodeProps> = ({ id, data, selected }) => {
   const validationErrors = validationIssues.filter((issue) => issue.severity === 'error').length;
   const validationWarnings = validationIssues.filter((issue) => issue.severity === 'warning').length;
   const visualType = normalizeType(data.type);
-  // Flow behavior is encoded by named handles, so those handles stay visible
-  // and connectable even when the rest of the canvas is in Compact mode.
+  // Compact mode collapses labels and validation details, but handles always
+  // remain visible so connections are understandable and editable.
   const showPortDetails = display.advanced || visualType === 'flow';
   const ports = normalizeNodePorts(data.ports, visualType);
   const style = TYPE_STYLES[visualType];
@@ -138,7 +138,7 @@ export const CustomNode: React.FC<NodeProps> = ({ id, data, selected }) => {
     'Flow',
     'Subpipeline',
   ]);
-  const showTemplate = templateLabel && !structuralDefaults.has(templateLabel);
+  const showTemplate = visualType !== 'source' && templateLabel && !structuralDefaults.has(templateLabel);
 
   return (
     <div
@@ -162,10 +162,7 @@ export const CustomNode: React.FC<NodeProps> = ({ id, data, selected }) => {
           position={Position.Left}
           title={`${port.name}${port.type !== 'any' ? ` · ${port.type}` : ''}${port.description ? ` — ${port.description}` : ''}`}
           style={{ top: portPosition(index, ports.inputs.length) }}
-          className={cn(
-            "node-port-handle node-port-handle-input",
-            !showPortDetails && "pointer-events-none opacity-0",
-          )}
+          className="node-port-handle node-port-handle-input"
         />
       ))}
 
@@ -246,10 +243,7 @@ export const CustomNode: React.FC<NodeProps> = ({ id, data, selected }) => {
           position={Position.Right}
           title={`${port.name}${port.type !== 'any' ? ` · ${port.type}` : ''}${port.description ? ` — ${port.description}` : ''}`}
           style={{ top: portPosition(index, ports.outputs.length) }}
-          className={cn(
-            "node-port-handle node-port-handle-output",
-            !showPortDetails && "pointer-events-none opacity-0",
-          )}
+          className="node-port-handle node-port-handle-output"
         />
       ))}
     </div>

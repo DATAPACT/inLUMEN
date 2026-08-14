@@ -331,6 +331,61 @@ class DeploymentAgentsTest(unittest.TestCase):
             )
         )
 
+    @unittest.skipIf(
+        generate_dockerfiles_with_agent is None,
+        f"deployment agent dependencies are unavailable: {IMPORT_ERROR}",
+    )
+    def test_user_main_py_takes_precedence_over_a_managed_source_adapter(self):
+        stored = {
+            ("files-step-id-1", "main.py"): b"print('custom source')\n",
+            ("files-step-id-1", "requirements.txt"): b"",
+        }
+
+        async def read_object(bucket, filename):
+            return stored[(bucket, filename)]
+
+        graph = {
+            "nodes": [
+                {
+                    "id": "1",
+                    "data": {
+                        "label": "Custom upload",
+                        "type": "source",
+                        "generated_artifact": {
+                            "status": "current",
+                            "generator": "inlumen-codegen-service",
+                            "provenance": {"user_modified": True},
+                        },
+                        "files": [
+                            {"filename": "main.py", "bucket": "files-step-id-1", "role": "code"},
+                            {"filename": "requirements.txt", "bucket": "files-step-id-1", "role": "code"},
+                        ],
+                    },
+                },
+            ],
+            "edges": [],
+        }
+
+        with patch(
+            "deployment_agents.read_minio_object_bytes",
+            side_effect=read_object,
+        ):
+            payload = run_async(
+                generate_dockerfiles_with_agent([], [], pipeline_graph=graph)
+            )
+
+        result = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        self.assertEqual(
+            "inlumen-attached-runtime",
+            result["runtime_artifacts"][0]["generator"],
+        )
+        main_file = next(
+            item
+            for item in result["runtime_artifacts"][0]["files"]
+            if item["filename"] == "main.py"
+        )
+        self.assertIn("custom source", main_file["content"])
+
 
 if __name__ == "__main__":
     unittest.main()

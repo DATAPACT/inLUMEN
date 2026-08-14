@@ -88,6 +88,7 @@ def normalize_definition_properties(properties: dict[str, Any]) -> None:
     properties.pop("implementation", None)
     properties.pop("implementation_json", None)
     properties.pop("configuration_status", None)
+    properties.pop("implementation_override", None)
     properties.pop("generated_artifact", None)
     properties.pop("generated_artifact_json", None)
     properties.pop("template", None)

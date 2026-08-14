@@ -8,6 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import inlumen_api
+import analytics_api
 
 
 class FakeResponse:
@@ -124,6 +125,46 @@ class CodegenServiceClientTest(unittest.TestCase):
         self.assertEqual("Bearer service-token", headers["authorization"])
         self.assertNotIn("x-llm-api-key", headers)
 
+    @patch.dict(
+        os.environ,
+        {"INLUMEN_CODEGEN_SERVICE_API_KEY": "service-token"},
+        clear=False,
+    )
+    @patch("analytics_api.urlopen")
+    def test_deployment_validation_uses_codegen_auth_and_transports_files(
+        self,
+        urlopen,
+    ):
+        urlopen.return_value = FakeResponse(
+            {"ok": True, "validation_report": {"ok": True}}
+        )
+        files = [
+            {
+                "path": "bundle-manifest.json",
+                "filename": "bundle-manifest.json",
+                "content": "{}",
+            }
+        ]
+
+        response = analytics_api._post_deployment_validation_request(
+            files=files,
+            targets={"argo": False, "dagster": False},
+            options={"mode": "fast", "materialize": False},
+        )
+
+        self.assertTrue(response["ok"])
+        outbound_request = urlopen.call_args.args[0]
+        self.assertTrue(
+            outbound_request.full_url.endswith(
+                "/v1/validate/deployment-bundle"
+            )
+        )
+        headers = self.headers(outbound_request)
+        self.assertEqual("Bearer service-token", headers["authorization"])
+        outbound_payload = json.loads(outbound_request.data.decode("utf-8"))
+        self.assertEqual(files, outbound_payload["files"])
+        self.assertEqual("fast", outbound_payload["mode"])
+
     def test_node_descriptor_carries_runtime_model_plan_to_codegen(self):
         model_plan = {
             "task": "automatic_speech_recognition",
@@ -177,6 +218,20 @@ class CodegenServiceClientTest(unittest.TestCase):
         })
 
         self.assertEqual(definition, descriptor["subpipeline"])
+
+    def test_node_descriptor_exposes_secret_names_without_values(self):
+        descriptor = inlumen_api._node_descriptor({
+            "id": "api-source",
+            "data": {
+                "type": "source",
+                "param": {"url": "https://example.test", "api_key": "do-not-send"},
+                "secret_params": ["api_key"],
+            },
+        })
+
+        self.assertEqual({"url": "https://example.test"}, descriptor["parameters"])
+        self.assertEqual(["api_key"], descriptor["secret_parameters"])
+        self.assertNotIn("do-not-send", json.dumps(descriptor))
 
     def test_dynamic_model_plan_participates_in_codegen_configuration_hash(self):
         model_plan = {

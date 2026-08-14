@@ -75,6 +75,7 @@ const CHAT_HISTORY_KEY = "inlumen-chat-history";
 const PIPELINE_PROMPT_KEY = "inlumen-pipeline-high-level-prompt";
 const PANEL_STATE_KEY = "inlumen-panel-preferences";
 const THEME_KEY = "inlumen-theme";
+const CHAT_PROCESSING_TOAST_ID = "pipeline-chat-processing";
 const createChatTurnId = () => {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
@@ -208,7 +209,6 @@ type ChatApiResponse = {
 
 const Index = () => {
   const [selectedNode, setSelectedNode] = useState<FlowNode | null>(null);
-  const [isCanvasAdvanced, setIsCanvasAdvanced] = useState(false);
   const [activeTab, setActiveTab] = useState('lab'); // 'lab', 'overview', or 'simulate'
   const [userInput, setUserInput] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -487,7 +487,7 @@ const Index = () => {
   const activeConfig = selectedConfig || defaultConfig;
 
   const handleSendMessage = async () => {
-    if (isProcessing) return;
+    if (isProcessing || isStopping) return;
     const messageText = userInput;
 
     if (!messageText.trim()) {
@@ -500,7 +500,8 @@ const Index = () => {
     setUserInput('');
     setIsProcessing(true);
     setIsStopping(false);
-    toast("Processing your input", {
+    toast.loading("Processing your input", {
+      id: CHAT_PROCESSING_TOAST_ID,
       description: "AI is thinking...",
     });
 
@@ -645,9 +646,10 @@ const Index = () => {
     } finally {
       if (activeChatTurnRef.current?.turnId === turnId) {
         activeChatTurnRef.current = null;
+        setIsProcessing(false);
+        setIsStopping(false);
       }
-      setIsProcessing(false);
-      setIsStopping(false);
+      toast.dismiss(CHAT_PROCESSING_TOAST_ID);
     }
   };
 
@@ -655,7 +657,13 @@ const Index = () => {
     const activeTurn = activeChatTurnRef.current;
     if (!activeTurn || isStopping) return;
 
+    // Stop the browser-side request synchronously. The separate cancellation
+    // request below waits for backend rollback before enabling another turn.
+    activeChatTurnRef.current = null;
+    activeTurn.controller.abort();
+    setIsProcessing(false);
     setIsStopping(true);
+    toast.dismiss(CHAT_PROCESSING_TOAST_ID);
     try {
       const response = await apiFetch(`${INLUMEN_API_URL}/simple_chat/cancel`, {
         method: "POST",
@@ -665,14 +673,36 @@ const Index = () => {
       if (!response.ok) {
         throw new Error(`Stop request failed (${response.status}): ${await response.text()}`);
       }
-      toast.info("Stopping pipeline agent", {
-        description: "Cancelling the active turn and restoring the previous pipeline…",
+      const stopped = await response.json() as ChatApiResponse & { completed?: boolean };
+      if (stopped.completed === false || stopped.status !== "cancelled") {
+        throw new Error("The stop request was accepted, but rollback did not finish in time.");
+      }
+      const restored = stopped.rollback_applied !== false;
+      if (restored && flowCanvasRef.current) {
+        await flowCanvasRef.current.syncFromBackend();
+      }
+      const message = restored
+        ? "Stopped immediately. Changes from the interrupted turn were removed."
+        : stopped.assistant_message || "Stopped, but the previous pipeline could not be restored automatically.";
+      setCanvasSyncStatus({
+        state: restored ? 'idle' : 'error',
+        message: restored ? 'Canvas is ready' : message,
       });
+      if (restored) {
+        toast.success("Pipeline agent stopped", { description: message });
+      } else {
+        toast.error("Pipeline rollback needs attention", { description: message });
+      }
     } catch (error) {
-      setIsStopping(false);
+      setCanvasSyncStatus({
+        state: 'error',
+        message: error instanceof Error ? error.message : "The stop could not be confirmed.",
+      });
       toast.error("Could not stop the pipeline agent", {
         description: error instanceof Error ? error.message : "Unknown error occurred",
       });
+    } finally {
+      setIsStopping(false);
     }
   };
 
@@ -1078,9 +1108,15 @@ const Index = () => {
         message: '',
         updatedAt,
       });
-      toast.success("Workspace cleared", {
-        description: "Main is empty; versions, chat, provenance, and generation history are cleared.",
-      });
+      if (result.status === "partial") {
+        toast.warning("Workspace graph cleared", {
+          description: "Some object-storage files could not be removed. Check the backend logs before release.",
+        });
+      } else {
+        toast.success("Workspace cleared", {
+          description: "Pipelines, files, chat, provenance, and generation history were deleted.",
+        });
+      }
     } catch (error) {
       console.error("Error clearing workspace:", error);
       toast.error("Failed to clear workspace", {
@@ -1188,6 +1224,10 @@ const Index = () => {
             onOverviewUpdated={handleOverviewUpdated}
             activeChatbotConfig={activeConfig}
             workspaceResetKey={workspaceResetKey}
+            getCurrentPipelineGraph={() => flowCanvasRef.current?.getCurrentGraph() || { nodes: [], edges: [] }}
+            replaceCurrentPipelineGraph={(graph) => flowCanvasRef.current?.replaceCurrentGraph(graph)}
+            currentPipelineName={activeVersionName}
+            currentPipelineDescription={activePipelineDescription}
           />
         )}
 
@@ -1208,7 +1248,6 @@ const Index = () => {
                   onActiveVersionChange={updateActiveVersion}
                   onActiveVersionNameChange={handleActiveVersionNameChange}
                   onPipelineDescriptionChange={setActivePipelineDescription}
-                  onDisplayModeChange={setIsCanvasAdvanced}
                   workspaceResetKey={workspaceResetKey}
                   flowCanvasRef={flowCanvasRef}
                 />
@@ -1236,7 +1275,6 @@ const Index = () => {
                         flowCanvasRef.current?.openCodeGeneration([nodeId]);
                       }}
                       activeChatbotConfig={activeConfig}
-                      isAdvancedMode={isCanvasAdvanced}
                     />
                   ) : rightPanel === 'chat' ? (
                     <ChatPanel

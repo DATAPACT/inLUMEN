@@ -11,7 +11,7 @@ from node_ports import (
     ports_json,
     ports_json_for_template,
 )
-from node_parameters import secret_params_json
+from node_parameters import secret_params_json, without_secret_param_values
 from pipeline_agent.contract import (
     COMPONENT_DEFINITION_IDS,
     default_input_port_expression,
@@ -23,7 +23,6 @@ from pipeline_agent.contract import (
 from pipeline_graph_validation import validate_pipeline_graph
 from subpipeline_reference import (
     derive_subpipeline_interface,
-    missing_explicit_port_contracts,
     normalize_reusable_pipeline_graph,
     plan_subpipeline_port_migration,
     public_ports_for_interface,
@@ -298,6 +297,7 @@ def build_pipeline_editor_tools(
                 sort_keys=True,
             ).replace("\\", "\\\\").replace("'", "\\'")
             props_lines.append(f"implementation_json: '{implementation_json}'")
+        param_obj = without_secret_param_values(param_obj, secret_parameters)
         param_json = json.dumps(param_obj, ensure_ascii=True, sort_keys=True)
         escaped_param_json = param_json.replace("\\", "\\\\").replace("'", "\\'")
         props_lines.append(f"param_json: '{escaped_param_json}'")
@@ -912,13 +912,13 @@ def build_pipeline_editor_tools(
           "name": "Conversation Understanding",
           "description": "Reusable transcription and conversation analysis.",
           "version_name": "Version 1",
-          "graph": {"nodes": ["complete React Flow-shaped nodes with explicit typed ports"], "edges": ["port-aware edges"]}
+          "graph": {"nodes": ["complete React Flow-shaped nodes"], "edges": ["connections"]}
         }
 
         The graph must be runnable on its own, with Source and Destination
-        boundaries. Every node must declare ports.inputs and ports.outputs with
-        stable ids and data types; implicit generic ports are rejected. Source
-        and Destination ports become the reusable pipeline's public contract.
+        boundaries. Port ids and data contracts are inferred and frozen when
+        the version is saved; expert-supplied typed ports remain supported.
+        Source and Destination ports become the public contract.
         """
         try:
             data = json.loads(params)
@@ -928,12 +928,6 @@ def build_pipeline_editor_tools(
             graph = data.get("graph") if isinstance(data.get("graph"), dict) else {}
             if not name:
                 raise ValueError("create_reusable_pipeline requires name")
-            missing_ports = missing_explicit_port_contracts(graph)
-            if missing_ports:
-                raise ValueError(
-                    "Every reusable-pipeline component requires explicit typed ports; missing: "
-                    + ", ".join(missing_ports)
-                )
             graph = normalize_reusable_pipeline_graph(graph)
             validation = validate_pipeline_graph(graph)
             if not validation.get("valid"):

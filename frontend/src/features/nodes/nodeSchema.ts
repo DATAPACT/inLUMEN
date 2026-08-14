@@ -174,6 +174,19 @@ export const normalizeSecretParamKeys = (
   return Array.from(new Set(candidates.filter((key) => key && paramKeys.has(key))));
 };
 
+export const withoutSensitiveParameterValues = (
+  parameters: unknown,
+  secretParameters: unknown,
+) => {
+  const sanitized = parameters && typeof parameters === "object" && !Array.isArray(parameters)
+    ? { ...(parameters as Record<string, unknown>) }
+    : {};
+  normalizeSecretParamKeys(secretParameters, sanitized).forEach((key) => {
+    sanitized[key] = "";
+  });
+  return sanitized;
+};
+
 export type NodeConfigurationStatus = "unconfigured" | "valid" | "invalid";
 
 export type GeneratedArtifact = {
@@ -355,7 +368,7 @@ export const normalizeConfigurationStatus = (
 export const typeHasFiles = (_type: StepType) => true;
 
 export const typeSupportsInputFiles = (type: StepType) =>
-  type === "source" || type === "task";
+  type === "source";
 
 export const typeHasContent = (type: StepType) =>
   type === "destination";
@@ -365,18 +378,20 @@ export const pickBackendUpdatableProps = (
   nodeData: Record<string, unknown>,
   nodeType: StepType,
 ) => {
+  const rawParam = nodeData.param && typeof nodeData.param === "object" && !Array.isArray(nodeData.param)
+    ? nodeData.param
+    : {};
+  const secretParams = normalizeSecretParamKeys(nodeData.secret_params, rawParam);
   const props: Record<string, unknown> = {
     flow_id: nodeId,
     label: nodeData.label ?? "",
     type: nodeType,
     description: nodeData.description ?? "",
-    param: nodeData.param && typeof nodeData.param === "object" && !Array.isArray(nodeData.param)
-      ? nodeData.param
-      : {},
+    param: withoutSensitiveParameterValues(rawParam, secretParams),
     ports: normalizeNodePorts(nodeData.ports, nodeType),
     has_files: nodeData.has_files ?? "no",
   };
-  props.secret_params = normalizeSecretParamKeys(nodeData.secret_params, props.param);
+  props.secret_params = secretParams;
 
   if (typeof nodeData.template_label === "string" && nodeData.template_label.trim()) {
     props.template_label = nodeData.template_label.trim();

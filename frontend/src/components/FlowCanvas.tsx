@@ -37,7 +37,6 @@ import {
   fetchPipelineUpdatedAt,
   restoreBackendGraphHistory,
   resumePipelineScriptGenerationRun,
-  restorePipelineVersion,
   startPipelineScriptGenerationRun,
   type PipelineVersionGraph,
   type PipelineVersionSummary,
@@ -65,6 +64,12 @@ import {
   isRestorableGenerationRun,
 } from '@/features/flow/generationState';
 import {
+  estimateGenerationTiming,
+  formatGenerationDuration,
+  generationCurrentStage,
+  generationProgressPercent,
+} from '@/features/flow/generationProgress';
+import {
   getValidationIssueSubject,
   validateGraph,
   type ValidationIssue,
@@ -87,7 +92,9 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Textarea } from '@/components/ui/textarea';
 import {
   AlertCircle,
+  Activity,
   CheckCircle2,
+  Clock3,
   Database,
   Loader2,
   Zap,
@@ -117,6 +124,7 @@ export interface FlowCanvasRef {
     options?: { remapSubpipeline?: boolean },
   ) => void;
   syncFromBackend: (graphData?: unknown) => Promise<NormalizedGraph>;
+  replaceCurrentGraph: (graphData: unknown) => Promise<NormalizedGraph>;
   getCurrentGraph: () => AgentGraphSnapshot;
   getCurrentVersionGraph: () => PipelineVersionGraph;
   openCodeGeneration: (selectedFlowIds?: string[]) => void;
@@ -172,7 +180,7 @@ const generationModeOptions: Array<{
   {
     value: "validated",
     title: "Validated",
-    description: "Execute with attached sample inputs and automatically repair validation failures.",
+    description: "Execute with attached Source input files and automatically repair validation failures.",
     icon: Database,
   },
 ];
@@ -201,22 +209,6 @@ const modeToGenerationOptions = (
   };
 };
 
-const generationProgressPercent = (job: PipelineGenerationJob | null) => {
-  const steps = job?.generation_run?.steps || [];
-  if (steps.length === 0) return job?.status === "queued" ? 5 : 10;
-  const completed = steps.filter((step) =>
-    ["valid", "invalid", "failed", "skipped"].includes(String(step.status || "")),
-  ).length;
-  const status = effectiveGenerationStatus(job);
-  if (
-    status === "valid" ||
-    status === "invalid" ||
-    status === "failed" ||
-    status === "cancelled"
-  ) return 100;
-  return Math.max(10, Math.min(95, Math.round((completed / steps.length) * 100)));
-};
-
 const ACTIVE_GENERATION_RUN_STORAGE_KEY = "inlumen-active-codegen-run-id";
 
 const generationFailureMessage = (job: PipelineGenerationJob) => {
@@ -243,6 +235,10 @@ const generationStageLabel = (stage: unknown) => {
   const key = String(stage || "pending").toLowerCase();
   const labels: Record<string, string> = {
     pending: "waiting",
+    preparing_nodes: "preparing nodes",
+    generating: "generating node code",
+    static_validation: "running static validation",
+    replaying: "replaying validated package",
     pipeline_planning: "planning pipeline",
     pipeline_generation: "generating canonical pipeline",
     pipeline_validation: "validating canonical pipeline",
@@ -491,11 +487,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const [overwriteProtectedCode, setOverwriteProtectedCode] = useState(false);
   const [recentGenerationRuns, setRecentGenerationRuns] =
     useState<PipelineGenerationJob[]>([]);
-  const [isCreatingGenerationCheckpoint, setIsCreatingGenerationCheckpoint] =
-    useState(false);
-  const [isRestoringGenerationCheckpoint, setIsRestoringGenerationCheckpoint] =
-    useState(false);
   const [generationJob, setGenerationJob] = useState<PipelineGenerationJob | null>(null);
+  const [generationClockMs, setGenerationClockMs] = useState(() => Date.now());
   const generationHistoryResetVersionRef = useRef(0);
   const resetGenerationHistoryState = useCallback(() => {
     generationHistoryResetVersionRef.current += 1;
@@ -747,6 +740,18 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     scheduleSyncRetry,
   ]);
 
+  const replaceCurrentGraph = useCallback(async (graphData: unknown) => {
+    const graph = normalizeGraph(graphData);
+    pushHistorySnapshot();
+    onCanvasEdited?.();
+    markLocalWrite(1500);
+    await rebuildBackendFromFlow(graph.nodes, graph.edges);
+    selectedNodeIdRef.current = null;
+    onNodeSelect(null);
+    applyGraph(graph, graph);
+    return graph;
+  }, [applyGraph, markLocalWrite, onCanvasEdited, onNodeSelect, pushHistorySnapshot]);
+
   const getCurrentGraph = useCallback(() => {
     return createAgentGraphSnapshot(normalizeGraph({
       updated_at: lastSeenUpdatedAtRef.current,
@@ -879,7 +884,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     void refresh();
     const intervalId = window.setInterval(() => {
       void refresh();
-    }, 3000);
+    }, isScriptGenerationOpen ? 750 : 1500);
     return () => {
       disposed = true;
       window.clearInterval(intervalId);
@@ -888,8 +893,16 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     activeGenerationPersistenceStatus,
     activeGenerationRunId,
     activeGenerationStatus,
+    isScriptGenerationOpen,
     rememberGenerationJob,
   ]);
+
+  useEffect(() => {
+    if (!isGeneratingScripts) return;
+    setGenerationClockMs(Date.now());
+    const intervalId = window.setInterval(() => setGenerationClockMs(Date.now()), 1000);
+    return () => window.clearInterval(intervalId);
+  }, [isGeneratingScripts]);
 
   useEffect(() => {
     if (!generationJob) return;
@@ -1202,6 +1215,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   useImperativeHandle(ref, () => ({
     updateNode,
     syncFromBackend,
+    replaceCurrentGraph,
     getCurrentGraph,
     getCurrentVersionGraph: createSerializableFlow,
     openCodeGeneration,
@@ -1209,6 +1223,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     createSerializableFlow,
     getCurrentGraph,
     openCodeGeneration,
+    replaceCurrentGraph,
     syncFromBackend,
     updateNode,
   ]);
@@ -1517,7 +1532,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const handleRunPipelineScriptGeneration = async () => {
     if (
       isGeneratingScripts
-      || isCreatingGenerationCheckpoint
       || !generationPreflight
       || generationPreflight.target_count === 0
     ) return;
@@ -1539,31 +1553,11 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       });
       return;
     }
-    let checkpointVersionUid = "";
-    if (generationPreflight.replacement_count > 0) {
-      try {
-        setIsCreatingGenerationCheckpoint(true);
-        const checkpoint = await savePipelineVersion(
-          `Before code generation ${new Date().toLocaleString()}`,
-          createSerializableFlow(),
-        );
-        checkpointVersionUid = checkpoint.uid;
-        onVersionSaved?.(checkpoint);
-      } catch (error) {
-        toast.error("Could not create a restore point", {
-          description: error instanceof Error ? error.message : "Generation was not started.",
-        });
-        return;
-      } finally {
-        setIsCreatingGenerationCheckpoint(false);
-      }
-    }
     const options = {
       ...modeToGenerationOptions(mode, sampleDataAvailable),
       scope: scriptGenerationScope,
       selectedFlowIds: scriptGenerationSelectedFlowIds,
       overwriteManualCode: overwriteProtectedCode,
-      checkpointVersionUid,
       userInstruction: scriptGenerationPrompt.trim(),
     };
     generationCancelRequestedRef.current = false;
@@ -1706,31 +1700,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     setIsScriptGenerationOpen(false);
   };
 
-  const handleRestoreGenerationCheckpoint = async () => {
-    const checkpointVersionUid = String(
-      generationJob?.checkpoint_version_uid || "",
-    ).trim();
-    if (!checkpointVersionUid || isRestoringGenerationCheckpoint) return;
-    try {
-      setIsRestoringGenerationCheckpoint(true);
-      const restored = await restorePipelineVersion(checkpointVersionUid);
-      await syncFromBackend(restored.graph);
-      onActiveVersionChange?.(restored.version.uid);
-      onActiveVersionNameChange?.(restored.version.name);
-      onPipelineDescriptionChange?.(restored.version.description || "");
-      toast.success("Generated packages were undone", {
-        description: `Restored ${restored.version.name}.`,
-      });
-      setIsScriptGenerationOpen(false);
-    } catch (error) {
-      toast.error("Could not restore the generation checkpoint", {
-        description: error instanceof Error ? error.message : "Unknown error",
-      });
-    } finally {
-      setIsRestoringGenerationCheckpoint(false);
-    }
-  };
-
   const importFlow = async (e: React.ChangeEvent<HTMLInputElement>) => {
     try {
       const file = e.target.files?.[0];
@@ -1789,7 +1758,20 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
   const generationSteps = generationJob?.generation_run?.steps || [];
   const generationProgress = generationProgressPercent(generationJob);
+  const generationStage = generationCurrentStage(generationJob);
   const generationStatus = effectiveGenerationStatus(generationJob);
+  const generationTiming = estimateGenerationTiming(
+    generationJob,
+    recentGenerationRuns,
+    generationClockMs,
+  );
+  const generationProgressUpdatedAt = generationJob?.generation_run?.progress_updated_at;
+  const generationProgressUpdatedAtMs = generationProgressUpdatedAt
+    ? Date.parse(generationProgressUpdatedAt)
+    : Number.NaN;
+  const generationProgressAgeMs = Number.isFinite(generationProgressUpdatedAtMs)
+    ? Math.max(0, generationClockMs - generationProgressUpdatedAtMs)
+    : null;
   const generationUsage = generationJob?.generation_run?.generation_usage;
   const generationFailed = ["invalid", "failed"].includes(generationStatus);
   const repairableFailedStep = failedGenerationStep(generationJob);
@@ -2033,7 +2015,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
                 {isGenerationPreflightLoading && !generationPreflight ? (
                   <div className="flex items-center gap-2 rounded-md border border-border p-4 text-sm text-muted-foreground">
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    Inspecting runtime packages and sample inputs…
+                    Inspecting runtime packages and Source input files…
                   </div>
                 ) : generationPreflightError ? (
                   <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
@@ -2058,7 +2040,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
                       <p className="text-xs text-muted-foreground">{activeChatbotConfig?.provider || "Open Settings to configure"}</p>
                     </div>
                     <div className="rounded-md border border-border bg-muted/20 p-3">
-                      <p className="text-xs text-muted-foreground">Sample inputs</p>
+                      <p className="text-xs text-muted-foreground">Source input files</p>
                       <p className="mt-1 font-semibold">
                         {generationPreflight.sample_data?.sample_file_count || 0} attached
                       </p>
@@ -2168,7 +2150,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
                       {generationSampleDataAvailable ? (
                         <><CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" /> Sample execution available</>
                       ) : (
-                        <><AlertCircle className="h-3.5 w-3.5 text-amber-500" /> No sample inputs</>
+                        <><AlertCircle className="h-3.5 w-3.5 text-amber-500" /> No Source input files</>
                       )}
                     </span>
                   </div>
@@ -2222,7 +2204,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
                         onChange={(event) => setOverwriteProtectedCode(event.target.checked)}
                         className="mt-0.5"
                       />
-                      <span>I understand and want to replace the protected packages. A restore point will be created first.</span>
+                      <span>I understand and want to replace the protected packages.</span>
                     </label>
                   </div>
                 )}
@@ -2292,7 +2274,55 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
                       {generationJob.generation_scope?.replace(/_/g, " ") || generationJob.mode || "pipeline"}
                     </span>
                   </div>
-                  {isGeneratingScripts && <Progress value={generationProgress} className="mt-4" />}
+                  {isGeneratingScripts && (
+                    <div className="mt-4 space-y-2">
+                      <Progress value={generationProgress} />
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <span className="font-medium text-foreground">
+                          {generationProgress}% · {generationStageLabel(generationStage)}
+                        </span>
+                        <span className="text-muted-foreground">
+                          Elapsed {formatGenerationDuration(generationTiming.elapsedMs)}
+                        </span>
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <div className="flex items-start gap-2 rounded-md bg-background/60 p-2.5 text-xs">
+                          <Clock3 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                          <div>
+                            <p className="font-medium text-foreground">Estimated completion</p>
+                            {generationTiming.remainingMs == null ? (
+                              <p className="text-muted-foreground">
+                                Learning from recent comparable runs; an ETA appears after two complete runs.
+                              </p>
+                            ) : generationTiming.remainingMs === 0 ? (
+                              <p className="text-muted-foreground">Finishing now</p>
+                            ) : (
+                              <p className="text-muted-foreground">
+                                {formatGenerationDuration(generationTiming.lowerRemainingMs || 0)}–{formatGenerationDuration(generationTiming.upperRemainingMs || generationTiming.remainingMs)} remaining
+                                {` · ${generationTiming.sampleCount} comparable run${generationTiming.sampleCount === 1 ? "" : "s"}`}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-start gap-2 rounded-md bg-background/60 p-2.5 text-xs">
+                          <Activity className="mt-0.5 h-3.5 w-3.5 shrink-0 text-sky-500" />
+                          <div>
+                            <p className="font-medium text-foreground">Live activity</p>
+                            <p className="text-muted-foreground">
+                              {generationProgressAgeMs == null
+                                ? "Waiting for the first worker update…"
+                                : generationProgressAgeMs < 2_000
+                                  ? "Updated just now"
+                                  : `Updated ${formatGenerationDuration(generationProgressAgeMs)} ago`}
+                              {generationJob.generation_run?.progress_revision
+                                ? ` · event ${generationJob.generation_run.progress_revision}`
+                                : ""}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                   <div className="mt-4 grid grid-cols-2 gap-2 text-sm">
                     <div className="rounded-md bg-background/60 p-3">
                       <p className="text-xs text-muted-foreground">Generation cost</p>
@@ -2371,10 +2401,10 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
                 <Button variant="outline" onClick={() => setIsScriptGenerationOpen(false)}>Close</Button>
                 <Button
                   onClick={() => { void handleRunPipelineScriptGeneration(); }}
-                  disabled={!canStartGeneration || isCreatingGenerationCheckpoint}
+                  disabled={!canStartGeneration}
                 >
-                  {(isGenerationPreflightLoading || isCreatingGenerationCheckpoint) && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                  {isCreatingGenerationCheckpoint ? "Creating restore point" : "Generate and attach"}
+                  {isGenerationPreflightLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Generate and attach
                 </Button>
               </>
             ) : isGeneratingScripts ? (
@@ -2392,16 +2422,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
             ) : (
               <>
                 <Button variant="outline" onClick={() => setIsScriptGenerationOpen(false)}>Close</Button>
-                {generationSucceeded && generationJob.checkpoint_version_uid && (
-                  <Button
-                    variant="outline"
-                    onClick={() => { void handleRestoreGenerationCheckpoint(); }}
-                    disabled={isRestoringGenerationCheckpoint}
-                  >
-                    {isRestoringGenerationCheckpoint && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                    Undo attachment
-                  </Button>
-                )}
                 {canRepairFailedNode && (
                   <Button variant="outline" onClick={() => { void handleRepairFailedPipelineNode(); }}>
                     Retry {displayedNodes.find((node) => String(node.id) === String(repairableFailedStep?.flow_id))?.data?.label || `Node ${repairableFailedStep?.flow_id}`}

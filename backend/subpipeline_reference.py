@@ -7,6 +7,67 @@ from typing import Any
 from node_ports import ports_for_template
 from step_types import normalize_step_type
 
+_GENERIC_PORT_TYPES = {
+    "",
+    "*",
+    "any",
+    "any[]",
+    "artifact",
+    "artifact[]",
+    "file",
+    "file[]",
+    "unknown",
+}
+_RUNTIME_PACKAGE_FILENAMES = {
+    "main.py",
+    "node-manifest.json",
+    "requirements.txt",
+    "validation-report.json",
+}
+_FORMAT_TYPES = {
+    "aac": "Audio",
+    "csv": "Table",
+    "doc": "Document",
+    "docx": "Document",
+    "flac": "Audio",
+    "gif": "Image",
+    "jpeg": "Image",
+    "jpg": "Image",
+    "json": "JSON",
+    "jsonl": "JSON",
+    "m4a": "Audio",
+    "md": "Text",
+    "mov": "Video",
+    "mp3": "Audio",
+    "mp4": "Video",
+    "ndjson": "JSON",
+    "ogg": "Audio",
+    "parquet": "Table",
+    "pdf": "Document",
+    "png": "Image",
+    "ppt": "Document",
+    "pptx": "Document",
+    "tsv": "Table",
+    "txt": "Text",
+    "wav": "Audio",
+    "webm": "Video",
+    "webp": "Image",
+    "xls": "Table",
+    "xlsx": "Table",
+}
+_KIND_TYPES = {
+    "audio": "Audio",
+    "binary": "Binary",
+    "directory": "Directory",
+    "document": "Document",
+    "image": "Image",
+    "json": "JSON",
+    "model": "Model",
+    "table": "Table",
+    "text": "Text",
+    "video": "Video",
+}
+
 
 def _node_data(node: Any) -> dict[str, Any]:
     if not isinstance(node, dict):
@@ -57,6 +118,208 @@ def missing_explicit_port_contracts(graph: Any) -> list[str]:
         if not valid:
             missing.append(_node_id(node) or f"component-{index}")
     return missing
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _descriptor_type(descriptor: Any) -> str:
+    if not isinstance(descriptor, dict):
+        return ""
+    kind = str(descriptor.get("kind") or "").strip().lower()
+    if kind in _KIND_TYPES:
+        return _KIND_TYPES[kind]
+    file_format = str(descriptor.get("format") or "").strip().lower().lstrip(".")
+    if file_format in _FORMAT_TYPES:
+        return _FORMAT_TYPES[file_format]
+    filename = str(descriptor.get("filename") or descriptor.get("name") or "")
+    extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    return _FORMAT_TYPES.get(extension, "")
+
+
+def _generated_contract_descriptors(
+    data: dict[str, Any],
+    direction: str,
+) -> list[dict[str, Any]]:
+    artifact = _json_object(
+        data.get("generated_artifact") or data.get("generated_artifact_json")
+    )
+    contract = _json_object(artifact.get("data_contract"))
+    descriptors = contract.get(direction)
+    return [item for item in descriptors if isinstance(item, dict)] if isinstance(descriptors, list) else []
+
+
+def _sample_file_type(data: dict[str, Any]) -> str:
+    files = data.get("files")
+    if not isinstance(files, list):
+        return ""
+    inferred: list[str] = []
+    for entry in files:
+        descriptor = entry if isinstance(entry, dict) else {"filename": entry}
+        filename = str(descriptor.get("filename") or descriptor.get("name") or "")
+        if filename.rsplit("/", 1)[-1].lower() in _RUNTIME_PACKAGE_FILENAMES:
+            continue
+        resolved = _descriptor_type(descriptor)
+        if resolved:
+            inferred.append(resolved)
+    unique = list(dict.fromkeys(inferred))
+    return unique[0] if len(unique) == 1 else "Artifact" if unique else ""
+
+
+def _semantic_port_type(
+    data: dict[str, Any],
+    direction: str,
+    kind: str,
+) -> str:
+    text = " ".join(
+        str(data.get(key) or "")
+        for key in ("label", "description", "template_label")
+    ).lower()
+    is_input = direction == "inputs"
+    if kind == "task" and "sentiment" in text:
+        return "Text" if is_input else "JSON"
+    if kind == "task" and any(
+        term in text for term in ("speech-to-text", "speech to text", "transcrib")
+    ):
+        return "Audio" if is_input else "Text"
+    keyword_types = (
+        (("json", "object"), "JSON"),
+        (("audio", "speech", "recording"), "Audio"),
+        (("image", "photo", "vision"), "Image"),
+        (("video",), "Video"),
+        (("csv", "spreadsheet", "table", "tabular"), "Table"),
+        (("pdf", "document"), "Document"),
+        (("text", "summary", "translation"), "Text"),
+    )
+    for keywords, resolved_type in keyword_types:
+        if any(keyword in text for keyword in keywords):
+            return resolved_type
+    return ""
+
+
+def _resolved_port_type(
+    port: dict[str, Any],
+    descriptors: list[dict[str, Any]],
+    fallback: str,
+) -> tuple[str, dict[str, Any] | None]:
+    current = str(port.get("type") or "").strip()
+    if current.lower() not in _GENERIC_PORT_TYPES:
+        return current, None
+    port_names = {
+        str(port.get("id") or "").strip().lower(),
+        str(port.get("name") or "").strip().lower(),
+    }
+    matching = [
+        descriptor
+        for descriptor in descriptors
+        if port_names
+        & {
+            str(descriptor.get("name") or "").strip().lower(),
+            str(descriptor.get("semantic_role") or "").strip().lower(),
+        }
+    ]
+    descriptor = matching[0] if len(matching) == 1 else descriptors[0] if len(descriptors) == 1 else None
+    inferred_types = list(
+        dict.fromkeys(
+            resolved
+            for resolved in (_descriptor_type(item) for item in descriptors)
+            if resolved
+        )
+    )
+    inferred = _descriptor_type(descriptor) if descriptor else ""
+    if not inferred and len(inferred_types) == 1:
+        inferred = inferred_types[0]
+    if not inferred and len(inferred_types) > 1:
+        inferred = "Artifact"
+    if not inferred:
+        inferred = fallback or ("Artifact[]" if current.lower().endswith("[]") else "Artifact")
+    return inferred, descriptor
+
+
+def _infer_normalized_port_contracts(graph: dict[str, Any]) -> dict[str, Any]:
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    ports_by_node: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        node_id = _node_id(node)
+        data = _node_data(node)
+        ports = data.get("ports") if isinstance(data.get("ports"), dict) else {}
+        kind = normalize_step_type(data.get("type"), default="task")
+        for direction in ("inputs", "outputs"):
+            port_list = ports.get(direction)
+            if not isinstance(port_list, list):
+                continue
+            descriptors = _generated_contract_descriptors(data, direction)
+            fallback = _semantic_port_type(data, direction, kind)
+            if kind == "source" and direction == "outputs":
+                fallback = _sample_file_type(data) or fallback
+            for port in port_list:
+                if not isinstance(port, dict):
+                    continue
+                resolved_type, descriptor = _resolved_port_type(
+                    port,
+                    descriptors,
+                    fallback,
+                )
+                port["type"] = resolved_type
+                if descriptor:
+                    file_format = str(descriptor.get("format") or "").strip()
+                    if file_format and not str(port.get("format") or "").strip():
+                        port["format"] = file_format
+                    if isinstance(descriptor.get("schema"), dict) and not isinstance(port.get("schema"), dict):
+                        port["schema"] = dict(descriptor["schema"])
+        ports_by_node[node_id] = ports
+
+    def port_for(node_id: str, direction: str, port_id: str) -> dict[str, Any] | None:
+        ports = ports_by_node.get(node_id, {}).get(direction, [])
+        return next(
+            (port for port in ports if str(port.get("id") or "") == port_id),
+            ports[0] if len(ports) == 1 else None,
+        )
+
+    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+    for _ in range(max(1, len(nodes))):
+        changed = False
+        for edge in edges:
+            if not isinstance(edge, dict):
+                continue
+            source = str(edge.get("source") or "")
+            target = str(edge.get("target") or "")
+            source_port = port_for(
+                source,
+                "outputs",
+                str(edge.get("sourceHandle") or edge.get("source_port") or ""),
+            )
+            target_port = port_for(
+                target,
+                "inputs",
+                str(edge.get("targetHandle") or edge.get("target_port") or ""),
+            )
+            if source_port is None or target_port is None:
+                continue
+            source_type = str(source_port.get("type") or "Artifact")
+            target_type = str(target_port.get("type") or "Artifact")
+            source_generic = source_type.lower() in {"artifact", "artifact[]"}
+            target_generic = target_type.lower() in {"artifact", "artifact[]"}
+            if source_generic and not target_generic:
+                source_port["type"] = target_type
+                changed = True
+            elif target_generic and not source_generic:
+                target_port["type"] = source_type
+                changed = True
+        if not changed:
+            break
+    return graph
 
 
 def normalize_reusable_pipeline_graph(graph: Any) -> dict[str, Any]:
@@ -156,7 +419,7 @@ def normalize_reusable_pipeline_graph(graph: Any) -> dict[str, Any]:
         normalized["updated_at"] = candidate.get("updated_at")
     if isinstance(candidate.get("settings"), dict):
         normalized["settings"] = candidate["settings"]
-    return normalized
+    return _infer_normalized_port_contracts(normalized)
 
 
 def derive_subpipeline_interface(graph: Any) -> dict[str, list[dict[str, Any]]]:

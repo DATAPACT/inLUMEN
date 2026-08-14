@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pipeline_agent.cancellation import (  # noqa: E402
+    cancel_pipeline_turn_and_wait,
     request_pipeline_turn_cancel,
     run_cancellable_pipeline_turn,
 )
@@ -85,6 +86,44 @@ class PipelineAgentCancellationTest(unittest.TestCase):
         self.assertEqual("cancel_queued", queued["status"])
         self.assertFalse(queued["active"])
         self.assertFalse(entered)
+
+    def test_synchronous_cancel_waits_for_turn_cleanup(self):
+        turn_id = f"turn-{uuid.uuid4()}"
+        started = threading.Event()
+        cleanup_finished = threading.Event()
+
+        async def run_until_cancelled():
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.02)
+                cleanup_finished.set()
+                error = RuntimeError("cancelled after cleanup")
+                error.rollback_applied = True
+                raise error
+
+        outcome: list[BaseException] = []
+
+        def run_turn():
+            try:
+                run_cancellable_pipeline_turn(turn_id, run_until_cancelled())
+            except BaseException as exc:
+                outcome.append(exc)
+
+        thread = threading.Thread(target=run_turn)
+        thread.start()
+        self.assertTrue(started.wait(timeout=2))
+
+        result = cancel_pipeline_turn_and_wait(turn_id, timeout=2)
+        thread.join(timeout=2)
+
+        self.assertTrue(cleanup_finished.is_set())
+        self.assertFalse(thread.is_alive())
+        self.assertEqual("cancelled", result["status"])
+        self.assertTrue(result["completed"])
+        self.assertTrue(result["rollback_applied"])
+        self.assertEqual(1, len(outcome))
 
 
 if __name__ == "__main__":

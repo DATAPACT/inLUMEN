@@ -10,11 +10,13 @@ from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 
+from .deployment_validation import validate_deployment_bundle_files
 from .generator import generate_node_script_bundle, generate_pipeline_script_bundles
 from .job_store import PipelineJobStore
 from .llm import LLMGenerationError
 from .sandbox import cancel_sandbox_run
 from .schemas import (
+    DeploymentBundleValidationRequest,
     GenerateNodeScriptRequest,
     GenerateNodeScriptResponse,
     GeneratePipelineScriptsRequest,
@@ -48,7 +50,10 @@ PIPELINE_CACHE_SCHEMA_VERSION = "pipeline-first-v9-ai-runtime-artifacts"
 app = FastAPI(
     title="InLumen Code Generation Service",
     version="0.1.0",
-    description="Embedded inLUMEN service for generating and validating node scripts.",
+    description=(
+        "Private inLUMEN service for code generation, sandbox validation, "
+        "and deployment-bundle validation."
+    ),
 )
 app.add_middleware(SecurityHeadersMiddleware)
 
@@ -214,6 +219,8 @@ def mark_pipeline_job_cancelled(run_id: str) -> None:
     if isinstance(generation_run, dict):
         run = PipelineGenerationRun.model_validate(generation_run)
         run.status = "cancelled"
+        run.current_stage = "cancelled"
+        run.stage_started_at = utc_now_iso()
         if "Generation cancelled by the user." not in run.warnings:
             run.warnings.append("Generation cancelled by the user.")
         for step in run.steps:
@@ -240,6 +247,8 @@ def mark_pipeline_job_failed(run_id: str, error: str) -> None:
     else:
         run = PipelineGenerationRun(run_id=run_id)
     run.status = "failed"
+    run.current_stage = "failed"
+    run.stage_started_at = utc_now_iso()
     if error and error not in run.errors:
         run.errors.append(error)
     for step in run.steps:
@@ -478,7 +487,10 @@ def list_pipeline_generation_runs(
         if run_id:
             PIPELINE_GENERATION_JOBS[run_id] = job
     if not include_result:
-        jobs = [{key: value for key, value in job.items() if key != "result"} for job in jobs]
+        jobs = [
+            {key: value for key, value in job.items() if key != "result"}
+            for job in jobs
+        ]
     return [PipelineGenerationJobResponse.model_validate(job) for job in jobs]
 
 
@@ -502,7 +514,10 @@ async def clear_pipeline_generation_runs() -> dict[str, int | str]:
     PIPELINE_GENERATION_PURGED_RUN_IDS.update(run_ids)
     if active_run_ids:
         await asyncio.gather(
-            *(asyncio.to_thread(cancel_sandbox_run, run_id) for run_id in active_run_ids),
+            *(
+                asyncio.to_thread(cancel_sandbox_run, run_id)
+                for run_id in active_run_ids
+            ),
             return_exceptions=True,
         )
     tasks = [
@@ -685,3 +700,31 @@ def validate_node_script(request: ValidateNodeScriptRequest) -> ValidationReport
         files=request.files,
         runtime_constraints=request.context.runtime_constraints,
     )
+
+
+@app.post(
+    "/v1/validate/deployment-bundle",
+    dependencies=SERVICE_AUTH,
+)
+async def validate_deployment_bundle_endpoint(
+    request: DeploymentBundleValidationRequest,
+) -> dict[str, Any]:
+    """Validate deployment artifacts inside the private codegen service."""
+    try:
+        return await asyncio.to_thread(
+            validate_deployment_bundle_files,
+            request.files,
+            targets=request.targets,
+            mode=request.mode,
+            validate_argo=request.validate_argo,
+            validate_dagster=request.validate_dagster,
+            materialize=request.materialize,
+            reinstall=request.reinstall,
+            skip_install=request.skip_install,
+            argo_lint=request.argo_lint,
+            argo_dry_run=request.argo_dry_run,
+            timeout_seconds=request.timeout_seconds,
+            runtime_secrets=request.runtime_secrets,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc

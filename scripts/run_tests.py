@@ -54,24 +54,6 @@ def checks_for(component: str) -> list[Check]:
                 ROOT / "backend",
             )
         ]
-    if component == "deployment-validation":
-        return [
-            Check(
-                "deployment validation tests",
-                (
-                    sys.executable,
-                    "-m",
-                    "unittest",
-                    "discover",
-                    "-s",
-                    "tests",
-                    "-p",
-                    "test_*.py",
-                    "-v",
-                ),
-                ROOT / "deployment_validation",
-            )
-        ]
     if component == "frontend":
         npm = executable("npm")
         return [
@@ -121,7 +103,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--component",
         action="append",
-        choices=("backend", "codegen", "deployment-validation", "frontend", "compose"),
+        choices=("backend", "codegen", "frontend", "compose"),
         help="Run only this component. Repeat the option to select more than one.",
     )
     return parser.parse_args()
@@ -132,7 +114,6 @@ def main() -> int:
     components = args.component or [
         "backend",
         "codegen",
-        "deployment-validation",
         "frontend",
         "compose",
     ]

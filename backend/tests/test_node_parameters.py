@@ -10,6 +10,7 @@ from node_parameters import (  # noqa: E402
     is_sensitive_parameter_name,
     normalize_secret_param_keys,
     secret_params_json,
+    without_secret_param_values,
 )
 
 
@@ -30,6 +31,15 @@ class NodeParametersTest(unittest.TestCase):
             normalize_secret_param_keys('["api_key", "missing"]', parameters),
         )
         self.assertEqual(["api_key"], json.loads(secret_params_json(None, parameters)))
+
+    def test_removes_secret_values_before_graph_persistence(self):
+        self.assertEqual(
+            {"api_key": "", "threshold": 0.8},
+            without_secret_param_values(
+                {"api_key": "do-not-persist", "threshold": 0.8},
+                ["api_key"],
+            ),
+        )
 
 
 if __name__ == "__main__":

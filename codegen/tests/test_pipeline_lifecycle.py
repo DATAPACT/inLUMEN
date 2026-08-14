@@ -118,6 +118,7 @@ def test_active_pipeline_job_can_be_cancelled(monkeypatch) -> None:
     body = cancelled.json()
     assert body["status"] == "cancelled"
     assert body["generation_run"]["status"] == "cancelled"
+    assert body["generation_run"]["current_stage"] == "cancelled"
     assert body["generation_run"]["steps"][0]["stage"] == "cancelled"
     assert run_id not in main.PIPELINE_GENERATION_TASKS
     assert cancelled_sandboxes == [run_id]

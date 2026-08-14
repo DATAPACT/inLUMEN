@@ -46,6 +46,14 @@ semantics, manifests, and graph contracts. Sample modes use an isolated Docker
 sandbox with network disabled. The sandbox derives its validation base image
 from `node-manifest.json`; it does not require a generated Dockerfile.
 
+The same service owns deployment-bundle validation at
+`POST /v1/validate/deployment-bundle`. The backend sends bundle files over the
+authenticated internal API; no shared backend filesystem or separate validator
+container is required. The validator checks the canonical bundle, Argo shape,
+Dagster definitions, and optional Dagster materialization. Repair mode can
+normalize deterministic bundle-layout issues before returning the repaired
+files to the backend.
+
 `CODEGEN_ALLOW_DETERMINISTIC_FALLBACK=true` exists for isolated tests and local
 recovery only. It is disabled by default; normal production generation requires
 the configured coding model.

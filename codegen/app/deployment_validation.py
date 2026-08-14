@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
+import mimetypes
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
 try:
     import yaml
-except Exception:  # pragma: no cover - service image installs PyYAML.
+except ImportError:  # pragma: no cover - service image installs PyYAML.
     yaml = None
 
 
@@ -24,16 +27,23 @@ def _dagster_project_root(path: Path) -> Path:
     if (child / "pyproject.toml").is_file() and (child / "src").is_dir():
         return child.resolve()
     canonical_child = candidate / "dagster"
-    if (canonical_child / "pyproject.toml").is_file() and (canonical_child / "src").is_dir():
+    if (canonical_child / "pyproject.toml").is_file() and (
+        canonical_child / "src"
+    ).is_dir():
         return canonical_child.resolve()
-    raise FileNotFoundError(f"Could not find a generated dagster_project under {candidate}")
+    raise FileNotFoundError(
+        f"Could not find a generated dagster_project under {candidate}"
+    )
 
 
 def _bundle_root(path: Path) -> Path:
     candidate = path.expanduser().resolve()
     if (candidate / "bundle-manifest.json").is_file():
         return candidate
-    if candidate.name in {"dagster", "dagster_project"} and (candidate.parent / "bundle-manifest.json").is_file():
+    if (
+        candidate.name in {"dagster", "dagster_project"}
+        and (candidate.parent / "bundle-manifest.json").is_file()
+    ):
         return candidate.parent
     if candidate.suffix.lower() in {".yaml", ".yml"}:
         return candidate.parent
@@ -81,7 +91,9 @@ def _run(
     }
 
 
-def _ensure_venv(project_root: Path, *, reinstall: bool, timeout_seconds: int) -> tuple[Path, list[dict[str, Any]]]:
+def _ensure_venv(
+    project_root: Path, *, reinstall: bool, timeout_seconds: int
+) -> tuple[Path, list[dict[str, Any]]]:
     venv_dir = project_root / ".inlumen_dagster_validation_venv"
     steps: list[dict[str, Any]] = []
     uv = shutil.which("uv")
@@ -93,7 +105,9 @@ def _ensure_venv(project_root: Path, *, reinstall: bool, timeout_seconds: int) -
             if uv
             else [sys.executable, "-m", "venv", str(venv_dir)]
         )
-        steps.append(_run(create_command, cwd=project_root, timeout_seconds=timeout_seconds))
+        steps.append(
+            _run(create_command, cwd=project_root, timeout_seconds=timeout_seconds)
+        )
         if not steps[-1]["ok"]:
             return venv_dir, steps
 
@@ -103,12 +117,14 @@ def _ensure_venv(project_root: Path, *, reinstall: bool, timeout_seconds: int) -
         if uv
         else [str(python), "-m", "pip", "install", "-e", "."]
     )
-    steps.append(_run(install_command, cwd=project_root, timeout_seconds=timeout_seconds))
+    steps.append(
+        _run(install_command, cwd=project_root, timeout_seconds=timeout_seconds)
+    )
     return venv_dir, steps
 
 
 def _validation_script() -> str:
-    return r'''
+    return r"""
 import json
 import sys
 
@@ -118,11 +134,11 @@ from inlumen_dagster_project.definitions import defs
 definitions = defs() if callable(defs) else defs
 asset_keys = sorted(str(key.to_user_string()) for key in definitions.resolve_asset_graph().get_all_asset_keys())
 print(json.dumps({"asset_keys": asset_keys}, indent=2))
-'''
+"""
 
 
 def _materialize_script() -> str:
-    return r'''
+    return r"""
 import dagster as dg
 from inlumen_dagster_project.definitions import defs
 
@@ -132,7 +148,7 @@ resources = dict(definitions.resources or {})
 result = dg.materialize(assets, resources=resources, raise_on_error=False)
 if not result.success:
     raise SystemExit(1)
-'''
+"""
 
 
 def validate_dagster_project(
@@ -142,6 +158,7 @@ def validate_dagster_project(
     reinstall: bool = False,
     skip_install: bool = False,
     timeout_seconds: int = 900,
+    runtime_secrets: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     project_root = _dagster_project_root(path)
     report: dict[str, Any] = {
@@ -164,17 +181,17 @@ def validate_dagster_project(
     dockerfile = project_root / "Dockerfile"
     pyproject_content = (project_root / "pyproject.toml").read_text(encoding="utf-8")
     dockerfile_content = (
-        dockerfile.read_text(encoding="utf-8")
-        if dockerfile.is_file()
-        else ""
+        dockerfile.read_text(encoding="utf-8") if dockerfile.is_file() else ""
     )
     if (
         '"dagster", "dev"' in dockerfile_content
         and "dagster-webserver" not in pyproject_content
     ):
         report["errors"] = [
-            "Generated Dagster Dockerfile runs `dagster dev`, but "
-            "pyproject.toml does not install dagster-webserver."
+            (
+                "Generated Dagster Dockerfile runs `dagster dev`, but "
+                "pyproject.toml does not install dagster-webserver."
+            )
         ]
         return report
 
@@ -182,8 +199,10 @@ def validate_dagster_project(
     if skip_install:
         if not (venv_dir / "bin" / "python").is_file():
             report["errors"] = [
-                "skip_install was requested, but no validation venv exists. "
-                "Run once without --skip-install."
+                (
+                    "skip_install was requested, but no validation venv exists. "
+                    "Run once without --skip-install."
+                )
             ]
             return report
     else:
@@ -200,6 +219,7 @@ def validate_dagster_project(
     python = venv_dir / "bin" / "python"
     env = {
         **os.environ,
+        **(runtime_secrets or {}),
         "DAGSTER_HOME": str(project_root / ".dagster_home"),
         "PYTHONPATH": str(project_root / "src"),
     }
@@ -217,9 +237,7 @@ def validate_dagster_project(
             "HF_HOME": str(model_root / "huggingface"),
             "HF_HUB_DISABLE_XET": os.getenv("HF_HUB_DISABLE_XET", "1"),
             "HF_HUB_ETAG_TIMEOUT": os.getenv("HF_HUB_ETAG_TIMEOUT", "30"),
-            "HF_HUB_DOWNLOAD_TIMEOUT": os.getenv(
-                "HF_HUB_DOWNLOAD_TIMEOUT", "600"
-            ),
+            "HF_HUB_DOWNLOAD_TIMEOUT": os.getenv("HF_HUB_DOWNLOAD_TIMEOUT", "600"),
             "HF_HUB_OFFLINE": "0",
             "TRANSFORMERS_OFFLINE": "0",
             "INLUMEN_ACCELERATOR": os.getenv("INLUMEN_ACCELERATOR", "cpu"),
@@ -240,9 +258,7 @@ def validate_dagster_project(
         prefetch_step["name"] = "model_prefetch"
         report["steps"].append(prefetch_step)
         if not prefetch_step["ok"]:
-            report["errors"] = [
-                "Reviewed model prefetch or verification failed."
-            ]
+            report["errors"] = ["Reviewed model prefetch or verification failed."]
             return report
         env.update(
             {
@@ -269,7 +285,7 @@ def validate_dagster_project(
 
     try:
         report["assets"] = json.loads(load_step["output"]).get("asset_keys", [])
-    except Exception:
+    except (AttributeError, json.JSONDecodeError, TypeError):
         report["assets"] = []
 
     if materialize:
@@ -291,7 +307,7 @@ def validate_dagster_project(
 def _load_json(path: Path) -> dict[str, Any]:
     try:
         parsed = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
 
@@ -447,11 +463,7 @@ def _input_contract_errors(
 
         raw_path = str(entry.get("path") or "").strip()
         relative_path = Path(raw_path)
-        if (
-            not raw_path
-            or relative_path.is_absolute()
-            or ".." in relative_path.parts
-        ):
+        if not raw_path or relative_path.is_absolute() or ".." in relative_path.parts:
             errors.append(f"Input {filename} has unsafe or missing path '{raw_path}'.")
         else:
             input_path = bundle_root / relative_path
@@ -517,7 +529,9 @@ def _input_contract_errors(
     return errors
 
 
-def _validate_bundle_structure(bundle_root: Path, targets: dict[str, Any]) -> dict[str, Any]:
+def _validate_bundle_structure(
+    bundle_root: Path, targets: dict[str, Any]
+) -> dict[str, Any]:
     required_paths = [
         "bundle-manifest.json",
         "inputs/input_manifest.json",
@@ -525,18 +539,22 @@ def _validate_bundle_structure(bundle_root: Path, targets: dict[str, Any]) -> di
         "outputs",
     ]
     if targets.get("argo"):
-        required_paths.extend([
-            "argo/workflow.yaml",
-            "argo/Dockerfile",
-            "argo/requirements.txt",
-        ])
+        required_paths.extend(
+            [
+                "argo/workflow.yaml",
+                "argo/Dockerfile",
+                "argo/requirements.txt",
+            ]
+        )
     if targets.get("dagster"):
-        required_paths.extend([
-            "dagster/pyproject.toml",
-            "dagster/Dockerfile",
-            "dagster/docker-compose.yml",
-            "dagster/src/inlumen_dagster_project/definitions.py",
-        ])
+        required_paths.extend(
+            [
+                "dagster/pyproject.toml",
+                "dagster/Dockerfile",
+                "dagster/docker-compose.yml",
+                "dagster/src/inlumen_dagster_project/definitions.py",
+            ]
+        )
 
     missing = []
     for item in required_paths:
@@ -548,7 +566,9 @@ def _validate_bundle_structure(bundle_root: Path, targets: dict[str, Any]) -> di
     run_spec_path = str(manifest.get("run_spec") or "").strip()
     if run_spec_path and not (bundle_root / run_spec_path).is_file():
         missing.append(run_spec_path)
-    node_entries = manifest.get("nodes") if isinstance(manifest.get("nodes"), list) else []
+    node_entries = (
+        manifest.get("nodes") if isinstance(manifest.get("nodes"), list) else []
+    )
     missing_node_outputs = []
     for node in node_entries:
         if not isinstance(node, dict):
@@ -561,14 +581,18 @@ def _validate_bundle_structure(bundle_root: Path, targets: dict[str, Any]) -> di
             missing_node_outputs.append(output_path)
 
     errors = [f"Missing required bundle path: {item}" for item in missing]
-    errors.extend(f"Missing node output directory: {item}" for item in missing_node_outputs)
+    errors.extend(
+        f"Missing node output directory: {item}" for item in missing_node_outputs
+    )
     if not missing and (bundle_root / "inputs" / "input_manifest.json").is_file():
         errors.extend(_input_contract_errors(bundle_root, manifest))
     run_spec = _load_json(bundle_root / run_spec_path) if run_spec_path else {}
     if run_spec_path and run_spec.get("schema_version") != "inlumen.run-spec@1":
         errors.append(f"{run_spec_path} must use schema_version inlumen.run-spec@1.")
     elif run_spec_path:
-        run_nodes = run_spec.get("nodes") if isinstance(run_spec.get("nodes"), list) else []
+        run_nodes = (
+            run_spec.get("nodes") if isinstance(run_spec.get("nodes"), list) else []
+        )
         run_node_ids = {
             str(node.get("id") or "")
             for node in run_nodes
@@ -583,7 +607,9 @@ def _validate_bundle_structure(bundle_root: Path, targets: dict[str, Any]) -> di
             errors.append(
                 "run-spec.json node ids do not match bundle-manifest.json nodes."
             )
-        runtime = run_spec.get("runtime") if isinstance(run_spec.get("runtime"), dict) else {}
+        runtime = (
+            run_spec.get("runtime") if isinstance(run_spec.get("runtime"), dict) else {}
+        )
         if runtime.get("package_manager") != "uv":
             errors.append("run-spec.json runtime.package_manager must be uv.")
         for connection in run_spec.get("connections") or []:
@@ -605,13 +631,17 @@ def _validate_bundle_structure(bundle_root: Path, targets: dict[str, Any]) -> di
     }
 
 
-def _write_json_if_changed(path: Path, payload: dict[str, Any], actions: list[str]) -> None:
+def _write_json_if_changed(
+    path: Path, payload: dict[str, Any], actions: list[str]
+) -> None:
     next_text = json.dumps(payload, indent=2) + "\n"
     current_text = path.read_text(encoding="utf-8") if path.exists() else ""
     if current_text != next_text:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(next_text, encoding="utf-8")
-        actions.append(f"wrote {path.relative_to(_bundle_root(path)) if path.is_absolute() else path}")
+        actions.append(
+            f"wrote {path.relative_to(_bundle_root(path)) if path.is_absolute() else path}"
+        )
 
 
 def _write_text_if_missing(path: Path, content: str, actions: list[str]) -> None:
@@ -622,7 +652,9 @@ def _write_text_if_missing(path: Path, content: str, actions: list[str]) -> None
     actions.append(f"created {path.name}")
 
 
-def _safe_node_entries(manifest: dict[str, Any], bundle_root: Path) -> list[dict[str, Any]]:
+def _safe_node_entries(
+    manifest: dict[str, Any], bundle_root: Path
+) -> list[dict[str, Any]]:
     raw_nodes = manifest.get("nodes") if isinstance(manifest.get("nodes"), list) else []
     nodes = [node for node in raw_nodes if isinstance(node, dict)]
     if nodes:
@@ -632,7 +664,9 @@ def _safe_node_entries(manifest: dict[str, Any], bundle_root: Path) -> list[dict
     if not node_root.is_dir():
         return []
     inferred = []
-    for index, node_dir in enumerate(sorted(item for item in node_root.iterdir() if item.is_dir()), start=1):
+    for index, node_dir in enumerate(
+        sorted(item for item in node_root.iterdir() if item.is_dir()), start=1
+    ):
         flow_id = str(index)
         name_parts = node_dir.name.split("-", 2)
         if len(name_parts) > 1 and name_parts[1]:
@@ -657,7 +691,9 @@ def _normalize_input_manifest(bundle_root: Path, actions: list[str]) -> None:
     manifest = _load_json(manifest_path)
     raw_entries = manifest.get("inputs")
     if not isinstance(raw_entries, list):
-        raw_entries = manifest.get("files") if isinstance(manifest.get("files"), list) else []
+        raw_entries = (
+            manifest.get("files") if isinstance(manifest.get("files"), list) else []
+        )
     bundle_manifest = _load_json(bundle_root / "bundle-manifest.json")
     descriptors = _root_contract_descriptors(bundle_root, bundle_manifest)
     inputs = []
@@ -665,7 +701,9 @@ def _normalize_input_manifest(bundle_root: Path, actions: list[str]) -> None:
         if not isinstance(entry, dict):
             continue
         normalized = dict(entry)
-        filename = str(normalized.get("filename") or normalized.get("name") or "").strip()
+        filename = str(
+            normalized.get("filename") or normalized.get("name") or ""
+        ).strip()
         if not filename:
             continue
         normalized["filename"] = filename
@@ -684,22 +722,28 @@ def _normalize_input_manifest(bundle_root: Path, actions: list[str]) -> None:
         inputs.append(normalized)
 
     known_filenames = {entry["filename"] for entry in inputs}
-    for input_file in sorted(item for item in input_dir.iterdir() if item.is_file() and item.name != "input_manifest.json"):
+    for input_file in sorted(
+        item
+        for item in input_dir.iterdir()
+        if item.is_file() and item.name != "input_manifest.json"
+    ):
         if input_file.name in known_filenames:
             continue
         descriptor = descriptors.get(input_file.name, {})
-        inputs.append({
-            "filename": input_file.name,
-            "path": f"inputs/{input_file.name}",
-            "size_bytes": input_file.stat().st_size,
-            "sha256": _sha256_file(input_file),
-            **_canonical_artifact(
-                input_file.name,
-                kind=descriptor.get("kind"),
-                file_format=descriptor.get("format"),
-            ),
-            "description": "Input file supplied for this execution.",
-        })
+        inputs.append(
+            {
+                "filename": input_file.name,
+                "path": f"inputs/{input_file.name}",
+                "size_bytes": input_file.stat().st_size,
+                "sha256": _sha256_file(input_file),
+                **_canonical_artifact(
+                    input_file.name,
+                    kind=descriptor.get("kind"),
+                    file_format=descriptor.get("format"),
+                ),
+                "description": "Input file supplied for this execution.",
+            }
+        )
 
     repaired = {
         "schema_version": "inlumen.input-manifest@1",
@@ -744,7 +788,9 @@ def _compose_dagster_content() -> str:
 """
 
 
-def _repair_dagster_defs(bundle_root: Path, nodes: list[dict[str, Any]], actions: list[str]) -> None:
+def _repair_dagster_defs(
+    bundle_root: Path, nodes: list[dict[str, Any]], actions: list[str]
+) -> None:
     defs_root = bundle_root / "dagster" / "src" / "inlumen_dagster_project" / "defs"
     if yaml is None or not defs_root.is_dir() or not nodes:
         return
@@ -755,11 +801,15 @@ def _repair_dagster_defs(bundle_root: Path, nodes: list[dict[str, Any]], actions
     for index, defs_file in enumerate(defs_files):
         try:
             parsed = yaml.safe_load(defs_file.read_text(encoding="utf-8"))
-        except Exception:
-            continue
+        except (OSError, UnicodeError, yaml.YAMLError):
+            parsed = None
         if not isinstance(parsed, dict):
             continue
-        attrs = parsed.get("attributes") if isinstance(parsed.get("attributes"), dict) else {}
+        attrs = (
+            parsed.get("attributes")
+            if isinstance(parsed.get("attributes"), dict)
+            else {}
+        )
         if not attrs:
             continue
         flow_id = node_order[index] if index < len(node_order) else ""
@@ -797,10 +847,25 @@ def repair_deployment_bundle(
 
     manifest_path = bundle_root / "bundle-manifest.json"
     manifest = _load_json(manifest_path)
-    manifest_targets = manifest.get("targets") if isinstance(manifest.get("targets"), dict) else {}
+    manifest_targets = (
+        manifest.get("targets") if isinstance(manifest.get("targets"), dict) else {}
+    )
     selected_targets = {
-        "argo": bool((targets or {}).get("argo", manifest_targets.get("argo", (bundle_root / "argo").exists()))),
-        "dagster": bool((targets or {}).get("dagster", manifest_targets.get("dagster", (bundle_root / "dagster").exists() or (bundle_root / "dagster_project").exists()))),
+        "argo": bool(
+            (targets or {}).get(
+                "argo", manifest_targets.get("argo", (bundle_root / "argo").exists())
+            )
+        ),
+        "dagster": bool(
+            (targets or {}).get(
+                "dagster",
+                manifest_targets.get(
+                    "dagster",
+                    (bundle_root / "dagster").exists()
+                    or (bundle_root / "dagster_project").exists(),
+                ),
+            )
+        ),
     }
 
     for dirname in ("inputs", "nodes", "outputs"):
@@ -835,12 +900,19 @@ def repair_deployment_bundle(
 
     manifest["schema_version"] = "inlumen.deployment-bundle@1"
     manifest["targets"] = selected_targets
-    manifest["node_order"] = [str(node.get("flow_id") or "") for node in repaired_nodes if str(node.get("flow_id") or "")]
+    manifest["node_order"] = [
+        str(node.get("flow_id") or "")
+        for node in repaired_nodes
+        if str(node.get("flow_id") or "")
+    ]
     manifest["nodes"] = repaired_nodes
     manifest["inputs"] = {
         "path": "inputs",
         "manifest": "inputs/input_manifest.json",
-        "file_count": len(_load_json(bundle_root / "inputs" / "input_manifest.json").get("inputs") or []),
+        "file_count": len(
+            _load_json(bundle_root / "inputs" / "input_manifest.json").get("inputs")
+            or []
+        ),
         "lifecycle": "per-run",
     }
     manifest["outputs"] = {
@@ -856,12 +928,21 @@ def repair_deployment_bundle(
             "compose": "docker-compose.yml",
             "project_compose": "dagster/docker-compose.yml",
         }
-        _write_text_if_missing(bundle_root / "docker-compose.yml", _compose_root_content(), actions)
-        _write_text_if_missing(bundle_root / "dagster" / "docker-compose.yml", _compose_dagster_content(), actions)
+        _write_text_if_missing(
+            bundle_root / "docker-compose.yml", _compose_root_content(), actions
+        )
+        _write_text_if_missing(
+            bundle_root / "dagster" / "docker-compose.yml",
+            _compose_dagster_content(),
+            actions,
+        )
         _repair_dagster_defs(bundle_root, repaired_nodes, actions)
 
     next_manifest = json.dumps(manifest, indent=2) + "\n"
-    if not manifest_path.exists() or manifest_path.read_text(encoding="utf-8") != next_manifest:
+    if (
+        not manifest_path.exists()
+        or manifest_path.read_text(encoding="utf-8") != next_manifest
+    ):
         manifest_path.write_text(next_manifest, encoding="utf-8")
         actions.append("normalized bundle-manifest.json")
 
@@ -885,6 +966,7 @@ def validate_and_repair_deployment_bundle(
     argo_lint: bool = False,
     argo_dry_run: bool = False,
     timeout_seconds: int = 900,
+    runtime_secrets: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     repair_report = repair_deployment_bundle(path, targets=targets)
     validation_report = validate_deployment_bundle(
@@ -898,10 +980,12 @@ def validate_and_repair_deployment_bundle(
         argo_lint=argo_lint,
         argo_dry_run=argo_dry_run,
         timeout_seconds=timeout_seconds,
+        runtime_secrets=runtime_secrets,
     )
     return {
         "ok": bool(repair_report.get("ok") and validation_report.get("ok")),
-        "bundle_root": validation_report.get("bundle_root") or repair_report.get("bundle_root"),
+        "bundle_root": validation_report.get("bundle_root")
+        or repair_report.get("bundle_root"),
         "repair_report": repair_report,
         "validation_report": validation_report,
         "errors": validation_report.get("errors") or [],
@@ -931,8 +1015,12 @@ def _validate_argo_static(workflow_path: Path) -> dict[str, Any]:
             "errors": ["PyYAML is unavailable; cannot parse Argo workflow YAML."],
         }
     try:
-        docs = [doc for doc in yaml.safe_load_all(workflow_path.read_text(encoding="utf-8")) if doc is not None]
-    except Exception as exc:
+        docs = [
+            doc
+            for doc in yaml.safe_load_all(workflow_path.read_text(encoding="utf-8"))
+            if doc is not None
+        ]
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
         return {
             "ok": False,
             "workflow_path": str(workflow_path),
@@ -948,8 +1036,15 @@ def _validate_argo_static(workflow_path: Path) -> dict[str, Any]:
     workflow = docs[0]
     if workflow.get("apiVersion") != "argoproj.io/v1alpha1":
         errors.append("apiVersion must be argoproj.io/v1alpha1")
-    if workflow.get("kind") not in {"Workflow", "WorkflowTemplate", "ClusterWorkflowTemplate", "CronWorkflow"}:
-        errors.append("kind must be Workflow, WorkflowTemplate, ClusterWorkflowTemplate, or CronWorkflow")
+    if workflow.get("kind") not in {
+        "Workflow",
+        "WorkflowTemplate",
+        "ClusterWorkflowTemplate",
+        "CronWorkflow",
+    }:
+        errors.append(
+            "kind must be Workflow, WorkflowTemplate, ClusterWorkflowTemplate, or CronWorkflow"
+        )
     spec = workflow.get("spec") if isinstance(workflow.get("spec"), dict) else {}
     entrypoint = spec.get("entrypoint")
     templates = spec.get("templates") if isinstance(spec.get("templates"), list) else []
@@ -974,14 +1069,12 @@ def _validate_argo_static(workflow_path: Path) -> dict[str, Any]:
             errors.append("template missing name")
             continue
         if "dag" in template:
-            tasks = ((template.get("dag") or {}).get("tasks") or [])
+            tasks = (template.get("dag") or {}).get("tasks") or []
             if not isinstance(tasks, list):
                 errors.append(f"template '{name}' dag.tasks must be a list")
                 continue
             task_names = {
-                str(task.get("name") or "")
-                for task in tasks
-                if isinstance(task, dict)
+                str(task.get("name") or "") for task in tasks if isinstance(task, dict)
             }
             for task in tasks:
                 if not isinstance(task, dict):
@@ -990,14 +1083,25 @@ def _validate_argo_static(workflow_path: Path) -> dict[str, Any]:
                 task_name = str(task.get("name") or "")
                 task_template = str(task.get("template") or "")
                 if not task_name or not task_template:
-                    errors.append(f"template '{name}' DAG task requires name and template")
+                    errors.append(
+                        f"template '{name}' DAG task requires name and template"
+                    )
                 if task_template and task_template not in template_by_name:
-                    errors.append(f"task '{task_name}' references missing template '{task_template}'")
+                    errors.append(
+                        f"task '{task_name}' references missing template '{task_template}'"
+                    )
                 for dependency in task.get("dependencies") or []:
                     if str(dependency) not in task_names:
-                        errors.append(f"task '{task_name}' references missing dependency '{dependency}'")
-        elif not any(key in template for key in ("container", "script", "steps", "resource", "suspend", "http")):
-            errors.append(f"template '{name}' does not define an executable or control body")
+                        errors.append(
+                            f"task '{task_name}' references missing dependency '{dependency}'"
+                        )
+        elif not any(
+            key in template
+            for key in ("container", "script", "steps", "resource", "suspend", "http")
+        ):
+            errors.append(
+                f"template '{name}' does not define an executable or control body"
+            )
 
     return {
         "ok": not errors,
@@ -1036,7 +1140,9 @@ def _find_working_argo() -> str | None:
     return None
 
 
-def _run_argo_command(command: list[str], *, cwd: Path, timeout_seconds: int) -> dict[str, Any]:
+def _run_argo_command(
+    command: list[str], *, cwd: Path, timeout_seconds: int
+) -> dict[str, Any]:
     executable = _find_working_argo()
     if not executable:
         return {
@@ -1132,13 +1238,29 @@ def validate_deployment_bundle(
     argo_lint: bool = False,
     argo_dry_run: bool = False,
     timeout_seconds: int = 900,
+    runtime_secrets: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     bundle_root = _bundle_root(path)
     manifest = _load_json(bundle_root / "bundle-manifest.json")
-    manifest_targets = manifest.get("targets") if isinstance(manifest.get("targets"), dict) else {}
+    manifest_targets = (
+        manifest.get("targets") if isinstance(manifest.get("targets"), dict) else {}
+    )
     selected_targets = {
-        "argo": bool((targets or {}).get("argo", manifest_targets.get("argo", (bundle_root / "argo").exists()))),
-        "dagster": bool((targets or {}).get("dagster", manifest_targets.get("dagster", (bundle_root / "dagster").exists() or (bundle_root / "dagster_project").exists()))),
+        "argo": bool(
+            (targets or {}).get(
+                "argo", manifest_targets.get("argo", (bundle_root / "argo").exists())
+            )
+        ),
+        "dagster": bool(
+            (targets or {}).get(
+                "dagster",
+                manifest_targets.get(
+                    "dagster",
+                    (bundle_root / "dagster").exists()
+                    or (bundle_root / "dagster_project").exists(),
+                ),
+            )
+        ),
     }
     if validate_argo is None:
         validate_argo = selected_targets["argo"]
@@ -1169,7 +1291,9 @@ def validate_deployment_bundle(
         )
         report["argo"] = argo_report
         if not argo_report.get("ok"):
-            report["errors"].extend(argo_report.get("errors") or ["Argo validation failed."])
+            report["errors"].extend(
+                argo_report.get("errors") or ["Argo validation failed."]
+            )
 
     if validate_dagster:
         dagster_report = validate_dagster_project(
@@ -1178,20 +1302,323 @@ def validate_deployment_bundle(
             reinstall=reinstall,
             skip_install=skip_install,
             timeout_seconds=timeout_seconds,
+            runtime_secrets=runtime_secrets,
         )
         report["dagster"] = dagster_report
         if not dagster_report.get("ok"):
-            report["errors"].extend(dagster_report.get("errors") or ["Dagster validation failed."])
+            report["errors"].extend(
+                dagster_report.get("errors") or ["Dagster validation failed."]
+            )
 
     report["ok"] = not report["errors"]
     return report
 
 
+_BINARY_EXTENSIONS = {
+    ".7z",
+    ".aac",
+    ".bin",
+    ".bmp",
+    ".flac",
+    ".gif",
+    ".gz",
+    ".jpeg",
+    ".jpg",
+    ".joblib",
+    ".m4a",
+    ".mov",
+    ".mp3",
+    ".mp4",
+    ".npy",
+    ".npz",
+    ".ogg",
+    ".onnx",
+    ".parquet",
+    ".pdf",
+    ".pickle",
+    ".pkl",
+    ".png",
+    ".pt",
+    ".pth",
+    ".tar",
+    ".tif",
+    ".tiff",
+    ".wav",
+    ".webp",
+    ".zip",
+}
+
+
+def _safe_bundle_relative_path(path: Any) -> Path:
+    raw_path = str(path or "").strip()
+    relative = Path(raw_path)
+    if (
+        not raw_path
+        or raw_path in {".", ".."}
+        or relative.is_absolute()
+        or any(part == ".." for part in relative.parts)
+    ):
+        raise ValueError(f"Unsafe bundle file path: {raw_path or '<empty>'}")
+    return relative
+
+
+def _decode_artifact_content(file_entry: dict[str, Any]) -> bytes:
+    content = file_entry.get("content")
+    text = content if isinstance(content, str) else str(content or "")
+    encoding = str(file_entry.get("content_encoding") or "utf-8").strip().lower()
+    if encoding == "base64":
+        try:
+            return base64.b64decode(text, validate=True)
+        except (ValueError, base64.binascii.Error) as exc:
+            raise ValueError(
+                f"Invalid base64 content for {file_entry.get('path') or file_entry.get('filename')}"
+            ) from exc
+    if encoding in {"", "utf-8", "text", "plain"}:
+        return text.encode("utf-8")
+    raise ValueError(f"Unsupported artifact content encoding: {encoding}")
+
+
+def _verify_artifact_integrity(
+    file_entry: dict[str, Any],
+    content: bytes,
+) -> None:
+    label = file_entry.get("path") or file_entry.get("filename")
+    expected_size = file_entry.get("size_bytes")
+    if expected_size is not None and int(expected_size) != len(content):
+        raise ValueError(
+            f"Artifact size mismatch for {label}: expected {expected_size}, got {len(content)}"
+        )
+    expected_digest = str(file_entry.get("sha256") or "").strip()
+    if expected_digest:
+        actual_digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
+        if expected_digest != actual_digest:
+            raise ValueError(f"Artifact checksum mismatch for {label}")
+
+
+def _materialize_bundle_files(
+    files: list[dict[str, Any]],
+    bundle_root: Path,
+) -> None:
+    seen_paths: set[Path] = set()
+    for file_entry in files:
+        if not isinstance(file_entry, dict):
+            raise TypeError("Deployment bundle files must be JSON objects.")
+        relative_path = _safe_bundle_relative_path(file_entry.get("path"))
+        if relative_path in seen_paths:
+            raise ValueError(f"Duplicate bundle file path: {relative_path.as_posix()}")
+        seen_paths.add(relative_path)
+        content = _decode_artifact_content(file_entry)
+        _verify_artifact_integrity(file_entry, content)
+        destination = bundle_root / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(content)
+
+
+def _content_type_for_filename(filename: str, fallback: str = "") -> str:
+    if fallback:
+        return fallback
+    guessed, _ = mimetypes.guess_type(filename)
+    return guessed or "application/octet-stream"
+
+
+def _encode_artifact_bytes(
+    content: bytes,
+    *,
+    filename: str,
+    content_type: str = "",
+) -> dict[str, Any]:
+    resolved_content_type = _content_type_for_filename(filename, content_type)
+    digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
+    if Path(filename).suffix.lower() not in _BINARY_EXTENSIONS:
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+        else:
+            return {
+                "content": text,
+                "content_encoding": "utf-8",
+                "content_type": resolved_content_type,
+                "size_bytes": len(content),
+                "sha256": digest,
+            }
+    return {
+        "content": base64.b64encode(content).decode("ascii"),
+        "content_encoding": "base64",
+        "content_type": resolved_content_type,
+        "size_bytes": len(content),
+        "sha256": digest,
+        "encoding": "base64",
+    }
+
+
+def _skip_validation_bundle_file(path: Path, bundle_root: Path) -> bool:
+    try:
+        relative = path.relative_to(bundle_root)
+    except ValueError:
+        return True
+    parts = set(relative.parts)
+    if parts & {".inlumen_dagster_validation_venv", ".dagster_home", "__pycache__"}:
+        return True
+    if path.suffix in {".pyc", ".pyo"}:
+        return True
+    return bool(
+        relative.parts and relative.parts[0] == "outputs" and path.name != ".gitkeep"
+    )
+
+
+def _artifact_file_entry(
+    path: Path,
+    bundle_root: Path,
+    *,
+    role: str,
+) -> dict[str, Any]:
+    relative = path.relative_to(bundle_root).as_posix()
+    encoded = _encode_artifact_bytes(
+        path.read_bytes(),
+        filename=path.name,
+        content_type=(
+            "application/json"
+            if path.suffix == ".json"
+            else "application/x-yaml;charset=utf-8"
+            if path.suffix in {".yaml", ".yml"}
+            else ""
+        ),
+    )
+    return {
+        "path": relative,
+        "filename": path.name,
+        "flow_id": "",
+        **_canonical_artifact(path.name),
+        **encoded,
+        "role": role,
+    }
+
+
+def _read_repaired_bundle_files(bundle_root: Path) -> list[dict[str, Any]]:
+    return [
+        _artifact_file_entry(path, bundle_root, role="runtime")
+        for path in sorted(item for item in bundle_root.rglob("*") if item.is_file())
+        if not _skip_validation_bundle_file(path, bundle_root)
+    ]
+
+
+def _read_run_output_files(bundle_root: Path) -> list[dict[str, Any]]:
+    output_root = bundle_root / "outputs"
+    if not output_root.is_dir():
+        return []
+    return [
+        _artifact_file_entry(path, bundle_root, role="run-output")
+        for path in sorted(item for item in output_root.rglob("*") if item.is_file())
+        if path.name != ".gitkeep"
+    ]
+
+
+def validate_deployment_bundle_files(
+    files: list[dict[str, Any]],
+    *,
+    targets: dict[str, Any] | None = None,
+    mode: str = "validate",
+    validate_argo: bool | None = None,
+    validate_dagster: bool | None = None,
+    materialize: bool = True,
+    reinstall: bool = False,
+    skip_install: bool = False,
+    argo_lint: bool = False,
+    argo_dry_run: bool = False,
+    timeout_seconds: int = 900,
+    runtime_secrets: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Materialize, validate, and optionally repair an uploaded bundle.
+
+    The codegen API accepts bundle contents instead of a host filesystem path,
+    so the backend and codegen service can be deployed independently without a
+    shared volume or container-specific path translation.
+    """
+    normalized_mode = str(mode or "validate").strip().lower()
+    if normalized_mode not in {"fast", "validate", "repair", "validate-and-repair"}:
+        raise ValueError(f"Unsupported deployment validation mode: {normalized_mode}")
+
+    workspace_parent = os.getenv("CODEGEN_DEPLOYMENT_VALIDATION_WORKDIR", "").strip()
+    if workspace_parent:
+        Path(workspace_parent).mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="inlumen-deployment-validation-",
+        dir=workspace_parent or None,
+    ) as temp_dir:
+        bundle_root = Path(temp_dir)
+        _materialize_bundle_files(files, bundle_root)
+
+        repair_report = None
+        if normalized_mode in {"repair", "validate-and-repair"}:
+            service_report = validate_and_repair_deployment_bundle(
+                bundle_root,
+                targets=targets,
+                validate_argo=validate_argo,
+                validate_dagster=validate_dagster,
+                materialize=materialize,
+                reinstall=reinstall,
+                skip_install=skip_install,
+                argo_lint=argo_lint,
+                argo_dry_run=argo_dry_run,
+                timeout_seconds=timeout_seconds,
+                runtime_secrets=runtime_secrets,
+            )
+            repair_report = service_report.get("repair_report")
+            validation_report = service_report.get("validation_report")
+            if not isinstance(validation_report, dict):
+                validation_report = service_report
+        else:
+            validation_report = validate_deployment_bundle(
+                bundle_root,
+                targets=targets,
+                validate_argo=validate_argo,
+                validate_dagster=validate_dagster,
+                materialize=materialize,
+                reinstall=reinstall,
+                skip_install=skip_install,
+                argo_lint=argo_lint,
+                argo_dry_run=argo_dry_run,
+                timeout_seconds=timeout_seconds,
+                runtime_secrets=runtime_secrets,
+            )
+
+        ok = bool(validation_report.get("ok"))
+        execution_requested = (
+            normalized_mode != "fast"
+            and bool((targets or {}).get("dagster"))
+            and materialize
+        )
+        return {
+            "ok": ok,
+            "validation_report": validation_report,
+            "repair_report": repair_report,
+            "repaired_files": (
+                _read_repaired_bundle_files(bundle_root)
+                if ok and repair_report is not None
+                else []
+            ),
+            "run_outputs": (
+                _read_run_output_files(bundle_root)
+                if ok and execution_requested
+                else []
+            ),
+        }
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate an InLumen generated deployment bundle.")
+    parser = argparse.ArgumentParser(
+        description="Validate an InLumen generated deployment bundle."
+    )
     parser.add_argument("bundle_path")
-    parser.add_argument("--target", choices=["argo", "dagster"], action="append", default=[])
-    parser.add_argument("--dagster-only", action="store_true", help="Run the legacy Dagster project validator only.")
+    parser.add_argument(
+        "--target", choices=["argo", "dagster"], action="append", default=[]
+    )
+    parser.add_argument(
+        "--dagster-only",
+        action="store_true",
+        help="Run the legacy Dagster project validator only.",
+    )
     parser.add_argument("--no-materialize", action="store_true")
     parser.add_argument("--reinstall", action="store_true")
     parser.add_argument("--skip-install", action="store_true")
@@ -1209,10 +1636,14 @@ def main() -> int:
             timeout_seconds=args.timeout_seconds,
         )
     else:
-        targets = {
-            "argo": "argo" in args.target,
-            "dagster": "dagster" in args.target,
-        } if args.target else None
+        targets = (
+            {
+                "argo": "argo" in args.target,
+                "dagster": "dagster" in args.target,
+            }
+            if args.target
+            else None
+        )
         report = validate_deployment_bundle(
             Path(args.bundle_path),
             targets=targets,

@@ -1,23 +1,14 @@
 import asyncio
-import base64
 import json
-import mimetypes
 import os
 import re
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from flask import Flask, jsonify, has_request_context, make_response, request
 
-from artifact_content import (
-    decode_artifact_content,
-    encode_artifact_bytes,
-    verify_artifact_integrity,
-)
-from artifact_contract import classify_artifact
 from async_runtime import run_async
 from auth_middleware import require_auth
 from chat_state import clear_state_from_disk
@@ -36,9 +27,10 @@ from graph_client import (
     fetch_pipeline_versions,
 )
 from llm_config import llm_config_from_payload, log_llm_selection
+from node_secrets import runtime_secret_environment
 from pipeline_agent.context import _clean_client_graph
 from pipeline_agent.cancellation import (
-    request_pipeline_turn_cancel,
+    cancel_pipeline_turn_and_wait,
     run_cancellable_pipeline_turn,
 )
 from pipeline_agent.service import PipelineEditorTurnCancelled, run_pipeline_editor_turn
@@ -46,22 +38,12 @@ from runtime_config import add_cors_headers
 
 app = Flask(__name__)
 
-DEPLOYMENT_VALIDATION_SERVICE_URL = os.getenv(
-    "INLUMEN_DEPLOYMENT_VALIDATION_SERVICE_URL",
-    "http://127.0.0.1:8020",
+CODEGEN_SERVICE_URL = os.getenv(
+    "INLUMEN_CODEGEN_SERVICE_URL",
+    "http://127.0.0.1:8010",
 ).rstrip("/")
 DEPLOYMENT_VALIDATION_TIMEOUT_SECONDS = int(
-    os.getenv("INLUMEN_DEPLOYMENT_VALIDATION_TIMEOUT_SECONDS", "1800")
-)
-DEPLOYMENT_VALIDATION_WORK_DIR = Path(
-    os.getenv("INLUMEN_DEPLOYMENT_VALIDATION_WORK_DIR", "state/deployment-validation")
-)
-DEPLOYMENT_VALIDATION_LOCAL_ROOT = Path(
-    os.getenv("INLUMEN_DEPLOYMENT_VALIDATION_LOCAL_ROOT", str(Path.cwd()))
-).resolve()
-DEPLOYMENT_VALIDATION_REMOTE_ROOT = os.getenv(
-    "INLUMEN_DEPLOYMENT_VALIDATION_REMOTE_ROOT",
-    str(DEPLOYMENT_VALIDATION_LOCAL_ROOT),
+    os.getenv("INLUMEN_CODEGEN_DEPLOYMENT_TIMEOUT_SECONDS", "1800")
 )
 
 
@@ -74,51 +56,18 @@ def _preflight_response():
     return make_response("", 200)
 
 
-def _safe_bundle_relative_path(path: str) -> Path:
-    relative = Path(str(path or "").strip())
-    if relative.is_absolute() or any(part == ".." for part in relative.parts):
-        raise ValueError(f"Unsafe bundle file path: {path}")
-    return relative
-
-
-def _validation_remote_path(local_path: Path) -> str:
-    resolved = local_path.resolve()
-    try:
-        relative = resolved.relative_to(DEPLOYMENT_VALIDATION_LOCAL_ROOT)
-    except ValueError:
-        return str(resolved)
-    return str(Path(DEPLOYMENT_VALIDATION_REMOTE_ROOT) / relative)
-
-
-def _write_validation_bundle(files: list[dict]) -> Path:
-    bundle_dir = DEPLOYMENT_VALIDATION_WORK_DIR / f"bundle-{uuid.uuid4().hex}"
-    if not bundle_dir.is_absolute():
-        bundle_dir = Path.cwd() / bundle_dir
-    bundle_dir.mkdir(parents=True, exist_ok=True)
-
-    for file_entry in files:
-        if not isinstance(file_entry, dict):
-            continue
-        relative_path = _safe_bundle_relative_path(str(file_entry.get("path") or ""))
-        destination = bundle_dir / relative_path
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        content = decode_artifact_content(file_entry)
-        verify_artifact_integrity(file_entry, content)
-        destination.write_bytes(content)
-    return bundle_dir
-
-
 def _post_deployment_validation_request(
     *,
-    bundle_path: Path,
+    files: list[dict],
     targets: dict,
     options: dict,
+    runtime_secrets: dict[str, str] | None = None,
 ) -> dict:
     mode = str(options.get("mode") or "").strip().lower()
-    endpoint = "validate-and-repair" if mode in {"repair", "validate-and-repair"} else "validate"
     payload = {
-        "bundle_path": _validation_remote_path(bundle_path),
+        "files": files,
         "targets": targets,
+        "mode": mode or "validate",
         "materialize": bool(options.get("materialize", targets.get("dagster"))),
         "reinstall": bool(options.get("reinstall", False)),
         "skip_install": bool(options.get("skip_install", False)),
@@ -126,13 +75,21 @@ def _post_deployment_validation_request(
         "validate_dagster": bool(options.get("validate_dagster", targets.get("dagster"))),
         "argo_lint": bool(options.get("argo_lint", False)),
         "argo_dry_run": bool(options.get("argo_dry_run", False)),
-        "timeout_seconds": int(options.get("timeout_seconds") or DEPLOYMENT_VALIDATION_TIMEOUT_SECONDS),
+        "timeout_seconds": int(
+            options.get("timeout_seconds")
+            or DEPLOYMENT_VALIDATION_TIMEOUT_SECONDS
+        ),
+        "runtime_secrets": runtime_secrets or {},
     }
     encoded = json.dumps(payload).encode("utf-8")
+    service_api_key = os.getenv("INLUMEN_CODEGEN_SERVICE_API_KEY", "").strip()
+    headers = {"Content-Type": "application/json"}
+    if service_api_key:
+        headers["Authorization"] = f"Bearer {service_api_key}"
     http_request = Request(
-        f"{DEPLOYMENT_VALIDATION_SERVICE_URL}/{endpoint}",
+        f"{CODEGEN_SERVICE_URL}/v1/validate/deployment-bundle",
         data=encoded,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -140,98 +97,18 @@ def _post_deployment_validation_request(
             response_payload = response.read().decode("utf-8")
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Deployment validation service rejected request: {exc.code} {detail}") from exc
+        raise RuntimeError(
+            f"Codegen deployment validation rejected request: {exc.code} {detail}"
+        ) from exc
     except URLError as exc:
         raise RuntimeError(
-            f"Deployment validation service unavailable at {DEPLOYMENT_VALIDATION_SERVICE_URL}: {exc}"
+            f"Codegen service unavailable at {CODEGEN_SERVICE_URL}: {exc}"
         ) from exc
 
     parsed = json.loads(response_payload)
     if not isinstance(parsed, dict):
-        raise RuntimeError("Deployment validation service returned an invalid response")
+        raise RuntimeError("Codegen deployment validation returned an invalid response")
     return parsed
-
-
-def _skip_validation_bundle_file(path: Path, bundle_root: Path) -> bool:
-    try:
-        relative = path.relative_to(bundle_root)
-    except ValueError:
-        return True
-    parts = set(relative.parts)
-    if parts & {".inlumen_dagster_validation_venv", ".dagster_home", "__pycache__"}:
-        return True
-    if path.suffix in {".pyc", ".pyo"}:
-        return True
-    if relative.parts and relative.parts[0] == "outputs" and path.name != ".gitkeep":
-        return True
-    return False
-
-
-def _read_validation_bundle_files(bundle_root: Path) -> list[dict]:
-    files: list[dict] = []
-    for path in sorted(item for item in bundle_root.rglob("*") if item.is_file()):
-        if _skip_validation_bundle_file(path, bundle_root):
-            continue
-        relative = path.relative_to(bundle_root).as_posix()
-        encoded = encode_artifact_bytes(
-            path.read_bytes(),
-            filename=path.name,
-            content_type=(
-                "application/json"
-                if path.suffix == ".json"
-                else "application/x-yaml;charset=utf-8"
-                if path.suffix in {".yaml", ".yml"}
-                else ""
-            ),
-        )
-        files.append(
-            {
-                "path": relative,
-                "filename": path.name,
-                "flow_id": "",
-                **classify_artifact(path.name),
-                **encoded,
-                "role": "runtime",
-                **(
-                    {"encoding": "base64"}
-                    if encoded.get("content_encoding") == "base64"
-                    else {}
-                ),
-            }
-        )
-    return files
-
-
-def _read_run_output_files(bundle_root: Path) -> list[dict]:
-    output_root = bundle_root / "outputs"
-    if not output_root.is_dir():
-        return []
-    files: list[dict] = []
-    for path in sorted(item for item in output_root.rglob("*") if item.is_file()):
-        if path.name == ".gitkeep":
-            continue
-        relative = path.relative_to(bundle_root).as_posix()
-        encoded = encode_artifact_bytes(
-            path.read_bytes(),
-            filename=path.name,
-            content_type="application/json" if path.suffix == ".json" else "",
-        )
-        files.append(
-            {
-                "path": relative,
-                "filename": path.name,
-                "flow_id": "",
-                **classify_artifact(path.name),
-                **encoded,
-                "role": "run-output",
-                **(
-                    {"encoding": "base64"}
-                    if encoded.get("content_encoding") == "base64"
-                    else {}
-                ),
-            }
-        )
-    return files
 
 
 def _dockerfile_inputs(files: list[dict]) -> tuple[list[str], list[str], list[str]]:
@@ -445,9 +322,8 @@ def agentic_generate_deployment_bundle():
         repair_report = None
         run_record = None
         if validate_bundle:
-            bundle_dir = _write_validation_bundle(bundle["files"])
             service_report = _post_deployment_validation_request(
-                bundle_path=bundle_dir,
+                files=bundle["files"],
                 targets=bundle["manifest"]["targets"],
                 options={
                     **validation_options,
@@ -462,20 +338,21 @@ def agentic_generate_deployment_bundle():
                         else {}
                     ),
                 },
+                runtime_secrets=runtime_secret_environment(pipeline_graph),
             )
-            if validation_mode in {"repair", "validate-and-repair"}:
-                repair_report = service_report.get("repair_report")
-                validation_report = (
-                    service_report.get("validation_report")
-                    if isinstance(service_report.get("validation_report"), dict)
-                    else service_report
+            repair_report = service_report.get("repair_report")
+            validation_report = service_report.get("validation_report")
+            if not isinstance(validation_report, dict):
+                raise RuntimeError(
+                    "Codegen deployment validation omitted its validation report"
                 )
-                if service_report.get("ok"):
-                    repaired_files = _read_validation_bundle_files(bundle_dir)
-                    if repaired_files:
-                        bundle["files"] = repaired_files
-            else:
-                validation_report = service_report
+            repaired_files = service_report.get("repaired_files")
+            if (
+                service_report.get("ok")
+                and isinstance(repaired_files, list)
+                and repaired_files
+            ):
+                bundle["files"] = repaired_files
 
             if not validation_report.get("ok"):
                 return jsonify(
@@ -514,7 +391,9 @@ def agentic_generate_deployment_bundle():
                 and bool(validation_options.get("materialize", True))
             )
             if execution_requested:
-                run_outputs = _read_run_output_files(bundle_dir)
+                run_outputs = service_report.get("run_outputs")
+                if not isinstance(run_outputs, list):
+                    run_outputs = []
                 bundle["files"].extend(run_outputs)
                 run_record = {
                     "schema_version": "inlumen.run-result@1",
@@ -721,7 +600,8 @@ def agentic_pipeline_editor_cancel():
     turn_id = str(payload.get("turn_id") or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", turn_id):
         return jsonify({"error": "A valid turn_id is required"}), 400
-    return jsonify(request_pipeline_turn_cancel(turn_id)), 202
+    result = cancel_pipeline_turn_and_wait(turn_id, timeout=30.0)
+    return jsonify(result), 200 if result.get("completed") else 202
 
 
 @app.route("/simple_chat/reset", methods=["POST", "OPTIONS"])

@@ -13,6 +13,7 @@ from pipeline_agent.context import (
     SAFE_INTERNAL_OUTPUT_MESSAGE,
     _assistant_message_from_result,
     _clean_client_graph,
+    _graph_for_agent_context,
     _looks_like_internal_agent_message,
     _safe_assistant_message,
 )
@@ -174,7 +175,7 @@ class PipelineGraphValidationTest(unittest.TestCase):
         self.assertFalse(report["valid"])
         self.assertIn("missing-edge-port", {issue["code"] for issue in report["issues"]})
 
-    def test_rest_api_task_requires_a_real_endpoint(self):
+    def test_non_python_task_requires_migration(self):
         graph = {
             "nodes": [
                 node(1, "source", "Input"),
@@ -187,7 +188,7 @@ class PipelineGraphValidationTest(unittest.TestCase):
         report = validate_pipeline_graph(graph)
 
         self.assertFalse(report["valid"])
-        self.assertIn("missing-endpoint", {issue["code"] for issue in report["issues"]})
+        self.assertIn("unsupported-task-implementation", {issue["code"] for issue in report["issues"]})
 
     def test_condition_flow_uses_template_ports_and_real_branches(self):
         graph = {
@@ -389,6 +390,32 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertEqual("data", cleaned["edges"][0]["source_port"])
         self.assertEqual("records", cleaned["edges"][0]["target_port"])
 
+    def test_agent_context_uses_conceptual_parameters_without_adapter_overrides(self):
+        graph = {
+            "nodes": [{
+                **node(1, "source", "Audio Upload"),
+                "data": {
+                    **node(1, "source", "Audio Upload")["data"],
+                    "template_label": "REST API",
+                    "configuration_status": "unconfigured",
+                    "endpoint": "https://stale.example.test",
+                    "param": {"language": "en", "api_key": "secret"},
+                    "secret_params": ["api_key"],
+                },
+            }],
+            "edges": [],
+        }
+
+        summary = _graph_for_agent_context(graph)["nodes"][0]
+
+        self.assertNotIn("template", summary)
+        self.assertNotIn("endpoint", summary)
+        self.assertEqual("en", summary["parameters"]["language"])
+        self.assertEqual(
+            "<provided securely at runtime>",
+            summary["parameters"]["api_key"],
+        )
+
     def test_guardrail_rejects_a_changed_but_invalid_graph(self):
         before = {"nodes": [], "edges": []}
         after = {
@@ -405,7 +432,10 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertFalse(sync["guardrail_passed"])
         self.assertFalse(sync["graph_safe_to_apply"])
         self.assertEqual("invalid", sync["status"])
-        self.assertTrue(any("endpoint" in message for message in sync["validation_errors"]))
+        self.assertTrue(any(
+            "managed Python package" in message
+            for message in sync["validation_errors"]
+        ))
 
     def test_guardrail_accepts_a_valid_model_chosen_graph_change(self):
         before = {

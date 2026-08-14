@@ -54,10 +54,10 @@ describe('ChatPanel cancellation controls', () => {
     expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>[^<]*Stop/);
   });
 
-  it('shows a disabled stopping state after cancellation is requested', () => {
+  it('shows a disabled rollback state after cancellation is requested', () => {
     const html = renderPanel(true, true);
 
-    expect(html).toContain('Stopping…');
+    expect(html).toContain('Restoring…');
     expect(html).toMatch(/<button[^>]*disabled=""/);
   });
 });

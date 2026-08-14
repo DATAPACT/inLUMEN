@@ -1,5 +1,6 @@
 import unittest
 
+from pipeline_graph_validation import validate_pipeline_graph
 from subpipeline_reference import (
     derive_subpipeline_interface,
     missing_explicit_port_contracts,
@@ -91,7 +92,125 @@ class SubpipelineReferenceTest(unittest.TestCase):
         self.assertEqual({"x": 280.0, "y": 120.0}, normalized["nodes"][1]["position"])
         self.assertEqual("input", normalized["edges"][0]["targetHandle"])
         self.assertEqual("output", normalized["edges"][1]["sourceHandle"])
+        self.assertEqual("Audio", normalized["nodes"][0]["data"]["ports"]["outputs"][0]["type"])
+        self.assertEqual("Audio", normalized["nodes"][1]["data"]["ports"]["inputs"][0]["type"])
+        self.assertEqual("Text", normalized["nodes"][1]["data"]["ports"]["outputs"][0]["type"])
+        self.assertEqual("Text", normalized["nodes"][2]["data"]["ports"]["inputs"][0]["type"])
+        self.assertEqual([], missing_explicit_port_contracts(normalized))
         self.assertEqual(["audio", "transcribe", "output"], missing_explicit_port_contracts(graph))
+
+    def test_infers_and_freezes_generated_contracts_before_reusable_save(self):
+        graph = normalize_reusable_pipeline_graph({
+            "nodes": [
+                {
+                    "id": "audio",
+                    "type": "source",
+                    "label": "Upload",
+                    "files": ["sample.wav"],
+                    "ports": {
+                        "inputs": [],
+                        "outputs": [{"id": "files", "type": "File[]"}],
+                    },
+                },
+                {
+                    "id": "transcribe",
+                    "type": "task",
+                    "label": "Process",
+                    "implementation": {"kind": "generated-code"},
+                    "ports": {
+                        "inputs": [{"id": "input", "type": "any"}],
+                        "outputs": [{"id": "output", "type": "any"}],
+                    },
+                    "generated_artifact": {
+                        "data_contract": {
+                            "inputs": [{"kind": "audio", "format": "wav"}],
+                            "outputs": [
+                                {
+                                    "kind": "json",
+                                    "format": "json",
+                                    "schema": {"type": "object"},
+                                }
+                            ],
+                        }
+                    },
+                },
+                {
+                    "id": "result",
+                    "type": "destination",
+                    "label": "Result",
+                    "ports": {
+                        "inputs": [{"id": "data", "type": "any"}],
+                        "outputs": [],
+                    },
+                },
+            ],
+            "edges": [
+                {"source": "audio", "target": "transcribe"},
+                {"source": "transcribe", "target": "result"},
+            ],
+        })
+
+        nodes = {node["id"]: node["data"] for node in graph["nodes"]}
+        self.assertEqual("Audio", nodes["audio"]["ports"]["outputs"][0]["type"])
+        self.assertEqual("Audio", nodes["transcribe"]["ports"]["inputs"][0]["type"])
+        self.assertEqual("JSON", nodes["transcribe"]["ports"]["outputs"][0]["type"])
+        self.assertEqual(
+            {"type": "object"},
+            nodes["transcribe"]["ports"]["outputs"][0]["schema"],
+        )
+        self.assertEqual("JSON", nodes["result"]["ports"]["inputs"][0]["type"])
+        self.assertEqual([], missing_explicit_port_contracts(graph))
+        self.assertTrue(validate_pipeline_graph(graph)["valid"])
+
+    def test_sentiment_pipeline_description_does_not_look_like_speech_to_text(self):
+        graph = normalize_reusable_pipeline_graph({
+            "nodes": [
+                {
+                    "id": "audio",
+                    "type": "source",
+                    "label": "Audio Upload",
+                    "description": "User uploaded audio file.",
+                    "template_label": "File Upload",
+                },
+                {
+                    "id": "transcribe",
+                    "type": "task",
+                    "label": "Transcribe Audio",
+                    "description": "Convert audio to text.",
+                    "template_label": "Speech-to-Text",
+                    "implementation": {"kind": "generated-code"},
+                },
+                {
+                    "id": "sentiment",
+                    "type": "task",
+                    "label": "Sentiment Analysis",
+                    "description": "Analyze sentiment of transcribed text.",
+                    "template_label": "Sentiment Analysis",
+                    "implementation": {"kind": "generated-code"},
+                },
+                {
+                    "id": "output",
+                    "type": "destination",
+                    "label": "JSON Output",
+                    "description": "Emit transcription and sentiment as JSON.",
+                    "template_label": "JSON Output",
+                },
+            ],
+            "edges": [
+                {"source": "audio", "target": "transcribe"},
+                {"source": "transcribe", "target": "sentiment"},
+                {"source": "sentiment", "target": "output"},
+            ],
+        })
+
+        nodes = {node["id"]: node["data"] for node in graph["nodes"]}
+        self.assertEqual("Audio", nodes["audio"]["ports"]["outputs"][0]["type"])
+        self.assertEqual("Audio", nodes["transcribe"]["ports"]["inputs"][0]["type"])
+        self.assertEqual("Text", nodes["transcribe"]["ports"]["outputs"][0]["type"])
+        self.assertEqual("Text", nodes["sentiment"]["ports"]["inputs"][0]["type"])
+        self.assertEqual("JSON", nodes["sentiment"]["ports"]["outputs"][0]["type"])
+        self.assertEqual("JSON", nodes["output"]["ports"]["inputs"][0]["type"])
+        self.assertTrue(validate_pipeline_graph(graph)["valid"])
 
     def test_derives_contract_from_normalized_explicit_boundaries(self):
         graph = normalize_reusable_pipeline_graph({

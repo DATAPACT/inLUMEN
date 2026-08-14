@@ -124,6 +124,9 @@ def test_pipeline_generation_run_reports_async_result() -> None:
 
     assert body["status"] == "valid"
     assert body["generation_run"]["run_id"] == run_id
+    assert body["generation_run"]["current_stage"] == "complete"
+    assert body["generation_run"]["progress_revision"] > 0
+    assert body["generation_run"]["progress_updated_at"].endswith("Z")
     assert body["result"]["nodes"][0]["flow_id"] == "ingest"
 
 

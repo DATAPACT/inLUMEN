@@ -39,6 +39,13 @@ from node_definitions.artifacts import (
     implementation_plan_from_data,
 )
 from node_ports import normalize_node_ports
+from node_secrets import (
+    clear_node_secrets,
+    configured_node_secrets,
+    delete_node_secret,
+    normalize_parameter_name,
+    set_node_secret,
+)
 from object_client import dispatch_object_request
 from provenance_provo import build_prov_o_jsonld, provenance_prov_o_filename
 from provenance_report import build_provenance_pdf, provenance_report_filename
@@ -82,6 +89,17 @@ CODEGEN_RUNTIME_FILENAMES = {
     "node-manifest.json",
     "validation-report.json",
 }
+USER_RUNTIME_SUPPORT_SUFFIXES = {
+    ".json",
+    ".py",
+    ".pyi",
+    ".sh",
+    ".sql",
+    ".toml",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
 PIPELINE_RUNTIME_BEHAVIOR_INSTRUCTION = """Design the entire pipeline as one coherent program before writing any node.
 For every edge, decide the exact output filename, format, schema or object shape, and required runtime dependencies. The producer must write that contract and the consumer must read the same contract.
 Implement every capability requested by the high-level request and graph. A terminal behavior such as answering questions, alerting, or publishing results must produce that real result, not only an intermediate score, index, or status.
@@ -105,15 +123,15 @@ For every node, create:
 - main.py
 - requirements.txt only if main.py needs third-party packages
 
-Return code files only. Never create or return input data, example data, fake files, placeholder files, credentials, Dockerfiles, Dagster files, or manifests. The user will supply real input data separately from inLUMEN's Run tab.
+Return code files only. Never create or return input data, example data, fake files, placeholder files, credentials, Dockerfiles, Dagster files, or manifests. Real input data is attached to Source nodes separately from generated code.
 
-Each main.py runs with the root node's Run-tab inputs or the previous node's output files in the current folder. It must read from that folder and write its results back to that folder. Connected nodes must agree on output filenames and formats.
+Each main.py runs with its Source node's attached input files or the previous node's output files in the current folder. It must read from that folder and write its results back to that folder. Connected nodes must agree on output filenames and formats.
 
 Each main.py must be a one-shot, non-interactive Python 3.11 batch program. It must not call input(), start a server or UI, watch for files, sleep indefinitely, or loop forever. It must validate required input files before loading large models, downloading resources, or doing other slow setup; invalid inputs must fail immediately with a clear error. A node with a downstream connection must write at least one real output file, then exit successfully.
 
 If you can create files, return one ZIP with folders named nodes/<flow_id>/. Otherwise, show each file in its own code block under a clear NODE <flow_id> heading. Return complete working code, not pseudocode.
 
-Finish with a short RUN INPUT MAP. For every real external input the user must provide, state the exact filename, flow_id, and root node label that first reads it. The user supplies these ephemeral files in the Run tab; they must not be attached to nodes as runtime code or test fixtures."""
+Finish with a short SOURCE INPUT MAP. For every real external input the user must provide, state the exact filename, flow_id, and Source node label that first reads it. The user attaches these files to the corresponding Source node; they must never be created by code generation or attached as runtime code."""
 CHATBOT_CONFIGS_PATH = Path(
     os.getenv("CHATBOT_CONFIGS_PATH", "state/chatbot_configurations.json")
 )
@@ -448,7 +466,6 @@ def _codegen_run_summary(local_run: dict[str, Any]) -> dict[str, Any]:
         "reusable_flow_ids": metadata.get("reusable_flow_ids", []),
         "preflight": metadata.get("preflight", {}),
         "model": metadata.get("model", {}),
-        "checkpoint_version_uid": metadata.get("checkpoint_version_uid", ""),
         "persistence": persistence,
         "created_at": local_run.get("created_at"),
         "updated_at": local_run.get("updated_at"),
@@ -472,7 +489,6 @@ def _codegen_run_response_metadata(
         "reusable_flow_ids": metadata.get("reusable_flow_ids", []),
         "preflight": metadata.get("preflight", {}),
         "model": metadata.get("model", {}),
-        "checkpoint_version_uid": metadata.get("checkpoint_version_uid", ""),
     }
 
 
@@ -635,6 +651,16 @@ def _node_descriptor(
         if isinstance(data.get("param"), dict)
         else {}
     )
+    secret_parameter_names = {
+        str(name)
+        for name in (data.get("secret_params") or [])
+        if str(name).strip()
+    }
+    parameters = {
+        key: value
+        for key, value in parameters.items()
+        if str(key) not in secret_parameter_names
+    }
     content = data.get("content")
     if isinstance(content, str) and content.strip():
         parameters["content"] = content.strip()
@@ -652,6 +678,7 @@ def _node_descriptor(
         "type": normalize_step_type(data.get("type")),
         "template": str(data.get("template_label") or data.get("definition_id") or ""),
         "parameters": parameters,
+        "secret_parameters": sorted(secret_parameter_names),
         "implementation": implementation,
         "subpipeline": subpipeline if isinstance(subpipeline, dict) else {},
         "ports": normalize_node_ports(data.get("ports"), data.get("type")),
@@ -1668,9 +1695,6 @@ def _build_pipeline_codegen_payload(
         "reusable_flow_ids": preflight["reusable_flow_ids"],
         "preflight": preflight,
         "overwrite_manual_code": bool(payload.get("overwrite_manual_code")),
-        "checkpoint_version_uid": str(
-            payload.get("checkpoint_version_uid") or ""
-        ).strip(),
         "model": {
             "provider": str(llm_config.get("provider") or ""),
             "model": str(llm_config.get("model") or ""),
@@ -1953,6 +1977,7 @@ def graph_nodes():
     deleted_ids = graph_payload.get("deleted_step_flow_ids") if isinstance(graph_payload, dict) else []
     storage_cleanup = []
     for flow_id in deleted_ids or []:
+        clear_node_secrets(flow_id)
         storage_response = _proxy(
             dispatch_object_request,
             "minio_clear_bucket",
@@ -2035,6 +2060,8 @@ def graph_node(node_id: str):
     graph_response = _proxy(dispatch_graph_request, f"neo4j_delete_node/{node_id}", data=b"")
     if not graph_response.ok:
         return _response_from_upstream(graph_response)
+
+    clear_node_secrets(node_id)
 
     storage_response = _proxy(
         dispatch_object_request,
@@ -2172,39 +2199,70 @@ def workspace_clear_all():
         return _response_from_upstream(graph_response)
 
     graph_payload = _upstream_json(graph_response)
-    deleted_ids = graph_payload.get("deleted_step_flow_ids") if isinstance(graph_payload, dict) else []
-    storage_cleanup = []
-    for flow_id in deleted_ids or []:
-        storage_response = _proxy(
-            dispatch_object_request,
-            "minio_clear_bucket",
-            method="DELETE",
-            params={"bucket_id": flow_id},
-            data=b"",
-        )
-        storage_cleanup.append({
-            "flow_id": flow_id,
-            "status": storage_response.status_code,
-            "ok": storage_response.ok,
-        })
+    storage_response = _proxy(
+        dispatch_object_request,
+        "minio_clear_workspace",
+        method="DELETE",
+        data=b"",
+    )
+    storage_cleanup = [{
+        "status": storage_response.status_code,
+        "ok": storage_response.ok,
+        "result": _upstream_json(storage_response),
+    }]
 
     chat_reset = False
     if session_id:
         clear_state_from_disk(session_id)
         chat_reset = True
     generation_cleanup = _clear_codegen_run_history()
+    secrets_cleared = clear_node_secrets()
 
     if isinstance(graph_payload, dict):
         graph_payload["storage_cleanup"] = storage_cleanup
         graph_payload["chat_reset"] = chat_reset
         graph_payload["generation_cleanup"] = generation_cleanup
+        graph_payload["secrets_cleared"] = secrets_cleared
+        if not storage_response.ok:
+            graph_payload["status"] = "partial"
+            graph_payload["error"] = "Neo4j was cleared, but object storage cleanup was incomplete"
+            return jsonify(graph_payload), 207
         return jsonify(graph_payload), graph_response.status_code
     return jsonify({
         "graph": graph_payload,
         "storage_cleanup": storage_cleanup,
         "chat_reset": chat_reset,
         "generation_cleanup": generation_cleanup,
+        "secrets_cleared": secrets_cleared,
     }), graph_response.status_code
+
+
+@app.route("/api/nodes/<node_id>/secrets", methods=["GET", "OPTIONS"])
+@require_auth
+def node_secrets(node_id: str):
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    return jsonify({"configured": configured_node_secrets(node_id)}), 200
+
+
+@app.route(
+    "/api/nodes/<node_id>/secrets/<parameter_name>",
+    methods=["PUT", "DELETE", "OPTIONS"],
+)
+@require_auth
+def node_secret(node_id: str, parameter_name: str):
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    try:
+        clean_name = normalize_parameter_name(parameter_name)
+        if request.method == "DELETE":
+            deleted = delete_node_secret(node_id, clean_name)
+            return jsonify({"name": clean_name, "configured": False, "deleted": deleted}), 200
+        value = _request_json().get("value")
+        set_node_secret(node_id, clean_name, value)
+        return jsonify({"name": clean_name, "configured": True}), 200
+    except ValueError as exc:
+        return _json_error(422, str(exc))
 
 
 @app.route("/api/provenance/report", methods=["GET", "OPTIONS"])
@@ -2791,6 +2849,27 @@ def node_files(node_id: str):
         if file_role not in {"code", "data"}:
             file_role = ""
         uploaded_filename = str(uploaded.filename or "").strip()
+        if file_role == "code":
+            safe_name = Path(uploaded_filename).name
+            lower_name = safe_name.lower()
+            if not safe_name or safe_name != uploaded_filename or "/" in uploaded_filename or "\\" in uploaded_filename:
+                return _json_error(422, "code files must use a plain filename")
+            if lower_name == "main.py" and safe_name != "main.py":
+                return _json_error(422, "the Python entrypoint must be named exactly main.py")
+            if lower_name in {"node-manifest.json", "validation-report.json"} or lower_name.startswith("dockerfile."):
+                return _json_error(
+                    422,
+                    "generated runtime files cannot be uploaded manually",
+                )
+            if (
+                lower_name not in {"main.py", "requirements.txt"}
+                and Path(lower_name).suffix not in USER_RUNTIME_SUPPORT_SUFFIXES
+            ):
+                return _json_error(
+                    422,
+                    "unsupported Python package file",
+                    "Upload main.py, optional requirements.txt, or a supporting Python package file.",
+                )
         if (
             uploaded_filename
             and file_role != "code"

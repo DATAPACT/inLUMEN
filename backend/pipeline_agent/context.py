@@ -232,9 +232,31 @@ def _graph_for_agent_context(graph: dict | None) -> dict:
     nodes = []
     for node in raw_nodes:
         summary = _node_payload(node)
+        node_type = str(summary.get("type") or "").strip().lower()
         template = node.get("template_label") or node.get("template")
-        if template:
+        if node_type in {"source", "task", "destination"}:
+            # Templates and old adapter fields are implementation hints, not
+            # conceptual user intent. Code generation chooses the implementation.
+            summary.pop("endpoint", None)
+            summary.pop("database", None)
+        elif template:
             summary["template"] = _clip_text(template, 160)
+        parameters = node.get("param") or node.get("parameters")
+        if isinstance(parameters, dict):
+            secret_keys = {
+                str(key)
+                for key in (node.get("secret_params") or [])
+                if str(key).strip()
+            }
+            visible_parameters = {
+                str(key): "<provided securely at runtime>"
+                if str(key) in secret_keys
+                else _json_safe_copy(value)
+                for key, value in parameters.items()
+                if str(key).strip() and str(key) != "model_plan"
+            }
+            if visible_parameters:
+                summary["parameters"] = visible_parameters
         implementation = node.get("implementation")
         if isinstance(implementation, dict):
             summary["implementation"] = {

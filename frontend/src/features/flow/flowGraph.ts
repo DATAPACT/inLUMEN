@@ -7,6 +7,7 @@ import {
   normalizeNodeImplementation,
   normalizeNodePorts,
   normalizeSecretParamKeys,
+  withoutSensitiveParameterValues,
   normalizeType,
 } from '@/features/nodes/nodeSchema';
 import {
@@ -261,7 +262,7 @@ export const createAgentGraphSnapshot = (graph: NormalizedGraph): AgentGraphSnap
       ...(typeof data.database === "string" ? { database: data.database } : {}),
       ...(files && files.length > 0 ? { files } : {}),
       ...(data.param && typeof data.param === "object" && !Array.isArray(data.param)
-        ? { param: data.param as Record<string, unknown> }
+        ? { param: withoutSensitiveParameterValues(data.param, data.secret_params) }
         : {}),
       ...(Array.isArray(data.secret_params)
         ? { secret_params: normalizeSecretParamKeys(data.secret_params, data.param) }

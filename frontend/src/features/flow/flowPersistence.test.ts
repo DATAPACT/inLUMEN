@@ -179,14 +179,13 @@ describe("background code generation", () => {
       scope: "selected",
       selectedFlowIds: ["task-2"],
       overwriteManualCode: true,
-      checkpointVersionUid: "checkpoint-1",
     });
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body.generation_scope).toBe("selected");
     expect(body.selected_flow_ids).toEqual(["task-2"]);
     expect(body.overwrite_manual_code).toBe(true);
-    expect(body.checkpoint_version_uid).toBe("checkpoint-1");
+    expect(body).not.toHaveProperty("checkpoint_version_uid");
   });
 
   it("requests a pipeline generation preflight for the selected scope", async () => {

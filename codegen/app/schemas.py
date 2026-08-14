@@ -35,6 +35,7 @@ PipelineGenerationStrategy = Literal["pipeline_first", "node_first"]
 GenerationJobStatus = Literal[
     "queued", "running", "valid", "invalid", "failed", "cancelled"
 ]
+DeploymentValidationMode = Literal["fast", "validate", "repair", "validate-and-repair"]
 
 
 class LLMConfig(BaseModel):
@@ -102,6 +103,7 @@ class NodeDescriptor(BaseModel):
     template: str = ""
     ports: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     parameters: dict[str, Any] = Field(default_factory=dict)
+    secret_parameters: list[str] = Field(default_factory=list)
     implementation: dict[str, Any] = Field(default_factory=dict)
     subpipeline: dict[str, Any] = Field(default_factory=dict)
     files: list[FileDescriptor] = Field(default_factory=list)
@@ -168,11 +170,15 @@ class GenerationOptions(BaseModel):
     validation_mode: ValidationMode = "static"
     user_instruction: str = ""
     allow_deterministic_fallback: bool = Field(
-        default_factory=lambda: os.getenv(
-            "CODEGEN_ALLOW_DETERMINISTIC_FALLBACK",
-            "false",
-        ).strip().lower()
-        in {"1", "true", "yes", "on"}
+        default_factory=lambda: (
+            os.getenv(
+                "CODEGEN_ALLOW_DETERMINISTIC_FALLBACK",
+                "false",
+            )
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        )
     )
     generation_strategy: PipelineGenerationStrategy = "pipeline_first"
     # When populated, the pipeline service regenerates only these nodes and
@@ -292,9 +298,9 @@ class PipelineGeneratedNode(BaseModel):
 
 class PipelineGenerationRunStep(BaseModel):
     flow_id: str
-    status: Literal[
-        "pending", "running", "valid", "invalid", "failed", "skipped"
-    ] = "pending"
+    status: Literal["pending", "running", "valid", "invalid", "failed", "skipped"] = (
+        "pending"
+    )
     stage: str = "pending"
     attempts: int = 1
     inputs: list[FileDescriptor] = Field(default_factory=list)
@@ -311,6 +317,10 @@ class PipelineGenerationRun(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     stage_timings_ms: dict[str, int] = Field(default_factory=dict)
     generation_usage: GenerationUsage | None = None
+    current_stage: str = "pending"
+    stage_started_at: str | None = None
+    progress_updated_at: str | None = None
+    progress_revision: int = 0
 
 
 class GeneratePipelineScriptsResponse(BaseModel):
@@ -330,3 +340,18 @@ class PipelineGenerationJobResponse(BaseModel):
     error: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
+
+
+class DeploymentBundleValidationRequest(BaseModel):
+    files: list[dict[str, Any]]
+    targets: dict[str, bool] = Field(default_factory=dict)
+    mode: DeploymentValidationMode = "validate"
+    validate_argo: bool | None = None
+    validate_dagster: bool | None = None
+    materialize: bool = True
+    reinstall: bool = False
+    skip_install: bool = False
+    argo_lint: bool = False
+    argo_dry_run: bool = False
+    timeout_seconds: int = Field(default=900, ge=30, le=3600)
+    runtime_secrets: dict[str, str] = Field(default_factory=dict, repr=False)

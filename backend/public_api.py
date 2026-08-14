@@ -2024,6 +2024,7 @@ def _chat_cancel_operation(operation_id: str) -> dict[str, Any]:
         "operationId": operation_id,
         "requestBody": _json_request("#/components/schemas/ChatCancelRequest"),
         "responses": {
+            "200": _json_response("#/components/schemas/ChatCancelResponse"),
             "202": _json_response("#/components/schemas/ChatCancelResponse"),
             "400": {"$ref": "#/components/responses/BadRequest"},
             "401": {"$ref": "#/components/responses/Unauthorized"},
@@ -2506,8 +2507,11 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
             "required": ["turn_id", "status", "active"],
             "properties": {
                 "turn_id": {"type": "string"},
-                "status": {"type": "string", "enum": ["cancelling", "cancel_queued"]},
+                "status": {"type": "string", "enum": ["cancelled", "cancelling", "cancel_queued"]},
                 "active": {"type": "boolean"},
+                "completed": {"type": "boolean"},
+                "rollback_applied": {"type": "boolean"},
+                "detail": {"type": "string"},
             },
         },
         "OkResponse": {

@@ -9,7 +9,20 @@ export type ComponentTemplate = {
   ports?: NodePorts;
   requiredParameters?: string[];
   defaultParameters?: Record<string, unknown>;
+  configurationFields?: Array<{
+    name: string;
+    label: string;
+    placeholder?: string;
+    secret?: boolean;
+  }>;
 };
+
+const field = (name: string, label: string, placeholder = "", secret = false) => ({
+  name,
+  label,
+  placeholder,
+  secret,
+});
 
 const port = (name: string, type: string, description: string, required = true) => ({
   id: name.toLowerCase().replace(/[^a-z0-9_.-]+/g, "-"),
@@ -49,11 +62,36 @@ export const COMPONENT_TEMPLATE_CATALOG: Record<StepType, ComponentTemplate[]> =
     { id: "source.generic", value: "Source", label: "Generic source" },
     { id: "source.file", value: "File", label: "File", ports: sourcePorts("file", "File") },
     { id: "source.folder", value: "Folder", label: "Folder", ports: sourcePorts("files", "File[]") },
-    { id: "source.database", value: "Database", label: "Database", ports: sourcePorts("rows", "Dataset") },
-    { id: "source.object-storage", value: "Object Storage", label: "Object Storage", ports: sourcePorts("objects", "Object[]") },
-    { id: "source.rest-api", value: "REST API", label: "REST API", ports: sourcePorts("response", "Object") },
-    { id: "source.kafka", value: "Kafka", label: "Kafka", ports: sourcePorts("messages", "Message[]") },
-    { id: "source.message-queue", value: "Message Queue", label: "Message Queue", ports: sourcePorts("messages", "Message[]") },
+    {
+      id: "source.database", value: "Database", label: "Database", ports: sourcePorts("rows", "Dataset"),
+      requiredParameters: ["connection_url", "query"],
+      defaultParameters: { connection_url: "", query: "" },
+      configurationFields: [field("connection_url", "Connection URL", "postgresql://…", true), field("query", "Query", "SELECT …")],
+    },
+    {
+      id: "source.object-storage", value: "Object Storage", label: "Object Storage", ports: sourcePorts("objects", "Object[]"),
+      requiredParameters: ["bucket"],
+      defaultParameters: { endpoint: "", bucket: "", access_key: "", secret_key: "" },
+      configurationFields: [field("endpoint", "Endpoint"), field("bucket", "Bucket"), field("access_key", "Access key", "", true), field("secret_key", "Secret key", "", true)],
+    },
+    {
+      id: "source.rest-api", value: "REST API", label: "REST API", ports: sourcePorts("response", "Object"),
+      requiredParameters: ["url"],
+      defaultParameters: { url: "", method: "GET" },
+      configurationFields: [field("url", "URL", "https://api.example.com/…"), field("method", "Method", "GET")],
+    },
+    {
+      id: "source.kafka", value: "Kafka", label: "Kafka", ports: sourcePorts("messages", "Message[]"),
+      requiredParameters: ["brokers", "topic"],
+      defaultParameters: { brokers: "", topic: "" },
+      configurationFields: [field("brokers", "Brokers", "broker:9092"), field("topic", "Topic")],
+    },
+    {
+      id: "source.message-queue", value: "Message Queue", label: "Message Queue", ports: sourcePorts("messages", "Message[]"),
+      requiredParameters: ["url", "queue"],
+      defaultParameters: { url: "", queue: "" },
+      configurationFields: [field("url", "Connection URL", "", true), field("queue", "Queue")],
+    },
     { id: "source.user-upload", value: "User Upload", label: "User Upload", ports: sourcePorts("uploaded_files", "File[]") },
   ]),
   task: [
@@ -77,21 +115,56 @@ export const COMPONENT_TEMPLATE_CATALOG: Record<StepType, ComponentTemplate[]> =
       { id: "task.entity-linking", value: "Entity Linking", label: "Entity Linking", ports: taskPorts("documents", "Document[]", "linked_entities", "Entity[]") },
       { id: "task.classification", value: "Classification", label: "Classification", ports: taskPorts("features", "FeatureSet", "predictions", "Prediction[]") },
       { id: "task.model-training", value: "Model Training", label: "Model Training", ports: taskPorts("training_data", "Dataset", "model_artifact", "Model") },
-      { id: "task.llm", value: "LLM", label: "LLM", ports: taskPorts("prompt", "Text", "response", "Text"), requiredParameters: ["model"] },
+      {
+        id: "task.llm", value: "LLM", label: "LLM", ports: taskPorts("prompt", "Text", "response", "Text"),
+        requiredParameters: ["model"], defaultParameters: { model: "" },
+        configurationFields: [field("model", "Model", "Provider model name")],
+      },
     ]),
     ...categorized("Integration", [
-      { id: "task.api-call", value: "API Call", label: "API Call", ports: taskPorts("request", "Object", "response", "Object") },
+      {
+        id: "task.api-call", value: "API Call", label: "API Call", ports: taskPorts("request", "Object", "response", "Object"),
+        requiredParameters: ["url"], defaultParameters: { url: "", method: "POST" },
+        configurationFields: [field("url", "URL", "https://api.example.com/…"), field("method", "Method", "POST")],
+      },
     ]),
   ],
   destination: categorized("Destinations", [
     { id: "destination.generic", value: "Destination", label: "Generic destination" },
-    { id: "destination.file", value: "File", label: "File", ports: destinationPorts("data", "any") },
-    { id: "destination.database", value: "Database", label: "Database", ports: destinationPorts("rows", "Dataset") },
-    { id: "destination.object-storage", value: "Object Storage", label: "Object Storage", ports: destinationPorts("objects", "Object[]") },
-    { id: "destination.rest-api", value: "REST API", label: "REST API", ports: destinationPorts("request", "Object") },
-    { id: "destination.kafka", value: "Kafka", label: "Kafka", ports: destinationPorts("messages", "Message[]") },
-    { id: "destination.report", value: "Report", label: "Report", ports: destinationPorts("report_data", "Dataset") },
-    { id: "destination.notification", value: "Notification", label: "Notification", ports: destinationPorts("notification", "Message") },
+    {
+      id: "destination.file", value: "File", label: "File", ports: destinationPorts("data", "any"),
+      requiredParameters: ["filename"], defaultParameters: { filename: "output.json" },
+      configurationFields: [field("filename", "Output filename", "output.json")],
+    },
+    {
+      id: "destination.database", value: "Database", label: "Database", ports: destinationPorts("rows", "Dataset"),
+      requiredParameters: ["connection_url", "table"], defaultParameters: { connection_url: "", table: "" },
+      configurationFields: [field("connection_url", "Connection URL", "postgresql://…", true), field("table", "Table")],
+    },
+    {
+      id: "destination.object-storage", value: "Object Storage", label: "Object Storage", ports: destinationPorts("objects", "Object[]"),
+      requiredParameters: ["bucket"], defaultParameters: { endpoint: "", bucket: "" },
+      configurationFields: [field("endpoint", "Endpoint"), field("bucket", "Bucket")],
+    },
+    {
+      id: "destination.rest-api", value: "REST API", label: "REST API", ports: destinationPorts("request", "Object"),
+      requiredParameters: ["url"], defaultParameters: { url: "", method: "POST" },
+      configurationFields: [field("url", "URL", "https://api.example.com/…"), field("method", "Method", "POST")],
+    },
+    {
+      id: "destination.kafka", value: "Kafka", label: "Kafka", ports: destinationPorts("messages", "Message[]"),
+      requiredParameters: ["brokers", "topic"], defaultParameters: { brokers: "", topic: "" },
+      configurationFields: [field("brokers", "Brokers", "broker:9092"), field("topic", "Topic")],
+    },
+    {
+      id: "destination.report", value: "Report", label: "Report", ports: destinationPorts("report_data", "Dataset"),
+      defaultParameters: { format: "pdf" }, configurationFields: [field("format", "Format", "pdf")],
+    },
+    {
+      id: "destination.notification", value: "Notification", label: "Notification", ports: destinationPorts("notification", "Message"),
+      requiredParameters: ["channel"], defaultParameters: { channel: "" },
+      configurationFields: [field("channel", "Channel")],
+    },
   ]),
   flow: [
     ...categorized("Flow control", [

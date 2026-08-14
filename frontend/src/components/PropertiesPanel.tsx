@@ -3,6 +3,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,44 +21,42 @@ import {
   EyeOff,
   GitBranch,
   Loader2,
-  LockKeyhole,
-  PlusCircle,
-  Unlock,
+  Plus,
   Upload,
   Wand2,
   X,
 } from 'lucide-react';
 import { toast } from "sonner";
 import { FilePreviewDialog, PreviewType } from '@/components/properties/FilePreviewDialog';
-import { SubpipelineEditorDialog } from '@/components/subpipeline/SubpipelineEditorDialog';
-import { getTypeColor, getTypeIcon } from '@/components/properties/nodeAppearance';
 import { ChatbotConfig } from '@/services/chatbotService';
 import {
   normalizeType,
   getStepTypeLabel,
   pickBackendUpdatableProps,
   StepType,
-  IMPLEMENTATION_KIND_OPTIONS,
-  normalizeImplementationKind,
   normalizeNodePorts,
   normalizeSecretParamKeys,
   isSensitiveParameterName,
+  withoutSensitiveParameterValues,
   getNodeFileBucket,
   getNodeFileName,
   getNodeFileRole,
   isBrowserFile,
   typeHasContent,
   typeHasFiles,
-  typeSupportsInputFiles,
   isImagePreviewName,
   isTextPreviewName,
   isTextPreviewFile,
   NodeFileReference,
   NodeFileRole,
   GeneratedArtifact,
-  NodePort,
   NodePorts,
 } from '@/features/nodes/nodeSchema';
+import {
+  nodeSupportsInputFiles,
+  taskImplementationMigrationError,
+  taskImplementationStatus,
+} from '@/features/nodes/propertyPanelPolicy';
 import {
   defaultParametersForTemplate,
   defaultTemplateForType,
@@ -68,6 +67,9 @@ import {
   readNodeFile,
   removeNodeFile,
   generateNodeScript,
+  deleteNodeSecret,
+  fetchConfiguredNodeSecrets,
+  storeNodeSecret,
   updateNodeTextFile,
   updateNodePropertiesInBackend,
   uploadNodeFile,
@@ -79,22 +81,20 @@ import {
   type SubpipelineDefinition,
   type SubpipelineInterface,
   type SubpipelineReference,
-  type ReusablePipelineSaveDraft,
 } from '@/features/flow/subpipeline';
 import {
   attachReusablePipelineVersion,
   fetchReusablePipelines,
-  fetchReusablePipelineVersion,
   previewReusablePipelineAttachment,
-  saveReusablePipeline,
   type ReusablePipelineAttachment,
   type ReusablePipelineSummary,
   type ReusablePipelineVersion,
 } from '@/features/flow/subpipelinePersistence';
 
 type NodeParamMap = Record<string, unknown>;
-type DraftKeyMap = Record<string, string>;
 const FLOW_PARAMETER_KEYS = new Set(["expression", "max_concurrency", "failure_policy"]);
+const USER_PARAMETER_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
+const USER_CODE_FILE_PATTERN = /^(?:main\.py|requirements\.txt|[A-Za-z0-9_.-]+\.(?:py|pyi|json|toml|ya?ml|sql|sh|txt))$/i;
 
 export type PropertyNodeData = {
   label?: string;
@@ -154,24 +154,6 @@ const withNodeFileRole = (
   return { ...file, role };
 };
 
-const normalizeEntrypoint = (value: unknown) => {
-  if (Array.isArray(value)) {
-    return value
-      .map((entry) => String(entry ?? "").trim())
-      .filter((entry) => entry.length > 0);
-  }
-  const single = String(value ?? "").trim();
-  return single.length > 0 ? [single] : [];
-};
-
-const getEntrypointHint = (data: PropertyNodeData) => {
-  const configuredEntrypoint = String(data.implementation?.entrypoint || "").trim();
-  if (configuredEntrypoint) return configuredEntrypoint;
-  const generatedEntrypoint = normalizeEntrypoint(data.generated_artifact?.entrypoint);
-  if (generatedEntrypoint.length === 0) return "";
-  return generatedEntrypoint.join(" ");
-};
-
 const InspectorSection = ({
   id,
   title,
@@ -216,33 +198,8 @@ interface PropertiesPanelProps {
   onRemoveNode?: (nodeId: string) => void;
   onGenerateCode?: (nodeId: string) => void;
   activeChatbotConfig?: ChatbotConfig | null;
-  isAdvancedMode?: boolean;
   className?: string;
 }
-
-const PORT_TYPE_OPTIONS = [
-  "any",
-  "Text",
-  "Number",
-  "Boolean",
-  "Object",
-  "Object[]",
-  "Dataset",
-  "File",
-  "File[]",
-  "Image",
-  "Image[]",
-  "Audio",
-  "Message",
-  "Message[]",
-  "Document",
-  "Document[]",
-  "Vector",
-  "Vector[]",
-  "FeatureSet",
-  "Model",
-  "Prediction[]",
-] as const;
 
 export function PropertiesPanel({
   selectedNode,
@@ -250,12 +207,12 @@ export function PropertiesPanel({
   onRemoveNode,
   onGenerateCode,
   activeChatbotConfig,
-  isAdvancedMode = false,
   className,
 }: PropertiesPanelProps) {
   const nodeType: StepType = normalizeType(selectedNode?.data?.type ?? selectedNode?.type);
   const canManageFiles = typeHasFiles(nodeType);
-  const canGenerateScript = nodeType === "task";
+  const canManageImplementation = ["source", "task", "destination"].includes(nodeType);
+  const canGenerateScript = canManageImplementation;
 
   const [label, setLabel] = useState('');
   const [description, setDescription] = useState('');
@@ -268,33 +225,18 @@ export function PropertiesPanel({
   // Parameters belong to the node inspector, never to separate graph nodes.
   const [param, setParam] = useState<NodeParamMap>({});
   const [secretParamKeys, setSecretParamKeys] = useState<string[]>([]);
+  const [secretDrafts, setSecretDrafts] = useState<Record<string, string>>({});
+  const [configuredSecretParams, setConfiguredSecretParams] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [newParameterName, setNewParameterName] = useState("");
   const [revealedSecretParams, setRevealedSecretParams] = useState<Set<string>>(
     () => new Set(),
   );
-  const [draftKeys, setDraftKeys] = useState<DraftKeyMap>({});
-  const editableParamEntries = Object.entries(param).filter(([key]) =>
-    key !== "model_plan" && !(nodeType === "flow" && FLOW_PARAMETER_KEYS.has(key))
-  );
   const [ports, setPorts] = useState<NodePorts>(() => normalizeNodePorts(undefined, nodeType));
-  const [portContractUnlocked, setPortContractUnlocked] = useState(false);
-  const [customPortTypeKeys, setCustomPortTypeKeys] = useState<Set<string>>(() => new Set());
-  const [templateSearch, setTemplateSearch] = useState("");
-  const [implementationKind, setImplementationKind] = useState(() =>
-    normalizeImplementationKind(selectedNode?.data?.implementation?.kind),
-  );
-  const [implementationLanguage, setImplementationLanguage] = useState('python');
-  const [implementationDependencies, setImplementationDependencies] = useState('');
-  const [implementationEntrypoint, setImplementationEntrypoint] = useState('');
-  const [implementationReference, setImplementationReference] = useState('');
-  const [isSubpipelineEditorOpen, setIsSubpipelineEditorOpen] = useState(false);
-  const [subpipelineEditorGraph, setSubpipelineEditorGraph] = useState<{ nodes: unknown[]; edges: unknown[] }>({ nodes: [], edges: [] });
   const [reusablePipelines, setReusablePipelines] = useState<ReusablePipelineSummary[]>([]);
   const [selectedReusableVersion, setSelectedReusableVersion] = useState("");
   const [isLoadingReusablePipelines, setIsLoadingReusablePipelines] = useState(false);
-  const [editingReusablePipelineUid, setEditingReusablePipelineUid] = useState("");
-  const [editingReusablePipelineName, setEditingReusablePipelineName] = useState("");
-  const [editingReusablePipelineDescription, setEditingReusablePipelineDescription] = useState("");
-  const [editingReusableVersionName, setEditingReusableVersionName] = useState("Version 1");
   const [pendingAttachment, setPendingAttachment] = useState<ReusablePipelineAttachment | null>(null);
   const [isAttachmentReviewOpen, setIsAttachmentReviewOpen] = useState(false);
   const [isAttachingReusablePipeline, setIsAttachingReusablePipeline] = useState(false);
@@ -305,21 +247,16 @@ export function PropertiesPanel({
       || selectedNode?.data?.template_label
       || defaultTemplateForType(nodeType),
   );
-  const canManageInputFiles = typeSupportsInputFiles(nodeType);
-  const currentTemplateDefinition = findTemplateForType(nodeType, currentTemplate);
+  const canManageInputFiles = nodeSupportsInputFiles(nodeType, currentTemplate);
+  const editableParamEntries: Array<[string, unknown]> = Object.entries(param).filter(([key]) => (
+    key !== "model_plan" && !(nodeType === "flow" && FLOW_PARAMETER_KEYS.has(key))
+  ));
   const templateOptions = templateOptionsForType(nodeType, currentTemplate);
   const showTemplateSelector = templateOptions.length > 1;
-  const filteredTemplateOptions = templateOptions.filter((option) => {
-    const query = templateSearch.trim().toLowerCase();
-    return !query
-      || option.value === currentTemplate
-      || option.label.toLowerCase().includes(query)
-      || option.category.toLowerCase().includes(query);
-  });
-  const templateGroups = Array.from(new Set(filteredTemplateOptions.map((option) => option.category)))
+  const templateGroups = Array.from(new Set(templateOptions.map((option) => option.category)))
     .map((category) => ({
       category,
-      options: filteredTemplateOptions.filter((option) => option.category === category),
+      options: templateOptions.filter((option) => option.category === category),
     }));
   const indexedCodeFiles = files
     .map((file, index) => ({ file, index }))
@@ -329,6 +266,11 @@ export function PropertiesPanel({
     .filter(({ file }) => getNodeFileRole(file) === "data");
   const activeNodeIdRef = useRef<string | null>(selectedNode?.id ?? null);
   const locallyProducedNodeDataRef = useRef(new WeakSet<object>());
+  const onNodeUpdateRef = useRef(onNodeUpdate);
+
+  useEffect(() => {
+    onNodeUpdateRef.current = onNodeUpdate;
+  }, [onNodeUpdate]);
 
   // preview/edit file dialog state
   const [previewFile, setPreviewFile] = useState<File | null>(null);
@@ -384,6 +326,7 @@ export function PropertiesPanel({
       ? next.param
       : {};
     next.secret_params = normalizeSecretParamKeys(next.secret_params, next.param);
+    next.param = withoutSensitiveParameterValues(next.param, next.secret_params);
     next.ports = normalizeNodePorts(next.ports, nodeType);
 
     // 1) update local reactflow node
@@ -400,9 +343,9 @@ export function PropertiesPanel({
     const nodeChanged = activeNodeIdRef.current !== nextNodeId;
     if (nodeChanged) {
       setRevealedSecretParams(new Set());
-      setPortContractUnlocked(false);
-      setCustomPortTypeKeys(new Set());
-      setTemplateSearch("");
+      setSecretDrafts({});
+      setConfiguredSecretParams(new Set());
+      setNewParameterName("");
       activeNodeIdRef.current = nextNodeId;
     }
     if (
@@ -423,35 +366,44 @@ export function PropertiesPanel({
       const nextParam = (p && typeof p === "object" && !Array.isArray(p))
         ? p as NodeParamMap
         : {};
-      setParam(nextParam);
-      setSecretParamKeys(normalizeSecretParamKeys(selectedNode.data.secret_params, nextParam));
+      const nextSecrets = normalizeSecretParamKeys(selectedNode.data.secret_params, nextParam);
+      const legacySecretDrafts = Object.fromEntries(nextSecrets
+        .filter((key) => String(nextParam[key] ?? "").length > 0)
+        .map((key) => [key, String(nextParam[key])]));
+      const sanitizedParam = withoutSensitiveParameterValues(nextParam, nextSecrets);
+      setParam(sanitizedParam);
+      setSecretParamKeys(nextSecrets);
+      setSecretDrafts(legacySecretDrafts);
+      if (Object.keys(legacySecretDrafts).length > 0) {
+        const sanitizedData = {
+          ...selectedNode.data,
+          param: sanitizedParam,
+          secret_params: nextSecrets,
+        };
+        onNodeUpdateRef.current(selectedNode.id, sanitizedData);
+        void updateNodePropertiesInBackend(
+          selectedNode.id,
+          pickBackendUpdatableProps(selectedNode.id, sanitizedData, nodeType),
+        );
+        void Promise.all(Object.entries(legacySecretDrafts).map(async ([key, value]) => {
+          await storeNodeSecret(selectedNode.id, key, value);
+          setConfiguredSecretParams((current) => new Set([...current, key]));
+        })).catch((error) => {
+          toast.error("Could not move a sensitive value to secure storage", {
+            description: error instanceof Error ? error.message : "Unknown error",
+          });
+        });
+      }
       setPorts(normalizeNodePorts(selectedNode.data.ports, nodeType));
-      setImplementationKind(normalizeImplementationKind(selectedNode.data.implementation?.kind));
-      setImplementationLanguage(String(selectedNode.data.implementation?.language || 'python'));
-      setImplementationDependencies(
-        Array.isArray(selectedNode.data.implementation?.dependencies)
-          ? selectedNode.data.implementation.dependencies.map(String).join(', ')
-          : '',
-      );
-      setImplementationEntrypoint(getEntrypointHint(selectedNode.data as PropertyNodeData));
-      setImplementationReference(String(
-        selectedNode.data.implementation?.image
-          || selectedNode.data.implementation?.repository
-          || selectedNode.data.implementation?.endpoint
-          || '',
-      ));
     } else {
       setLabel('');
       setDescription('');
       setFiles([]);
       setParam({});
       setSecretParamKeys([]);
+      setSecretDrafts({});
+      setConfiguredSecretParams(new Set());
       setPorts(normalizeNodePorts(undefined, nodeType));
-      setImplementationKind("python");
-      setImplementationLanguage("python");
-      setImplementationDependencies("");
-      setImplementationEntrypoint("");
-      setImplementationReference("");
     }
 
     // reset preview dialog
@@ -465,6 +417,21 @@ export function PropertiesPanel({
     setEditedContent('');
     setPreviewFileIndex(-1);
   }, [selectedNode, nodeType]);
+
+  useEffect(() => {
+    if (!selectedNode?.id) return;
+    let cancelled = false;
+    void fetchConfiguredNodeSecrets(selectedNode.id)
+      .then((names) => {
+        if (!cancelled) {
+          setConfiguredSecretParams((current) => new Set([...current, ...names]));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setConfiguredSecretParams(new Set());
+      });
+    return () => { cancelled = true; };
+  }, [selectedNode?.id]);
 
   const selectedSubpipelinePipelineUid = selectedNode?.data.subpipeline?.reference?.pipeline_uid || "";
   const selectedSubpipelineVersionUid = selectedNode?.data.subpipeline?.reference?.version_uid || "";
@@ -511,17 +478,6 @@ export function PropertiesPanel({
     pushNodeUpdate({ description: e.target.value });
   };
 
-  const handleImplementationKindChange = (kind: string) => {
-    const normalized = normalizeImplementationKind(kind);
-    setImplementationKind(normalized);
-    pushNodeUpdate({
-      implementation: {
-        ...(selectedNode?.data.implementation || {}),
-        kind: normalized,
-      },
-    });
-  };
-
   const handleTemplateChange = (templateLabel: string) => {
     const template = findTemplateForType(nodeType, templateLabel);
     const nextPorts = normalizeNodePorts(template?.ports, nodeType);
@@ -532,23 +488,29 @@ export function PropertiesPanel({
       );
     if (removesConnectedPort("inputs") || removesConnectedPort("outputs")) {
       toast.error("Template change would break connections", {
-        description: "Disconnect or remap connected ports before choosing a template with a different contract.",
+        description: "Disconnect or remap the affected connections before choosing this template.",
       });
       return;
     }
+    const templateDefaults = defaultParametersForTemplate(nodeType, templateLabel);
     const nextParam = nodeType === "flow"
       ? {
           ...Object.fromEntries(Object.entries(param).filter(([key]) => !FLOW_PARAMETER_KEYS.has(key))),
-          ...defaultParametersForTemplate(nodeType, templateLabel),
+          ...templateDefaults,
         }
-      : param;
+      : { ...templateDefaults, ...param };
+    const nextSecretParams = Array.from(new Set([
+      ...secretParamKeys,
+      ...(template?.configurationFields || [])
+        .filter((field) => field.secret)
+        .map((field) => field.name),
+    ])).filter((key) => key in nextParam);
     const replaceGenericFlowLabel = nodeType === "flow" && ["Flow", "Condition", "Parallel Map"].includes(label);
     const nextLabel = replaceGenericFlowLabel ? (template?.label || templateLabel) : label;
     setPorts(nextPorts);
     setParam(nextParam);
+    setSecretParamKeys(nextSecretParams);
     if (nextLabel !== label) setLabel(nextLabel);
-    setPortContractUnlocked(false);
-    setCustomPortTypeKeys(new Set());
     pushNodeUpdate({
       template_label: templateLabel,
       template: {
@@ -556,7 +518,9 @@ export function PropertiesPanel({
         name: templateLabel,
       },
       ports: nextPorts,
-      ...(nodeType === "flow" ? { param: nextParam, label: nextLabel } : {}),
+      param: nextParam,
+      secret_params: nextSecretParams,
+      ...(nodeType === "flow" ? { label: nextLabel } : {}),
     });
   };
 
@@ -564,15 +528,6 @@ export function PropertiesPanel({
     const next = { ...param, [key]: value };
     setParam(next);
     pushNodeUpdate({ param: next, secret_params: secretParamKeys });
-  };
-
-  const updateImplementation = (patch: Record<string, unknown>) => {
-    pushNodeUpdate({
-      implementation: {
-        ...(selectedNode?.data.implementation || {}),
-        ...patch,
-      },
-    });
   };
 
   const applyReusablePipelineVersion = (
@@ -629,12 +584,26 @@ export function PropertiesPanel({
         pipelineUid,
         versionUid,
       });
+      if (preview.compatibility.conflicts.length === 0) {
+        const attached = await attachReusablePipelineVersion({
+          flowId: selectedNode.id,
+          pipelineUid,
+          versionUid,
+          inputMapping: preview.compatibility.input_mapping,
+          outputMapping: preview.compatibility.output_mapping,
+        });
+        applyReusablePipelineVersion(attached, { persist: false });
+        toast.success("Reusable pipeline attached", {
+          description: `${attached.reference.pipeline_name} · ${attached.reference.version_name}`,
+        });
+        return;
+      }
       setPendingAttachment(preview);
       setAttachmentInputMapping(preview.compatibility.input_mapping);
       setAttachmentOutputMapping(preview.compatibility.output_mapping);
       setIsAttachmentReviewOpen(true);
     } catch (error) {
-      toast.error("Could not review reusable pipeline version", {
+      toast.error("Could not attach reusable pipeline version", {
         description: error instanceof Error ? error.message : "Unknown error",
       });
     } finally {
@@ -668,54 +637,6 @@ export function PropertiesPanel({
     }
   };
 
-  const openReferencedPipeline = async () => {
-    const reference = selectedNode?.data.subpipeline?.reference;
-    const resolved = selectedNode?.data.subpipeline?.resolved_graph;
-    const legacy = selectedNode?.data.subpipeline?.graph;
-    try {
-      if (reference?.pipeline_uid && reference.version_uid) {
-        const version = await fetchReusablePipelineVersion(reference.pipeline_uid, reference.version_uid);
-        const reusable = reusablePipelines.find((pipeline) => pipeline.uid === reference.pipeline_uid);
-        setSubpipelineEditorGraph(version.graph);
-        setEditingReusablePipelineUid(reference.pipeline_uid);
-        setEditingReusablePipelineName(version.reference.pipeline_name);
-        setEditingReusablePipelineDescription(version.description || reusable?.description || "");
-        setEditingReusableVersionName(`Version ${(reusable?.versions.length || 0) + 1}`);
-      } else {
-        setSubpipelineEditorGraph(legacy || { nodes: [], edges: [] });
-        setEditingReusablePipelineUid("");
-        setEditingReusablePipelineName(label.trim() || "Reusable Pipeline");
-        setEditingReusablePipelineDescription(description.trim());
-        setEditingReusableVersionName("Version 1");
-      }
-      setIsSubpipelineEditorOpen(true);
-    } catch (error) {
-      toast.error("Could not open referenced pipeline", {
-        description: error instanceof Error ? error.message : "Unknown error",
-      });
-    }
-  };
-
-  const saveSubpipelineDefinition = async (draft: ReusablePipelineSaveDraft) => {
-    const saved = await saveReusablePipeline({
-      pipelineUid: editingReusablePipelineUid || undefined,
-      name: draft.name,
-      description: draft.description,
-      versionName: draft.versionName,
-      graph: draft.graph,
-    });
-    setEditingReusablePipelineUid(saved.reference.pipeline_uid);
-    setEditingReusablePipelineName(saved.reference.pipeline_name);
-    setEditingReusablePipelineDescription(draft.description);
-    const pipelines = await refreshReusablePipelineCatalog();
-    const savedPipeline = pipelines.find((pipeline) => pipeline.uid === saved.reference.pipeline_uid);
-    setEditingReusableVersionName(`Version ${(savedPipeline?.versions.length || 0) + 1}`);
-    setSelectedReusableVersion(`${saved.reference.pipeline_uid}::${saved.reference.version_uid}`);
-    toast.success(editingReusablePipelineUid ? "Reusable pipeline version saved" : "Reusable pipeline created", {
-      description: `${saved.reference.pipeline_name} · ${saved.reference.version_name}. Review and use this version when ready.`,
-    });
-  };
-
   // Upload newly added files through the backend. Same filename replaces older entry.
   const handleFileUpload = async (
     e: React.ChangeEvent<HTMLInputElement>,
@@ -725,6 +646,26 @@ export function PropertiesPanel({
     if (!selectedNode) return;
     const picked = e.target.files ? Array.from(e.target.files) : [];
     if (picked.length === 0) return;
+    if (role === "code") {
+      const invalid = picked.find((file) => !USER_CODE_FILE_PATTERN.test(file.name));
+      if (invalid) {
+        toast.error(`Could not upload ${invalid.name}`, {
+          description: "Upload main.py, optional requirements.txt, or a supporting Python package file.",
+        });
+        e.target.value = "";
+        return;
+      }
+      const incorrectlyCasedEntrypoint = picked.find((file) => (
+        file.name.toLowerCase() === "main.py" && file.name !== "main.py"
+      ));
+      if (incorrectlyCasedEntrypoint) {
+        toast.error("Rename the entrypoint to main.py", {
+          description: "The Python entrypoint filename is case-sensitive.",
+        });
+        e.target.value = "";
+        return;
+      }
+    }
     const existing = files;
     // Map filename -> index in existing array
     const nameToIndex = new Map<string, number>();
@@ -931,87 +872,123 @@ export function PropertiesPanel({
     }
   };
 
-  // Static node parameter helpers.
-  const addParamRow = () => {
-    let i = 1;
-    let key = `key_${i}`;
-    while (param[key] != null) {
-      i += 1;
-      key = `key_${i}`;
-    }
-    const next = { ...param, [key]: "" };
-    setParam(next);
-    pushNodeUpdate({ param: next, secret_params: secretParamKeys });
-  };
-
-  const renameParamKey = (oldKey: string, newKeyRaw: string) => {
-    const newKey = newKeyRaw.trim();
-    if (!newKey || newKey === oldKey) return;
-    const next: NodeParamMap = {};
-    Object.entries(param).forEach(([k, v]) => {
-      if (k === oldKey) next[newKey] = v ?? "";
-      else next[k] = v ?? "";
-    });
-    setParam(next);
-    const renamedSecrets = secretParamKeys
-      .map((key) => key === oldKey ? newKey : key)
-      .filter((key) => key in next);
-    if (isSensitiveParameterName(newKey) && !renamedSecrets.includes(newKey)) {
-      renamedSecrets.push(newKey);
-    }
-    setSecretParamKeys(renamedSecrets);
-    setRevealedSecretParams((current) => {
-      const nextRevealed = new Set(current);
-      if (nextRevealed.delete(oldKey)) nextRevealed.add(newKey);
-      return nextRevealed;
-    });
-    pushNodeUpdate({ param: next, secret_params: renamedSecrets });
-    setDraftKeys((prev) => {
-      const copy = { ...prev };
-      delete copy[oldKey];
-      return copy;
-    });
-  };
-
   const setParamValue = (key: string, value: string) => {
+    if (secretParamKeys.includes(key)) {
+      setSecretDrafts((current) => ({ ...current, [key]: value }));
+      return;
+    }
     const next = { ...param, [key]: value };
     setParam(next);
-    pushNodeUpdate({ param: next, secret_params: secretParamKeys });
-  };
-
-  const removeParamKey = (key: string) => {
-    const next = { ...param };
-    delete next[key];
-    setParam(next);
-    const nextSecrets = secretParamKeys.filter((secretKey) => secretKey !== key);
-    setSecretParamKeys(nextSecrets);
-    setRevealedSecretParams((current) => {
-      const nextRevealed = new Set(current);
-      nextRevealed.delete(key);
-      return nextRevealed;
-    });
-    pushNodeUpdate({ param: next, secret_params: nextSecrets });
-    setDraftKeys((prev) => {
-      const copy = { ...prev };
-      delete copy[key];
-      return copy;
+    pushNodeUpdate({
+      param: next,
+      secret_params: secretParamKeys,
     });
   };
 
-  const toggleSecretParam = (key: string) => {
-    const isSecret = secretParamKeys.includes(key);
-    const nextSecrets = isSecret
-      ? secretParamKeys.filter((secretKey) => secretKey !== key)
-      : [...secretParamKeys, key];
-    setSecretParamKeys(nextSecrets);
-    if (isSecret) {
+  const commitSecretValue = async (key: string) => {
+    if (!selectedNode?.id) return;
+    const value = secretDrafts[key] || "";
+    if (!value) return;
+    try {
+      await storeNodeSecret(selectedNode.id, key, value);
+      setConfiguredSecretParams((current) => new Set([...current, key]));
+      setSecretDrafts((current) => ({ ...current, [key]: "" }));
       setRevealedSecretParams((current) => {
-        const nextRevealed = new Set(current);
-        nextRevealed.delete(key);
-        return nextRevealed;
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+      toast.success(`${key} stored securely`);
+    } catch (error) {
+      toast.error(`Could not store ${key}`, {
+        description: error instanceof Error ? error.message : "Unknown error",
       });
     }
-    pushNodeUpdate({ secret_params: nextSecrets });
+  };
+
+  const setParameterSensitive = async (key: string, sensitive: boolean) => {
+    const currentValue = String(param[key] ?? "");
+    if (sensitive) {
+      const nextSecrets = Array.from(new Set([...secretParamKeys, key]));
+      const next = { ...param, [key]: "" };
+      setParam(next);
+      setSecretParamKeys(nextSecrets);
+      if (currentValue) setSecretDrafts((current) => ({ ...current, [key]: currentValue }));
+      pushNodeUpdate({ param: next, secret_params: nextSecrets });
+      if (currentValue && selectedNode?.id) {
+        try {
+          await storeNodeSecret(selectedNode.id, key, currentValue);
+          setConfiguredSecretParams((current) => new Set([...current, key]));
+          setSecretDrafts((current) => ({ ...current, [key]: "" }));
+        } catch (error) {
+          toast.error(`Could not store ${key}`, {
+            description: error instanceof Error ? error.message : "Unknown error",
+          });
+        }
+      }
+      return;
+    }
+
+    const restoredValue = secretDrafts[key] || "";
+    const nextSecrets = secretParamKeys.filter((name) => name !== key);
+    const next = { ...param, [key]: restoredValue };
+    setParam(next);
+    setSecretParamKeys(nextSecrets);
+    setConfiguredSecretParams((current) => {
+      const updated = new Set(current);
+      updated.delete(key);
+      return updated;
+    });
+    setSecretDrafts((current) => {
+      const updated = { ...current };
+      delete updated[key];
+      return updated;
+    });
+    pushNodeUpdate({ param: next, secret_params: nextSecrets });
+    if (selectedNode?.id) {
+      void deleteNodeSecret(selectedNode.id, key).catch(() => undefined);
+    }
+  };
+
+  const addParameter = () => {
+    const name = newParameterName.trim();
+    if (!name) return;
+    if (!USER_PARAMETER_NAME_PATTERN.test(name)) {
+      toast.error("Use a simple parameter name", {
+        description: "Start with a letter or underscore; then use letters, numbers, dots, dashes, or underscores.",
+      });
+      return;
+    }
+    if (name in param) {
+      toast.error(`Parameter ${name} already exists.`);
+      return;
+    }
+    const next = { ...param, [name]: "" };
+    const nextSecrets = isSensitiveParameterName(name)
+      ? Array.from(new Set([...secretParamKeys, name]))
+      : secretParamKeys;
+    setParam(next);
+    setSecretParamKeys(nextSecrets);
+    setNewParameterName("");
+    pushNodeUpdate({ param: next, secret_params: nextSecrets });
+  };
+
+  const removeParameter = (key: string) => {
+    const wasSecret = secretParamKeys.includes(key);
+    const next = { ...param };
+    delete next[key];
+    const nextSecrets = secretParamKeys.filter((name) => name !== key);
+    setParam(next);
+    setSecretParamKeys(nextSecrets);
+    setRevealedSecretParams((current) => {
+      const updated = new Set(current);
+      updated.delete(key);
+      return updated;
+    });
+    pushNodeUpdate({ param: next, secret_params: nextSecrets });
+    if (wasSecret && selectedNode?.id) {
+      void deleteNodeSecret(selectedNode.id, key).catch(() => undefined);
+    }
   };
 
   const toggleSecretVisibility = (key: string) => {
@@ -1023,70 +1000,21 @@ export function PropertiesPanel({
     });
   };
 
-  const pushPorts = (next: NodePorts) => {
-    const normalized = normalizeNodePorts(next, nodeType);
-    setPorts(normalized);
-    pushNodeUpdate({ ports: normalized });
-  };
-
-  const addPort = (direction: keyof NodePorts) => {
-    const existing = ports[direction];
-    const stem = direction === "inputs" ? "input" : "output";
-    let index = existing.length + 1;
-    let id = `${stem}-${index}`;
-    const ids = new Set(existing.map((port) => port.id));
-    while (ids.has(id)) {
-      index += 1;
-      id = `${stem}-${index}`;
-    }
-    pushPorts({
-      ...ports,
-      [direction]: [...existing, {
-        id,
-        name: id,
-        type: "any",
-        required: true,
-        description: "",
-      }],
-    });
-  };
-
-  const updatePort = (
-    direction: keyof NodePorts,
-    portId: string,
-    patch: Partial<NodePort>,
-  ) => {
-    pushPorts({
-      ...ports,
-      [direction]: ports[direction].map((port) =>
-        port.id === portId ? { ...port, ...patch } : port
-      ),
-    });
-  };
-
-  const removePort = (direction: keyof NodePorts, portId: string) => {
-    pushPorts({
-      ...ports,
-      [direction]: ports[direction].filter((port) => port.id !== portId),
-    });
-  };
-
   const renderFileArea = (
     role: NodeFileRole,
     indexedFiles: Array<{ file: NodeFileReference; index: number }>,
     inputRef: React.RefObject<HTMLInputElement>,
   ) => {
     const attachmentLabel = role === "code"
-      ? "Runtime Package"
-      : nodeType === "source"
-        ? "Pipeline Input"
-        : "Sample Input";
+      ? "Python Code"
+      : "Input";
     return (
     <div className="rounded-lg border border-dashed border-border p-3">
       <input
         ref={inputRef}
         type="file"
         multiple
+        accept={role === "code" ? ".py,.pyi,.txt,.json,.toml,.yaml,.yml,.sql,.sh" : undefined}
         onChange={(event) => { void handleFileUpload(event, role); }}
         className="hidden"
       />
@@ -1098,7 +1026,7 @@ export function PropertiesPanel({
         className="w-full"
       >
         <Upload className="mr-2 h-4 w-4" />
-        Upload {attachmentLabel} Files
+        {role === "code" ? "Upload your Python code" : `Upload ${attachmentLabel} Files`}
       </Button>
 
       {indexedFiles.length === 0 ? (
@@ -1139,8 +1067,10 @@ export function PropertiesPanel({
   };
 
   const validationReport = selectedNode?.data.generated_artifact?.validation_report;
-  const configurationStatus = selectedNode?.data.configuration_status || "unconfigured";
   const designValidationIssues = selectedNode?.data.validation_issues || [];
+  const visibleDesignValidationIssues = designValidationIssues.filter((issue) => (
+    issue.category !== "ports" && issue.category !== "implementation"
+  ));
   const categoryStatus = (category: ValidationIssue['category']) => {
     const categoryIssues = designValidationIssues.filter((issue) => issue.category === category);
     if (categoryIssues.some((issue) => issue.severity === 'error')) return 'invalid';
@@ -1151,133 +1081,150 @@ export function PropertiesPanel({
     const status = categoryStatus(category);
     return status === "invalid" ? "error" : status === "warning" ? "warning" : undefined;
   };
-  const connectedPorts = selectedNode?.data.connected_ports || {};
-  const isPortConnected = (direction: keyof NodePorts, portId: string) =>
-    (connectedPorts[direction] || []).includes(portId);
-  const referenceOwnsPortContract = nodeType === "subpipeline";
-  const canCustomizePorts = isAdvancedMode && portContractUnlocked && !referenceOwnsPortContract;
+  const implementationMigrationError = taskImplementationMigrationError(selectedNode?.data.implementation);
+  const implementationStatus = taskImplementationStatus({
+    implementation: selectedNode?.data.implementation,
+    artifact: selectedNode?.data.generated_artifact,
+    hasPythonPackage: indexedCodeFiles.some(({ file }) => /(^|\/)main\.py$/i.test(getNodeFileName(file))),
+    isGenerating: isGeneratingScript,
+    hasImplementationErrors: designValidationIssues.some((issue) => (
+      issue.category === "implementation" && issue.severity === "error"
+    )),
+  });
+  const implementationStatusLabel = {
+    missing: "Not added",
+    generating: "Generating",
+    current: "Current",
+    stale: "Stale",
+    invalid: "Invalid",
+  }[implementationStatus];
+  const packageEntry = indexedCodeFiles.find(({ file }) => /(^|\/)main\.py$/i.test(getNodeFileName(file)))
+    || indexedCodeFiles[0];
+  const hasValidationMessages = visibleDesignValidationIssues.length > 0
+    || Boolean(validationReport?.errors?.length)
+    || Boolean(validationReport?.warnings?.length);
   const focusIssueSection = (issue: ValidationIssue) => {
     const section = ["unknown-edge-port", "missing-edge-port"].includes(issue.code)
-      ? "ports"
+      ? "validation"
       : issue.category;
-    document.getElementById(`inspector-${section}`)?.scrollIntoView({
-      behavior: "smooth",
-      block: "start",
+    window.setTimeout(() => {
+      document.getElementById(`inspector-${section}`)?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
     });
   };
-  const renderPortDirection = (direction: keyof NodePorts) => {
-    const directionLabel = direction === "inputs" ? "Inputs" : "Outputs";
-    const structurallyBlocked = direction === "inputs"
-      ? nodeType === "source"
-      : nodeType === "destination";
-    return (
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <Label className="text-xs uppercase tracking-wide text-muted-foreground">{directionLabel}</Label>
-          {!structurallyBlocked && canCustomizePorts && (
-            <Button type="button" variant="outline" size="sm" onClick={() => addPort(direction)}>
-              <PlusCircle className="mr-1 h-3.5 w-3.5" /> Add
-            </Button>
-          )}
-        </div>
-        {ports[direction].length === 0 && (
-          <p className="text-xs text-muted-foreground">
-            {structurallyBlocked
-              ? `${nodeType === "source" ? "Sources" : "Destinations"} cannot define ${direction}.`
-              : `No ${direction} defined.`}
-          </p>
-        )}
-        {ports[direction].map((port) => {
-          const portKey = `${direction}:${port.id}`;
-          const connected = isPortConnected(direction, port.id);
-          const customType = customPortTypeKeys.has(portKey)
-            || !PORT_TYPE_OPTIONS.includes(port.type as typeof PORT_TYPE_OPTIONS[number]);
-          return (
-            <div key={port.id} className="space-y-2 rounded-md border border-border/70 p-2">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs font-medium">{port.name}</span>
-                {connected && <Badge variant="outline" className="text-[10px]">Connected</Badge>}
-              </div>
-              <div className="grid grid-cols-[1fr_1fr_auto] gap-2">
-                <Input
-                  value={port.name}
-                  disabled={!canCustomizePorts || connected}
-                  onChange={(event) => updatePort(direction, port.id, { name: event.target.value })}
-                  placeholder="name"
-                  title={connected ? "Disconnect or remap this port before renaming it." : undefined}
-                />
-                <select
-                  className="h-9 min-w-0 rounded-md border border-input bg-background px-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
-                  value={customType ? "__custom__" : port.type}
-                  disabled={!canCustomizePorts || connected}
-                  onChange={(event) => {
-                    if (event.target.value === "__custom__") {
-                      setCustomPortTypeKeys((current) => new Set(current).add(portKey));
-                      if (!customType) updatePort(direction, port.id, { type: "CustomType" });
-                      return;
-                    }
-                    setCustomPortTypeKeys((current) => {
-                      const next = new Set(current);
-                      next.delete(portKey);
-                      return next;
-                    });
-                    updatePort(direction, port.id, { type: event.target.value });
+  const renderParametersSection = () => (
+    <InspectorSection
+      id="inspector-configuration"
+      title="Parameters"
+      description="Optional values available to generated or uploaded code at runtime."
+    >
+      <div className="space-y-3">
+      {editableParamEntries.map(([key, value]) => {
+        const isSecret = secretParamKeys.includes(key);
+        const isRevealed = revealedSecretParams.has(key);
+        return (
+          <div key={key} className="space-y-1.5 rounded-md border bg-background/50 p-2">
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor={`parameter-${key}`} className="min-w-0 truncate font-mono text-xs">
+                {key}
+              </Label>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 shrink-0"
+                onClick={() => removeParameter(key)}
+                aria-label={`Remove parameter ${key}`}
+              >
+                <X className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                <Checkbox
+                  checked={isSecret}
+                  onCheckedChange={(checked) => {
+                    void setParameterSensitive(key, checked === true);
                   }}
-                  title={connected ? "Disconnect or remap this port before changing its type." : undefined}
-                >
-                  {PORT_TYPE_OPTIONS.map((type) => <option key={type} value={type}>{type}</option>)}
-                  <option value="__custom__">Custom type…</option>
-                </select>
+                  aria-label={`Mark ${key} as sensitive`}
+                />
+                Sensitive
+              </label>
+              {isSecret && configuredSecretParams.has(key) && (
+                <Badge variant="outline" className="text-[10px]">Stored securely</Badge>
+              )}
+            </div>
+            <div className="relative">
+              <Input
+                id={`parameter-${key}`}
+                type={isSecret && !isRevealed ? "password" : "text"}
+                value={isSecret
+                  ? (secretDrafts[key] || "")
+                  : (typeof value === "string" ? value : JSON.stringify(value ?? ""))}
+                onChange={(event) => setParamValue(key, event.target.value)}
+                onBlur={() => { if (isSecret) void commitSecretValue(key); }}
+                placeholder={isSecret
+                  ? (configuredSecretParams.has(key) ? "Stored securely — enter to replace" : "Enter sensitive value")
+                  : "Value"}
+                className={isSecret ? "pr-9" : undefined}
+              />
+              {isSecret && (
                 <Button
                   type="button"
                   variant="ghost"
-                  size="sm"
-                  disabled={!canCustomizePorts || connected}
-                  onClick={() => removePort(direction, port.id)}
-                  aria-label={`Remove ${direction === "inputs" ? "input" : "output"} ${port.name}`}
-                  title={connected ? "Disconnect or remap this port before deleting it." : undefined}
+                  size="icon"
+                  className="absolute right-0 top-0 h-9 w-9"
+                  onClick={() => toggleSecretVisibility(key)}
+                  aria-label={isRevealed ? `Hide ${key}` : `Show ${key}`}
                 >
-                  <X className="h-4 w-4" />
+                  {isRevealed ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </Button>
-              </div>
-              {customType && (
-                <Input
-                  value={port.type}
-                  disabled={!canCustomizePorts || connected}
-                  onChange={(event) => updatePort(direction, port.id, { type: event.target.value })}
-                  placeholder="Custom contract type"
-                />
               )}
-              <div className="grid grid-cols-[auto_1fr] items-center gap-2 pl-1">
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <input
-                    type="checkbox"
-                    checked={port.required}
-                    disabled={!canCustomizePorts}
-                    onChange={(event) => updatePort(direction, port.id, { required: event.target.checked })}
-                  />
-                  Required
-                </label>
-                <Input
-                  value={port.description}
-                  disabled={!canCustomizePorts}
-                  onChange={(event) => updatePort(direction, port.id, { description: event.target.value })}
-                  placeholder="Contract description"
-                />
-              </div>
             </div>
-          );
-        })}
+          </div>
+        );
+      })}
+        {editableParamEntries.length === 0 && (
+          <p className="text-xs text-muted-foreground">No parameters added.</p>
+        )}
+        <div className="flex gap-2">
+          <Input
+            aria-label="New parameter name"
+            value={newParameterName}
+            onChange={(event) => setNewParameterName(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                addParameter();
+              }
+            }}
+            placeholder="Parameter name"
+          />
+          <Button
+            type="button"
+            variant="outline"
+            onClick={addParameter}
+            disabled={!newParameterName.trim()}
+          >
+            <Plus className="mr-1.5 h-4 w-4" />
+            Add
+          </Button>
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          Regular values are available in <code className="rounded bg-muted px-1">INLUMEN_PARAMS_JSON</code>.
+          {" "}Sensitive values are stored outside the pipeline and injected only through their individual
+          {" "}<code className="rounded bg-muted px-1">INLUMEN_PARAM_*</code> variable.
+        </p>
       </div>
-    );
-  };
+    </InspectorSection>
+  );
 
   const renderInputFilesSection = () => (
     <InspectorSection
-      title={nodeType === "source" ? "Pipeline Input Files" : "Sample Inputs"}
-      description={nodeType === "source"
-        ? "Upload the actual files emitted by this source when the pipeline runs. Files selected from the Run tab override these attachments for that run."
-        : "Upload representative input files for inspection, code generation, and repeatable tests."}
+      title="Input Files"
+      description="Upload the files this Source provides to the pipeline. These files are used when the pipeline runs."
     >
       {renderFileArea("data", indexedDataFiles, dataFileInputRef)}
     </InspectorSection>
@@ -1290,7 +1237,7 @@ export function PropertiesPanel({
           <div>
             <h2 className="text-lg font-semibold">Properties</h2>
             <p className="text-xs text-muted-foreground mt-1">
-              Configure the selected node
+              {selectedNode ? `${getStepTypeLabel(nodeType)} details` : "Select a node to edit"}
             </p>
           </div>
         </div>
@@ -1299,21 +1246,21 @@ export function PropertiesPanel({
       {selectedNode ? (
         <div className="p-4 flex-1 overflow-y-auto">
           <div className="space-y-4">
-            <InspectorSection
+            {hasValidationMessages && <InspectorSection
               id="inspector-validation"
               title="Validation"
-              description="Select an issue to jump to the field or contract that needs attention."
-              status={designValidationIssues.some((issue) => issue.severity === "error")
+              description="Review anything that still needs attention before running the pipeline."
+              status={visibleDesignValidationIssues.some((issue) => issue.severity === "error")
                 ? "error"
-                : designValidationIssues.length > 0
+                : visibleDesignValidationIssues.length > 0
                   ? "warning"
                   : undefined}
             >
-              {designValidationIssues.length === 0 ? (
+              {visibleDesignValidationIssues.length === 0 ? (
                 <p className="text-xs text-[hsl(var(--success-foreground))]">No design-time issues on this component.</p>
               ) : (
                 <div className="space-y-1.5">
-                  {designValidationIssues.map((issue, index) => (
+                  {visibleDesignValidationIssues.map((issue, index) => (
                     <button
                       key={`${issue.code}-${index}`}
                       type="button"
@@ -1340,64 +1287,16 @@ export function PropertiesPanel({
                   {validationReport.warnings.join(" ")}
                 </div>
               )}
-            </InspectorSection>
+            </InspectorSection>}
 
             <InspectorSection
               id="inspector-graph"
-              title="General"
-              description="Choose a stable graph component and specialize it with a template."
+              title="Details"
+              description="Describe what this component should do."
               status={sectionStatus("graph")}
             >
-              <div className="flex items-center justify-between">
-                <Label className="text-sm">Component kind</Label>
-                <Badge
-                  variant="outline"
-                  className={cn(
-                    "flex items-center gap-1 px-2 text-xs font-normal",
-                    getTypeColor(nodeType),
-                  )}
-                >
-                  {getTypeIcon(nodeType)}
-                  {getStepTypeLabel(nodeType)}
-                </Badge>
-              </div>
-
-              {showTemplateSelector && (
-                <div className="space-y-2">
-                  <Label htmlFor="node-template" className="text-sm">
-                    Template
-                  </Label>
-                  {nodeType === "task" && (
-                    <Input
-                      value={templateSearch}
-                      onChange={(event) => setTemplateSearch(event.target.value)}
-                      placeholder="Search templates or categories"
-                      aria-label="Search templates"
-                    />
-                  )}
-                  <select
-                    id="node-template"
-                    className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-                    value={currentTemplate}
-                    onChange={(event) => handleTemplateChange(event.target.value)}
-                  >
-                    {templateGroups.map((group) => (
-                      <optgroup key={group.category} label={group.category}>
-                        {group.options.map((option) => (
-                          <option key={option.value} value={option.value}>{option.label}</option>
-                        ))}
-                      </optgroup>
-                    ))}
-                  </select>
-                  <p className="text-xs text-muted-foreground">
-                    {currentTemplateDefinition?.description
-                      || "Categories help you find concrete templates; changing one never changes the structural graph kind."}
-                  </p>
-                </div>
-              )}
-
               <div className="space-y-2">
-                <Label htmlFor="node-label" className="text-sm">Label</Label>
+                <Label htmlFor="node-label" className="text-sm">Name</Label>
                 <Input
                   id="node-label"
                   value={label}
@@ -1420,7 +1319,7 @@ export function PropertiesPanel({
               </div>
             </InspectorSection>
 
-            {nodeType === "source" && canManageInputFiles && renderInputFilesSection()}
+            {canManageInputFiles && renderInputFilesSection()}
 
             {nodeType === "flow" && (
               <InspectorSection
@@ -1429,6 +1328,25 @@ export function PropertiesPanel({
                 description="Flow components control scheduling and routing; they do not transform the value themselves."
                 status={sectionStatus("configuration")}
               >
+                {showTemplateSelector && (
+                  <div className="space-y-2">
+                    <Label htmlFor="flow-behavior">Behavior</Label>
+                    <select
+                      id="flow-behavior"
+                      className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                      value={currentTemplate}
+                      onChange={(event) => handleTemplateChange(event.target.value)}
+                    >
+                      {templateGroups.map((group) => (
+                        <optgroup key={group.category} label={group.category}>
+                          {group.options.map((option) => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                          ))}
+                        </optgroup>
+                      ))}
+                    </select>
+                  </div>
+                )}
                 {currentTemplate === "Condition" && (
                   <div className="space-y-3">
                     <div className="flex gap-2 rounded-md border border-purple-500/25 bg-purple-500/10 p-3 text-xs text-muted-foreground">
@@ -1495,282 +1413,51 @@ export function PropertiesPanel({
               </InspectorSection>
             )}
 
-            <InspectorSection
-              id="inspector-ports"
-              title="Inputs / Outputs"
-              description="The selected template owns this connection contract by default."
-              status={sectionStatus("ports") || (designValidationIssues.some((issue) =>
-                ["unknown-edge-port", "missing-edge-port"].includes(issue.code),
-              ) ? "error" : undefined)}
-            >
-              <div className="flex items-center justify-between gap-3 rounded-md border border-border/70 bg-background/60 p-2">
-                <div>
-                  <Badge variant="outline">
-                    {referenceOwnsPortContract
-                      ? "Referenced interface"
-                      : canCustomizePorts
-                        ? "Customized"
-                        : "Template-managed"}
-                  </Badge>
-                  <p className="mt-1 text-[11px] text-muted-foreground">
-                    {referenceOwnsPortContract
-                      ? "Select a reusable pipeline version to update this contract."
-                      : isAdvancedMode
-                        ? canCustomizePorts
-                          ? "Connected port names, types, and deletion remain protected."
-                          : "Unlock only when this component needs a non-standard contract."
-                        : "Switch the canvas to Advanced mode to customize this contract."}
-                  </p>
-                </div>
-                {isAdvancedMode && !portContractUnlocked && !referenceOwnsPortContract && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setPortContractUnlocked(true)}
-                  >
-                    <Unlock className="mr-1 h-3.5 w-3.5" /> Customize contract
-                  </Button>
-                )}
-              </div>
-              {renderPortDirection("inputs")}
-              {renderPortDirection("outputs")}
-            </InspectorSection>
+            {canManageImplementation && renderParametersSection()}
 
-            <InspectorSection
-              id="inspector-configuration"
-              title={nodeType === "source"
-                ? "Source Configuration"
-                : nodeType === "destination"
-                  ? "Destination Configuration"
-                  : "Parameters"}
-              description={nodeType === "source"
-                ? "Configure how this source reads data; emitted values are described by its output ports."
-                : nodeType === "destination"
-                  ? "Configure how pipeline results are delivered; incoming values arrive through its input ports."
-                  : "Static configuration stays on this component; only dynamic values belong on ports."}
-              status={configurationStatus === "invalid" ? "error" : sectionStatus("configuration")}
-            >
-              <div className="flex items-center justify-between">
-                <Label className="text-sm">Parameters</Label>
-                <Button type="button" variant="outline" size="sm" onClick={addParamRow}>
-                  <PlusCircle className="mr-2 h-4 w-4" />
-                  Add field
-                </Button>
-              </div>
-
-              <div className="space-y-2">
-                {editableParamEntries.length === 0 && (
-                  <p className="text-xs text-muted-foreground">No static parameters configured.</p>
-                )}
-
-                {editableParamEntries.length > 0 && (
-                  <p className="text-xs text-muted-foreground">
-                    Secret values are masked by default. Use the lock to classify a field and the eye to reveal it locally.
-                  </p>
-                )}
-
-                {editableParamEntries.map(([k, v]) => {
-                  const isSecret = secretParamKeys.includes(k);
-                  const isRevealed = revealedSecretParams.has(k);
-                  return (
-                    <div key={k} className="grid grid-cols-[1fr_1fr_auto_auto] gap-2 items-center">
-                      <Input
-                        value={draftKeys[k] ?? k}
-                        placeholder="key"
-                        onChange={(e) => {
-                          e.stopPropagation();
-                          setDraftKeys((prev) => ({ ...prev, [k]: e.target.value }));
-                        }}
-                        onKeyDown={(e) => {
-                          e.stopPropagation();
-                          if (e.key === "Enter") {
-                            e.preventDefault();
-                            const newKey = (draftKeys[k] ?? "").trim();
-                            if (newKey && newKey !== k) renameParamKey(k, newKey);
-                            setDraftKeys((prev) => {
-                              const copy = { ...prev };
-                              delete copy[k];
-                              return copy;
-                            });
-                          }
-                        }}
-                        onBlur={() => {
-                          const newKey = (draftKeys[k] ?? "").trim();
-                          if (newKey && newKey !== k) renameParamKey(k, newKey);
-                          setDraftKeys((prev) => {
-                            const copy = { ...prev };
-                            delete copy[k];
-                            return copy;
-                          });
-                        }}
-                      />
-                      <div className="relative">
-                        <Input
-                          type={isSecret && !isRevealed ? "password" : "text"}
-                          value={typeof v === "string" ? v : JSON.stringify(v ?? "")}
-                          onChange={(e) => setParamValue(k, e.target.value)}
-                          placeholder="value"
-                          className={isSecret ? "pr-9" : undefined}
-                        />
-                        {isSecret && (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="absolute right-0 top-0 h-9 w-9"
-                            onClick={() => toggleSecretVisibility(k)}
-                            aria-label={isRevealed ? `Hide ${k}` : `Show ${k}`}
-                            title={isRevealed ? "Hide secret value" : "Show secret value"}
-                          >
-                            {isRevealed
-                              ? <EyeOff className="w-4 h-4" />
-                              : <Eye className="w-4 h-4" />}
-                          </Button>
-                        )}
-                      </div>
-                      <Button
-                        type="button"
-                        variant={isSecret ? "secondary" : "ghost"}
-                        size="sm"
-                        onClick={() => toggleSecretParam(k)}
-                        aria-label={isSecret ? `Make ${k} visible` : `Make ${k} secret`}
-                        title={isSecret ? "Treat as ordinary parameter" : "Mask as secret parameter"}
-                      >
-                        {isSecret
-                          ? <LockKeyhole className="w-4 h-4" />
-                          : <Unlock className="w-4 h-4" />}
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => removeParamKey(k)}
-                        aria-label={`Remove parameter ${k}`}
-                      >
-                        <X className="w-4 h-4" />
-                      </Button>
-                    </div>
-                  );
-                })}
-              </div>
-            </InspectorSection>
-
-            {canGenerateScript && (
+            {canManageImplementation && (
               <InspectorSection
                 id="inspector-implementation"
-                title="Runtime Package"
-                description="Task code runs from this package. For Python, attach main.py and requirements.txt (not requirements.py). Source and Destination components use inLumen-managed adapters."
-                status={sectionStatus("implementation")}
+                title="Implementation"
+                description="Generate the code with AI or upload main.py with an optional requirements.txt file."
+                status={implementationStatus === "invalid" ? "error" : sectionStatus("implementation")}
               >
-                <div className="space-y-2">
-                  <Label htmlFor="implementation-kind" className="text-sm">Runtime</Label>
-                  <select
-                    id="implementation-kind"
-                    className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-                    value={implementationKind}
-                    onChange={(event) => handleImplementationKindChange(event.target.value)}
-                  >
-                    {!IMPLEMENTATION_KIND_OPTIONS.some((option) => option.value === implementationKind) && (
-                      <option value={implementationKind}>Custom runtime ({implementationKind})</option>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <Badge variant="outline">{implementationStatusLabel}</Badge>
+                  <div className="flex items-center gap-2">
+                    {packageEntry && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => { void viewFile(packageEntry.file, packageEntry.index); }}
+                      >
+                        View code
+                      </Button>
                     )}
-                    {IMPLEMENTATION_KIND_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                </div>
-
-                {['container', 'repository', 'rest-api'].includes(implementationKind) && (
-                  <div className="space-y-2">
-                    <Label htmlFor="implementation-reference" className="text-sm">
-                      {implementationKind === 'container'
-                        ? 'Container image'
-                        : implementationKind === 'repository'
-                          ? 'Repository URL'
-                          : 'API endpoint'}
-                    </Label>
-                    <Input
-                      id="implementation-reference"
-                      value={implementationReference}
-                      onChange={(event) => {
-                        const value = event.target.value;
-                        setImplementationReference(value);
-                        updateImplementation({
-                          [implementationKind === 'container'
-                            ? 'image'
-                            : implementationKind === 'repository'
-                              ? 'repository'
-                              : 'endpoint']: value,
-                        });
-                      }}
-                    />
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => { void handleGenerateScript(); }}
+                      disabled={isGeneratingScript}
+                    >
+                      {isGeneratingScript
+                        ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        : <Wand2 className="mr-2 h-4 w-4" />}
+                      Generate with AI
+                    </Button>
                   </div>
+                </div>
+                {implementationMigrationError && (
+                  <p role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
+                    {implementationMigrationError} The original metadata has been preserved.
+                  </p>
                 )}
-
-                <div className="space-y-2">
-                  <Label htmlFor="implementation-language" className="text-sm">Language</Label>
-                  <Input
-                    id="implementation-language"
-                    value={implementationLanguage}
-                    onChange={(event) => {
-                      setImplementationLanguage(event.target.value);
-                      updateImplementation({ language: event.target.value });
-                    }}
-                    placeholder="python"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="implementation-entrypoint" className="text-sm">Entrypoint</Label>
-                  <Input
-                    id="implementation-entrypoint"
-                    value={implementationEntrypoint}
-                    onChange={(event) => {
-                      setImplementationEntrypoint(event.target.value);
-                      updateImplementation({ entrypoint: event.target.value });
-                    }}
-                    placeholder="main.py"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="implementation-dependencies" className="text-sm">Dependencies</Label>
-                  <Input
-                    id="implementation-dependencies"
-                    value={implementationDependencies}
-                    onChange={(event) => {
-                      const value = event.target.value;
-                      setImplementationDependencies(value);
-                      updateImplementation({
-                        dependencies: value.split(',').map((item) => item.trim()).filter(Boolean),
-                      });
-                    }}
-                    placeholder="pandas, pyarrow"
-                  />
-                </div>
-
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <Label className="text-sm">Code</Label>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      Generate code or attach the entrypoint and dependency files used to execute this node.
-                    </p>
-                  </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => { void handleGenerateScript(); }}
-                    disabled={isGeneratingScript}
-                  >
-                    {isGeneratingScript
-                      ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      : <Wand2 className="mr-2 h-4 w-4" />}
-                    Generate
-                  </Button>
-                </div>
-
                 {renderFileArea("code", indexedCodeFiles, codeFileInputRef)}
+                <p className="text-[11px] text-muted-foreground">
+                  The only required file is <code className="rounded bg-muted px-1">main.py</code>.
+                  Add <code className="rounded bg-muted px-1">requirements.txt</code> only when third-party packages are needed.
+                </p>
               </InspectorSection>
             )}
 
@@ -1812,43 +1499,22 @@ export function PropertiesPanel({
                     </select>
                     <Button
                       type="button"
-                      variant="outline"
                       size="sm"
                       disabled={!selectedReusableVersion || isLoadingReusablePipelines}
                       onClick={() => { void attachSelectedReusablePipeline(); }}
                     >
-                      Review selected version
+                      {isLoadingReusablePipelines ? "Attaching…" : "Use selected version"}
                     </Button>
                   </div>
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      type="button"
-                      size="sm"
-                      onClick={() => { void openReferencedPipeline(); }}
-                    >
-                      {selectedNode.data.subpipeline?.reference
-                        ? 'Open referenced pipeline'
-                        : selectedNode.data.subpipeline?.graph
-                          ? 'Convert embedded pipeline'
-                          : 'Create reusable pipeline'}
-                    </Button>
-                    {selectedNode.data.subpipeline?.reference && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => {
-                          setSubpipelineEditorGraph({ nodes: [], edges: [] });
-                          setEditingReusablePipelineUid("");
-                          setEditingReusablePipelineName("Reusable Pipeline");
-                          setEditingReusablePipelineDescription("");
-                          setEditingReusableVersionName("Version 1");
-                          setIsSubpipelineEditorOpen(true);
-                        }}
-                      >
-                        Create new
-                      </Button>
-                    )}
+                  <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                    Create and update reusable pipelines from <strong className="text-foreground">Library → Reusable pipelines → Manage</strong> using the normal main canvas.
+                  </div>
+                  {selectedNode.data.subpipeline?.graph && !selectedNode.data.subpipeline?.reference && (
+                    <p role="alert" className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
+                      This component contains a legacy embedded pipeline. Rebuild it on the main canvas, save it for reuse, then select the saved version here. The embedded metadata remains preserved.
+                    </p>
+                  )}
+                  <div className="flex justify-end">
                     <Button
                       type="button"
                       variant="ghost"
@@ -1859,21 +1525,8 @@ export function PropertiesPanel({
                     </Button>
                   </div>
                 </InspectorSection>
-                <SubpipelineEditorDialog
-                  open={isSubpipelineEditorOpen}
-                  onOpenChange={setIsSubpipelineEditorOpen}
-                  pipelineUid={editingReusablePipelineUid}
-                  name={editingReusablePipelineName || label || "Reusable Pipeline"}
-                  description={editingReusablePipelineDescription}
-                  suggestedVersionName={editingReusableVersionName}
-                  reusablePipelines={reusablePipelines}
-                  graph={subpipelineEditorGraph}
-                  onSave={saveSubpipelineDefinition}
-                />
               </>
             )}
-
-            {nodeType === "task" && canManageInputFiles && renderInputFilesSection()}
 
           </div>
         </div>
@@ -1903,7 +1556,7 @@ export function PropertiesPanel({
                   {pendingAttachment.reference.pipeline_name} · {pendingAttachment.reference.version_name}
                 </div>
                 <div className="mt-1 text-xs text-muted-foreground">
-                  New contract: {pendingAttachment.interface.inputs.length} input{pendingAttachment.interface.inputs.length === 1 ? "" : "s"}
+                  Available connections: {pendingAttachment.interface.inputs.length} input{pendingAttachment.interface.inputs.length === 1 ? "" : "s"}
                   {" · "}{pendingAttachment.interface.outputs.length} output{pendingAttachment.interface.outputs.length === 1 ? "" : "s"}
                 </div>
               </div>

@@ -60,3 +60,10 @@ def secret_params_json(value: Any, parameters: Any) -> str:
         normalize_secret_param_keys(value, parameters),
         ensure_ascii=False,
     )
+
+
+def without_secret_param_values(value: Any, secret_parameters: Any) -> dict[str, Any]:
+    parameters = dict(value) if isinstance(value, dict) else {}
+    for key in normalize_secret_param_keys(secret_parameters, parameters):
+        parameters[key] = ""
+    return parameters

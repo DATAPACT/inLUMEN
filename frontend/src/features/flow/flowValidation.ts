@@ -11,6 +11,7 @@ import {
 } from "@/features/nodes/nodeSchema";
 import { findTemplateForType } from "@/features/nodes/templateCatalog";
 import { normalizeSubpipelineInterface } from "@/features/flow/subpipeline";
+import { taskImplementationMigrationError } from "@/features/nodes/propertyPanelPolicy";
 
 export type ValidationCategory =
   | "configuration"
@@ -53,7 +54,7 @@ const validationNodeSubject = (node: Node): ValidationIssueSubject => {
   const template = String(objectValue(data.template).name || data.template_label || "").trim();
   return {
     label,
-    context: template && template.toLowerCase() !== kindLabel.toLowerCase()
+    context: kind === "flow" && template && template.toLowerCase() !== kindLabel.toLowerCase()
       ? `${kindLabel} · ${template}`
       : kindLabel,
   };
@@ -91,31 +92,18 @@ const portTypesCompatible = (source: string, target: string) => {
 };
 
 const FLOW_EXPRESSION_PATTERN = /^value(?:(?:\.[A-Za-z_][A-Za-z0-9_]*)|(?:\[(?:\d+|"[^"]+"|'[^']+')\]))*(?:\s*(?:==|!=|>=|<=|>|<)\s*(?:"[^"]*"|'[^']*'|-?\d+(?:\.\d+)?|true|false|null))?$/;
-
-const executableFilePattern = (implementationKind: string) => {
-  if (implementationKind === "python") return /\.py$/i;
-  if (implementationKind === "sql") return /\.sql$/i;
-  if (implementationKind === "shell") return /\.(?:sh|bash|zsh)$/i;
-  return /\.(?:py|sql|sh|bash|zsh|js|jsx|ts|tsx|java|go|rs|rb|php|r|scala|kt|kts|swift|lua|pl|ex|exs)$/i;
-};
-
-const getEntrypointTokens = (value: unknown) => {
-  if (Array.isArray(value)) {
-    return value
-      .map((entry) => String(entry ?? "").trim())
-      .filter((entry) => entry.length > 0);
-  }
-  const single = String(value ?? "").trim();
-  return single.length > 0 ? [single] : [];
-};
+const FILE_SOURCE_TEMPLATES = new Set(["file", "folder", "user upload"]);
 
 export const validateGraph = (
   nodes: Node[],
   edges: Edge[],
-  options: { mode?: GraphValidationMode } = {},
+  options: { mode?: GraphValidationMode; requireRuntime?: boolean } = {},
 ): GraphValidationReport => {
   const issues: ValidationIssue[] = [];
   const wiringSeverity: ValidationIssue["severity"] = options.mode === "draft" ? "warning" : "error";
+  const runtimeSeverity: ValidationIssue["severity"] = options.requireRuntime === false
+    ? "warning"
+    : wiringSeverity;
   const nodeById = new Map(nodes.map((node) => [String(node.id), node]));
   const portsByNode = new Map(nodes.map((node) => {
     const kind = normalizeType(node.data?.type);
@@ -132,6 +120,21 @@ export const validateGraph = (
     const templateName = String(objectValue(data.template).name || data.template_label || "");
     const template = findTemplateForType(kind, templateName);
     const requiredParameterNames = new Set(template?.requiredParameters || []);
+    const validatesImplementationParameters = kind === "flow";
+
+    if (kind === "source" && FILE_SOURCE_TEMPLATES.has(templateName.trim().toLowerCase())) {
+      const hasInputFile = Array.isArray(data.files) && data.files.some((file) =>
+        getNodeFileRole(file as NodeFileReference) === "data"
+        && Boolean(getNodeFileName(file as NodeFileReference))
+      );
+      if (!hasInputFile) add({
+        severity: runtimeSeverity,
+        category: "configuration",
+        code: "missing-source-input-file",
+        nodeId,
+        message: "This Source requires an input file. Upload it in the Input Files section.",
+      });
+    }
 
     ports.inputs.filter((port) => port.required).forEach((port) => {
       const connected = edges.some((edge) =>
@@ -155,6 +158,7 @@ export const validateGraph = (
     });
 
     Object.entries(parameters).forEach(([name, value]) => {
+      if (!validatesImplementationParameters) return;
       if (!requiredParameterNames.has(name) && (value == null || (typeof value === "string" && !value.trim()))) add({
         severity: "error",
         category: "configuration",
@@ -164,6 +168,7 @@ export const validateGraph = (
       });
     });
     (template?.requiredParameters || []).forEach((name) => {
+      if (!validatesImplementationParameters) return;
       if (!(name in parameters) || parameters[name] == null || String(parameters[name]).trim() === "") add({
         severity: "error",
         category: "configuration",
@@ -229,7 +234,7 @@ export const validateGraph = (
     if (kind === "task") {
       const implementation = objectValue(data.implementation);
       const kindValue = normalizeImplementationKind(implementation.kind);
-      const generatedArtifact = objectValue(data.generated_artifact);
+      const migrationError = taskImplementationMigrationError(implementation);
       if (!implementation.kind) add({
         severity: "error",
         category: "implementation",
@@ -237,54 +242,28 @@ export const validateGraph = (
         nodeId,
         message: "Task implementation is not configured.",
       });
-      if (["python", "sql", "shell", "generated-code"].includes(kindValue)) {
+      if (migrationError) add({
+        severity: "error",
+        category: "implementation",
+        code: "unsupported-task-implementation",
+        nodeId,
+        message: migrationError,
+      });
+      if (!migrationError && ["python", "generated-code"].includes(kindValue)) {
         const codeFiles = Array.isArray(data.files)
           ? data.files.filter((file) =>
               getNodeFileRole(file as NodeFileReference) === "code"
-              && executableFilePattern(kindValue).test(
-                getNodeFileName(file as NodeFileReference),
-              )
+              && /(^|\/)main\.py$/i.test(getNodeFileName(file as NodeFileReference))
             )
           : [];
         if (codeFiles.length === 0) add({
-          severity: wiringSeverity,
+          severity: runtimeSeverity,
           category: "implementation",
           code: "missing-code",
           nodeId,
-          message: "No implementation code is attached. Generate code or upload a runtime package.",
-        });
-        else if (
-          getEntrypointTokens(implementation.entrypoint).length === 0
-          && getEntrypointTokens(generatedArtifact.entrypoint).length === 0
-        ) add({
-          severity: wiringSeverity,
-          category: "implementation",
-          code: "missing-entrypoint",
-          nodeId,
-          message: "Select the runtime package entrypoint.",
+          message: "No Python implementation is attached. Generate code or upload main.py in the Implementation section.",
         });
       }
-      if (kindValue === "container" && !String(implementation.image || "").trim()) add({
-        severity: "error",
-        category: "implementation",
-        code: "missing-container-image",
-        nodeId,
-        message: "Container implementation requires an image.",
-      });
-      if (kindValue === "repository" && !String(implementation.repository || implementation.url || "").trim()) add({
-        severity: "error",
-        category: "implementation",
-        code: "missing-repository",
-        nodeId,
-        message: "Repository implementation requires a repository URL.",
-      });
-      if (kindValue === "rest-api" && !String(implementation.endpoint || "").trim()) add({
-        severity: "error",
-        category: "implementation",
-        code: "missing-endpoint",
-        nodeId,
-        message: "REST API implementation requires an endpoint.",
-      });
     }
 
     if (kind === "subpipeline") {

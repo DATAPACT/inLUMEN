@@ -1,14 +1,11 @@
 import hashlib
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from app.validator import (
+from app.deployment_validation import (
     repair_deployment_bundle,
     validate_dagster_project,
     validate_deployment_bundle,
@@ -27,8 +24,7 @@ class DagsterRuntimeDependencyValidationTest(unittest.TestCase):
                 encoding="utf-8",
             )
             (
-                project_root
-                / "src/inlumen_dagster_project/components/shell_command.py"
+                project_root / "src/inlumen_dagster_project/components/shell_command.py"
             ).write_text("", encoding="utf-8")
             (project_root / "pyproject.toml").write_text(
                 '[project]\ndependencies = ["dagster==1.13.12"]\n',
@@ -54,8 +50,7 @@ class DagsterRuntimeDependencyValidationTest(unittest.TestCase):
                 "", encoding="utf-8"
             )
             (
-                project_root
-                / "src/inlumen_dagster_project/components/shell_command.py"
+                project_root / "src/inlumen_dagster_project/components/shell_command.py"
             ).write_text("", encoding="utf-8")
             (project_root / "pyproject.toml").write_text(
                 '[project]\ndependencies = ["dagster==1.13.12"]\n',
@@ -81,11 +76,19 @@ class DagsterRuntimeDependencyValidationTest(unittest.TestCase):
                     if str(project_root / "model-prefetch.py") in command
                     else '{"asset_keys": []}'
                 )
-                return {"command": command, "returncode": 0, "output": output, "ok": True}
+                return {
+                    "command": command,
+                    "returncode": 0,
+                    "output": output,
+                    "ok": True,
+                }
 
-            with mock.patch.dict(
-                "os.environ", {"INLUMEN_MODEL_ROOT": str(model_root)}, clear=False
-            ), mock.patch("app.validator._run", side_effect=fake_run):
+            with (
+                mock.patch.dict(
+                    "os.environ", {"INLUMEN_MODEL_ROOT": str(model_root)}, clear=False
+                ),
+                mock.patch("app.deployment_validation._run", side_effect=fake_run),
+            ):
                 report = validate_dagster_project(
                     project_root,
                     materialize=False,
@@ -123,8 +126,7 @@ class DeploymentInputContractValidationTest(unittest.TestCase):
                             "format": "wav",
                             "size_bytes": len(sample_bytes),
                             "sha256": (
-                                "sha256:"
-                                + hashlib.sha256(sample_bytes).hexdigest()
+                                "sha256:" + hashlib.sha256(sample_bytes).hexdigest()
                             ),
                         }
                     ],
@@ -211,7 +213,10 @@ class DeploymentInputContractValidationTest(unittest.TestCase):
             any("non-canonical kind 'file'" in error for error in report["errors"])
         )
         self.assertTrue(
-            any("does not match root node contract" in error for error in report["errors"])
+            any(
+                "does not match root node contract" in error
+                for error in report["errors"]
+            )
         )
 
     def test_repair_uses_root_node_contract(self):
@@ -250,9 +255,7 @@ class DeploymentInputContractValidationTest(unittest.TestCase):
             )
 
         self.assertFalse(report["ok"])
-        self.assertTrue(
-            any("checksum mismatch" in error for error in report["errors"])
-        )
+        self.assertTrue(any("checksum mismatch" in error for error in report["errors"]))
 
     def test_validation_rejects_missing_required_root_input(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -277,8 +280,7 @@ class DeploymentInputContractValidationTest(unittest.TestCase):
         self.assertFalse(report["ok"])
         self.assertTrue(
             any(
-                "Root node contract input sample.wav is missing"
-                in error
+                "Root node contract input sample.wav is missing" in error
                 for error in report["errors"]
             )
         )
@@ -321,10 +323,7 @@ class DeploymentInputContractValidationTest(unittest.TestCase):
 
         self.assertEqual(
             expected,
-            {
-                entry["filename"]: entry["kind"]
-                for entry in manifest["inputs"]
-            },
+            {entry["filename"]: entry["kind"] for entry in manifest["inputs"]},
         )
 
 

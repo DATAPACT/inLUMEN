@@ -44,31 +44,12 @@ export const FlowCanvasActionsPanel = ({
   canRedo,
   isHistoryRestoring = false,
 }: FlowCanvasActionsPanelProps) => (
-  <Panel position="top-center" className="mt-2 max-w-[calc(100vw-1rem)]">
-    <div className="flex flex-nowrap items-center gap-1 rounded-xl border border-border/80 bg-card/85 p-1.5 text-xs shadow-xl shadow-black/10 backdrop-blur-md">
+  <>
+    <Panel position="top-center" className="mt-2 max-w-[calc(100vw-1rem)]">
+      <div className="flex flex-nowrap items-center gap-1 rounded-xl border border-border/80 bg-card/85 p-1.5 text-xs shadow-xl shadow-black/10 backdrop-blur-md">
       <Button size="sm" variant="outline" onClick={onSave} className="flex h-7 items-center gap-1 px-2.5">
         <Save className="h-3.5 w-3.5" />
         Save
-      </Button>
-      <Button
-        size="sm"
-        variant="outline"
-        className={validationErrors > 0
-          ? "flex h-7 items-center gap-1 border-red-500/60 px-2 text-red-500 hover:bg-red-500/10 hover:text-red-500"
-          : validationWarnings > 0
-            ? "flex h-7 items-center gap-1 border-amber-500/60 px-2 text-amber-500 hover:bg-amber-500/10 hover:text-amber-500"
-            : "flex h-7 items-center gap-1 border-emerald-500/50 px-2 text-emerald-500 hover:bg-emerald-500/10 hover:text-emerald-500"}
-        onClick={onValidationClick}
-        title="Open pipeline validation"
-      >
-        {validationErrors > 0 || validationWarnings > 0
-          ? <AlertTriangle className="h-3.5 w-3.5" />
-          : <ShieldCheck className="h-3.5 w-3.5" />}
-        {validationErrors > 0
-          ? `${validationErrors} error${validationErrors === 1 ? "" : "s"}${validationWarnings > 0 ? ` · ${validationWarnings} warning${validationWarnings === 1 ? "" : "s"}` : ""}`
-          : validationWarnings > 0
-            ? `${validationWarnings} warning${validationWarnings === 1 ? "" : "s"}`
-            : "Valid"}
       </Button>
       <Button
         size="sm"
@@ -128,11 +109,13 @@ export const FlowCanvasActionsPanel = ({
         variant={showPortDetails ? "secondary" : "outline"}
         className="flex h-7 items-center gap-1 px-2"
         onClick={onTogglePortDetails}
-        title={showPortDetails ? "Switch to Compact mode" : "Switch to Advanced mode and show ports, contracts, and validation"}
+        title={showPortDetails
+          ? "Hide port names and validation details; connection handles remain visible"
+          : "Show port names, types, and validation details"}
         aria-pressed={showPortDetails}
       >
         <CircleDot className="h-3.5 w-3.5" />
-        {showPortDetails ? "Advanced" : "Compact"}
+        {showPortDetails ? "Details" : "Compact"}
       </Button>
       <Button
         size="sm"
@@ -144,6 +127,34 @@ export const FlowCanvasActionsPanel = ({
       >
         <Trash2 className="h-3.5 w-3.5" />
       </Button>
-    </div>
-  </Panel>
+      </div>
+    </Panel>
+
+    <Panel position="bottom-center" className="mb-3 max-w-[calc(100vw-1rem)]">
+      <Button
+        size="sm"
+        variant="outline"
+        className={validationErrors > 0
+          ? "flex h-8 items-center gap-2 border-red-500/60 bg-card/90 px-3 text-red-500 shadow-lg backdrop-blur-md hover:bg-red-500/10 hover:text-red-500"
+          : validationWarnings > 0
+            ? "flex h-8 items-center gap-2 border-amber-500/60 bg-card/90 px-3 text-amber-500 shadow-lg backdrop-blur-md hover:bg-amber-500/10 hover:text-amber-500"
+            : "flex h-8 items-center gap-2 border-emerald-500/50 bg-card/90 px-3 text-emerald-500 shadow-lg backdrop-blur-md hover:bg-emerald-500/10 hover:text-emerald-500"}
+        onClick={onValidationClick}
+        title="Open pipeline validation"
+        aria-label="Open pipeline validation"
+      >
+        {validationErrors > 0 || validationWarnings > 0
+          ? <AlertTriangle className="h-3.5 w-3.5" />
+          : <ShieldCheck className="h-3.5 w-3.5" />}
+        <span className="font-medium">Validation</span>
+        <span>
+          {validationErrors > 0
+            ? `${validationErrors} error${validationErrors === 1 ? "" : "s"}${validationWarnings > 0 ? ` · ${validationWarnings} warning${validationWarnings === 1 ? "" : "s"}` : ""}`
+            : validationWarnings > 0
+              ? `${validationWarnings} warning${validationWarnings === 1 ? "" : "s"}`
+              : "No issues"}
+        </span>
+      </Button>
+    </Panel>
+  </>
 );

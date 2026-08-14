@@ -51,6 +51,7 @@ export type PipelineWorkspaceClearResult = {
   deleted_step_flow_ids?: string[];
   deleted_version_uids?: string[];
   deleted_version_count?: number;
+  deleted_entity_count?: number;
   deleted_provenance_event_count?: number;
   provenance_cleared?: boolean;
   version: PipelineVersionSummary;
@@ -114,7 +115,6 @@ export type PipelineScriptGenerationOptions = {
   scope?: PipelineScriptGenerationScope;
   selectedFlowIds?: string[];
   overwriteManualCode?: boolean;
-  checkpointVersionUid?: string;
   includeSampleData?: boolean;
   validationMode?: "static" | "unit" | "edge" | "pipeline_sample";
   generationStrategy?: "auto" | "single_pass" | "per_node";
@@ -142,6 +142,11 @@ export type PipelineGenerationRun = {
   steps?: PipelineGenerationRunStep[];
   errors?: string[];
   warnings?: string[];
+  stage_timings_ms?: Record<string, number>;
+  current_stage?: string;
+  stage_started_at?: string | null;
+  progress_updated_at?: string | null;
+  progress_revision?: number;
   generation_usage?: {
     request_count?: number;
     usage_reported_count?: number;
@@ -166,7 +171,6 @@ export type PipelineGenerationJob = {
   reusable_flow_ids?: string[];
   preflight?: PipelineGenerationPreflight;
   model?: { provider?: string; model?: string };
-  checkpoint_version_uid?: string;
   data_awareness?: {
     has_sample_data?: boolean;
     sample_file_count?: number;
@@ -606,7 +610,6 @@ const buildPipelineGenerationPayload = (
     generation_scope: options.scope ?? "missing_changed",
     selected_flow_ids: options.selectedFlowIds ?? [],
     overwrite_manual_code: options.overwriteManualCode ?? false,
-    checkpoint_version_uid: options.checkpointVersionUid ?? "",
     allow_deterministic_fallback: options.allowDeterministicFallback ?? false,
     repair_attempts: options.repairAttempts ?? 7,
     high_level_prompt: options.userInstruction?.trim() || "",

@@ -7,6 +7,7 @@ import io
 import json
 import math
 import os
+import re
 import shutil
 import struct
 import tarfile
@@ -140,6 +141,7 @@ def validate_node_with_docker(
     flow_id: str,
     artifact: GeneratedArtifact,
     input_files: list[FileDescriptor],
+    parameters: dict[str, object] | None = None,
     timeout_seconds: int,
     run_id: str | None = None,
     stage_callback: Callable[[str], None] | None = None,
@@ -184,6 +186,7 @@ def validate_node_with_docker(
             expected_outputs=artifact.data_contract.outputs,
             timeout_seconds=timeout_seconds,
             checks=checks,
+            parameters=parameters,
             run_id=run_id,
             stage_callback=stage_callback,
         )
@@ -1083,6 +1086,7 @@ def run_docker_validation(
     expected_outputs: list[ExpectedArtifact],
     timeout_seconds: int,
     checks: list[str],
+    parameters: dict[str, object] | None = None,
     run_id: str | None = None,
     stage_callback: Callable[[str], None] | None = None,
 ) -> ValidationReport:
@@ -1125,6 +1129,30 @@ def run_docker_validation(
         if stage_callback is not None:
             stage_callback("sandbox_execution")
         _raise_if_sandbox_cancelled(run_id)
+        runtime_parameters = {
+            str(key): value
+            for key, value in (parameters or {}).items()
+            if str(key).strip() and str(key) != "model_plan"
+        }
+        runtime_environment = {
+            "INLUMEN_FLOW_ID": flow_id,
+            "INLUMEN_INPUT_MANIFEST": "/inlumen/inputs/input_manifest.json",
+            "INLUMEN_OUTPUT_DIR": "/inlumen/outputs",
+            "INLUMEN_OUTPUT_MANIFEST": "/inlumen/outputs/output_manifest.json",
+            "INLUMEN_CONTEXT_PATH": "/inlumen/context.json",
+        }
+        if runtime_parameters:
+            runtime_environment["INLUMEN_PARAMS_JSON"] = json.dumps(
+                runtime_parameters,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        for key, value in sorted(runtime_parameters.items()):
+            env_name = "INLUMEN_PARAM_" + re.sub(
+                r"[^A-Za-z0-9]+", "_", key
+            ).upper().strip("_")
+            if env_name != "INLUMEN_PARAM_":
+                runtime_environment[env_name] = str(value)
         container = client.containers.run(
             image.id,
             command=["python", "/app/main.py"],
@@ -1133,13 +1161,7 @@ def run_docker_validation(
             network_disabled=True,
             mem_limit="512m",
             nano_cpus=1_000_000_000,
-            environment={
-                "INLUMEN_FLOW_ID": flow_id,
-                "INLUMEN_INPUT_MANIFEST": "/inlumen/inputs/input_manifest.json",
-                "INLUMEN_OUTPUT_DIR": "/inlumen/outputs",
-                "INLUMEN_OUTPUT_MANIFEST": "/inlumen/outputs/output_manifest.json",
-                "INLUMEN_CONTEXT_PATH": "/inlumen/context.json",
-            },
+            environment=runtime_environment,
             volumes={
                 str(workspace): {"bind": "/app", "mode": "ro"},
                 str(inputs_dir): {"bind": "/inlumen/inputs", "mode": "ro"},

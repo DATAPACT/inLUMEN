@@ -429,6 +429,11 @@ def _inlumen_node_main():
     _context = {{}}
     if _context_path.is_file():
         _context = _json.loads(_context_path.read_text(encoding="utf-8"))
+    _runtime_parameters = _json.loads(
+        _os.environ.get("INLUMEN_PARAMS_JSON", "{{}}") or "{{}}"
+    )
+    if isinstance(_runtime_parameters, dict):
+        _context["parameters"] = _runtime_parameters
     _output_dir.mkdir(parents=True, exist_ok=True)
     _compat_dir = _output_dir / ".inlumen-inputs"
     _compat_dir.mkdir(parents=True, exist_ok=True)
@@ -563,6 +568,7 @@ def _inlumen_pipeline_main():
             "flow_id": _flow_id,
             "pipeline": INLUMEN_PIPELINE_PLAN.get("pipeline", {}),
             "node": _node.get("descriptor", {}),
+            "parameters": (_node.get("descriptor", {}).get("parameters") or {}),
         }
         _compat_dir = _node_dir / ".inlumen-inputs"
         _compat_dir.mkdir(parents=True, exist_ok=True)

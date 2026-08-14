@@ -25,8 +25,6 @@ import {
   Paperclip,
   Download,
   ShieldCheck,
-  Upload,
-  X,
 } from 'lucide-react';
 import {
   createNodeDataFromDefinition,
@@ -76,6 +74,10 @@ interface SidebarProps {
   onOverviewUpdated?: (overview: PipelineOverviewUpdate) => void;
   activeChatbotConfig?: ChatbotConfig;
   workspaceResetKey?: number;
+  getCurrentPipelineGraph?: () => unknown;
+  replaceCurrentPipelineGraph?: (graph: unknown) => Promise<unknown> | unknown;
+  currentPipelineName?: string;
+  currentPipelineDescription?: string;
 }
 
 type DragNodeType = {
@@ -190,93 +192,6 @@ const deploymentFailureMessage = (
   return Array.from(new Set(messages.filter(Boolean))).slice(0, 4).join(" ") || fallback;
 };
 
-const fileToBase64 = async (file: File) => {
-  const dataUrl = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(reader.error || new Error(`Could not read ${file.name}.`));
-    reader.readAsDataURL(file);
-  });
-  const separator = dataUrl.indexOf(",");
-  if (separator < 0) throw new Error(`Could not encode ${file.name}.`);
-  return dataUrl.slice(separator + 1);
-};
-
-const sha256File = async (file: File) => {
-  const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
-  return `sha256:${Array.from(new Uint8Array(digest))
-    .map((value) => value.toString(16).padStart(2, "0"))
-    .join("")}`;
-};
-
-const buildRunInputArtifacts = async (
-  payload: DockerfileGenerationResponse,
-  files: File[],
-): Promise<DeploymentBundleFile[]> => {
-  const bindings = new Map<string, Array<{ flowId: string; descriptor: Record<string, unknown> }>>();
-  const addBinding = (filename: string, flowId: string, descriptor: Record<string, unknown>) => {
-    const cleanFilename = filename.trim();
-    if (!cleanFilename || !flowId) return;
-    const current = bindings.get(cleanFilename) || [];
-    if (!current.some((entry) => entry.flowId === flowId)) {
-      current.push({ flowId, descriptor });
-      bindings.set(cleanFilename, current);
-    }
-  };
-
-  (payload.runtime_artifacts || []).forEach((artifact) => {
-    const flowId = String(artifact.flow_id || "").trim();
-    (artifact.data_contract?.inputs || []).forEach((descriptor) => {
-      const filename = String(descriptor.filename || descriptor.name || "");
-      addBinding(filename, flowId, descriptor);
-    });
-  });
-  (payload.input_files || []).forEach((input) => {
-    addBinding(
-      String(input.filename || ""),
-      String(input.flow_id || "").trim(),
-      input as Record<string, unknown>,
-    );
-  });
-
-  return Promise.all(files.map(async (file) => {
-    const candidates = bindings.get(file.name) || [];
-    if (candidates.length === 0) {
-      const roots = Array.from(new Set((payload.root_flow_ids || []).filter(Boolean)));
-      if (roots.length === 1) {
-        candidates.push({ flowId: roots[0], descriptor: { filename: file.name } });
-      } else {
-        throw new Error(
-          `${file.name} is not declared by a root node input contract. `
-          + "Use the exact filename shown in that node's manifest.",
-        );
-      }
-    }
-    if (candidates.length > 1) {
-      throw new Error(
-        `${file.name} is declared by multiple root nodes. Give those inputs unique filenames before running.`,
-      );
-    }
-    const binding = candidates[0];
-    return {
-      path: `inputs/${file.name}`,
-      filename: file.name,
-      flow_id: binding.flowId,
-      content: await fileToBase64(file),
-      content_encoding: "base64",
-      content_type: file.type || "application/octet-stream",
-      size_bytes: file.size,
-      sha256: await sha256File(file),
-      role: "input",
-      ...Object.fromEntries(
-        ["name", "kind", "format", "schema", "required"]
-          .filter((key) => binding.descriptor[key] !== undefined)
-          .map((key) => [key, binding.descriptor[key]]),
-      ),
-    };
-  }));
-};
-
 type RuntimeArtifactDownload = { name: string; url: string };
 type YamlDownload = { name: string; url: string };
 type DeploymentBundleDownload = { name: string; url: string };
@@ -332,6 +247,10 @@ export function Sidebar({
   onOverviewUpdated,
   activeChatbotConfig,
   workspaceResetKey = 0,
+  getCurrentPipelineGraph,
+  replaceCurrentPipelineGraph,
+  currentPipelineName,
+  currentPipelineDescription,
 }: SidebarProps) {
   // --- overview state (fetched when Overview tab is opened)
   const [overviewData, setOverviewData] = useState<Partial<PipelineOverview> | null>(null);
@@ -356,7 +275,6 @@ export function Sidebar({
     argo: true,
     dagster: true,
   });
-  const [runInputFiles, setRunInputFiles] = useState<File[]>([]);
   const [nodeDefinitions, setNodeDefinitions] = useState<NodeDefinition[]>(
     getFallbackNodeDefinitions,
   );
@@ -448,7 +366,6 @@ export function Sidebar({
     setDeploymentValidationReport(null);
     setDeploymentRepairReport(null);
     setPipelineRunResult(null);
-    setRunInputFiles([]);
     // The reset key changes only after a confirmed workspace-wide clear.
   }, [workspaceResetKey]);
 
@@ -555,19 +472,11 @@ export function Sidebar({
   const generateDeploymentBundle = async (
     dockerfileJson: DockerfileGenerationResponse,
   ): Promise<DeploymentBundleGenerationResponse> => {
-    const shouldApplyRunInputOverride = deploymentTargets.dagster
-      && deploymentValidationMode !== "fast";
-    const inputFiles = shouldApplyRunInputOverride && runInputFiles.length > 0
-      ? await buildRunInputArtifacts(dockerfileJson, runInputFiles)
-      : undefined;
-    const runtimePayload = inputFiles
-      ? { ...dockerfileJson, input_files: inputFiles }
-      : dockerfileJson;
     const bundleRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_deployment_bundle`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        dockerfile_json: runtimePayload,
+        dockerfile_json: dockerfileJson,
         targets: deploymentTargets,
         validation_mode: deploymentValidationMode,
         validate_bundle: true,
@@ -879,7 +788,7 @@ export function Sidebar({
                   )}
                   {reusablePipelines.length === 0 && !reusablePipelineError && (
                     <p className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">
-                      Saved reusable pipelines appear here. Create one from a Subpipeline component.
+                      Saved reusable pipelines appear here. Use Manage to save the current canvas.
                     </p>
                   )}
                   {reusablePipelines.flatMap((pipeline) => pipeline.versions.map((version) => {
@@ -1107,61 +1016,6 @@ export function Sidebar({
                 </p>
               </div>
 
-              {deploymentTargets.dagster && deploymentValidationMode !== "fast" && (
-                <details className="mb-3 min-w-0 rounded-md border border-border bg-muted/20">
-                  <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-2 py-2 text-xs font-medium [&::-webkit-details-marker]:hidden">
-                    <span className="min-w-0">Run input override</span>
-                    <span className="shrink-0 text-muted-foreground">
-                      {runInputFiles.length > 0 ? `${runInputFiles.length} selected` : "Optional"}
-                    </span>
-                  </summary>
-                  <div className="min-w-0 border-t border-border p-2">
-                    <p className="mb-2 text-xs leading-snug text-muted-foreground">
-                      Replace the attached pipeline input on a Source for this run.
-                    </p>
-                    <label className="flex min-w-0 cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-border bg-background px-2 py-2 text-xs hover:bg-muted">
-                      <Upload className="h-3.5 w-3.5 shrink-0" />
-                      <span className="min-w-0 truncate">Choose override files</span>
-                      <input
-                        type="file"
-                        multiple
-                        className="hidden"
-                        onChange={(event) => {
-                          const selected = Array.from(event.target.files || []);
-                          setRunInputFiles((current) => {
-                            const byName = new Map(current.map((file) => [file.name, file]));
-                            selected.forEach((file) => byName.set(file.name, file));
-                            return Array.from(byName.values());
-                          });
-                          event.target.value = "";
-                        }}
-                      />
-                    </label>
-                    {runInputFiles.length > 0 ? (
-                      <div className="mt-2 min-w-0 space-y-1">
-                        {runInputFiles.map((file) => (
-                          <div key={file.name} className="flex min-w-0 items-center justify-between gap-2 rounded bg-background px-2 py-1 text-xs">
-                            <span className="min-w-0 flex-1 truncate" title={file.name}>{file.name}</span>
-                            <button
-                              type="button"
-                              className="shrink-0"
-                              onClick={() => setRunInputFiles((current) => current.filter((item) => item.name !== file.name))}
-                              aria-label={`Remove ${file.name}`}
-                            >
-                              <X className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="mt-2 text-xs leading-snug text-muted-foreground">
-                        No override: the source's attached pipeline input is used.
-                      </p>
-                    )}
-                  </div>
-                </details>
-              )}
-
               <Button
                 className="h-auto min-h-10 w-full whitespace-normal px-3 py-2 text-center leading-snug"
                 onClick={handleGenerateDeploymentArtifacts}
@@ -1307,6 +1161,10 @@ export function Sidebar({
       pipelines={reusablePipelines}
       onOpenChange={setIsReusablePipelineManagerOpen}
       onRefresh={refreshReusablePipelineCatalog}
+      getCurrentGraph={getCurrentPipelineGraph}
+      replaceCurrentGraph={replaceCurrentPipelineGraph}
+      currentPipelineName={currentPipelineName}
+      currentPipelineDescription={currentPipelineDescription}
     />
     </>
   );
