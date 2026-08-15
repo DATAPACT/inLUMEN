@@ -12,7 +12,13 @@ const App = () => (
   <AuthProvider>
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
-        <Sonner position="bottom-left" visibleToasts={4} />
+        <Sonner
+          position="bottom-center"
+          offset={{ bottom: 184 }}
+          mobileOffset={{ bottom: 184 }}
+          visibleToasts={3}
+          gap={8}
+        />
         <BrowserRouter>
           <Routes>
             <Route path="/" element={<Index />} />

@@ -30,7 +30,7 @@ from llm_config import llm_config_from_payload, log_llm_selection
 from node_secrets import runtime_secret_environment
 from pipeline_agent.context import _clean_client_graph
 from pipeline_agent.cancellation import (
-    cancel_pipeline_turn_and_wait,
+    request_pipeline_turn_cancel,
     run_cancellable_pipeline_turn,
 )
 from pipeline_agent.service import PipelineEditorTurnCancelled, run_pipeline_editor_turn
@@ -600,8 +600,15 @@ def agentic_pipeline_editor_cancel():
     turn_id = str(payload.get("turn_id") or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", turn_id):
         return jsonify({"error": "A valid turn_id is required"}), 400
-    result = cancel_pipeline_turn_and_wait(turn_id, timeout=30.0)
-    return jsonify(result), 200 if result.get("completed") else 202
+    session_id = str(payload.get("session_id") or "").strip()
+    if session_id:
+        clear_state_from_disk(session_id)
+    result = request_pipeline_turn_cancel(turn_id)
+    return jsonify({
+        **result,
+        "completed": False,
+        "session_cleared": bool(session_id),
+    }), 202
 
 
 @app.route("/simple_chat/reset", methods=["POST", "OPTIONS"])

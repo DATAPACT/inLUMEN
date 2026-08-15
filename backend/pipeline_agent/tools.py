@@ -8,6 +8,7 @@ from node_ports import (
     default_input_port_id,
     default_output_port_id,
     normalize_node_ports,
+    ports_for_template,
     ports_json,
     ports_json_for_template,
 )
@@ -338,6 +339,79 @@ def build_pipeline_editor_tools(
             return []
         return [row for row in decoded if isinstance(row, dict)]
 
+    def _available_connection_ports(
+        step: dict[str, Any],
+        direction: str,
+    ) -> list[str]:
+        raw_ports = step.get("ports_json")
+        ports = ports_for_template(
+            raw_ports if raw_ports else None,
+            step.get("type"),
+            step.get("template_label"),
+        )
+        values = ports.get(direction)
+        return [
+            str(port.get("id") or "").strip()
+            for port in values or []
+            if isinstance(port, dict) and str(port.get("id") or "").strip()
+        ]
+
+    def _resolve_connection_port(
+        requested: object,
+        available: list[str],
+        *,
+        flow_id: str,
+        direction: str,
+        primary_port: object = None,
+    ) -> str:
+        label = "output" if direction == "outputs" else "input"
+        value = str(requested or "").strip()
+        if not available:
+            raise ValueError(f"Step {flow_id} exposes no {label} ports")
+
+        if not value:
+            if len(available) == 1:
+                return available[0]
+            valid = ", ".join(available)
+            raise ValueError(
+                f"connect_steps requires {label}_port for step {flow_id}. "
+                f"Valid {label} port ids: {valid}"
+            )
+
+        if not all(character.isalnum() or character in "_.-" for character in value):
+            raise ValueError(f"connect_steps received an invalid {label}_port")
+
+        if value in available:
+            return value
+
+        # Some models interpret documentation such as "task.output" as the
+        # literal id. Port ids are local to a node, so accept that common alias
+        # only when its final segment unambiguously names a real port.
+        unprefixed = value.rsplit(".", 1)[-1]
+        if unprefixed in available:
+            return unprefixed
+
+        primary = str(primary_port or "").strip()
+        if unprefixed in {"input", "output"} and primary in available:
+            return primary
+
+        casefolded = {
+            candidate.casefold(): candidate
+            for candidate in available
+        }
+        matched = (
+            casefolded.get(value.casefold())
+            or casefolded.get(unprefixed.casefold())
+        )
+        if matched:
+            return matched
+
+        valid = ", ".join(available)
+        raise ValueError(
+            f"Unknown {label} port id {value!r} for step {flow_id}. "
+            f"Valid {label} port ids: {valid}. Use the exact id without a component prefix."
+        )
+
     def _cypher_string(value: object) -> str:
         return str(value or "").replace("\\", "\\\\").replace("'", "\\'")
 
@@ -635,18 +709,22 @@ def build_pipeline_editor_tools(
         {
           "source_flow_id": "source step flow_id",
           "target_flow_id": "target step flow_id",
-          "source_port": "output port id",
-          "target_port": "input port id",
+          "source_port": "optional exact output port id",
+          "target_port": "optional exact input port id",
           "allow_fan_out": false
         }
 
-        Standard handles are source.data, task.output/input, destination.data,
-        Condition.value/when_true/when_false, and Parallel Map.items/item.
+        Port ids never include a component-type prefix. Standard exact ids are:
+        Source output `data`; Task input `input` and output `output`; Destination
+        input `data`; Condition input `value` and outputs `when_true`/`when_false`;
+        Parallel Map input `items` and output `item`. When a side exposes exactly
+        one port, its port field may be omitted and will be inferred.
         Subpipeline handles are the public port ids returned by create_step.
-        For compatibility, input/output aliases are mapped to the pinned
-        Subpipeline's primary public ports. Calling this for an existing
-        source/target pair updates that connection's handles. Use it to add every
-        non-linear branch.
+        For compatibility, type-prefixed aliases such as task.output are
+        normalized only when they resolve to a real port, and input/output
+        aliases are mapped to the pinned Subpipeline's primary public ports.
+        Calling this for an existing source/target pair updates that connection's
+        handles. Use it to add every non-linear branch.
         Flow steps may fan out by design. A non-Flow step may only gain a second
         downstream target when allow_fan_out is explicitly true; omit it for
         ordinary chains and branch merges.
@@ -664,11 +742,56 @@ def build_pipeline_editor_tools(
 
             source_flow_id = required_value("source_flow_id")
             target_flow_id = required_value("target_flow_id")
-            source_port = required_value("source_port")
-            target_port = required_value("target_port")
             allow_fan_out = data.get("allow_fan_out") is True
             if source_flow_id == target_flow_id:
                 raise ValueError("connect_steps cannot connect a step to itself")
+
+            context_result = await run_query(f"""
+            MATCH (p:PIPELINE {{status:'design'}})-[:HAS_STEP]->(source:STEP {{flow_id:'{source_flow_id}'}})
+            MATCH (p)-[:HAS_STEP]->(target:STEP {{flow_id:'{target_flow_id}'}})
+            WHERE source.type <> 'destination' AND target.type <> 'source'
+            RETURN {{
+              source: {{flow_id:source.flow_id, type:source.type,
+                       template_label:source.template_label, ports_json:source.ports_json,
+                       primary_output_port:source.primary_output_port}},
+              target: {{flow_id:target.flow_id, type:target.type,
+                       template_label:target.template_label, ports_json:target.ports_json,
+                       primary_input_port:target.primary_input_port}}
+            }} AS connection_context;
+            """, "resolve_connection_ports")
+            contexts = [
+                row.get("connection_context")
+                for row in _decoded_rows(context_result)
+                if isinstance(row.get("connection_context"), dict)
+            ]
+            if not contexts:
+                raise ValueError(
+                    "Connection rejected: source or target step does not exist, or the "
+                    "requested direction is invalid. Call overview and use its flow_id values."
+                )
+
+            context = contexts[0]
+            source_context = context.get("source")
+            target_context = context.get("target")
+            if not isinstance(source_context, dict) or not isinstance(target_context, dict):
+                raise ValueError("Connection rejected: step port contracts are unavailable")
+
+            source_port = _resolve_connection_port(
+                data.get("source_port"),
+                _available_connection_ports(source_context, "outputs"),
+                flow_id=source_flow_id,
+                direction="outputs",
+                primary_port=source_context.get("primary_output_port"),
+            )
+            target_port = _resolve_connection_port(
+                data.get("target_port"),
+                _available_connection_ports(target_context, "inputs"),
+                flow_id=target_flow_id,
+                direction="inputs",
+                primary_port=target_context.get("primary_input_port"),
+            )
+            escaped_source_port = _cypher_string(source_port)
+            escaped_target_port = _cypher_string(target_port)
 
             query = f"""
             MATCH (p:PIPELINE {{status:'design'}})-[:HAS_STEP]->(source:STEP {{flow_id:'{source_flow_id}'}})
@@ -681,16 +804,8 @@ def build_pipeline_editor_tools(
                OR size(existingTargets) = 0
                OR target IN existingTargets
             MERGE (source)-[flow:FLOWS_TO]->(target)
-            SET flow.source_port = CASE
-                    WHEN source.type = 'subpipeline' AND '{source_port}' = 'output'
-                    THEN coalesce(source.primary_output_port, '{source_port}')
-                    ELSE '{source_port}'
-                END,
-                flow.target_port = CASE
-                    WHEN target.type = 'subpipeline' AND '{target_port}' = 'input'
-                    THEN coalesce(target.primary_input_port, '{target_port}')
-                    ELSE '{target_port}'
-                END,
+            SET flow.source_port = '{escaped_source_port}',
+                flow.target_port = '{escaped_target_port}',
                 p.updated_at = datetime()
             WITH p, source, target, flow
             OPTIONAL MATCH (source)-[trueConnection:FLOWS_TO]->(trueTarget:STEP)

@@ -21,7 +21,6 @@ type ChatPanelProps = {
   conversationEndRef: React.RefObject<HTMLDivElement>;
   canvasSyncStatus: CanvasSyncStatus;
   isProcessing: boolean;
-  isStopping: boolean;
   userInput: string;
   promptSuggestions: string[];
   formatConfigDescription: (config: ChatbotConfig) => string;
@@ -40,7 +39,6 @@ export const ChatPanel = ({
   conversationEndRef,
   canvasSyncStatus,
   isProcessing,
-  isStopping,
   userInput,
   promptSuggestions,
   formatConfigDescription,
@@ -52,14 +50,12 @@ export const ChatPanel = ({
   onExportConversation,
   onSuggestionClick,
 }: ChatPanelProps) => {
-  const conversationStatus = isStopping
-    ? "Stopping and restoring the previous graph..."
-    : isProcessing
+  const conversationStatus = isProcessing
     ? "Thinking through your graph..."
     : conversation.length > 0
       ? `${conversation.length} message${conversation.length === 1 ? "" : "s"} in session`
       : "Ready to design";
-  const hasConversation = conversation.length > 0 || isProcessing || isStopping;
+  const hasConversation = conversation.length > 0 || isProcessing;
   const showSyncStatus =
     canvasSyncStatus.state === 'warning' || canvasSyncStatus.state === 'error';
   const syncStatusClass =
@@ -184,7 +180,7 @@ export const ChatPanel = ({
                 </div>
               ))}
 
-              {(isProcessing || isStopping) && (
+              {isProcessing && (
                 <div className="flex justify-start">
                   <div className="max-w-[90%] space-y-1.5">
                     <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
@@ -194,9 +190,7 @@ export const ChatPanel = ({
                     <div className="rounded-[18px] border border-border bg-muted/55 px-3 py-2.5 text-sm text-muted-foreground shadow-sm">
                       <div className="flex items-center gap-3">
                         <span className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-emerald-400" />
-                        {isStopping
-                          ? "Stopping and restoring the previous graph..."
-                          : "Working through the next pipeline revision..."}
+                        Working through the next pipeline revision...
                       </div>
                     </div>
                   </div>
@@ -249,20 +243,15 @@ export const ChatPanel = ({
             <div className="mt-2 flex items-center justify-end border-t border-border pt-2">
               <Button
                 onClick={isProcessing ? onStopProcessing : onSendMessage}
-                disabled={isStopping || (!isProcessing && !userInput.trim())}
+                disabled={!isProcessing && !userInput.trim()}
                 className={cn(
                   "h-9 rounded-xl px-3.5 font-semibold hover:opacity-95",
-                  isProcessing || isStopping
+                  isProcessing
                     ? "bg-rose-500 text-white shadow-[0_18px_40px_rgba(244,63,94,0.2)] hover:bg-rose-500"
                     : "bg-[linear-gradient(135deg,#34d399,#0f766e)] text-slate-950 shadow-[0_18px_40px_rgba(16,185,129,0.22)]",
                 )}
               >
-                {isStopping ? (
-                  <>
-                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-                    Restoring…
-                  </>
-                ) : isProcessing ? (
+                {isProcessing ? (
                   <>
                     <Square className="h-4 w-4 fill-current" />
                     Stop

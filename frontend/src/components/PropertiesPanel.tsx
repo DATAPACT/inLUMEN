@@ -1212,11 +1212,6 @@ export function PropertiesPanel({
             Add
           </Button>
         </div>
-        <p className="text-[11px] text-muted-foreground">
-          Regular values are available in <code className="rounded bg-muted px-1">INLUMEN_PARAMS_JSON</code>.
-          {" "}Sensitive values are stored outside the pipeline and injected only through their individual
-          {" "}<code className="rounded bg-muted px-1">INLUMEN_PARAM_*</code> variable.
-        </p>
       </div>
     </InspectorSection>
   );

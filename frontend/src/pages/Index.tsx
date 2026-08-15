@@ -212,7 +212,6 @@ const Index = () => {
   const [activeTab, setActiveTab] = useState('lab'); // 'lab', 'overview', or 'simulate'
   const [userInput, setUserInput] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
-  const [isStopping, setIsStopping] = useState(false);
   const [flowNodes, setFlowNodes] = useState<FlowNode[]>([]);
   const [conversation, setConversation] = useState<ChatMessage[]>(readSavedConversation);
   const [canvasSyncStatus, setCanvasSyncStatus] = useState<CanvasSyncStatus>({
@@ -227,6 +226,7 @@ const Index = () => {
   const activeChatTurnRef = useRef<{
     turnId: string;
     controller: AbortController;
+    beforeGraph: ReturnType<FlowCanvasRef["getCurrentGraph"]> | null;
   } | null>(null);
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
   const [pipelineLastUpdate, setPipelineLastUpdate] = useState<string>('Never');
@@ -487,7 +487,7 @@ const Index = () => {
   const activeConfig = selectedConfig || defaultConfig;
 
   const handleSendMessage = async () => {
-    if (isProcessing || isStopping) return;
+    if (isProcessing) return;
     const messageText = userInput;
 
     if (!messageText.trim()) {
@@ -499,7 +499,6 @@ const Index = () => {
 
     setUserInput('');
     setIsProcessing(true);
-    setIsStopping(false);
     toast.loading("Processing your input", {
       id: CHAT_PROCESSING_TOAST_ID,
       description: "AI is thinking...",
@@ -510,11 +509,11 @@ const Index = () => {
     setConversation(updatedConversation);
     const turnId = createChatTurnId();
     const controller = new AbortController();
-    activeChatTurnRef.current = { turnId, controller };
+    const canvasGraph = flowCanvasRef.current?.getCurrentGraph() ?? null;
+    activeChatTurnRef.current = { turnId, controller, beforeGraph: canvasGraph };
 
     try {
       const activeCfg = selectedConfig || defaultConfig;
-      const canvasGraph = flowCanvasRef.current?.getCurrentGraph() ?? null;
 
       const res = await apiFetch(`${INLUMEN_API_URL}/simple_chat`, {
         method: "POST",
@@ -531,6 +530,8 @@ const Index = () => {
           llm_config: buildLLMRequestConfig(activeCfg),
         }),
       });
+
+      if (activeChatTurnRef.current?.turnId !== turnId) return;
 
       if (res.status === 409) {
         const stopped = await res.json() as ChatApiResponse;
@@ -561,6 +562,7 @@ const Index = () => {
       }
 
       const data = await res.json() as ChatApiResponse;
+      if (activeChatTurnRef.current?.turnId !== turnId) return;
 
       // Agent turns may create a separately saved reusable pipeline. Refresh
       // every mounted catalog consumer immediately instead of waiting for a
@@ -647,63 +649,60 @@ const Index = () => {
       if (activeChatTurnRef.current?.turnId === turnId) {
         activeChatTurnRef.current = null;
         setIsProcessing(false);
-        setIsStopping(false);
       }
       toast.dismiss(CHAT_PROCESSING_TOAST_ID);
     }
   };
 
-  const handleStopProcessing = async () => {
+  const handleStopProcessing = () => {
     const activeTurn = activeChatTurnRef.current;
-    if (!activeTurn || isStopping) return;
+    if (!activeTurn) return;
 
-    // Stop the browser-side request synchronously. The separate cancellation
-    // request below waits for backend rollback before enabling another turn.
+    // The visible turn ends synchronously. Restore the immutable pre-turn
+    // snapshot from memory and keep backend polling paused while the server
+    // finishes its own consistency rollback in the background.
     activeChatTurnRef.current = null;
     activeTurn.controller.abort();
     setIsProcessing(false);
-    setIsStopping(true);
     toast.dismiss(CHAT_PROCESSING_TOAST_ID);
-    try {
-      const response = await apiFetch(`${INLUMEN_API_URL}/simple_chat/cancel`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ turn_id: activeTurn.turnId }),
-      });
-      if (!response.ok) {
-        throw new Error(`Stop request failed (${response.status}): ${await response.text()}`);
-      }
-      const stopped = await response.json() as ChatApiResponse & { completed?: boolean };
-      if (stopped.completed === false || stopped.status !== "cancelled") {
-        throw new Error("The stop request was accepted, but rollback did not finish in time.");
-      }
-      const restored = stopped.rollback_applied !== false;
-      if (restored && flowCanvasRef.current) {
-        await flowCanvasRef.current.syncFromBackend();
-      }
-      const message = restored
-        ? "Stopped immediately. Changes from the interrupted turn were removed."
-        : stopped.assistant_message || "Stopped, but the previous pipeline could not be restored automatically.";
-      setCanvasSyncStatus({
-        state: restored ? 'idle' : 'error',
-        message: restored ? 'Canvas is ready' : message,
-      });
-      if (restored) {
-        toast.success("Pipeline agent stopped", { description: message });
-      } else {
-        toast.error("Pipeline rollback needs attention", { description: message });
-      }
-    } catch (error) {
-      setCanvasSyncStatus({
-        state: 'error',
-        message: error instanceof Error ? error.message : "The stop could not be confirmed.",
-      });
-      toast.error("Could not stop the pipeline agent", {
-        description: error instanceof Error ? error.message : "Unknown error occurred",
-      });
-    } finally {
-      setIsStopping(false);
+    if (activeTurn.beforeGraph && flowCanvasRef.current) {
+      flowCanvasRef.current.restoreGraphLocally(activeTurn.beforeGraph);
     }
+    setConversation((current) => [
+      ...current,
+      {
+        role: 'assistant',
+        content: "Stopped. Changes from the interrupted turn were discarded.",
+      },
+    ]);
+    setCanvasSyncStatus({
+      state: 'idle',
+      message: 'Canvas is ready',
+    });
+
+    void apiFetch(`${INLUMEN_API_URL}/simple_chat/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        turn_id: activeTurn.turnId,
+        session_id: chatSessionId || null,
+      }),
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Stop request failed (${response.status}): ${await response.text()}`);
+        }
+        const stopped = await response.json() as ChatApiResponse & { completed?: boolean };
+        if (stopped.completed === false) {
+          flowCanvasRef.current?.pauseBackendSync(30000);
+        }
+      })
+      .catch((error) => {
+        // The user-facing turn is already stopped. A transport failure here
+        // must not resurrect a spinner or overwrite the restored local graph.
+        console.warn("Background pipeline cancellation could not be confirmed:", error);
+        flowCanvasRef.current?.pauseBackendSync(30000);
+      });
   };
 
   const resetLocalConversation = useCallback(() => {
@@ -1283,13 +1282,12 @@ const Index = () => {
                       conversationEndRef={conversationEndRef}
                       canvasSyncStatus={canvasSyncStatus}
                       isProcessing={isProcessing}
-                      isStopping={isStopping}
                       userInput={userInput}
                       promptSuggestions={CHAT_PROMPT_SUGGESTIONS}
                       formatConfigDescription={formatConfigDescription}
                       onUserInputChange={setUserInput}
                       onSendMessage={handleSendMessage}
-                      onStopProcessing={() => { void handleStopProcessing(); }}
+                      onStopProcessing={handleStopProcessing}
                       onClearConversation={handleClearConversation}
                       onSaveConversation={handleSaveConversation}
                       onExportConversation={handleExportConversation}

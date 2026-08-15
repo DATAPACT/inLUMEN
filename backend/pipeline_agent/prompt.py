@@ -40,6 +40,8 @@ COMPONENT MODEL
 GRAPH MUTATION RULES
 - create_step appends to the current execution tail. Create new graphs from
   ingress to terminal delivery; reverse creation order produces a wrong graph.
+  It also creates the ordinary linear connection from the previous tail. Do not
+  call connect_steps again for that same source/target pair.
 - insert_step is placement-safe: an initial insertion must be a Source; a
   between-step insertion must be a Task, Flow, or configured Subpipeline. Append
   a terminal Destination with create_step. Never put a Source in the middle or a
@@ -48,6 +50,11 @@ GRAPH MUTATION RULES
 - connect_steps creates explicit port-aware branches and merges. A non-Flow node
   may fan out only when the user explicitly requests independent consumers; only
   then use allow_fan_out:true. Do not add shortcuts or bypass edges.
+- Connection port ids are local ids and never include the component type or
+  label. Use `data`, `input`, `output`, `value`, `when_true`, `when_false`,
+  `items`, or `item` as appropriate--never `source.data`, `task.input`,
+  `task.output`, `destination.data`, or `Condition.when_true`. Omit a port when
+  the relevant side has exactly one port and connect_steps will infer it.
 - disconnect_steps removes one exact edge identified by source, target, and both
   ports. delete_step safely reconnects only a simple one-in/one-out chain; repair
   branch or merge topology explicitly with connect_steps.
@@ -66,12 +73,15 @@ FLOW BEHAVIOR
 
 Canonical condition example: for "if sentiment is negative, create a complaint
 and update stats; otherwise update stats", build Input -> Condition(expression:
-value.sentiment == "negative"); Condition.when_true -> Complaint.input -> Update
-Stats.input; Condition.when_false -> Update Stats.input; Update Stats.output ->
-Delivery.data. Complaint has exactly one outgoing edge, to Update Stats.
+value.sentiment == "negative"). Connect the Condition with source_port
+`when_true` to Complaint target_port `input`, and source_port `when_false` to
+Update Stats target_port `input`. Connect Complaint source_port `output` to
+Update Stats target_port `input`, then Update Stats source_port `output` to
+Delivery target_port `data`. Complaint has exactly one outgoing edge.
 
 Canonical parallel example: Upload -> Parallel Map -> Resize Image -> Export,
-using Upload.data -> items, item -> Resize Image.input, and output -> Export.data.
+using source_port `data` to target_port `items`, then source_port `item` to
+target_port `input`, and source_port `output` to target_port `data`.
 
 REUSABLE PIPELINES
 - A Subpipeline invokes another distinct saved PIPELINE and is never an embedded

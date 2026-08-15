@@ -124,6 +124,11 @@ export interface FlowCanvasRef {
     options?: { remapSubpipeline?: boolean },
   ) => void;
   syncFromBackend: (graphData?: unknown) => Promise<NormalizedGraph>;
+  restoreGraphLocally: (
+    graphData: unknown,
+    backendSyncPauseMs?: number,
+  ) => NormalizedGraph;
+  pauseBackendSync: (durationMs?: number) => void;
   replaceCurrentGraph: (graphData: unknown) => Promise<NormalizedGraph>;
   getCurrentGraph: () => AgentGraphSnapshot;
   getCurrentVersionGraph: () => PipelineVersionGraph;
@@ -607,6 +612,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     refreshCooldownUntilRef.current = Date.now() + ms;
   }, []);
 
+  const pauseBackendSync = useCallback((durationMs = 35000) => {
+    refreshCooldownUntilRef.current = Math.max(
+      refreshCooldownUntilRef.current,
+      Date.now() + durationMs,
+    );
+  }, []);
+
   const scheduleSyncRetry = useCallback((label: string, error: unknown) => {
     if (!syncFailureLoggedRef.current) {
       console.warn(`[FlowCanvas.tsx] ${label}:`, error);
@@ -739,6 +751,15 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     pushHistorySnapshot,
     scheduleSyncRetry,
   ]);
+
+  const restoreGraphLocally = useCallback((
+    graphData: unknown,
+    backendSyncPauseMs = 35000,
+  ) => {
+    const graph = normalizeGraph(graphData);
+    pauseBackendSync(backendSyncPauseMs);
+    return applyGraph(graphData, graph);
+  }, [applyGraph, pauseBackendSync]);
 
   const replaceCurrentGraph = useCallback(async (graphData: unknown) => {
     const graph = normalizeGraph(graphData);
@@ -1215,6 +1236,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   useImperativeHandle(ref, () => ({
     updateNode,
     syncFromBackend,
+    restoreGraphLocally,
+    pauseBackendSync,
     replaceCurrentGraph,
     getCurrentGraph,
     getCurrentVersionGraph: createSerializableFlow,
@@ -1223,7 +1246,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     createSerializableFlow,
     getCurrentGraph,
     openCodeGeneration,
+    pauseBackendSync,
     replaceCurrentGraph,
+    restoreGraphLocally,
     syncFromBackend,
     updateNode,
   ]);

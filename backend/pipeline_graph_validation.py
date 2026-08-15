@@ -369,10 +369,23 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
             None,
         )
         if source_port is None or target_port is None:
+            valid_source_ports = ", ".join(
+                str(port.get("id") or "")
+                for port in ports_by_node[source]["outputs"]
+                if str(port.get("id") or "")
+            ) or "none"
+            valid_target_ports = ", ".join(
+                str(port.get("id") or "")
+                for port in ports_by_node[target]["inputs"]
+                if str(port.get("id") or "")
+            ) or "none"
             issues.append(_issue(
                 "graph",
                 "unknown-edge-port",
-                "Connection references a port that does not exist.",
+                "Connection references a port that does not exist: "
+                f"source used {source_port_id!r} (valid: {valid_source_ports}); "
+                f"target used {target_port_id!r} (valid: {valid_target_ports}). "
+                "Port ids do not include component-type prefixes.",
                 node_id=target,
                 edge_id=edge_id,
             ))

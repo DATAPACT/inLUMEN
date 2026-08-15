@@ -7,7 +7,6 @@ import { CHAT_PROMPT_SUGGESTIONS } from '@/features/chat/promptSuggestions';
 
 const renderPanel = (
   isProcessing: boolean,
-  isStopping = false,
   promptSuggestions: string[] = [],
 ) =>
   renderToStaticMarkup(
@@ -22,7 +21,6 @@ const renderPanel = (
       conversationEndRef={React.createRef<HTMLDivElement>()}
       canvasSyncStatus={{ state: 'idle', message: 'Ready' }}
       isProcessing={isProcessing}
-      isStopping={isStopping}
       userInput="Build a pipeline"
       promptSuggestions={promptSuggestions}
       formatConfigDescription={() => 'Test'}
@@ -38,7 +36,7 @@ const renderPanel = (
 
 describe('ChatPanel cancellation controls', () => {
   it('shows the audio pipeline among the three default design examples', () => {
-    const html = renderPanel(false, false, CHAT_PROMPT_SUGGESTIONS);
+    const html = renderPanel(false, CHAT_PROMPT_SUGGESTIONS);
 
     expect(html).toContain('audio transcription and sentiment analysis');
     expect(html).toContain('remote patient monitoring');
@@ -54,10 +52,10 @@ describe('ChatPanel cancellation controls', () => {
     expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>[^<]*Stop/);
   });
 
-  it('shows a disabled rollback state after cancellation is requested', () => {
-    const html = renderPanel(true, true);
+  it('never exposes a blocking restoring state', () => {
+    const html = renderPanel(false);
 
-    expect(html).toContain('Restoring…');
-    expect(html).toMatch(/<button[^>]*disabled=""/);
+    expect(html).not.toContain('Restoring…');
+    expect(html).not.toContain('Stopping and restoring');
   });
 });

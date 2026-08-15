@@ -175,6 +175,26 @@ class PipelineGraphValidationTest(unittest.TestCase):
         self.assertFalse(report["valid"])
         self.assertIn("missing-edge-port", {issue["code"] for issue in report["issues"]})
 
+    def test_unknown_edge_port_reports_the_exact_valid_ids(self):
+        graph = {
+            "nodes": [
+                node(1, "source", "Audio Upload"),
+                node(2, "task", "Transcribe Audio", GENERATED_CODE),
+            ],
+            "edges": [edge(1, 2, "source.data", "task.input")],
+        }
+
+        report = validate_pipeline_graph(graph)
+
+        issue = next(
+            issue
+            for issue in report["issues"]
+            if issue["code"] == "unknown-edge-port"
+        )
+        self.assertIn("source used 'source.data' (valid: data)", issue["message"])
+        self.assertIn("target used 'task.input' (valid: input)", issue["message"])
+        self.assertIn("do not include component-type prefixes", issue["message"])
+
     def test_non_python_task_requires_migration(self):
         graph = {
             "nodes": [
@@ -491,7 +511,8 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("list_reusable_pipelines", tool_names)
         self.assertIn("create_reusable_pipeline", tool_names)
         system_message = assistant_agent.call_args.kwargs["system_message"]
-        self.assertIn("Condition.when_false", system_message)
+        self.assertIn("never `source.data`", system_message)
+        self.assertIn("source_port `when_false`", system_message)
         self.assertIn('value.sentiment == "negative"', system_message)
         self.assertIn("Complaint has exactly one outgoing edge", system_message)
         self.assertIn("Parallel Map owns iteration", system_message)
@@ -719,7 +740,30 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
             api_key="secret",
         )
         select_model_client.return_value = MagicMock()
-        run_query.return_value = [{"connection": {"source_port": "when_false"}}]
+        run_query.side_effect = [
+            [{
+                "connection_context": {
+                    "source": {
+                        "flow_id": "4",
+                        "type": "flow",
+                        "template_label": "Condition",
+                        "ports_json": json.dumps({
+                            "inputs": [{"id": "value"}],
+                            "outputs": [{"id": "when_true"}, {"id": "when_false"}],
+                        }),
+                    },
+                    "target": {
+                        "flow_id": "6",
+                        "type": "task",
+                        "ports_json": json.dumps({
+                            "inputs": [{"id": "input"}],
+                            "outputs": [{"id": "output"}],
+                        }),
+                    },
+                },
+            }],
+            [{"connection": {"source_port": "when_false"}}],
+        ]
 
         build_pipeline_editing_team(config)
         connect_steps = next(
@@ -739,13 +783,190 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("source.type = 'flow'", query)
         self.assertIn("OR false", query)
         self.assertIn("MERGE (source)-[flow:FLOWS_TO]->(target)", query)
-        self.assertIn("ELSE 'when_false'", query)
-        self.assertIn("ELSE 'input'", query)
-        self.assertIn("coalesce(source.primary_output_port", query)
-        self.assertIn("coalesce(target.primary_input_port", query)
+        self.assertIn("flow.source_port = 'when_false'", query)
+        self.assertIn("flow.target_port = 'input'", query)
         self.assertIn("trueTarget.y = coalesce(source.y, 0.0) - 180.0", query)
         self.assertIn("falseTargetIsMerge", query)
         self.assertEqual("connect_steps", run_query.await_args.args[1])
+        self.assertEqual("resolve_connection_ports", run_query.await_args_list[0].args[1])
+
+    @patch("pipeline_agent.team.RoundRobinGroupChat")
+    @patch("pipeline_agent.team.AssistantAgent")
+    @patch("pipeline_agent.team.select_model_client")
+    @patch("pipeline_agent.tools.run_neo4j_query", new_callable=AsyncMock)
+    def test_connect_steps_normalizes_gpt_oss_type_prefixed_ports(
+        self,
+        run_query,
+        select_model_client,
+        assistant_agent,
+        _round_robin,
+    ):
+        config = LLMConfig(
+            provider="openrouter",
+            model="openai/gpt-oss-120b",
+            base_url="https://example.test/v1",
+            api_key="secret",
+        )
+        select_model_client.return_value = MagicMock()
+        run_query.side_effect = [
+            [{
+                "connection_context": {
+                    "source": {
+                        "flow_id": "1",
+                        "type": "source",
+                        "ports_json": json.dumps({
+                            "inputs": [],
+                            "outputs": [{"id": "data"}],
+                        }),
+                    },
+                    "target": {
+                        "flow_id": "2",
+                        "type": "task",
+                        "ports_json": json.dumps({
+                            "inputs": [{"id": "input"}],
+                            "outputs": [{"id": "output"}],
+                        }),
+                    },
+                },
+            }],
+            [{"connection": {"source_port": "data", "target_port": "input"}}],
+        ]
+
+        build_pipeline_editing_team(config)
+        connect_steps = next(
+            tool
+            for tool in assistant_agent.call_args.kwargs["tools"]
+            if tool.__name__ == "connect_steps"
+        )
+        asyncio.run(connect_steps(json.dumps({
+            "source_flow_id": "1",
+            "target_flow_id": "2",
+            "source_port": "source.data",
+            "target_port": "task.input",
+        })))
+
+        mutation_query = run_query.await_args_list[1].args[0]
+        self.assertIn("flow.source_port = 'data'", mutation_query)
+        self.assertIn("flow.target_port = 'input'", mutation_query)
+        self.assertNotIn("source.data", mutation_query)
+        self.assertNotIn("task.input", mutation_query)
+
+    @patch("pipeline_agent.team.RoundRobinGroupChat")
+    @patch("pipeline_agent.team.AssistantAgent")
+    @patch("pipeline_agent.team.select_model_client")
+    @patch("pipeline_agent.tools.run_neo4j_query", new_callable=AsyncMock)
+    def test_connect_steps_rejects_unknown_port_before_mutating(
+        self,
+        run_query,
+        select_model_client,
+        assistant_agent,
+        _round_robin,
+    ):
+        config = LLMConfig(
+            provider="openrouter",
+            model="test/model",
+            base_url="https://example.test/v1",
+            api_key="secret",
+        )
+        select_model_client.return_value = MagicMock()
+        run_query.return_value = [{
+            "connection_context": {
+                "source": {
+                    "flow_id": "2",
+                    "type": "task",
+                    "ports_json": json.dumps({
+                        "inputs": [{"id": "input"}],
+                        "outputs": [{"id": "output"}],
+                    }),
+                },
+                "target": {
+                    "flow_id": "3",
+                    "type": "task",
+                    "ports_json": json.dumps({
+                        "inputs": [{"id": "input"}],
+                        "outputs": [{"id": "output"}],
+                    }),
+                },
+            },
+        }]
+
+        build_pipeline_editing_team(config)
+        connect_steps = next(
+            tool
+            for tool in assistant_agent.call_args.kwargs["tools"]
+            if tool.__name__ == "connect_steps"
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Valid output port ids: output",
+        ):
+            asyncio.run(connect_steps(json.dumps({
+                "source_flow_id": "2",
+                "target_flow_id": "3",
+                "source_port": "task.result",
+                "target_port": "task.input",
+            })))
+
+        self.assertEqual(1, run_query.await_count)
+        self.assertEqual("resolve_connection_ports", run_query.await_args.args[1])
+
+    @patch("pipeline_agent.team.RoundRobinGroupChat")
+    @patch("pipeline_agent.team.AssistantAgent")
+    @patch("pipeline_agent.team.select_model_client")
+    @patch("pipeline_agent.tools.run_neo4j_query", new_callable=AsyncMock)
+    def test_connect_steps_infers_single_ports_when_omitted(
+        self,
+        run_query,
+        select_model_client,
+        assistant_agent,
+        _round_robin,
+    ):
+        config = LLMConfig(
+            provider="openrouter",
+            model="test/model",
+            base_url="https://example.test/v1",
+            api_key="secret",
+        )
+        select_model_client.return_value = MagicMock()
+        run_query.side_effect = [
+            [{
+                "connection_context": {
+                    "source": {
+                        "flow_id": "3",
+                        "type": "task",
+                        "ports_json": json.dumps({
+                            "inputs": [{"id": "input"}],
+                            "outputs": [{"id": "output"}],
+                        }),
+                    },
+                    "target": {
+                        "flow_id": "4",
+                        "type": "destination",
+                        "ports_json": json.dumps({
+                            "inputs": [{"id": "data"}],
+                            "outputs": [],
+                        }),
+                    },
+                },
+            }],
+            [{"connection": {"source_port": "output", "target_port": "data"}}],
+        ]
+
+        build_pipeline_editing_team(config)
+        connect_steps = next(
+            tool
+            for tool in assistant_agent.call_args.kwargs["tools"]
+            if tool.__name__ == "connect_steps"
+        )
+        asyncio.run(connect_steps(json.dumps({
+            "source_flow_id": "3",
+            "target_flow_id": "4",
+        })))
+
+        mutation_query = run_query.await_args_list[1].args[0]
+        self.assertIn("flow.source_port = 'output'", mutation_query)
+        self.assertIn("flow.target_port = 'data'", mutation_query)
 
     @patch("pipeline_agent.team.RoundRobinGroupChat")
     @patch("pipeline_agent.team.AssistantAgent")

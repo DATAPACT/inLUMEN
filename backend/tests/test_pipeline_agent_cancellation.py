@@ -14,10 +14,38 @@ from pipeline_agent.cancellation import (  # noqa: E402
     request_pipeline_turn_cancel,
     run_cancellable_pipeline_turn,
 )
+from analytics_api import app  # noqa: E402
 from graph_client import run_neo4j_query  # noqa: E402
 
 
 class PipelineAgentCancellationTest(unittest.TestCase):
+    def test_cancel_endpoint_acknowledges_immediately_and_clears_session(self):
+        turn_id = f"turn-{uuid.uuid4()}"
+        with (
+            patch(
+                "analytics_api.request_pipeline_turn_cancel",
+                return_value={
+                    "turn_id": turn_id,
+                    "status": "cancelling",
+                    "active": True,
+                },
+            ) as request_cancel,
+            patch("analytics_api.clear_state_from_disk") as clear_session,
+            app.test_client() as client,
+        ):
+            response = client.post(
+                "/simple_chat/cancel",
+                json={"turn_id": turn_id, "session_id": "session-123"},
+            )
+
+        self.assertEqual(202, response.status_code)
+        payload = response.get_json()
+        self.assertEqual("cancelling", payload["status"])
+        self.assertFalse(payload["completed"])
+        self.assertTrue(payload["session_cleared"])
+        request_cancel.assert_called_once_with(turn_id)
+        clear_session.assert_called_once_with("session-123")
+
     def test_waits_for_started_graph_mutation_before_propagating_cancellation(self):
         started = threading.Event()
         release = threading.Event()

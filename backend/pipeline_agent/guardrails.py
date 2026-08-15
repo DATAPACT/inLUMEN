@@ -107,6 +107,10 @@ def _guardrail_repair_task(
         "saved reference and repair the parent wiring: insert or connect an upstream Source "
         "to that public input, then connect its output to downstream processing and a terminal "
         "Destination. Do not recreate or repeatedly reconfigure the reusable pipeline."
+        " Connection port ids never include a component type or label prefix. Use exact "
+        "local ids such as data, input, output, value, when_true, when_false, items, or "
+        "item. Call overview to inspect custom or Subpipeline port ids. Never use forms "
+        "such as source.data, task.input, task.output, or destination.data."
         + (f"\n\nVALIDATION ERRORS:\n{error_context}" if error_context else "")
         + "\n\n"
         + _build_agent_task(user_message, canvas_graph, backend_graph)
