@@ -202,10 +202,10 @@ class GeneratedFile(BaseModel):
 
 class DataContract(BaseModel):
     contract_id: str = "inlumen.generic-node@1"
-    input_manifest_env: str = "INLUMEN_INPUT_MANIFEST"
-    output_dir_env: str = "INLUMEN_OUTPUT_DIR"
-    output_manifest_env: str = "INLUMEN_OUTPUT_MANIFEST"
-    context_path_env: str = "INLUMEN_CONTEXT_PATH"
+    input_manifest_env: str = "PIPELINE_INPUT_DIR"
+    output_dir_env: str = "PIPELINE_OUTPUT_DIR"
+    output_manifest_env: str = ""
+    context_path_env: str = ""
     inputs: list[ExpectedArtifact] = Field(default_factory=list)
     outputs: list[ExpectedArtifact] = Field(default_factory=list)
 

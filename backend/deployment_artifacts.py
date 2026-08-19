@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from artifact_content import decode_artifact_content, verify_artifact_integrity
 from artifact_contract import classify_artifact
+from filesystem_runtime import filesystem_shell_component_source
 from node_parameters import normalize_secret_param_keys
 from node_ports import normalize_node_ports
 from node_secrets import runtime_secret_name
@@ -45,6 +46,23 @@ MANAGED_ADAPTER_GENERATOR = "inlumen-managed-adapter"
 DAGSTER_PINNED_VERSION = "1.13.12"
 DAGSTER_LIBRARY_PINNED_VERSION = "0.29.12"
 UV_PINNED_VERSION = "0.11.32"
+ARTIFACT_CONTRACT = {
+    "schema_version": "inlumen.artifact-contract@1",
+    "transport": "filesystem",
+    "input_environment": "PIPELINE_INPUT_DIR",
+    "output_environment": "PIPELINE_OUTPUT_DIR",
+    "recursive": True,
+    "input_layout": "<input_port>/...",
+    "output_layout": "<output_port>/...",
+    "source_agnostic": True,
+    "connector_agnostic": True,
+}
+_DIRECT_PARAMETER_ENVIRONMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_RESERVED_PARAMETER_ENVIRONMENT_NAMES = {
+    "PIPELINE_INPUT_DIR",
+    "PIPELINE_OUTPUT_DIR",
+    "PIPELINE_PARAMS_JSON",
+}
 
 
 class DeploymentArtifactValidationError(ValueError):
@@ -88,6 +106,42 @@ def _step_runtime_parameters(step: dict[str, Any]) -> dict[str, Any]:
         and str(key) != "model_plan"
         and str(key) not in secret_names
     }
+
+
+def _direct_parameter_environment_name(key: Any) -> str:
+    """Return a safe direct environment variable name for a Task parameter."""
+    name = str(key).strip()
+    if (
+        not _DIRECT_PARAMETER_ENVIRONMENT_RE.fullmatch(name)
+        or name in _RESERVED_PARAMETER_ENVIRONMENT_NAMES
+        or name.startswith(("PIPELINE_", "INLUMEN_"))
+    ):
+        return ""
+    return name
+
+
+def _capability_secret_names(manifest: dict) -> list[str]:
+    capabilities = manifest.get("capabilities")
+    values = capabilities.get("secrets") if isinstance(capabilities, dict) else []
+    if not isinstance(values, list):
+        return []
+    return sorted({str(value).strip() for value in values if str(value).strip()})
+
+
+def _runtime_secret_parameters(
+    step: dict[str, Any],
+    dockerfiles_payload: Any,
+) -> list[str]:
+    """Combine graph-configured and package-declared secret references."""
+    flow_id = _clean_string(step.get("flow_id"))
+    manifest = _json_object(
+        _deployment_file_content(
+            dockerfiles_payload,
+            flow_id,
+            "node-manifest.json",
+        )
+    )
+    return sorted(set(_step_secret_parameters(step)) | set(_capability_secret_names(manifest)))
 
 
 def _kubernetes_secret_key(step_id: Any, parameter_name: Any) -> str:
@@ -763,6 +817,37 @@ def _dockerfile_lookup(dockerfiles_payload: Any) -> Dict[str, dict]:
     return lookup
 
 
+def _runtime_command_for_step(
+    dockerfiles_payload: Any,
+    flow_id: str,
+) -> List[str]:
+    """Return the declared command for a packaged node, when one is available."""
+    dockerfile = _dockerfile_lookup(dockerfiles_payload).get(flow_id, {})
+    command = dockerfile.get("command")
+    if isinstance(command, list) and all(isinstance(item, str) for item in command):
+        return [item for item in command if item.strip()]
+    return _extract_json_cmd_from_dockerfile(_clean_string(dockerfile.get("content")))
+
+
+def _runtime_entrypoint_filename(
+    dockerfiles_payload: Any,
+    flow_id: str,
+) -> str:
+    """Resolve a Python entrypoint filename without exposing container paths.
+
+    The bundle can relocate a node from ``/app`` into ``nodes/<node>``.  We keep
+    the executable filename from its declared Python command, rather than
+    assuming every uploaded package is a directly executable ``main.py``.
+    """
+    command = _runtime_command_for_step(dockerfiles_payload, flow_id)
+    if not command:
+        return "main.py"
+    candidate = PurePosixPath(command[-1]).name
+    if candidate.endswith(".py") and candidate not in {".", ".."}:
+        return candidate
+    return "main.py"
+
+
 def _topological_order(step_ids: Sequence[str], edges: Sequence[dict]) -> List[str]:
     step_id_set = set(step_ids)
     incoming = {step_id: 0 for step_id in step_ids}
@@ -967,28 +1052,29 @@ def _build_codegen_argo_workflow_object(
 
     for step_id in ordered_ids:
         parent_ids = dependencies.get(step_id) or []
+        step = steps_by_id[step_id]
+        is_database_source = (
+            _clean_string(step.get("type")).lower() == "source"
+            and _clean_string(step.get("template")).lower() == "database"
+        )
         task = {
             "name": _argo_name(step_id),
             "template": _argo_name(step_id),
-            "arguments": {
-                "artifacts": [
-                    {
-                        "name": "inputs",
-                        **(
-                            {
-                                "from": f"{{{{tasks.{_argo_name(parent_ids[0])}.outputs.artifacts.outputs}}}}"
-                            }
-                            if parent_ids
-                            else {
-                                "s3": {
-                                    "key": "{{workflow.parameters.input-artifact-key}}"
-                                }
-                            }
-                        ),
-                    }
-                ]
-            },
         }
+        if parent_ids:
+            task["arguments"] = {
+                "artifacts": [{
+                    "name": "inputs",
+                    "from": f"{{{{tasks.{_argo_name(parent_ids[0])}.outputs.artifacts.outputs}}}}",
+                }]
+            }
+        elif not is_database_source:
+            task["arguments"] = {
+                "artifacts": [{
+                    "name": "inputs",
+                    "s3": {"key": "{{workflow.parameters.input-artifact-key}}"},
+                }]
+            }
         if parent_ids:
             task["dependencies"] = [_argo_name(parent) for parent in parent_ids]
         tasks.append(task)
@@ -996,7 +1082,6 @@ def _build_codegen_argo_workflow_object(
     for step_id in ordered_ids:
         step = steps_by_id[step_id]
         dockerfile = dockerfiles_by_step[step_id]
-        contract = _step_data_contract(step)
         image_parameter = (
             shared_image_parameter
             if shared_runtime
@@ -1031,39 +1116,9 @@ def _build_codegen_argo_workflow_object(
 
         env = [
             {"name": "INLUMEN_FLOW_ID", "value": step_id},
-            {
-                "name": _contract_env_name(
-                    contract,
-                    "input_manifest_env",
-                    "INLUMEN_INPUT_MANIFEST",
-                ),
-                "value": "/inlumen/inputs/input_manifest.json",
-            },
-            {
-                "name": _contract_env_name(
-                    contract,
-                    "output_dir_env",
-                    "INLUMEN_OUTPUT_DIR",
-                ),
-                "value": "/inlumen/outputs",
-            },
-            {
-                "name": _contract_env_name(
-                    contract,
-                    "output_manifest_env",
-                    "INLUMEN_OUTPUT_MANIFEST",
-                ),
-                "value": "/inlumen/outputs/output_manifest.json",
-            },
-            {
-                "name": _contract_env_name(
-                    contract,
-                    "context_path_env",
-                    "INLUMEN_CONTEXT_PATH",
-                ),
-                "value": _clean_string(shared_node.get("context_path"))
-                or "/app/node-manifest.json",
-            },
+            # The public Task ABI is intentionally just these two directories.
+            {"name": "PIPELINE_INPUT_DIR", "value": "/inlumen/inputs"},
+            {"name": "PIPELINE_OUTPUT_DIR", "value": "/inlumen/outputs"},
         ]
         if step.get("label"):
             env.append({"name": "INLUMEN_STEP_LABEL", "value": step["label"]})
@@ -1075,15 +1130,46 @@ def _build_codegen_argo_workflow_object(
                 "name": "INLUMEN_PARAMS_JSON",
                 "value": json.dumps(runtime_parameters, ensure_ascii=False, sort_keys=True),
             })
+            env.append({
+                "name": "PIPELINE_PARAMS_JSON",
+                "value": json.dumps(runtime_parameters, ensure_ascii=False, sort_keys=True),
+            })
         for key, value in sorted(runtime_parameters.items()):
             env_name = "INLUMEN_PARAM_" + re.sub(r"[^A-Za-z0-9]+", "_", key).upper().strip("_")
             if env_name != "INLUMEN_PARAM_":
                 env.append({"name": env_name, "value": str(value)})
+                env.append({
+                    "name": env_name.replace("INLUMEN_", "PIPELINE_"),
+                    "value": str(value),
+                })
+            direct_name = _direct_parameter_environment_name(key)
+            if direct_name:
+                env.append({"name": direct_name, "value": str(value)})
         for key in _step_secret_parameters(step):
             env_name = "INLUMEN_PARAM_" + re.sub(r"[^A-Za-z0-9]+", "_", key).upper().strip("_")
             if env_name != "INLUMEN_PARAM_":
                 env.append({
                     "name": env_name,
+                    "valueFrom": {
+                        "secretKeyRef": {
+                            "name": "inlumen-runtime-secrets",
+                            "key": _kubernetes_secret_key(step_id, key),
+                        },
+                    },
+                })
+                env.append({
+                    "name": env_name.replace("INLUMEN_", "PIPELINE_"),
+                    "valueFrom": {
+                        "secretKeyRef": {
+                            "name": "inlumen-runtime-secrets",
+                            "key": _kubernetes_secret_key(step_id, key),
+                        },
+                    },
+                })
+            direct_name = _direct_parameter_environment_name(key)
+            if direct_name:
+                env.append({
+                    "name": direct_name,
                     "valueFrom": {
                         "secretKeyRef": {
                             "name": "inlumen-runtime-secrets",
@@ -1107,18 +1193,9 @@ def _build_codegen_argo_workflow_object(
         if step.get("label"):
             annotations["inlumen.ai/label"] = step["label"]
 
-        templates.append(
-            {
+        template = {
                 "name": _argo_name(step_id),
                 "metadata": {"annotations": annotations},
-                "inputs": {
-                    "artifacts": [
-                        {
-                            "name": "inputs",
-                            "path": "/inlumen/inputs",
-                        }
-                    ]
-                },
                 "outputs": {"artifacts": [output_artifact]},
                 "container": {
                     "image": f"{{{{workflow.parameters.{image_parameter}}}}}",
@@ -1129,7 +1206,14 @@ def _build_codegen_argo_workflow_object(
                     "env": env,
                 },
             }
-        )
+        if not (
+            _clean_string(step.get("type")).lower() == "source"
+            and _clean_string(step.get("template")).lower() == "database"
+        ):
+            template["inputs"] = {
+                "artifacts": [{"name": "inputs", "path": "/inlumen/inputs"}]
+            }
+        templates.append(template)
 
     return {
         "apiVersion": "argoproj.io/v1alpha1",
@@ -1275,15 +1359,46 @@ def build_argo_workflow_object(
                 "name": "INLUMEN_PARAMS_JSON",
                 "value": json.dumps(runtime_parameters, ensure_ascii=False, sort_keys=True),
             })
+            env.append({
+                "name": "PIPELINE_PARAMS_JSON",
+                "value": json.dumps(runtime_parameters, ensure_ascii=False, sort_keys=True),
+            })
         for key, value in sorted(runtime_parameters.items()):
             env_name = "INLUMEN_PARAM_" + re.sub(r"[^A-Za-z0-9]+", "_", key).upper().strip("_")
             if env_name != "INLUMEN_PARAM_":
                 env.append({"name": env_name, "value": str(value)})
+                env.append({
+                    "name": env_name.replace("INLUMEN_", "PIPELINE_"),
+                    "value": str(value),
+                })
+            direct_name = _direct_parameter_environment_name(key)
+            if direct_name:
+                env.append({"name": direct_name, "value": str(value)})
         for key in _step_secret_parameters(step):
             env_name = "INLUMEN_PARAM_" + re.sub(r"[^A-Za-z0-9]+", "_", key).upper().strip("_")
             if env_name != "INLUMEN_PARAM_":
                 env.append({
                     "name": env_name,
+                    "valueFrom": {
+                        "secretKeyRef": {
+                            "name": "inlumen-runtime-secrets",
+                            "key": _kubernetes_secret_key(step_id, key),
+                        },
+                    },
+                })
+                env.append({
+                    "name": env_name.replace("INLUMEN_", "PIPELINE_"),
+                    "valueFrom": {
+                        "secretKeyRef": {
+                            "name": "inlumen-runtime-secrets",
+                            "key": _kubernetes_secret_key(step_id, key),
+                        },
+                    },
+                })
+            direct_name = _direct_parameter_environment_name(key)
+            if direct_name:
+                env.append({
+                    "name": direct_name,
                     "valueFrom": {
                         "secretKeyRef": {
                             "name": "inlumen-runtime-secrets",
@@ -1573,6 +1688,28 @@ def _payload_runtime_artifacts(dockerfiles_payload: Any) -> List[dict]:
     return [item for item in artifacts if isinstance(item, dict)] if isinstance(artifacts, list) else []
 
 
+def _runtime_artifact_for_step(dockerfiles_payload: Any, flow_id: str) -> dict:
+    for artifact in _payload_runtime_artifacts(dockerfiles_payload):
+        if _clean_string(artifact.get("flow_id")) == flow_id:
+            return artifact
+    return {}
+
+
+def _uses_managed_boundary_runtime(step: dict, dockerfiles_payload: Any) -> bool:
+    """Identify platform-owned connector runtimes without inspecting code."""
+    if str(step.get("type") or "").strip().lower() not in {"source", "destination"}:
+        return False
+    artifact = _runtime_artifact_for_step(
+        dockerfiles_payload,
+        _clean_string(step.get("flow_id")),
+    )
+    generator = _clean_string(artifact.get("generator"))
+    # Boundary runtimes are managed unless a Custom node explicitly carries a
+    # user-owned attached runtime. AI-generated connector code is not allowed
+    # to replace the platform adapter.
+    return generator != ATTACHED_RUNTIME_GENERATOR
+
+
 def _deployment_file_content(
     dockerfiles_payload: Any,
     flow_id: str,
@@ -1672,6 +1809,13 @@ def _dagster_yaml(data: dict) -> str:
 
 
 def _dagster_shell_command_component_source() -> str:
+    # The exported component is intentionally engine-adjacent only: it stages
+    # files, starts Python, and inventories produced artifacts.  Task code sees
+    # only PIPELINE_INPUT_DIR and PIPELINE_OUTPUT_DIR.
+    return filesystem_shell_component_source()
+
+
+def _legacy_dagster_shell_command_component_source() -> str:
     return '''import json
 import os
 import queue
@@ -2197,11 +2341,10 @@ def _dagster_readme(
     has_model_requirements: bool = False,
 ) -> str:
     input_dir = "inputs" if bundle_layout else "storage/inputs"
-    input_manifest = f"{input_dir}/input_manifest.json"
     sample_note = (
         f"Run input files were copied into `{input_dir}/`."
         if has_sample_inputs
-        else f"No run input files were detected; add contract-matching files beside `{input_manifest}` before materializing root assets."
+        else f"No run input files were detected; add files to `{input_dir}/` before materializing root assets."
     )
     run_commands = (
         "```bash\n"
@@ -2237,12 +2380,14 @@ This project was generated deterministically from persisted InLumen runtime arti
 
 {run_commands}
 
-The reusable component in `src/inlumen_dagster_project/components/shell_command.py` launches each node script as a local subprocess, forwards its logs to Dagster, and preserves the InLumen runtime contract:
+The reusable component in `src/inlumen_dagster_project/components/shell_command.py` launches each node script as a local subprocess, forwards its logs to Dagster, and creates a standard workspace for every Task:
 
-- `INLUMEN_INPUT_MANIFEST`
-- `INLUMEN_OUTPUT_DIR`
-- `INLUMEN_OUTPUT_MANIFEST`
-- `INLUMEN_CONTEXT_PATH`
+- `PIPELINE_INPUT_DIR`
+- `PIPELINE_OUTPUT_DIR`
+
+Task code reads files from the input directory and writes downstream artifacts
+to the output directory. Dagster inventories and moves those files internally;
+Task code does not read or write an output manifest.
 
 {sample_note}
 {model_note}
@@ -2327,6 +2472,44 @@ def _model_requirements_for_dagster(
 ) -> dict:
     models: List[dict] = []
     seen: set[Tuple[str, str, str]] = set()
+
+    def append_model(
+        *,
+        flow_id: str,
+        adapter_id: str,
+        model_id: str,
+        model_revision: str,
+        model_variants: dict | None = None,
+        runtime_selection: dict | None = None,
+        artifact_policy: dict | None = None,
+    ) -> None:
+        key = (adapter_id, model_id, model_revision)
+        if key in seen:
+            return
+        seen.add(key)
+        variants = model_variants or {}
+        models.append(
+            {
+                "flow_id": flow_id,
+                "adapter_id": adapter_id,
+                "model_id": model_id,
+                "model_revision": model_revision,
+                "model_variants": variants,
+                "runtime_selection": runtime_selection or {},
+                "profile_env": (
+                    "INLUMEN_ASR_PROFILE"
+                    if adapter_id == "faster-whisper" and variants
+                    else ""
+                ),
+                "device_env": (
+                    "INLUMEN_ASR_DEVICE"
+                    if adapter_id == "faster-whisper" and variants
+                    else ""
+                ),
+                "artifact_policy": artifact_policy or {},
+            }
+        )
+
     for step in steps:
         flow_id = _clean_string(step.get("flow_id"))
         manifest_content = _deployment_file_content(
@@ -2335,6 +2518,30 @@ def _model_requirements_for_dagster(
             "node-manifest.json",
         )
         manifest = _json_object(manifest_content)
+        declared_models = manifest.get("model_requirements")
+        if isinstance(declared_models, list):
+            for declared in declared_models:
+                if not isinstance(declared, dict) or declared.get("runtime") != "local":
+                    continue
+                model_id = _clean_string(declared.get("model_id"))
+                model_revision = _clean_string(declared.get("model_revision"))
+                if model_id and model_revision:
+                    append_model(
+                        flow_id=flow_id,
+                        adapter_id=_clean_string(declared.get("adapter_id")) or "user-declared-model",
+                        model_id=model_id,
+                        model_revision=model_revision,
+                        model_variants=(
+                            declared.get("model_variants")
+                            if isinstance(declared.get("model_variants"), dict)
+                            else {}
+                        ),
+                        runtime_selection=(
+                            declared.get("runtime_selection")
+                            if isinstance(declared.get("runtime_selection"), dict)
+                            else {}
+                        ),
+                    )
         plan = (
             manifest.get("implementation_plan")
             if isinstance(manifest.get("implementation_plan"), dict)
@@ -2364,10 +2571,6 @@ def _model_requirements_for_dagster(
         ):
             continue
         adapter_id = _clean_string(plan.get("adapter_id"))
-        key = (adapter_id, model_id, model_revision)
-        if key in seen:
-            continue
-        seen.add(key)
         variants = (
             plan.get("model_variants")
             if isinstance(plan.get("model_variants"), dict)
@@ -2378,26 +2581,14 @@ def _model_requirements_for_dagster(
             if isinstance(plan.get("runtime_selection"), dict)
             else {}
         )
-        models.append(
-            {
-                "flow_id": flow_id,
-                "adapter_id": adapter_id,
-                "model_id": model_id,
-                "model_revision": model_revision,
-                "model_variants": variants,
-                "runtime_selection": runtime_selection,
-                "profile_env": (
-                    "INLUMEN_ASR_PROFILE"
-                    if adapter_id == "faster-whisper" and variants
-                    else ""
-                ),
-                "device_env": (
-                    "INLUMEN_ASR_DEVICE"
-                    if adapter_id == "faster-whisper" and variants
-                    else ""
-                ),
-                "artifact_policy": artifact_policy,
-            }
+        append_model(
+            flow_id=flow_id,
+            adapter_id=adapter_id,
+            model_id=model_id,
+            model_revision=model_revision,
+            model_variants=variants,
+            runtime_selection=runtime_selection,
+            artifact_policy=artifact_policy,
         )
     return {
         "schema_version": "inlumen.model-requirements@1",
@@ -2452,6 +2643,30 @@ def _safe_snapshot(model_root: Path, relative_path: str) -> Path:
     if not snapshot.is_dir():
         raise RuntimeError(f"Model snapshot is missing: {snapshot}")
     return snapshot
+
+
+def _register_default_revision(model_root: Path, model_id: str, revision: str) -> None:
+    """Make a pinned snapshot discoverable by libraries requesting ``main``.
+
+    Some model SDKs accept a friendly model alias and internally request the
+    repository's default revision.  The build has already reviewed and pinned
+    the exact commit, so this local cache ref maps that alias to the verified
+    snapshot without enabling outbound network access.
+    """
+    repository_cache = (
+        model_root
+        / "huggingface"
+        / ("models--" + model_id.replace("/", "--"))
+    )
+    refs_dir = repository_cache / "refs"
+    refs_dir.mkdir(parents=True, exist_ok=True)
+    temporary_ref = refs_dir / "main.tmp"
+    # huggingface_hub reads this file verbatim when resolving an alias such as
+    # ``main``. Unlike our JSON manifests, the ref must not be newline
+    # terminated: the newline becomes part of the revision and prevents the
+    # otherwise-present snapshot from being found in offline mode.
+    temporary_ref.write_text(revision, encoding="utf-8")
+    temporary_ref.replace(refs_dir / "main")
 
 
 def _existing_verified_artifact(
@@ -2542,6 +2757,7 @@ def _acquire(model_root: Path, model_id: str, revision: str) -> Path:
         spec_sha256,
     )
     if existing is not None:
+        _register_default_revision(model_root, model_id, revision)
         print(f"[inlumen:model-prefetch] verified cache hit {model_id}@{revision}", flush=True)
         return existing
 
@@ -2556,6 +2772,7 @@ def _acquire(model_root: Path, model_id: str, revision: str) -> Path:
             token=os.getenv("HF_TOKEN") or None,
         )
     ).resolve()
+    _register_default_revision(model_root, model_id, revision)
     try:
         relative_snapshot = snapshot.relative_to(model_root).as_posix()
     except ValueError as exc:
@@ -2791,8 +3008,11 @@ x-dagster-environment: &dagster-environment
   DAGSTER_POSTGRES_USER: "${{DAGSTER_POSTGRES_USER:-dagster}}"
   DAGSTER_POSTGRES_PASSWORD: "${{DAGSTER_POSTGRES_PASSWORD:-dagster}}"
   DAGSTER_POSTGRES_DB: "${{DAGSTER_POSTGRES_DB:-dagster}}"
-  HF_HUB_OFFLINE: "1"
-  TRANSFORMERS_OFFLINE: "1"
+  # Arbitrary user Tasks may acquire their own model or call external services.
+  # Reviewed adapters still load their prefetched snapshots directly from
+  # INLUMEN_MODEL_ROOT, but do not impose an offline-only policy on user code.
+  HF_HUB_OFFLINE: "${{HF_HUB_OFFLINE:-0}}"
+  TRANSFORMERS_OFFLINE: "${{TRANSFORMERS_OFFLINE:-0}}"
   INLUMEN_ACCELERATOR: "${{INLUMEN_ACCELERATOR:-cpu}}"
   INLUMEN_MODEL_ROOT: /models
   INLUMEN_ASR_DEVICE: "${{INLUMEN_ASR_DEVICE:-auto}}"
@@ -2852,6 +3072,7 @@ services:
     environment: *dagster-environment
     networks:
       - orchestration
+      - runtime-egress
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 4000), timeout=3).close()"]
       interval: 10s
@@ -2920,6 +3141,7 @@ networks:
   orchestration:
     internal: true
   ui:
+  runtime-egress:
 {model_download_network}\
 """
 
@@ -2982,9 +3204,10 @@ def _deployment_bundle_readme_content(
         model_note = (
             " A generated model-prefetch service acquires reviewed model revisions "
             "before Dagster starts, verifies a SHA-256 tree manifest, and stores them "
-            "in the persistent `inlumen_model_store` volume. Runtime model adapters "
-            "load only from that read-only local store with Hub access disabled. Set "
-            "`HF_TOKEN` before `docker compose up` for authenticated acquisition."
+            "in the persistent `inlumen_model_store` volume. Reviewed adapters load "
+            "from that read-only local store. Custom Task code may acquire its own "
+            "models at runtime; set `HF_TOKEN` before `docker compose up` for "
+            "authenticated Hugging Face access."
             if has_model_requirements
             else ""
         )
@@ -3033,10 +3256,10 @@ This bundle was generated deterministically from persisted InLumen runtime artif
 
 ## Layout
 
-- `inputs/`: files attached to Source nodes and `input_manifest.json`
+- `inputs/`: files attached to Source nodes
 - `nodes/`: per-node runtime source, requirements, and manifests (no node Dockerfiles)
 - `outputs/`: per-node output folders used during local Dagster execution
-- `run-spec.json`: engine-neutral node, port, input, output, and runtime contract
+- `run-spec.json`: engine-neutral runtime and filesystem hand-off contract
 - `bundle-manifest.json`: machine-readable bundle index
 {dagster_section}{argo_section}{secrets_section}"""
 
@@ -3314,7 +3537,6 @@ def build_dagster_project_files(
 
     ordered_ids = _topological_order(step_ids, explicit_edges)
     dependencies = _dependency_lookup(step_ids, explicit_edges)
-    _require_single_parent_handoff(ordered_ids, dependencies)
 
     steps_by_id = {step["flow_id"]: step for step in steps}
     asset_names = _dagster_asset_names([steps_by_id[step_id] for step_id in ordered_ids])
@@ -3359,23 +3581,26 @@ def build_dagster_project_files(
                     sha256=_clean_string(file_entry.get("sha256")),
                 )
             )
-        output_files.append(
-            _dagster_file(
-                f"{project_dir}/storage/inputs/input_manifest.json",
-                _input_manifest_for_dagster(root_input_files),
-                "dagster-input",
-            )
-        )
-
     for step_id in ordered_ids:
         step = steps_by_id[step_id]
         asset_name = asset_names[step_id]
         node_dir = _bundle_node_dir(step)
-        script_content = _deployment_file_content(dockerfiles_payload, step_id, "main.py")
+        entrypoint_filename = _runtime_entrypoint_filename(
+            dockerfiles_payload,
+            step_id,
+        )
+        script_content = _deployment_file_content(
+            dockerfiles_payload,
+            step_id,
+            entrypoint_filename,
+        )
         if not script_content:
             raise DeploymentArtifactValidationError(
                 "Dagster deployment guardrail validation failed",
-                [f"Node {step_id} is missing main.py in persisted runtime artifacts."],
+                [
+                    f"Node {step_id} is missing {entrypoint_filename} in persisted "
+                    "runtime artifacts."
+                ],
             )
 
         requirements_content = _deployment_file_content(
@@ -3391,7 +3616,42 @@ def build_dagster_project_files(
         script_root = f"{project_dir}/src/inlumen_dagster_project/scripts/{asset_name}"
         defs_root = f"{project_dir}/src/inlumen_dagster_project/defs/{asset_name}"
         if not bundle_layout:
-            output_files.append(_dagster_file(f"{script_root}/main.py", script_content, "dagster-script"))
+            output_files.append(
+                _dagster_file(
+                    f"{script_root}/{entrypoint_filename}",
+                    script_content,
+                    "dagster-script",
+                )
+            )
+            # Function-style uploads are library modules.  Mirror their Python
+            # files next to the launcher so sibling imports work in the
+            # non-bundle Dagster project too.
+            for file_entry in _deployment_files_for_step(
+                dockerfiles_payload,
+                step_id,
+            ):
+                filename = _clean_string(file_entry.get("filename"))
+                if (
+                    not filename.endswith(".py")
+                    or filename == entrypoint_filename
+                ):
+                    continue
+                output_files.append(
+                    _dagster_file(
+                        f"{script_root}/{_safe_docker_source(filename)}",
+                        str(file_entry.get("content") or ""),
+                        "dagster-script",
+                        content_type=str(
+                            file_entry.get("content_type")
+                            or "text/x-python;charset=utf-8"
+                        ),
+                        content_encoding=_clean_string(
+                            file_entry.get("content_encoding")
+                        ),
+                        size_bytes=file_entry.get("size_bytes"),
+                        sha256=_clean_string(file_entry.get("sha256")),
+                    )
+                )
 
             for file_entry in _deployment_files_for_step(dockerfiles_payload, step_id):
                 filename = _clean_string(file_entry.get("filename"))
@@ -3415,15 +3675,22 @@ def build_dagster_project_files(
                 )
 
         parents = dependencies.get(step_id) or []
-        parent_asset = asset_names[parents[0]] if parents else ""
-        input_manifest_path = (
-            f"../outputs/{_bundle_node_dir(steps_by_id[parents[0]])}/output_manifest.json"
+        # The runner copies each upstream output directory into a fresh input
+        # directory before starting this process.  No manifest or declared
+        # schema is part of the Task-facing API.
+        input_dirs = (
+            [f"../outputs/{_bundle_node_dir(steps_by_id[parent])}" for parent in parents]
             if bundle_layout and parents
-            else f"storage/{parent_asset}/output_manifest.json"
-            if parent_asset
-            else "../inputs/input_manifest.json"
+            else [f"storage/{asset_names[parent]}" for parent in parents]
+            if parents
+            else ["../inputs"]
             if bundle_layout
-            else "storage/inputs/input_manifest.json"
+            else ["storage/inputs"]
+        )
+        input_dir = (
+            f"../workspaces/{node_dir}/input"
+            if bundle_layout
+            else f"storage/{asset_name}/input"
         )
         output_dir = (
             f"../outputs/{node_dir}"
@@ -3431,15 +3698,16 @@ def build_dagster_project_files(
             else f"storage/{asset_name}"
         )
         script_path = (
-            f"../nodes/{node_dir}/main.py"
+            f"../nodes/{node_dir}/{entrypoint_filename}"
             if bundle_layout
-            else f"src/inlumen_dagster_project/scripts/{asset_name}/main.py"
+            else f"src/inlumen_dagster_project/scripts/{asset_name}/{entrypoint_filename}"
         )
         context_path = (
             f"../nodes/{node_dir}/node-manifest.json"
             if bundle_layout
             else f"src/inlumen_dagster_project/artifacts/nodes/{_sanitize_fragment(step_id, 'step')}/node-manifest.json"
         )
+        secret_parameter_names = _runtime_secret_parameters(step, dockerfiles_payload)
         defs_yaml = _dagster_yaml(
             {
                 "type": "inlumen_dagster_project.components.shell_command.ShellCommand",
@@ -3447,10 +3715,9 @@ def build_dagster_project_files(
                     "asset_key": asset_name,
                     "script_path": script_path,
                     "upstream_assets": [asset_names[parent] for parent in parents],
-                    "input_manifest_path": input_manifest_path,
+                    "input_dirs": input_dirs,
+                    "input_dir": input_dir,
                     "output_dir": output_dir,
-                    "output_manifest_path": f"{output_dir}/output_manifest.json",
-                    "context_path": context_path,
                     "arguments": [],
                     "parameters": {
                         str(key): value
@@ -3458,7 +3725,7 @@ def build_dagster_project_files(
                     },
                     "secret_environment": {
                         key: runtime_secret_name(step_id, key)
-                        for key in _step_secret_parameters(step)
+                        for key in secret_parameter_names
                     },
                 },
             }
@@ -3659,9 +3926,13 @@ def _shared_argo_runtime(
                 }
             )
         working_dir = f"/workspace/nodes/{node_dir}"
+        entrypoint_filename = _runtime_entrypoint_filename(
+            dockerfiles_payload,
+            step_id,
+        )
         nodes[step_id] = {
             "working_dir": working_dir,
-            "command": ["python", f"{working_dir}/main.py"],
+            "command": ["python", f"{working_dir}/{entrypoint_filename}"],
             "context_path": f"{working_dir}/node-manifest.json",
         }
 
@@ -3732,6 +4003,10 @@ def build_run_spec(
     for step_id in ordered_ids:
         step = steps_by_id[step_id]
         node_dir = _bundle_node_dir(step)
+        entrypoint_filename = _runtime_entrypoint_filename(
+            dockerfiles_payload,
+            step_id,
+        )
         requirements = _parse_requirements_for_dagster_project(
             _deployment_file_content(
                 dockerfiles_payload,
@@ -3750,6 +4025,20 @@ def build_run_spec(
             step.get("type") or "task",
         )
         node_kind = step.get("type") or "task"
+        managed_boundary = _uses_managed_boundary_runtime(step, dockerfiles_payload)
+        executable_as_package = node_kind == "task" or not managed_boundary
+        node_manifest = (
+            _json_object(
+                _deployment_file_content(
+                    dockerfiles_payload,
+                    step_id,
+                    "node-manifest.json",
+                )
+            )
+            if executable_as_package
+            else {}
+        )
+        secret_parameter_names = _runtime_secret_parameters(step, dockerfiles_payload)
         node_entry = {
             "id": step_id,
             "label": step.get("label") or "",
@@ -3760,7 +4049,7 @@ def build_run_spec(
                     "kind": "python-package",
                     "ownership": "user",
                 }
-                if node_kind == "task"
+                if executable_as_package
                 else {
                     "kind": "managed-adapter",
                     "ownership": "inlumen",
@@ -3778,20 +4067,24 @@ def build_run_spec(
                     "environment": runtime_secret_name(step_id, key),
                     "argo_secret_key": _kubernetes_secret_key(step_id, key),
                 }
-                for key in _step_secret_parameters(step)
+                for key in secret_parameter_names
             ],
         }
-        if node_kind == "task":
+        if executable_as_package:
             node_entry["package"] = {
                 "path": f"nodes/{node_dir}",
-                "entrypoint": f"nodes/{node_dir}/main.py",
+                "entrypoint": f"nodes/{node_dir}/{entrypoint_filename}",
                 "manifest": f"nodes/{node_dir}/node-manifest.json",
                 "requirements": f"nodes/{node_dir}/requirements.txt",
-                "command": ["python", f"nodes/{node_dir}/main.py"],
+                "command": ["python", f"nodes/{node_dir}/{entrypoint_filename}"],
                 "package_manager": "uv",
                 "python": "3.11",
                 "environment_hash": dependency_hash,
             }
+            if isinstance(node_manifest.get("io_contract"), dict):
+                node_entry["io_contract"] = node_manifest["io_contract"]
+            if isinstance(node_manifest.get("capabilities"), dict):
+                node_entry["capabilities"] = node_manifest["capabilities"]
         else:
             node_entry["adapter"] = {
                 "template": step.get("template") or "",
@@ -3836,6 +4129,7 @@ def build_run_spec(
     }
     return {
         "schema_version": "inlumen.run-spec@1",
+        "artifact_contract": dict(ARTIFACT_CONTRACT),
         "runtime": {
             "default_engine": "dagster",
             "package_manager": "uv",
@@ -3846,11 +4140,11 @@ def build_run_spec(
         "connections": list(connections),
         "run_inputs": {
             "path": "inputs",
-            "manifest": "inputs/input_manifest.json",
             "lifecycle": "source-owned",
+            "transport": "filesystem",
             "fixture_policy": "files are attached to Source nodes",
         },
-        "outputs": {"path": "outputs", "manifest_name": "output_manifest.json"},
+        "outputs": {"path": "outputs", "transport": "filesystem"},
         "engines": engines,
     }
 
@@ -3905,7 +4199,7 @@ def build_deployment_bundle_files(
     secret_environment_names = sorted({
         runtime_secret_name(step["flow_id"], key)
         for step in steps
-        for key in _step_secret_parameters(step)
+        for key in _runtime_secret_parameters(step, dockerfiles_payload)
     })
 
     bundle_files: List[dict] = []
@@ -3986,15 +4280,17 @@ def build_deployment_bundle_files(
                 sha256=_clean_string(file_entry.get("sha256")),
             )
         )
-    bundle_files.append(
-        _bundle_file(
-            "inputs/input_manifest.json",
-            _bundle_input_manifest(root_input_files),
-            role="input-manifest",
-            content_type="application/json",
+    if not root_input_files:
+        # Runtime-backed Sources (for example Database) do not have uploaded
+        # fixture files, but the bundle still needs an inputs/ mount point.
+        bundle_files.append(
+            _bundle_file(
+                "inputs/.gitkeep",
+                "",
+                role="input-directory-placeholder",
+                content_type="text/plain",
+            )
         )
-    )
-
     argo_workflow_path = None
     shared_argo_runtime = None
     if selected_targets["argo"]:
@@ -4102,6 +4398,7 @@ def build_deployment_bundle_files(
 
     manifest = {
         "schema_version": "inlumen.deployment-bundle@1",
+        "artifact_contract": dict(ARTIFACT_CONTRACT),
         "run_spec": "run-spec.json",
         "targets": selected_targets,
         "readme": "README.md",
@@ -4110,9 +4407,9 @@ def build_deployment_bundle_files(
         "connections": explicit_edges,
         "inputs": {
             "path": "inputs",
-            "manifest": "inputs/input_manifest.json",
             "file_count": len(root_input_files),
             "lifecycle": "source-owned",
+            "transport": "filesystem",
         },
         "sensitive_parameters": [
             reference

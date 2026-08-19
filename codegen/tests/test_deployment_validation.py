@@ -317,14 +317,13 @@ class DeploymentInputContractValidationTest(unittest.TestCase):
                 root,
                 targets={"argo": False, "dagster": False},
             )
-            manifest = json.loads(
-                (root / "inputs/input_manifest.json").read_text(encoding="utf-8")
+            bundle_manifest = json.loads(
+                (root / "bundle-manifest.json").read_text(encoding="utf-8")
             )
 
-        self.assertEqual(
-            expected,
-            {entry["filename"]: entry["kind"] for entry in manifest["inputs"]},
-        )
+        self.assertFalse((root / "inputs/input_manifest.json").exists())
+        self.assertEqual(len(expected), bundle_manifest["inputs"]["file_count"])
+        self.assertEqual("filesystem", bundle_manifest["inputs"]["transport"])
 
 
 if __name__ == "__main__":

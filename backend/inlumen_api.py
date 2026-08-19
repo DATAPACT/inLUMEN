@@ -89,17 +89,7 @@ CODEGEN_RUNTIME_FILENAMES = {
     "node-manifest.json",
     "validation-report.json",
 }
-USER_RUNTIME_SUPPORT_SUFFIXES = {
-    ".json",
-    ".py",
-    ".pyi",
-    ".sh",
-    ".sql",
-    ".toml",
-    ".txt",
-    ".yaml",
-    ".yml",
-}
+USER_TASK_RUNTIME_FILENAMES = {"main.py", "requirements.txt"}
 PIPELINE_RUNTIME_BEHAVIOR_INSTRUCTION = """Design the entire pipeline as one coherent program before writing any node.
 For every edge, decide the exact output filename, format, schema or object shape, and required runtime dependencies. The producer must write that contract and the consumer must read the same contract.
 Implement every capability requested by the high-level request and graph. A terminal behavior such as answering questions, alerting, or publishing results must produce that real result, not only an intermediate score, index, or status.
@@ -113,8 +103,11 @@ PIPELINE_RUNTIME_ATTACHMENT_INSTRUCTION = f"""{PIPELINE_RUNTIME_BEHAVIOR_INSTRUC
 
 Create the files needed to run every pipeline node.
 For each flow_id, return main.py and requirements.txt. Leave requirements.txt empty when the script only uses the Python 3.11 standard library.
-When a node runs, its input files and files from the previous node are in the current working directory. Read them from there and write the node's output files there.
-Keep connected nodes consistent about output filenames and formats.
+When a node runs, the platform provides a standard workspace through
+PIPELINE_INPUT_DIR and PIPELINE_OUTPUT_DIR. Read input files recursively from
+PIPELINE_INPUT_DIR and write every downstream artifact beneath
+PIPELINE_OUTPUT_DIR. Keep connected nodes consistent about output filenames and
+formats.
 Each main.py must be a finite, non-interactive batch program: do not call input(), start a server or UI, watch for files, or loop forever. Validate required input files before loading large models or doing other slow setup, then exit when the output files are written.
 Associate each returned file with its flow_id so inLUMEN can attach it to the correct node."""
 EXTERNAL_AI_RUNTIME_RESPONSE_INSTRUCTION = f"""{PIPELINE_RUNTIME_BEHAVIOR_INSTRUCTION}
@@ -125,7 +118,10 @@ For every node, create:
 
 Return code files only. Never create or return input data, example data, fake files, placeholder files, credentials, Dockerfiles, Dagster files, or manifests. Real input data is attached to Source nodes separately from generated code.
 
-Each main.py runs with its Source node's attached input files or the previous node's output files in the current folder. It must read from that folder and write its results back to that folder. Connected nodes must agree on output filenames and formats.
+Each main.py runs with its Source node's attached input files or the previous
+node's output files materialized under PIPELINE_INPUT_DIR. It must write its
+results beneath PIPELINE_OUTPUT_DIR. Connected nodes must agree on output
+filenames and formats.
 
 Each main.py must be a one-shot, non-interactive Python 3.11 batch program. It must not call input(), start a server or UI, watch for files, sleep indefinitely, or loop forever. It must validate required input files before loading large models, downloading resources, or doing other slow setup; invalid inputs must fail immediately with a clear error. A node with a downstream connection must write at least one real output file, then exit successfully.
 
@@ -1486,7 +1482,7 @@ def _pipeline_codegen_preflight(
         for node in nodes
         if isinstance(node, dict)
         and _node_flow_id(node)
-        and normalize_step_type(_node_data(node).get("type")) != "config"
+        and normalize_step_type(_node_data(node).get("type")) == "task"
     ]
     all_flow_ids = {item["flow_id"] for item in items}
     selected_flow_ids.intersection_update(all_flow_ids)
@@ -1757,6 +1753,9 @@ def _finalize_pipeline_codegen_response(
     )
     generation_run = _persist_codegen_run_report(codegen_response.get("generation_run"))
     graph_nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    # Boundary adapters and flow wiring are compiler-owned.  A Generate Code
+    # request may use them while validating the complete graph, but it only
+    # attaches implementations to Task components.
     expected_flow_ids = [
         str(
             node.get("id")
@@ -1766,17 +1765,25 @@ def _finalize_pipeline_codegen_response(
         ).strip()
         for node in graph_nodes
         if isinstance(node, dict)
+        and normalize_step_type(_node_data(node).get("type")) == "task"
     ]
     expected_flow_ids = [flow_id for flow_id in expected_flow_ids if flow_id]
+    task_flow_ids = set(expected_flow_ids)
+    generated_task_nodes = [
+        item
+        for item in generated_nodes
+        if isinstance(item, dict)
+        and str(item.get("flow_id") or "").strip() in task_flow_ids
+    ]
     invalid_nodes = _invalid_codegen_nodes(
-        generated_nodes,
+        generated_task_nodes,
         expected_flow_ids,
     )
     if _validation_status(integration_validation) != "valid" or invalid_nodes:
         return (
             False,
             {
-                "nodes": generated_nodes,
+                "nodes": generated_task_nodes,
                 "edges": codegen_response.get("edges", []),
                 "invalid_nodes": invalid_nodes,
                 "integration_validation": integration_validation,
@@ -1793,6 +1800,8 @@ def _finalize_pipeline_codegen_response(
         flow_id = str(item.get("flow_id") or "").strip()
         artifact = item.get("generated_artifact")
         if not flow_id or not isinstance(artifact, dict):
+            continue
+        if flow_id not in task_flow_ids:
             continue
         if persist_flow_ids is not None and flow_id not in persist_flow_ids:
             continue
@@ -2377,6 +2386,14 @@ def node_generate_script(node_id: str):
         )
         if context is None:
             return _json_error(404, "node not found")
+        target_type = normalize_step_type(
+            (context.get("target_node") or {}).get("type")
+        )
+        if target_type != "task":
+            return _json_error(
+                422,
+                "Generate Code only creates Task implementations. Sources and Destinations are configured when you build the bundle.",
+            )
 
         codegen_payload = {
             "context": context,
@@ -2835,6 +2852,27 @@ def pipeline_generation_run(run_id: str):
         return _json_error(502, "pipeline generation run lookup failed", str(exc))
 
 
+def _file_owner_node_type(node_id: str) -> tuple[str, Any | None]:
+    """Resolve the live graph type before accepting a node file mutation."""
+    graph_response = _proxy(
+        dispatch_graph_request,
+        "neo4j_get_graph",
+        method="GET",
+        params={},
+        data=b"",
+    )
+    if not graph_response.ok:
+        return "", graph_response
+    graph = _upstream_json(graph_response)
+    nodes = graph.get("nodes") if isinstance(graph, dict) else []
+    for node in nodes if isinstance(nodes, list) else []:
+        if not isinstance(node, dict):
+            continue
+        if _node_flow_id(node) == node_id:
+            return normalize_step_type(_node_data(node).get("type")), None
+    return "", None
+
+
 @app.route("/api/nodes/<node_id>/files", methods=["POST", "DELETE", "OPTIONS"])
 @require_auth
 def node_files(node_id: str):
@@ -2849,7 +2887,18 @@ def node_files(node_id: str):
         if file_role not in {"code", "data"}:
             file_role = ""
         uploaded_filename = str(uploaded.filename or "").strip()
+        node_type, graph_error = _file_owner_node_type(node_id)
+        if graph_error is not None:
+            return _response_from_upstream(graph_error)
+        if not node_type:
+            return _json_error(404, f"node {node_id!r} was not found in the current graph")
         if file_role == "code":
+            if node_type != "task":
+                return _json_error(
+                    422,
+                    "code can only be uploaded to Task nodes",
+                    "Sources and Destinations are connector adapters generated during Build Bundle.",
+                )
             safe_name = Path(uploaded_filename).name
             lower_name = safe_name.lower()
             if not safe_name or safe_name != uploaded_filename or "/" in uploaded_filename or "\\" in uploaded_filename:
@@ -2861,15 +2910,18 @@ def node_files(node_id: str):
                     422,
                     "generated runtime files cannot be uploaded manually",
                 )
-            if (
-                lower_name not in {"main.py", "requirements.txt"}
-                and Path(lower_name).suffix not in USER_RUNTIME_SUPPORT_SUFFIXES
-            ):
+            if lower_name not in USER_TASK_RUNTIME_FILENAMES:
                 return _json_error(
                     422,
-                    "unsupported Python package file",
-                    "Upload main.py, optional requirements.txt, or a supporting Python package file.",
+                    "unsupported Task runtime file",
+                    "Upload main.py and, only when needed, requirements.txt.",
                 )
+        if file_role == "data" and node_type != "source":
+            return _json_error(
+                422,
+                "input files can only be uploaded to Source nodes",
+                "Tasks receive artifacts from Sources or upstream Tasks; Destinations receive pipeline outputs.",
+            )
         if (
             uploaded_filename
             and file_role != "code"
@@ -2990,6 +3042,16 @@ def node_text_file(node_id: str):
         return _json_error(400, "filename is required")
     if not isinstance(content, str):
         return _json_error(400, "content must be a string")
+    if filename.lower() in USER_TASK_RUNTIME_FILENAMES:
+        node_type, graph_error = _file_owner_node_type(node_id)
+        if graph_error is not None:
+            return _response_from_upstream(graph_error)
+        if node_type != "task":
+            return _json_error(
+                422,
+                "Task runtime files can only be edited on Task nodes",
+                "Sources and Destinations are managed connector adapters.",
+            )
     storage_response = _proxy(
         dispatch_object_request,
         "minio_update_text_file",

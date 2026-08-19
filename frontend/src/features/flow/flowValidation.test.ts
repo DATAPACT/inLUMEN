@@ -80,7 +80,35 @@ describe("pipeline design validation", () => {
     expect(graph.nodes[0].data).not.toHaveProperty("implementation_override");
   });
 
-  it("keeps old Source adapter metadata out of conceptual validation", () => {
+  it("requires advanced connector parameters while keeping Custom source and destination valid", () => {
+    const incomplete = normalizeGraph({
+      nodes: [
+        { id: "source", position: { x: 0, y: 0 }, data: {
+          type: "source", template_label: "Database",
+          ports: { inputs: [], outputs: [{ id: "rows", name: "rows", type: "Dataset", required: true }] },
+          param: { connection_url: "", query: "" },
+        } },
+        { id: "destination", position: { x: 1, y: 0 }, data: {
+          type: "destination", template_label: "Custom",
+          ports: { inputs: [{ id: "data", name: "data", type: "any", required: true }], outputs: [] },
+        } },
+      ],
+      edges: [{ source: "source", target: "destination", sourceHandle: "rows", targetHandle: "data" }],
+    });
+
+    expect(validateGraph(incomplete.nodes, incomplete.edges).issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "missing-required-parameter", nodeId: "source" }),
+      ]),
+    );
+    expect(validateGraph(incomplete.nodes, incomplete.edges).issues).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "missing-required-parameter", nodeId: "destination" }),
+      ]),
+    );
+  });
+
+  it("requires connector parameters for an explicitly selected Source adapter", () => {
     const graph = normalizeGraph({
       nodes: [{
         id: "audio-source",
@@ -96,9 +124,9 @@ describe("pipeline design validation", () => {
       edges: [],
     });
 
-    expect(validateGraph(graph.nodes, graph.edges).issues).not.toEqual(
+    expect(validateGraph(graph.nodes, graph.edges).issues).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ code: "missing-required-parameter" }),
+        expect.objectContaining({ code: "missing-required-parameter", nodeId: "audio-source" }),
       ]),
     );
     expect(getValidationIssueSubject({

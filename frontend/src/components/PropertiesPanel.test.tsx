@@ -47,11 +47,11 @@ describe("PropertiesPanel", () => {
     expect(container.textContent).toContain("customer_complaint.wav");
     expect(container.textContent).toContain("Input Files");
     expect(container.textContent).not.toContain("Sample Inputs");
-    expect(container.textContent).toContain("Parameters");
+    expect(container.textContent).toContain("Connection");
+    expect(container.textContent).toContain("Advanced connection settings");
     expect(container.textContent).toContain("language");
-    expect(container.textContent).toContain("Implementation");
-    expect(container.textContent).toContain("main.py");
-    expect(container.textContent).not.toContain("Advanced");
+    expect(container.textContent).not.toContain("Implementation");
+    expect(container.textContent).not.toContain("main.py");
     expect(container.textContent).not.toContain("Source override");
     expect(container.textContent).not.toContain("Implementation override");
     expect(container.querySelector('[aria-label="Remove customer_complaint.wav"]')).not.toBeNull();
@@ -83,6 +83,9 @@ describe("PropertiesPanel", () => {
     expect(container.textContent).not.toContain("Input Files");
     expect(container.textContent).not.toContain("Sample Inputs");
     expect(container.textContent).toContain("Implementation");
+    expect(container.textContent).toContain("Task runtime contract");
+    expect(container.textContent).toContain("PIPELINE_INPUT_DIR");
+    expect(container.textContent).toContain("PIPELINE_OUTPUT_DIR");
     await act(async () => root.unmount());
   });
 });

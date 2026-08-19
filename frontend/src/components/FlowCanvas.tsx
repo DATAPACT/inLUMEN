@@ -16,6 +16,7 @@ import ReactFlow, {
   applyNodeChanges,
   applyEdgeChanges,
 } from 'reactflow';
+import JSZip from 'jszip';
 import 'reactflow/dist/style.css';
 import { nodeTypes } from './NodeTypes';
 import { PortDisplayContext } from '@/features/nodes/PortDisplayContext';
@@ -75,6 +76,7 @@ import {
   type ValidationIssue,
 } from '@/features/flow/flowValidation';
 import { normalizeNodePorts, normalizeType } from '@/features/nodes/nodeSchema';
+import { uploadNodeFile } from '@/features/nodes/nodePersistence';
 import { remapSubpipelineParentEdges } from '@/features/flow/subpipeline';
 import {
   Dialog,
@@ -169,6 +171,33 @@ const hasUploadedSampleData = (nodes: Node[]) =>
       return Boolean(filename && !isCodegenRuntimeFile(filename));
     }),
   );
+
+const taskPackageName = (value: unknown) => String(value || "")
+  .toLowerCase()
+  .replace(/[^a-z0-9]+/g, " ")
+  .trim();
+
+const packageMatch = (folder: string, taskNodes: Node[]) => {
+  const tokens = new Set(taskPackageName(folder).split(" ").filter(Boolean));
+  const scored = taskNodes.map((node) => {
+    const candidate = taskPackageName(`${node.data?.label || ""} ${node.data?.description || ""}`);
+    const candidateTokens = new Set(candidate.split(" ").filter(Boolean));
+    const overlap = [...tokens].filter((token) => candidateTokens.has(token)).length;
+    const score = taskPackageName(folder) === taskPackageName(node.data?.label)
+      ? 100
+      : overlap / Math.max(tokens.size, 1);
+    return { node, score };
+  }).sort((left, right) => right.score - left.score);
+  if (!scored[0] || scored[0].score < 0.5) return null;
+  if (scored[1] && scored[0].score === scored[1].score) return null;
+  return scored[0].node;
+};
+
+type PendingTaskPackage = {
+  folder: string;
+  files: Array<{ name: string; blob: Blob }>;
+  node: Node;
+};
 
 const generationModeOptions: Array<{
   value: PipelineScriptGenerationMode;
@@ -479,6 +508,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const [scriptGenerationPrompt, setScriptGenerationPrompt] = useState("");
   const [scriptGenerationMode, setScriptGenerationMode] =
     useState<PipelineScriptGenerationMode>("validated");
+  const [pendingTaskPackages, setPendingTaskPackages] = useState<PendingTaskPackage[]>([]);
+  const [isTaskPackageImporting, setIsTaskPackageImporting] = useState(false);
   const [scriptGenerationScope, setScriptGenerationScope] =
     useState<PipelineScriptGenerationScope>("missing_changed");
   const [scriptGenerationSelectedFlowIds, setScriptGenerationSelectedFlowIds] =
@@ -1021,7 +1052,72 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     }
   }, [edges, markLocalWrite, nodes, onCanvasEdited, pushHistorySnapshot]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const taskPackageInputRef = useRef<HTMLInputElement | null>(null);
   const triggerImport = () => fileInputRef.current?.click();
+  const triggerTaskPackageImport = () => taskPackageInputRef.current?.click();
+
+  const importTaskPackages = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const archive = event.target.files?.[0];
+    event.target.value = "";
+    if (!archive) return;
+    if (archive.size > 50 * 1024 * 1024) {
+      toast.error("Package archive is too large", { description: "Use a ZIP smaller than 50 MB." });
+      return;
+    }
+    try {
+      const zip = await JSZip.loadAsync(archive);
+      const packages = new Map<string, Array<{ name: string; blob: Blob }>>();
+      for (const entry of Object.values(zip.files)) {
+        if (entry.dir) continue;
+        const parts = entry.name.replace(/\\/g, "/").split("/").filter(Boolean);
+        if (parts.length < 2 || parts.includes("..") || parts[0] === "__MACOSX") continue;
+        const filename = parts.at(-1) || "";
+        if (!/^(main\.py|requirements\.txt|[\w.-]+\.(py|pyi|json|toml|ya?ml|sql|sh))$/i.test(filename)) continue;
+        // ZIPs commonly contain one archive-root directory.  The immediate
+        // parent of main.py/requirements.txt is the Task package name, not
+        // the archive root.
+        const folder = parts.at(-2) || "";
+        const files = packages.get(folder) || [];
+        files.push({ name: filename, blob: await entry.async("blob") });
+        packages.set(folder, files);
+      }
+      const tasks = nodes.filter((node) => normalizeType(node.data?.type) === "task");
+      const matches: PendingTaskPackage[] = [...packages.entries()].flatMap(([folder, files]) => {
+        const node = packageMatch(folder, tasks);
+        if (!node || !files.some((file) => file.name === "main.py")) return [];
+        const hasCode = nodeFiles(node).some((file) => isCodegenRuntimeFile(typeof file === "string" ? file : file.filename || file.name));
+        return hasCode ? [] : [{ folder, files, node }];
+      });
+      if (!matches.length) {
+        toast.error("No safe Task packages matched", { description: "Each ZIP folder needs main.py and a uniquely matching Task name." });
+        return;
+      }
+      setPendingTaskPackages(matches);
+    } catch (error) {
+      toast.error("Could not import Task packages", { description: error instanceof Error ? error.message : "The ZIP could not be read or uploaded." });
+    }
+  };
+
+  const confirmTaskPackageImport = async () => {
+    if (!pendingTaskPackages.length) return;
+    setIsTaskPackageImporting(true);
+    try {
+      let uploaded = 0;
+      for (const { node, files } of pendingTaskPackages) {
+        for (const file of files) {
+          await uploadNodeFile(node.id, new File([file.blob], file.name, { type: file.blob.type || "text/plain" }), "code");
+          uploaded += 1;
+        }
+      }
+      await syncFromBackend();
+      toast.success("Task packages attached", { description: `${uploaded} file${uploaded === 1 ? "" : "s"} uploaded to ${pendingTaskPackages.length} Task${pendingTaskPackages.length === 1 ? "" : "s"}.` });
+      setPendingTaskPackages([]);
+    } catch (error) {
+      toast.error("Could not attach Task packages", { description: error instanceof Error ? error.message : "The package upload failed." });
+    } finally {
+      setIsTaskPackageImporting(false);
+    }
+  };
 
   const createSerializableFlow = useCallback((): PipelineVersionGraph => {
     const viewport = reactFlowInstance?.toObject().viewport ?? { x: 0, y: 0, zoom: 1 };
@@ -1940,6 +2036,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           onExportJson={exportFlow}
           onImportClick={triggerImport}
           onImport={importFlow}
+          taskPackageInputRef={taskPackageInputRef}
+          onTaskPackageImportClick={triggerTaskPackageImport}
+          onTaskPackageImport={importTaskPackages}
           onGenerateScripts={handleGeneratePipelineScripts}
           isGeneratingScripts={isGeneratingScripts}
           showPortDetails={showPortDetails}
@@ -1954,6 +2053,39 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         />
       </ReactFlow>
       </PortDisplayContext.Provider>
+
+      <Dialog
+        open={pendingTaskPackages.length > 0}
+        onOpenChange={(open) => { if (!open && !isTaskPackageImporting) setPendingTaskPackages([]); }}
+      >
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Review Task package import</DialogTitle>
+            <DialogDescription>
+              These files will be attached to matching Tasks. Existing uploaded or generated code is not replaced.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-[45vh] space-y-2 overflow-y-auto">
+            {pendingTaskPackages.map(({ folder, files, node }) => (
+              <div key={`${folder}-${node.id}`} className="rounded-md border border-border bg-muted/30 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <code className="text-xs font-medium">{folder}</code>
+                  <span className="text-xs text-muted-foreground">→</span>
+                  <span className="min-w-0 truncate text-sm font-medium">{String(node.data?.label || node.id)}</span>
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">{files.map((file) => file.name).join(", ")}</p>
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPendingTaskPackages([])} disabled={isTaskPackageImporting}>Cancel</Button>
+            <Button onClick={() => { void confirmTaskPackageImport(); }} disabled={isTaskPackageImporting}>
+              {isTaskPackageImporting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              Attach packages
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={isValidationOpen} onOpenChange={setIsValidationOpen}>
         <DialogContent className="max-h-[80vh] overflow-y-auto sm:max-w-xl">

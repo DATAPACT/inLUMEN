@@ -420,11 +420,30 @@ def _inlumen_node_main():
     import json as _json
     import os as _os
     from pathlib import Path as _Path
-    _manifest_path = _Path(_os.environ["INLUMEN_INPUT_MANIFEST"])
-    _output_dir = _Path(_os.environ["INLUMEN_OUTPUT_DIR"])
-    _output_manifest_path = _Path(_os.environ["INLUMEN_OUTPUT_MANIFEST"])
+    _manifest_path = _Path(_os.environ.get("INLUMEN_INPUT_MANIFEST", ""))
+    _input_dir = _Path(
+        _os.environ.get("PIPELINE_INPUT_DIR")
+        or (str(_manifest_path.parent) if _manifest_path else "/workspace/input")
+    )
+    _output_dir = _Path(
+        _os.environ.get("PIPELINE_OUTPUT_DIR")
+        or _os.environ.get("INLUMEN_OUTPUT_DIR", "/workspace/output")
+    )
+    _output_manifest_path = _Path(
+        _os.environ.get("INLUMEN_OUTPUT_MANIFEST", str(_output_dir / "output_manifest.json"))
+    )
     _context_path = _Path(_os.environ.get("INLUMEN_CONTEXT_PATH", ""))
-    _manifest = _json.loads(_manifest_path.read_text(encoding="utf-8"))
+    _manifest = (
+        _json.loads(_manifest_path.read_text(encoding="utf-8"))
+        if _manifest_path.is_file()
+        else {{
+            "inputs": [
+                {{"filename": _path.relative_to(_input_dir).as_posix(), "path": str(_path)}}
+                for _path in sorted(_input_dir.rglob("*"))
+                if _path.is_file()
+            ]
+        }}
+    )
     _inputs = _manifest.get("inputs") or _manifest.get("files") or []
     _context = {{}}
     if _context_path.is_file():
@@ -534,13 +553,28 @@ def _inlumen_pipeline_main():
     import json as _json
     import os as _os
     from pathlib import Path as _Path
-    _manifest_path = _os.environ["INLUMEN_INPUT_MANIFEST"]
-    _output_root = _Path(_os.environ["INLUMEN_OUTPUT_DIR"])
-    _output_manifest_path = _Path(_os.environ["INLUMEN_OUTPUT_MANIFEST"])
+    _manifest_path = _Path(_os.environ.get("INLUMEN_INPUT_MANIFEST", ""))
+    _input_dir = _Path(
+        _os.environ.get("PIPELINE_INPUT_DIR")
+        or (str(_manifest_path.parent) if _manifest_path else "/workspace/input")
+    )
+    _output_root = _Path(
+        _os.environ.get("PIPELINE_OUTPUT_DIR")
+        or _os.environ.get("INLUMEN_OUTPUT_DIR", "/workspace/output")
+    )
+    _output_manifest_path = _Path(
+        _os.environ.get("INLUMEN_OUTPUT_MANIFEST", str(_output_root / "output_manifest.json"))
+    )
     _context = _inlumen_pipeline_load(
         _os.environ.get("INLUMEN_CONTEXT_PATH", "")
     )
-    _manifest = _inlumen_pipeline_load(_manifest_path)
+    _manifest = _inlumen_pipeline_load(_manifest_path) if _manifest_path.is_file() else {{
+        "inputs": [
+            {{"filename": _path.relative_to(_input_dir).as_posix(), "path": str(_path)}}
+            for _path in sorted(_input_dir.rglob("*"))
+            if _path.is_file()
+        ]
+    }}
     _root_inputs = _manifest.get("inputs") or _manifest.get("files") or []
     _produced = {}
     _nodes = INLUMEN_PIPELINE_PLAN["nodes"]

@@ -433,6 +433,20 @@ def _input_contract_errors(
     bundle_manifest: dict[str, Any],
 ) -> list[str]:
     manifest_path = bundle_root / "inputs" / "input_manifest.json"
+    if not manifest_path.is_file():
+        # Filesystem-first bundles do not expose an input manifest.  The only
+        # deployment-level check is that any persisted root fixtures exist.
+        descriptors = _root_contract_descriptors(bundle_root, bundle_manifest)
+        available = {
+            path.relative_to(bundle_root / "inputs").as_posix()
+            for path in (bundle_root / "inputs").rglob("*")
+            if path.is_file()
+        }
+        return [
+            f"Root node input {filename} is missing from inputs/."
+            for filename in sorted(descriptors)
+            if filename not in available
+        ]
     input_manifest = _load_json(manifest_path)
     raw_inputs = input_manifest.get("inputs")
     if not isinstance(raw_inputs, list):
@@ -534,7 +548,7 @@ def _validate_bundle_structure(
 ) -> dict[str, Any]:
     required_paths = [
         "bundle-manifest.json",
-        "inputs/input_manifest.json",
+        "inputs",
         "nodes",
         "outputs",
     ]
@@ -584,7 +598,7 @@ def _validate_bundle_structure(
     errors.extend(
         f"Missing node output directory: {item}" for item in missing_node_outputs
     )
-    if not missing and (bundle_root / "inputs" / "input_manifest.json").is_file():
+    if not missing:
         errors.extend(_input_contract_errors(bundle_root, manifest))
     run_spec = _load_json(bundle_root / run_spec_path) if run_spec_path else {}
     if run_spec_path and run_spec.get("schema_version") != "inlumen.run-spec@1":
@@ -688,6 +702,10 @@ def _normalize_input_manifest(bundle_root: Path, actions: list[str]) -> None:
     input_dir = bundle_root / "inputs"
     input_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = input_dir / "input_manifest.json"
+    # New bundles hand off the directory itself.  Preserve and normalize a
+    # manifest only when repairing a legacy export; never create one.
+    if not manifest_path.exists():
+        return
     manifest = _load_json(manifest_path)
     raw_entries = manifest.get("inputs")
     if not isinstance(raw_entries, list):
@@ -819,16 +837,21 @@ def _repair_dagster_defs(
         node_path = str(node.get("path") or "").strip()
         output_path = str(node.get("output_path") or "").strip()
         parents = [str(parent) for parent in node.get("parents") or []]
-        first_parent = node_by_flow.get(parents[0]) if parents else None
+        input_dirs = [
+            f"../{node_by_flow[parent].get('output_path')}"
+            for parent in parents
+            if parent in node_by_flow
+        ] or ["../inputs"]
         attrs["script_path"] = f"../{node_path}/main.py"
-        attrs["input_manifest_path"] = (
-            f"../{first_parent.get('output_path')}/output_manifest.json"
-            if first_parent
-            else "../inputs/input_manifest.json"
-        )
+        attrs["input_dirs"] = input_dirs
+        attrs["input_dir"] = f"../workspaces/{Path(output_path).name}/input"
         attrs["output_dir"] = f"../{output_path}"
-        attrs["output_manifest_path"] = f"../{output_path}/output_manifest.json"
-        attrs["context_path"] = f"../{node_path}/node-manifest.json"
+        for legacy_key in (
+            "input_manifest_path",
+            "output_manifest_path",
+            "context_path",
+        ):
+            attrs.pop(legacy_key, None)
         parsed["attributes"] = attrs
         next_text = yaml.safe_dump(parsed, sort_keys=False)
         if defs_file.read_text(encoding="utf-8") != next_text:
@@ -908,12 +931,11 @@ def repair_deployment_bundle(
     manifest["nodes"] = repaired_nodes
     manifest["inputs"] = {
         "path": "inputs",
-        "manifest": "inputs/input_manifest.json",
-        "file_count": len(
-            _load_json(bundle_root / "inputs" / "input_manifest.json").get("inputs")
-            or []
+        "file_count": sum(
+            1 for path in (bundle_root / "inputs").rglob("*") if path.is_file()
         ),
         "lifecycle": "per-run",
+        "transport": "filesystem",
     }
     manifest["outputs"] = {
         "path": "outputs",

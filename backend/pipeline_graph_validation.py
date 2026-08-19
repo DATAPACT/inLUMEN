@@ -6,6 +6,7 @@ from collections import defaultdict, deque
 from typing import Any
 
 from node_ports import ports_for_template
+from pipeline_agent.contract import missing_connector_parameters
 from subpipeline_reference import subpipeline_reference
 from step_types import normalize_step_type
 
@@ -180,6 +181,20 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
                         "Parallel Map requires a valid item failure policy.",
                         node_id=node_id,
                     ))
+
+        if kind in {"source", "destination"}:
+            missing_parameters = missing_connector_parameters(
+                kind,
+                template_label,
+                _parameters(data),
+            )
+            for parameter_name in missing_parameters:
+                issues.append(_issue(
+                    "configuration",
+                    "missing-required-parameter",
+                    f"{template_label} {kind} requires parameter '{parameter_name}'.",
+                    node_id=node_id,
+                ))
 
         if kind == "task":
             implementation = _implementation(data)

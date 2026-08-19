@@ -18,6 +18,7 @@ from pipeline_agent.contract import (
     default_input_port_expression,
     default_output_port_expression,
     normalize_agent_implementation,
+    missing_connector_parameters,
     require_agent_step_type,
     validate_insertion_kind,
 )
@@ -223,9 +224,9 @@ def build_pipeline_editor_tools(
     ) -> list[str]:
         """Builds shared STEP properties for create and insert tools."""
         default_template_labels = {
-            "source": "Source",
-            "task": "Blank Task",
-            "destination": "Destination",
+            "source": "Custom",
+            "task": "Task",
+            "destination": "Custom",
             "flow": "Condition",
             "subpipeline": "Subpipeline",
         }
@@ -572,6 +573,14 @@ def build_pipeline_editor_tools(
                 raw_label,
                 raw_description,
             )
+            missing_parameters = missing_connector_parameters(
+                step_type, resolved_template, data.get("parameters")
+            )
+            if missing_parameters:
+                raise ValueError(
+                    f"{resolved_template} {step_type} requires connector parameter(s): "
+                    + ", ".join(missing_parameters)
+                )
             props_lines = _step_props_lines(
                 step_type,
                 label,
@@ -1291,6 +1300,14 @@ def build_pipeline_editor_tools(
                 raw_label,
                 raw_description,
             )
+            missing_parameters = missing_connector_parameters(
+                step_type, resolved_template, data.get("parameters")
+            )
+            if missing_parameters:
+                raise ValueError(
+                    f"{resolved_template} {step_type} requires connector parameter(s): "
+                    + ", ".join(missing_parameters)
+                )
             before_flow_id = str(data["before_flow_id"]).replace("'", "\\'")
             raw_after_flow_id = data.get("after_flow_id")
             after_flow_id = (

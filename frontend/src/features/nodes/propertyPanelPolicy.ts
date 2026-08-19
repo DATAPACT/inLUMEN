@@ -23,6 +23,8 @@ export const taskImplementationMigrationError = (value: unknown): string => {
 };
 
 export const nodeSupportsInputFiles = (nodeType: StepType, template: unknown) => {
+  // A Source may combine a configured connector with local seed files. The
+  // bundle resolves which inputs apply; the inspector stays deliberately light.
   void template;
   return nodeType === "source";
 };
@@ -65,7 +67,7 @@ export const visiblePropertySections = ({
 }) => ({
   general: true,
   configuration: nodeType === "flow" && configurationFieldCount > 0,
-  implementation: ["source", "task", "destination"].includes(nodeType),
+  implementation: nodeType === "task",
   inputFiles: nodeSupportsInputFiles(nodeType, template),
   validation: validationIssueCount > 0,
   advanced: false,

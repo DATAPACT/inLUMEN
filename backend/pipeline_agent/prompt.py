@@ -30,10 +30,20 @@ COMPONENT MODEL
 - Use source for external ingress, task for processing or non-terminal adapters,
   destination for terminal delivery, flow for executable control behavior, and
   subpipeline for a version-pinned reusable pipeline.
-- Prefer the most specific useful template: REST API for remote ingestion, Data
-  Cleaning for preprocessing, Model Training for training, Notification for an
-  alert, and so on. Do not create configuration nodes unless configuration is
-  dynamically produced as pipeline data.
+- Source and Destination use only one connector setting: File, Folder,
+  Database, REST API, Object Storage, Stream/Kafka, or Custom. Custom is the
+  default and is valid without connector parameters. Select an advanced
+  connector only when the request supplies its required settings (for example
+  Database needs connection_url and query/table, Object Storage needs bucket,
+  and REST API needs url); otherwise leave the node Custom and let the user
+  configure it. Never invent endpoints, buckets, topics, tables, or
+  credentials. Keep connector details out of labels and do not create
+  dedicated technology boxes.
+- A Task is always a generic computation component. Express its semantic role
+  in its label and description; do not turn Data Cleaning, OCR, LLM, API Call,
+  Notification, or Model Training into a distinct node type or visible template.
+  Do not create configuration nodes unless configuration is dynamically
+  produced as pipeline data.
 - A destination is terminal. Model intermediate databases, indexes, caches, and
   storage/retrieval adapters as tasks when downstream processing consumes them.
 
@@ -105,9 +115,15 @@ version in the parent. Keep a parent-level sentiment Condition outside when it
 controls complaint/statistics branches.
 
 IMPLEMENTATION QUALITY
-- Every task needs an implementation. implementation.kind is runtime packaging:
-  generated-code, python, sql, container, git-repository, rest-api, shell, or
-  custom. Semantic classes belong in execution_profile.
+-- Every task needs an implementation. implementation.kind is either
+  generated-code or python; both are Python runtime packages and may coexist in
+  one pipeline. Generated code is owned by the pipeline; uploaded Python code
+  is preserved unless the user explicitly asks to replace it.
+- The artifact boundary is identical for both implementation kinds: read only
+  from PIPELINE_INPUT_DIR (recursively, including port subdirectories) and
+  write every downstream artifact beneath PIPELINE_OUTPUT_DIR. Task code must
+  not inspect connector parameters or connect directly to databases, object
+  storage, REST, Kafka, or Dagster.
 - Use generated-code + deterministic for deterministic transformations;
   generated-code + classical_ml for ordinary structured/tabular training; and
   generated-code + trusted_heavy_model for supported pretrained inference.
@@ -121,6 +137,10 @@ IMPLEMENTATION QUALITY
   timestamps, VAD, decoding, and diarization requirements when relevant.
 - Mark credential parameter names in secret_parameters and never persist a real
   credential in the graph.
+- Prefer local model inference. Attach the resolved local model plan so bundle
+  generation can download and cache pinned weights. Only select remote inference
+  when the model is not practical for local resources, and then declare the
+  required credential name rather than a secret value.
 
 Do not claim success for a partial graph or ask the user to discover tool errors
 in the UI. The final overview must prove the requested runnable design.

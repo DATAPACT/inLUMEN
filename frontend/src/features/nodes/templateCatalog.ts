@@ -59,14 +59,14 @@ const categorized = (
 
 export const COMPONENT_TEMPLATE_CATALOG: Record<StepType, ComponentTemplate[]> = {
   source: categorized("Sources", [
-    { id: "source.generic", value: "Source", label: "Generic source" },
+    { id: "source.custom", value: "Custom", label: "Custom" },
     { id: "source.file", value: "File", label: "File", ports: sourcePorts("file", "File") },
     { id: "source.folder", value: "Folder", label: "Folder", ports: sourcePorts("files", "File[]") },
     {
       id: "source.database", value: "Database", label: "Database", ports: sourcePorts("rows", "Dataset"),
       requiredParameters: ["connection_url", "query"],
-      defaultParameters: { connection_url: "", query: "" },
-      configurationFields: [field("connection_url", "Connection URL", "postgresql://…", true), field("query", "Query", "SELECT …")],
+      defaultParameters: { connection_url: "", query: "", output_format: "csv" },
+      configurationFields: [field("connection_url", "Connection URL", "postgresql://…", true), field("query", "Query", "SELECT …"), field("output_format", "Output format", "csv or parquet")],
     },
     {
       id: "source.object-storage", value: "Object Storage", label: "Object Storage", ports: sourcePorts("objects", "Object[]"),
@@ -81,7 +81,7 @@ export const COMPONENT_TEMPLATE_CATALOG: Record<StepType, ComponentTemplate[]> =
       configurationFields: [field("url", "URL", "https://api.example.com/…"), field("method", "Method", "GET")],
     },
     {
-      id: "source.kafka", value: "Kafka", label: "Kafka", ports: sourcePorts("messages", "Message[]"),
+      id: "source.kafka", value: "Kafka", label: "Stream/Kafka", ports: sourcePorts("messages", "Message[]"),
       requiredParameters: ["brokers", "topic"],
       defaultParameters: { brokers: "", topic: "" },
       configurationFields: [field("brokers", "Brokers", "broker:9092"), field("topic", "Topic")],
@@ -130,7 +130,7 @@ export const COMPONENT_TEMPLATE_CATALOG: Record<StepType, ComponentTemplate[]> =
     ]),
   ],
   destination: categorized("Destinations", [
-    { id: "destination.generic", value: "Destination", label: "Generic destination" },
+    { id: "destination.custom", value: "Custom", label: "Custom" },
     {
       id: "destination.file", value: "File", label: "File", ports: destinationPorts("data", "any"),
       requiredParameters: ["filename"], defaultParameters: { filename: "output.json" },
@@ -144,7 +144,7 @@ export const COMPONENT_TEMPLATE_CATALOG: Record<StepType, ComponentTemplate[]> =
     {
       id: "destination.object-storage", value: "Object Storage", label: "Object Storage", ports: destinationPorts("objects", "Object[]"),
       requiredParameters: ["bucket"], defaultParameters: { endpoint: "", bucket: "" },
-      configurationFields: [field("endpoint", "Endpoint"), field("bucket", "Bucket")],
+      configurationFields: [field("endpoint", "Endpoint"), field("bucket", "Bucket"), field("prefix", "Object prefix"), field("object_name", "Object name")],
     },
     {
       id: "destination.rest-api", value: "REST API", label: "REST API", ports: destinationPorts("request", "Object"),
@@ -152,7 +152,7 @@ export const COMPONENT_TEMPLATE_CATALOG: Record<StepType, ComponentTemplate[]> =
       configurationFields: [field("url", "URL", "https://api.example.com/…"), field("method", "Method", "POST")],
     },
     {
-      id: "destination.kafka", value: "Kafka", label: "Kafka", ports: destinationPorts("messages", "Message[]"),
+      id: "destination.kafka", value: "Kafka", label: "Stream/Kafka", ports: destinationPorts("messages", "Message[]"),
       requiredParameters: ["brokers", "topic"], defaultParameters: { brokers: "", topic: "" },
       configurationFields: [field("brokers", "Brokers", "broker:9092"), field("topic", "Topic")],
     },

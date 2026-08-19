@@ -29,6 +29,46 @@ SEMANTIC_IMPLEMENTATION_KIND_ALIASES = {
     "deterministic_processing": ("generated-code", "deterministic"),
 }
 
+# Connector selection is intentionally separate from the artifact contract:
+# these values only describe what a boundary needs before it can run.  Custom
+# is the safe default and has no platform-owned parameters.
+CONNECTOR_REQUIRED_PARAMETERS = {
+    "source": {
+        "database": ("connection_url", "query"),
+        "object storage": ("bucket",),
+        "rest api": ("url",),
+        "stream/kafka": ("brokers", "topic"),
+        "kafka": ("brokers", "topic"),
+        "message queue": ("url", "queue"),
+    },
+    "destination": {
+        "file": ("filename",),
+        "database": ("connection_url", "table"),
+        "object storage": ("bucket",),
+        "rest api": ("url",),
+        "stream/kafka": ("brokers", "topic"),
+        "kafka": ("brokers", "topic"),
+        "message queue": ("url", "queue"),
+        "notification": ("channel",),
+    },
+}
+
+
+def missing_connector_parameters(
+    step_type: object,
+    template: object,
+    parameters: Any,
+) -> list[str]:
+    """Return required boundary settings absent from a connector node."""
+    kind = str(step_type or "").strip().lower()
+    connector = str(template or "").strip().lower()
+    required = CONNECTOR_REQUIRED_PARAMETERS.get(kind, {}).get(connector, ())
+    values = parameters if isinstance(parameters, dict) else {}
+    return [
+        name for name in required
+        if values.get(name) is None or not str(values.get(name)).strip()
+    ]
+
 
 def require_agent_step_type(raw_type: object) -> str:
     """Return an exact palette type, rejecting aliases and invented boxes."""
@@ -59,6 +99,12 @@ def normalize_agent_implementation(implementation: Any) -> dict[str, Any]:
     if alias:
         candidate["kind"] = alias[0]
         candidate.setdefault("execution_profile", alias[1])
+    kind = str(candidate.get("kind") or "").strip().lower()
+    if kind and kind not in {"python", "generated-code"}:
+        raise ValueError(
+            "Task implementation.kind must be 'generated-code' or 'python'. "
+            "Sources and Destinations are configured as connectors during bundle generation."
+        )
     return candidate
 
 

@@ -24,7 +24,6 @@ import {
   Hash,
   Paperclip,
   Download,
-  ShieldCheck,
 } from 'lucide-react';
 import {
   createNodeDataFromDefinition,
@@ -270,11 +269,6 @@ export function Sidebar({
   const [deploymentValidationReport, setDeploymentValidationReport] = useState<DeploymentValidationReport | null>(null);
   const [deploymentRepairReport, setDeploymentRepairReport] = useState<DeploymentRepairReport | null>(null);
   const [pipelineRunResult, setPipelineRunResult] = useState<PipelineRunResult | null>(null);
-  const [deploymentValidationMode, setDeploymentValidationMode] = useState<DeploymentValidationMode>("validate");
-  const [deploymentTargets, setDeploymentTargets] = useState<DeploymentTargets>({
-    argo: true,
-    dagster: true,
-  });
   const [nodeDefinitions, setNodeDefinitions] = useState<NodeDefinition[]>(
     getFallbackNodeDefinitions,
   );
@@ -477,15 +471,17 @@ export function Sidebar({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         dockerfile_json: dockerfileJson,
-        targets: deploymentTargets,
-        validation_mode: deploymentValidationMode,
+        // Dagster is an implementation detail of the first bundle target.
+        // The editor deliberately exposes one outcome: a runnable bundle.
+        targets: { argo: false, dagster: true },
+        validation_mode: "fast",
         validate_bundle: true,
         validation: {
           enabled: true,
-          mode: deploymentValidationMode,
-          materialize: deploymentValidationMode !== "fast" && deploymentTargets.dagster,
-          validate_argo: deploymentValidationMode !== "fast" && deploymentTargets.argo,
-          validate_dagster: deploymentValidationMode !== "fast" && deploymentTargets.dagster,
+          mode: "fast",
+          materialize: false,
+          validate_argo: false,
+          validate_dagster: false,
           argo_lint: false,
           argo_dry_run: false,
         },
@@ -554,9 +550,6 @@ export function Sidebar({
       setDeploymentValidationReport(null);
       setDeploymentRepairReport(null);
       setPipelineRunResult(null);
-      if (!deploymentTargets.argo && !deploymentTargets.dagster) {
-        throw new Error("Select at least one deployment target.");
-      }
       setIsGeneratingDeployment(true);
       clearRuntimeArtifactDownloads();
       clearYamlDownload();
@@ -611,10 +604,6 @@ export function Sidebar({
         : null;
       const bundleBlob = await buildDeploymentZip(bundledFiles);
       const bundleUrl = URL.createObjectURL(bundleBlob);
-      const targetName = [
-        deploymentTargets.argo ? "argo" : "",
-        deploymentTargets.dagster ? "dagster" : "",
-      ].filter(Boolean).join("-");
 
       setRuntimeArtifactDownloads(deploymentRuntimeLinks.length > 0 ? deploymentRuntimeLinks : runtimeLinks);
       setYamlDownload(yamlDownloadLink);
@@ -622,7 +611,7 @@ export function Sidebar({
       setDeploymentRepairReport(bundle.repair_report || null);
       setPipelineRunResult(bundle.run || null);
       setDeploymentBundleDownload({
-        name: `inlumen-${targetName || "deployment"}-artifacts-${Date.now()}.zip`,
+        name: `inlumen-runnable-bundle-${Date.now()}.zip`,
         url: bundleUrl,
       });
     } catch (e: unknown) {
@@ -644,13 +633,7 @@ export function Sidebar({
     ...overviewData,
   } as PipelineOverview;
   const isMainVersion = activeVersionUid === MAIN_PIPELINE_VERSION_UID;
-  const deploymentButtonLabel = deploymentValidationMode === "repair"
-    ? "Repair, Run & Build Bundle"
-    : deploymentValidationMode === "validate"
-      ? deploymentTargets.dagster
-        ? deploymentTargets.argo ? "Run Dagster & Build Argo" : "Run with Dagster"
-        : "Validate Argo Export"
-      : "Build Bundle Only";
+  const deploymentButtonLabel = "Build bundle";
   const runtimeArtifactGroups = groupRuntimeArtifactDownloads(runtimeArtifactDownloads);
 
   useEffect(() => {
@@ -939,87 +922,15 @@ export function Sidebar({
         {activeTab === "simulate" && (
           <div className="w-full min-w-0 max-w-full space-y-4 overflow-hidden py-4">
             <div className="min-w-0 overflow-hidden rounded-lg border border-border p-3">
-              <h3 className="text-sm font-medium mb-2">Run & Export Pipeline</h3>
+              <h3 className="text-sm font-medium mb-2">Build runnable bundle</h3>
               <p className="text-xs text-muted-foreground mb-3">
-                Dagster is the local runner. Argo is an optional Kubernetes export built from the same Run Spec.
+                Package the current Sources, Tasks, Destinations, flow logic, uploaded code, generated code, dependencies, connectors, and model requirements into a complete local project. This does not generate Task code.
               </p>
-
-              <div className="mb-3 rounded-md border border-border bg-muted/20 p-2">
-                <div className="mb-2 text-xs font-medium">Execution adapter</div>
-                <label className="flex min-w-0 items-start gap-2 text-xs text-muted-foreground">
-                  <input
-                    type="checkbox"
-                    className="mt-0.5 shrink-0"
-                    checked={deploymentTargets.argo}
-                    onChange={(event) =>
-                      setDeploymentTargets((current) => ({
-                        ...current,
-                        argo: event.target.checked,
-                      }))
-                    }
-                  />
-                  <span className="min-w-0 leading-snug">Argo Workflow (Kubernetes export)</span>
-                </label>
-                <label className="mt-2 flex min-w-0 items-start gap-2 text-xs text-muted-foreground">
-                  <input
-                    type="checkbox"
-                    className="mt-0.5 shrink-0"
-                    checked={deploymentTargets.dagster}
-                    onChange={(event) =>
-                      setDeploymentTargets((current) => ({
-                        ...current,
-                        dagster: event.target.checked,
-                      }))
-                    }
-                  />
-                  <span className="min-w-0 leading-snug">Dagster + Docker Compose (local)</span>
-                </label>
-              </div>
-
-              <div className="mb-3 rounded-md border border-border bg-muted/20 p-2">
-                <div className="mb-2 flex items-center gap-2 text-xs font-medium">
-                  <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                  Deployment validation
-                </div>
-                <div className="grid grid-cols-2 gap-1">
-                  {([
-                    ["fast", "Build"],
-                    ["validate", "Run"],
-                    ["repair", "Repair + run"],
-                  ] as const).map(([mode, label]) => (
-                    <button
-                      key={mode}
-                      type="button"
-                      onClick={() => setDeploymentValidationMode(mode)}
-                      className={cn(
-                        "rounded-md border px-2 py-1.5 text-xs transition-colors",
-                        mode === "repair" && "col-span-2",
-                        deploymentValidationMode === mode
-                          ? "border-primary bg-primary/15 text-primary"
-                          : "border-border bg-background text-muted-foreground hover:bg-muted",
-                      )}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  {deploymentValidationMode === "repair"
-                    ? deploymentTargets.dagster
-                      ? "Normalize the bundle, run Dagster materialization, and validate every selected export."
-                      : "Normalize and validate the Argo export without requiring a live Kubernetes cluster."
-                    : deploymentValidationMode === "validate"
-                      ? deploymentTargets.dagster
-                        ? "Execute the pipeline through Dagster materialization and return its validation result."
-                        : "Validate the generated Argo workflow and shared image bundle without submitting it to a cluster."
-                      : "Build and structurally validate the bundle without installing or executing it."}
-                </p>
-              </div>
 
               <Button
                 className="h-auto min-h-10 w-full whitespace-normal px-3 py-2 text-center leading-snug"
                 onClick={handleGenerateDeploymentArtifacts}
-                disabled={isGeneratingDeployment || (!deploymentTargets.argo && !deploymentTargets.dagster)}
+                disabled={isGeneratingDeployment}
               >
                 {isGeneratingDeployment ? "Generating..." : deploymentButtonLabel}
               </Button>
@@ -1046,7 +957,7 @@ export function Sidebar({
               {pipelineRunResult && (
                 <div className="mt-3 rounded-md border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs">
                   <div className="font-medium text-emerald-300">
-                    Dagster run {pipelineRunResult.status || "completed"}
+                    Bundle check {pipelineRunResult.status || "completed"}
                   </div>
                   <div className="mt-1 text-muted-foreground">
                     Run {String(pipelineRunResult.run_id || "").slice(0, 8)} · {pipelineRunResult.package_manager || "uv"} · {pipelineRunResult.outputs?.length || 0} output files
@@ -1069,7 +980,7 @@ export function Sidebar({
 
               {deploymentBundleDownload && (
                 <div className="mt-4 min-w-0">
-                  <div className="mb-2 text-xs font-medium">Deployment Bundle</div>
+                  <div className="mb-2 text-xs font-medium">Runnable bundle</div>
                   <a
                     href={deploymentBundleDownload.url}
                     download={deploymentBundleDownload.name}

@@ -1671,12 +1671,60 @@ def node_manifest(
     requirements: list[str],
 ) -> dict[str, Any]:
     flow_id = request.context.target_node.flow_id
+    implementation_plan = (
+        implementation_plan_for_node(
+            request.context.target_node,
+            request.context.available_inputs,
+        )
+        or (
+            dict(payload["implementation_plan"])
+            if isinstance(payload.get("implementation_plan"), dict)
+            else {}
+        )
+    )
+    model_requirements = (
+        [
+            {
+                "model_id": implementation_plan["model_id"],
+                "model_revision": implementation_plan["model_revision"],
+                "runtime": "local",
+                "adapter_id": implementation_plan.get("adapter_id") or "generated-model",
+                "model_variants": implementation_plan.get("model_variants") or {},
+                "runtime_selection": implementation_plan.get("runtime_selection") or {},
+            }
+        ]
+        if implementation_plan.get("model_id") and implementation_plan.get("model_revision")
+        else []
+    )
+    capabilities = {
+        "schema_version": "inlumen.task-capability@1",
+        "mode": "batch",
+        "execution": {"adapter": "manifest"},
+        "input": {"delivery": "manifest"},
+        "output": {"discovery": "manifest", "target": "directory"},
+        "dependencies": {"python": requirements, "system": []},
+        "models": model_requirements,
+        "resources": {},
+        "secrets": [],
+        "side_effects": [],
+    }
     return {
         "schema_version": 1,
         "flow_id": flow_id,
         "generator": "inlumen-codegen-service",
         "generator_version": GENERATOR_VERSION,
         "entrypoint": ["python", "/app/main.py"],
+        # Generated scripts already implement the portable manifest ABI.  Keep
+        # that fact beside the uploaded-task contracts so deployment targets
+        # treat generated and user-supplied Task implementations identically.
+        "io_contract": {
+            "schema_version": "inlumen.task-io@1",
+            "execution": {"adapter": "manifest"},
+            "input": {"delivery": "manifest"},
+            "output": {"discovery": "manifest", "target": "directory"},
+        },
+        "capabilities": capabilities,
+        "model_requirements": model_requirements,
         "runtime": {
             "language": "python",
             "python_version": request.context.runtime_constraints.python_version,
@@ -1685,17 +1733,7 @@ def node_manifest(
             "max_runtime_seconds": request.context.runtime_constraints.max_runtime_seconds,
         },
         "dependencies": requirements,
-        "implementation_plan": (
-            implementation_plan_for_node(
-                request.context.target_node,
-                request.context.available_inputs,
-            )
-            or (
-                dict(payload["implementation_plan"])
-                if isinstance(payload.get("implementation_plan"), dict)
-                else {}
-            )
-        ),
+        "implementation_plan": implementation_plan,
         "data_contract": data_contract_from_payload(request, payload).model_dump(
             mode="json"
         ),
@@ -2458,16 +2496,26 @@ def json_payload_for_spec(spec: dict, fallback_payload: dict, input_entries: lis
 
 
 def main() -> None:
-    input_manifest_path = os.getenv("INLUMEN_INPUT_MANIFEST", "")
-    output_dir = Path(os.getenv("INLUMEN_OUTPUT_DIR", "/inlumen/outputs"))
-    output_manifest_path = Path(
-        os.getenv("INLUMEN_OUTPUT_MANIFEST", str(output_dir / "output_manifest.json"))
+    legacy_input_manifest_path = os.getenv("INLUMEN_INPUT_MANIFEST", "")
+    input_dir = Path(
+        os.getenv("PIPELINE_INPUT_DIR")
+        or (Path(legacy_input_manifest_path).parent if legacy_input_manifest_path else "/workspace/input")
     )
-    context_path = os.getenv("INLUMEN_CONTEXT_PATH", "")
+    output_dir = Path(
+        os.getenv("PIPELINE_OUTPUT_DIR")
+        or os.getenv("INLUMEN_OUTPUT_DIR", "/workspace/output")
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    input_manifest = load_json(input_manifest_path)
-    context = load_json(context_path)
+    input_manifest_path = legacy_input_manifest_path
+    input_manifest = load_json(input_manifest_path) if input_manifest_path else {{
+        "inputs": [
+            {{"filename": path.relative_to(input_dir).as_posix(), "path": str(path)}}
+            for path in sorted(input_dir.rglob("*"))
+            if path.is_file()
+        ]
+    }}
+    context = {{}}
 
     output_specs = {output_specs_json}
     manifest_outputs = []
@@ -2539,16 +2587,17 @@ def main() -> None:
             }}
         )
 
-    output_manifest = {{
-        "schema_version": "inlumen.output-manifest@1",
-        "flow_id": os.getenv("INLUMEN_FLOW_ID", "{request.context.target_node.flow_id}"),
-        "outputs": manifest_outputs,
-    }}
-    output_manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_manifest_path.open("w", encoding="utf-8") as handle:
-        json.dump(output_manifest, handle, indent=2, sort_keys=True)
-        handle.write("\\n")
-
+    # Kept solely for older direct invocations. The public runtime does not set
+    # this variable and instead inventories PIPELINE_OUTPUT_DIR after exit.
+    legacy_output_manifest_path = os.getenv("INLUMEN_OUTPUT_MANIFEST", "")
+    if legacy_output_manifest_path:
+        Path(legacy_output_manifest_path).write_text(
+            json.dumps({{
+                "schema_version": "inlumen.output-manifest@1",
+                "outputs": manifest_outputs,
+            }}, indent=2, sort_keys=True) + "\\n",
+            encoding="utf-8",
+        )
 
 if __name__ == "__main__":
     main()

@@ -106,6 +106,29 @@ def codegen_payload():
     }
 
 
+def function_style_payload():
+    payload = codegen_payload()
+    launcher_dockerfile = dockerfile_content().replace(
+        'COPY ["main.py", "/app/main.py"]',
+        'COPY ["main.py", "/app/main.py"]\nCOPY ["launcher.py", "/app/launcher.py"]',
+    ).replace(
+        'CMD ["python", "/app/main.py"]',
+        'CMD ["python", "/app/launcher.py"]',
+    )
+    payload["dockerfiles"][1]["content"] = launcher_dockerfile
+    payload["dockerfiles"][1]["command"] = ["python", "/app/launcher.py"]
+    payload["dockerfiles"][1]["files"].append("launcher.py")
+    payload["deployment_files"].append(
+        {
+            "path": "nodes/2/launcher.py",
+            "filename": "launcher.py",
+            "flow_id": "2",
+            "content": "# function-style compatibility launcher\n",
+        }
+    )
+    return payload
+
+
 class CodegenDeploymentArtifactsTest(unittest.TestCase):
     def graph(self):
         return {
@@ -128,7 +151,7 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             "edges": [{"source": "1", "target": "2"}],
         }
 
-    def test_dagster_runtime_rejects_json_payload_that_violates_node_contract(self):
+    def test_dagster_runtime_stages_files_without_requiring_a_manifest(self):
         component_source = _dagster_shell_command_component_source().replace(
             "import dagster as dg",
             "",
@@ -138,97 +161,33 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         exec(compile(helper_source, "shell_command.py", "exec"), namespace)
 
         with tempfile.TemporaryDirectory() as tmp:
-            output_dir = Path(tmp) / "outputs"
-            output_dir.mkdir()
-            payload_path = output_dir / "sentiment_analysis.json"
-            payload_path.write_text(
-                json.dumps(
-                    {
-                        "label": "positive",
-                        "score": 0.91,
-                        "scores": {"positive": 0.91},
-                    }
-                ),
-                encoding="utf-8",
-            )
-            output_manifest_path = output_dir / "output_manifest.json"
-            output_manifest_path.write_text(
-                json.dumps(
-                    {
-                        "outputs": [
-                            {
-                                "name": "sentiment_analysis",
-                                "filename": "sentiment_analysis.json",
-                                "path": str(payload_path),
-                                "kind": "json",
-                                "format": "json",
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            context_path = Path(tmp) / "node-manifest.json"
-            context_path.write_text(
-                json.dumps(
-                    {
-                        "data_contract": {
-                            "outputs": [
-                                {
-                                    "name": "sentiment_analysis",
-                                    "filename": "sentiment_analysis.json",
-                                    "kind": "json",
-                                    "format": "json",
-                                    "schema": {
-                                        "type": "object",
-                                        "required": [
-                                            "transcript",
-                                            "sentiment_label",
-                                            "confidence",
-                                        ],
-                                    },
-                                }
-                            ]
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
+            source = Path(tmp) / "source"
+            source.mkdir()
+            (source / "payload.json").write_text('{"ok": true}', encoding="utf-8")
+            # Legacy bundle metadata is intentionally not a user input.
+            (source / "input_manifest.json").write_text("{}", encoding="utf-8")
+            staged = Path(tmp) / "workspace" / "input"
+            namespace["_stage_inputs"]([source], staged)
+            self.assertTrue((staged / "payload.json").is_file())
+            self.assertFalse((staged / "input_manifest.json").exists())
 
-            errors = namespace["_output_contract_errors"](
-                output_manifest_path,
-                context_path,
-                output_dir,
-            )
-
-        self.assertEqual(
-            [
-                (
-                    "JSON output 'sentiment_analysis' is missing required fields: "
-                    "transcript, sentiment_label, confidence."
-                )
-            ],
-            errors,
-        )
-
-    def test_codegen_dockerfile_payload_selects_manifest_handoff_without_node_metadata(self):
+    def test_codegen_dockerfile_payload_selects_filesystem_handoff_without_node_metadata(self):
         workflow = build_argo_workflow_object(self.graph(), codegen_payload())
         self.assertEqual("inlumen-codegen-", workflow["metadata"]["generateName"])
-        self.assertEqual(
-            "/inlumen/inputs/input_manifest.json",
-            next(
-                item["value"]
-                for item in workflow["spec"]["templates"][1]["container"]["env"]
-                if item["name"] == "INLUMEN_INPUT_MANIFEST"
-            ),
-        )
         env = {
             item["name"]: item["value"]
             for item in workflow["spec"]["templates"][1]["container"]["env"]
             if "value" in item
         }
+        self.assertEqual("/inlumen/inputs", env["PIPELINE_INPUT_DIR"])
+        self.assertEqual("/inlumen/outputs", env["PIPELINE_OUTPUT_DIR"])
+        self.assertNotIn("INLUMEN_INPUT_MANIFEST", env)
+        self.assertNotIn("INLUMEN_OUTPUT_MANIFEST", env)
         self.assertEqual('{"language": "en"}', env["INLUMEN_PARAMS_JSON"])
+        self.assertEqual('{"language": "en"}', env["PIPELINE_PARAMS_JSON"])
         self.assertEqual("en", env["INLUMEN_PARAM_LANGUAGE"])
+        self.assertEqual("en", env["PIPELINE_PARAM_LANGUAGE"])
+        self.assertEqual("en", env["language"])
         self.assertNotIn("INLUMEN_PARAM_MODEL_PLAN", env)
         secret_env = next(
             item
@@ -250,7 +209,9 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         yaml_text = build_argo_workflow_yaml(self.graph(), codegen_payload())
         self.assertIn('generateName: "inlumen-codegen-"', yaml_text)
         self.assertIn("artifactRepositoryRef:", yaml_text)
-        self.assertIn("INLUMEN_OUTPUT_MANIFEST", yaml_text)
+        self.assertIn("PIPELINE_INPUT_DIR", yaml_text)
+        self.assertIn("PIPELINE_OUTPUT_DIR", yaml_text)
+        self.assertNotIn("INLUMEN_OUTPUT_MANIFEST", yaml_text)
 
     def test_dagster_project_files_use_persisted_scripts_and_graph_dependencies(self):
         files = build_dagster_project_files(self.graph(), codegen_payload())
@@ -284,19 +245,16 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             by_path["dagster_project/src/inlumen_dagster_project/defs/node_1_ingestion/defs.yaml"],
         )
         self.assertNotIn("do-not-export", "\n".join(by_path.values()))
-        self.assertIn('"inputs"', by_path["dagster_project/storage/inputs/input_manifest.json"])
-        self.assertIn('"filename": "vital_signs_short.csv"', by_path["dagster_project/storage/inputs/input_manifest.json"])
-        self.assertIn('"path": "storage/inputs/vital_signs_short.csv"', by_path["dagster_project/storage/inputs/input_manifest.json"])
-        self.assertIn('"kind": "table"', by_path["dagster_project/storage/inputs/input_manifest.json"])
+        self.assertIn("dagster_project/storage/inputs/vital_signs_short.csv", by_path)
+        self.assertNotIn("dagster_project/storage/inputs/input_manifest.json", by_path)
         shell_command = by_path["dagster_project/src/inlumen_dagster_project/components/shell_command.py"]
-        self.assertIn("_prepare_input_manifest", shell_command)
-        self.assertIn("import sys", shell_command)
-        self.assertIn("project_root.parent / path", shell_command)
-        self.assertIn('normalized["kind"] = inferred_kind', shell_command)
-        self.assertIn('return "binary", normalized_format', shell_command)
+        self.assertIn("PIPELINE_INPUT_DIR", shell_command)
+        self.assertIn("PIPELINE_OUTPUT_DIR", shell_command)
+        self.assertIn("_stage_inputs", shell_command)
+        self.assertIn("_artifacts", shell_command)
         self.assertIn("subprocess.Popen(", shell_command)
         self.assertIn("stderr=subprocess.STDOUT", shell_command)
-        self.assertIn("output_queue.get(timeout=15.0)", shell_command)
+        self.assertIn("lines.get(timeout=15.0)", shell_command)
         self.assertIn("is still running", shell_command)
         self.assertNotIn("capture_output=True", shell_command)
         self.assertNotIn("PipesSubprocessClient", shell_command)
@@ -313,6 +271,31 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertNotIn("find /app", by_path["dagster_project/Dockerfile"])
         self.assertIn("/app/.dagster_home", by_path["dagster_project/Dockerfile"])
 
+    def test_dagster_project_uses_declared_function_style_launcher(self):
+        files = build_dagster_project_files(self.graph(), function_style_payload())
+        by_path = {item["path"]: item["content"] for item in files}
+        self.assertEqual(
+            "# function-style compatibility launcher\n",
+            by_path[
+                "dagster_project/src/inlumen_dagster_project/scripts/"
+                "node_2_preprocessing/launcher.py"
+            ],
+        )
+        self.assertEqual(
+            "print('preprocess')\n",
+            by_path[
+                "dagster_project/src/inlumen_dagster_project/scripts/"
+                "node_2_preprocessing/main.py"
+            ],
+        )
+        self.assertIn(
+            'script_path: "src/inlumen_dagster_project/scripts/node_2_preprocessing/launcher.py"',
+            by_path[
+                "dagster_project/src/inlumen_dagster_project/defs/"
+                "node_2_preprocessing/defs.yaml"
+            ],
+        )
+
     def test_canonical_deployment_bundle_has_runnable_layout(self):
         bundle = build_deployment_bundle_files(
             self.graph(),
@@ -323,7 +306,7 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertIn("README.md", by_path)
         self.assertIn("bundle-manifest.json", by_path)
         self.assertIn("run-spec.json", by_path)
-        self.assertIn("inputs/input_manifest.json", by_path)
+        self.assertNotIn("inputs/input_manifest.json", by_path)
         self.assertIn("inputs/vital_signs_short.csv", by_path)
         self.assertIn("inputs/sample.wav", by_path)
         self.assertIn("nodes/node-1-ingestion/main.py", by_path)
@@ -371,7 +354,11 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertIn("dagster-webserver:", by_path["docker-compose.yml"])
         self.assertIn("dagster-daemon:", by_path["docker-compose.yml"])
         self.assertIn("internal: true", by_path["docker-compose.yml"])
-        self.assertIn('HF_HUB_OFFLINE: "1"', by_path["docker-compose.yml"])
+        self.assertIn(
+            'HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-0}"',
+            by_path["docker-compose.yml"],
+        )
+        self.assertIn("runtime-egress:", by_path["docker-compose.yml"])
         self.assertIn("dagster/workspace.yaml", by_path)
         self.assertIn("dagster_postgres_data:", by_path["docker-compose.yml"])
         self.assertIn(
@@ -388,23 +375,13 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         )
         self.assertIn("healthcheck:", by_path["docker-compose.yml"])
         self.assertIn(
-            "@dg.asset_check",
+            "PIPELINE_OUTPUT_DIR",
             by_path[
                 "dagster/src/inlumen_dagster_project/components/shell_command.py"
             ],
         )
         self.assertIn("/workspace/dagster/.dagster_home", by_path["dagster/Dockerfile"])
         self.assertIn("script_path: \"../nodes/node-1-ingestion/main.py\"", by_path["dagster/src/inlumen_dagster_project/defs/node_1_ingestion/defs.yaml"])
-        self.assertIn('"path": "inputs/vital_signs_short.csv"', by_path["inputs/input_manifest.json"])
-        self.assertIn('"kind": "table"', by_path["inputs/input_manifest.json"])
-        input_manifest = json.loads(by_path["inputs/input_manifest.json"])
-        inputs_by_filename = {
-            entry["filename"]: entry for entry in input_manifest["inputs"]
-        }
-        # Explicit legacy binary declarations remain compatible; newly inferred
-        # WAV descriptors use the more specific audio kind.
-        self.assertEqual("binary", inputs_by_filename["sample.wav"]["kind"])
-        self.assertEqual("wav", inputs_by_filename["sample.wav"]["format"])
         binary_file = next(
             item for item in bundle["files"] if item["path"] == "inputs/sample.wav"
         )
@@ -424,6 +401,8 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertEqual("inlumen.run-spec@1", run_spec["schema_version"])
         self.assertEqual("uv", run_spec["runtime"]["package_manager"])
         self.assertEqual("dagster", run_spec["runtime"]["default_engine"])
+        self.assertEqual("filesystem", run_spec["run_inputs"]["transport"])
+        self.assertEqual("filesystem", run_spec["outputs"]["transport"])
         self.assertEqual("managed-adapter", run_spec["nodes"][0]["execution"]["kind"])
         self.assertNotIn("package", run_spec["nodes"][0])
         self.assertEqual("python-package", run_spec["nodes"][1]["execution"]["kind"])
@@ -455,6 +434,9 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertIn("inlumen_model_store:/models", compose)
         self.assertIn("inlumen_model_store:/models:ro", compose)
         self.assertIn('HF_HUB_DISABLE_XET: "${HF_HUB_DISABLE_XET:-1}"', compose)
+        self.assertNotIn("HF_HUB_CACHE: /models/huggingface", compose)
+        self.assertIn('HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-0}"', compose)
+        self.assertIn("runtime-egress:", compose)
         self.assertIn('HF_TOKEN: "${HF_TOKEN:-}"', compose)
         self.assertIn("model-download:", compose)
         self.assertIn("dagster/model-requirements.json", by_path)
@@ -548,6 +530,16 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
                 hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
                 (artifact_dir / "VERIFIED").read_text(encoding="utf-8").strip(),
             )
+            self.assertEqual(
+                "0123456789abcdef",
+                (
+                    root
+                    / "huggingface"
+                    / "models--reviewed--model"
+                    / "refs"
+                    / "main"
+                ).read_text(encoding="utf-8"),
+            )
 
     def test_explicit_multimodal_inputs_are_separate_from_runtime_files(self):
         payload = codegen_payload()
@@ -612,7 +604,7 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             )
         )
 
-    def test_bundle_input_manifest_classifies_supported_modalities(self):
+    def test_bundle_copies_supported_modalities_without_a_task_manifest(self):
         payload = deepcopy(codegen_payload())
         additional_inputs = {
             "document.pdf": "document",
@@ -636,25 +628,10 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             payload,
             targets={"argo": False, "dagster": True},
         )
-        manifest_file = next(
-            item
-            for item in bundle["files"]
-            if item["path"] == "inputs/input_manifest.json"
-        )
-        entries = {
-            entry["filename"]: entry
-            for entry in json.loads(manifest_file["content"])["inputs"]
-        }
-
-        expected = {
-            "vital_signs_short.csv": "table",
-            "sample.wav": "binary",
-            **additional_inputs,
-        }
-        self.assertEqual(
-            expected,
-            {filename: entries[filename]["kind"] for filename in expected},
-        )
+        paths = {item["path"] for item in bundle["files"]}
+        self.assertNotIn("inputs/input_manifest.json", paths)
+        for filename in {"vital_signs_short.csv", "sample.wav", *additional_inputs}:
+            self.assertIn(f"inputs/{filename}", paths)
 
 
 if __name__ == "__main__":

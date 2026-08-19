@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pipeline_agent.contract import (  # noqa: E402
     default_input_port_expression,
     default_output_port_expression,
+    normalize_agent_implementation,
     require_agent_step_type,
     validate_insertion_kind,
 )
@@ -41,6 +42,18 @@ class PipelineAgentContractTest(unittest.TestCase):
         self.assertIn("node.primary_output_port", output_expression)
         self.assertIn("THEN 'when_true'", output_expression)
         self.assertIn("THEN 'item'", output_expression)
+
+    def test_tasks_only_accept_python_implementation_packages(self):
+        self.assertEqual(
+            {"kind": "generated-code"},
+            normalize_agent_implementation({"kind": "generated-code"}),
+        )
+        self.assertEqual(
+            {"kind": "python", "language": "python"},
+            normalize_agent_implementation({"kind": "python", "language": "python"}),
+        )
+        with self.assertRaisesRegex(ValueError, "generated-code.*python"):
+            normalize_agent_implementation({"kind": "container"})
 
 
 if __name__ == "__main__":

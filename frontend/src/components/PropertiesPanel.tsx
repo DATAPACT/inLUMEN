@@ -94,7 +94,7 @@ import {
 type NodeParamMap = Record<string, unknown>;
 const FLOW_PARAMETER_KEYS = new Set(["expression", "max_concurrency", "failure_policy"]);
 const USER_PARAMETER_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
-const USER_CODE_FILE_PATTERN = /^(?:main\.py|requirements\.txt|[A-Za-z0-9_.-]+\.(?:py|pyi|json|toml|ya?ml|sql|sh|txt))$/i;
+const USER_CODE_FILE_PATTERN = /^(?:main\.py|requirements\.txt)$/;
 
 export type PropertyNodeData = {
   label?: string;
@@ -211,13 +211,15 @@ export function PropertiesPanel({
 }: PropertiesPanelProps) {
   const nodeType: StepType = normalizeType(selectedNode?.data?.type ?? selectedNode?.type);
   const canManageFiles = typeHasFiles(nodeType);
-  const canManageImplementation = ["source", "task", "destination"].includes(nodeType);
+  // Code is a Task concern. Sources and Destinations are connectivity boundaries
+  // whose adapters are resolved when the runnable bundle is assembled.
+  const canManageImplementation = nodeType === "task";
   const canGenerateScript = canManageImplementation;
 
   const [label, setLabel] = useState('');
   const [description, setDescription] = useState('');
 
-  // Every runtime node can carry its script, requirements, and input files.
+  // Sources own run input files; Tasks own a minimal Python implementation.
   const [files, setFiles] = useState<NodeFileReference[]>([]);
   const codeFileInputRef = useRef<HTMLInputElement>(null);
   const dataFileInputRef = useRef<HTMLInputElement>(null);
@@ -258,6 +260,20 @@ export function PropertiesPanel({
       category,
       options: templateOptions.filter((option) => option.category === category),
     }));
+  const connectorTemplateGroups = templateGroups
+    .map((group) => ({
+      ...group,
+      options: group.options.filter((option) => [
+        "Custom",
+        "File",
+        "Folder",
+        "Database",
+        "Object Storage",
+        "REST API",
+        "Kafka",
+      ].includes(option.value)),
+    }))
+    .filter((group) => group.options.length > 0);
   const indexedCodeFiles = files
     .map((file, index) => ({ file, index }))
     .filter(({ file }) => getNodeFileRole(file) === "code");
@@ -650,7 +666,7 @@ export function PropertiesPanel({
       const invalid = picked.find((file) => !USER_CODE_FILE_PATTERN.test(file.name));
       if (invalid) {
         toast.error(`Could not upload ${invalid.name}`, {
-          description: "Upload main.py, optional requirements.txt, or a supporting Python package file.",
+          description: "Upload main.py and, only when needed, requirements.txt.",
         });
         e.target.value = "";
         return;
@@ -1114,11 +1130,17 @@ export function PropertiesPanel({
       });
     });
   };
-  const renderParametersSection = () => (
+  const renderParametersSection = ({
+    title = "Parameters",
+    description = "Optional values passed to code at runtime under the same name (for example, QUESTION).",
+  }: {
+    title?: string;
+    description?: string;
+  } = {}) => (
     <InspectorSection
       id="inspector-configuration"
-      title="Parameters"
-      description="Optional values available to generated or uploaded code at runtime."
+      title={title}
+      description={description}
     >
       <div className="space-y-3">
       {editableParamEntries.map(([key, value]) => {
@@ -1316,6 +1338,44 @@ export function PropertiesPanel({
 
             {canManageInputFiles && renderInputFilesSection()}
 
+            {["source", "destination"].includes(nodeType) && (
+              <InspectorSection
+                id="inspector-connection"
+                title="Connection"
+                description="Choose the boundary type. Describe the connection in chat; inLUMEN configures it while building the bundle."
+                status={sectionStatus("configuration")}
+              >
+                <div className="space-y-2">
+                  <Label htmlFor="connector-type">Connector type</Label>
+                  <select
+                    id="connector-type"
+                    className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                    value={currentTemplate}
+                    onChange={(event) => handleTemplateChange(event.target.value)}
+                  >
+                    {connectorTemplateGroups.map((group) => (
+                      <optgroup key={group.category} label={group.category}>
+                        {group.options.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                </div>
+                <details className="rounded-md border border-border bg-muted/10">
+                  <summary className="cursor-pointer px-3 py-2 text-xs font-medium">
+                    Advanced connection settings
+                  </summary>
+                  <div className="border-t border-border p-2">
+                    {renderParametersSection({
+                      title: "Connection settings",
+                      description: "Optional overrides. Credentials are stored securely and are never included in the pipeline graph or bundle.",
+                    })}
+                  </div>
+                </details>
+              </InspectorSection>
+            )}
+
             {nodeType === "flow" && (
               <InspectorSection
                 id="inspector-flow"
@@ -1453,6 +1513,10 @@ export function PropertiesPanel({
                   The only required file is <code className="rounded bg-muted px-1">main.py</code>.
                   Add <code className="rounded bg-muted px-1">requirements.txt</code> only when third-party packages are needed.
                 </p>
+                <div className="rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
+                  <p className="font-medium text-foreground">Task runtime contract</p>
+                  <p className="mt-1">Your code runs with a standard workspace. Read input files from <code className="rounded bg-background px-1">PIPELINE_INPUT_DIR</code> and write every result for downstream nodes to <code className="rounded bg-background px-1">PIPELINE_OUTPUT_DIR</code>.</p>
+                </div>
               </InspectorSection>
             )}
 

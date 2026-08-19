@@ -73,13 +73,9 @@ def validate_generated_files(
                         errors.append(
                             f"main.py calls banned function: {unsafe_call}"
                         )
-        for required_token in (
-            "INLUMEN_INPUT_MANIFEST",
-            "INLUMEN_OUTPUT_DIR",
-            "INLUMEN_OUTPUT_MANIFEST",
-        ):
+        for required_token in ("PIPELINE_INPUT_DIR", "PIPELINE_OUTPUT_DIR"):
             if required_token not in main_py.content:
-                warnings.append(
+                errors.append(
                     f"main.py does not explicitly reference {required_token}"
                 )
 

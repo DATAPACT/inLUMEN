@@ -336,7 +336,15 @@ def test_ast_security_allows_model_eval_but_rejects_builtin_eval() -> None:
         "files": [
             {
                 "filename": "main.py",
-                "content": "import torch\nmodel = torch.nn.Linear(1, 1)\nmodel.eval()\n",
+                "content": (
+                    "import os\n"
+                    "from pathlib import Path\n"
+                    "import torch\n"
+                    "input_dir = Path(os.environ['PIPELINE_INPUT_DIR'])\n"
+                    "output_dir = Path(os.environ['PIPELINE_OUTPUT_DIR'])\n"
+                    "model = torch.nn.Linear(1, 1)\n"
+                    "model.eval()\n"
+                ),
             },
             *base_files,
         ],

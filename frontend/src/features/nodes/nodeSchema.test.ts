@@ -14,6 +14,7 @@ import {
   normalizeSecretParamKeys,
   normalizeType,
   pickBackendUpdatableProps,
+  typeHasFiles,
   typeSupportsInputFiles,
 } from "@/features/nodes/nodeSchema";
 
@@ -107,6 +108,14 @@ describe("node schema compatibility", () => {
     expect(typeSupportsInputFiles("destination")).toBe(false);
     expect(typeSupportsInputFiles("flow")).toBe(false);
     expect(typeSupportsInputFiles("subpipeline")).toBe(false);
+  });
+
+  it("limits node file ownership to Source inputs and Task runtimes", () => {
+    expect(typeHasFiles("source")).toBe(true);
+    expect(typeHasFiles("task")).toBe(true);
+    expect(typeHasFiles("destination")).toBe(false);
+    expect(typeHasFiles("flow")).toBe(false);
+    expect(typeHasFiles("subpipeline")).toBe(false);
   });
 
   it("persists structural metadata without technology-specific graph types", () => {

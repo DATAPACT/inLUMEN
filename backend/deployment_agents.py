@@ -1,3 +1,4 @@
+import ast
 import hashlib
 import json
 import re
@@ -21,10 +22,16 @@ from deployment_artifacts import (
 )
 from generators.registry import GeneratorRegistry
 from minio_gateway import read_minio_object, read_minio_object_bytes
+from model_plans import (
+    infer_implementation_plan_from_python_source,
+    unresolved_model_plan_errors_from_python_source,
+)
+from node_parameters import normalize_secret_param_keys
 
 CODEGEN_GENERATOR = "inlumen-codegen-service"
 ATTACHED_RUNTIME_GENERATOR = "inlumen-attached-runtime"
 MANAGED_ADAPTER_GENERATOR = "inlumen-managed-adapter"
+CONTROL_FLOW_GENERATOR = "inlumen-control-flow"
 
 
 class ListDockerfilesResponse(BaseModel):
@@ -110,6 +117,16 @@ async def generate_dockerfiles_with_agent(
     codegen_dockerfiles: list[dict[str, Any]] = []
     artifact_errors: list[str] = []
     for step in steps:
+        # Explicit connector boundaries are rebuilt from the current connector
+        # specification so stale generated artifacts cannot override them.
+        # Custom boundaries with an attached main.py are user-owned runtimes
+        # and follow the same contract as Tasks.
+        if _is_managed_adapter(step):
+            runtime_artifact, dockerfile = _managed_adapter_runtime(step)
+            codegen_runtime_artifacts.append(runtime_artifact)
+            codegen_dockerfiles.append(dockerfile)
+            continue
+
         codegen_artifact = (
             _codegen_artifact_from_persisted_files(step)
             if require_attached_runtime
@@ -124,8 +141,23 @@ async def generate_dockerfiles_with_agent(
                     codegen_artifact,
                 )
             except DeploymentArtifactValidationError as exc:
-                artifact_errors.extend(exc.errors)
-                continue
+                # A previous codegen validation may have persisted an invalid
+                # wrapper around otherwise valid user-owned files.  Prefer the
+                # current uploaded Task package in that case; old codegen state
+                # must not block arbitrary ``main.py`` tasks from exporting.
+                if not _has_attached_python_entrypoint(step):
+                    artifact_errors.extend(exc.errors)
+                    continue
+                try:
+                    runtime_artifact, dockerfile = await _read_attached_python_runtime(
+                        step
+                    )
+                except DeploymentArtifactValidationError as attached_exc:
+                    artifact_errors.extend([
+                        *exc.errors,
+                        *attached_exc.errors,
+                    ])
+                    continue
             codegen_runtime_artifacts.append(runtime_artifact)
             codegen_dockerfiles.append(dockerfile)
             continue
@@ -140,8 +172,11 @@ async def generate_dockerfiles_with_agent(
             codegen_dockerfiles.append(dockerfile)
             continue
 
-        if _is_managed_adapter(step):
-            runtime_artifact, dockerfile = _managed_adapter_runtime(step)
+        # Flow nodes are orchestration components, not user Tasks.  They do
+        # not require an uploaded main.py; provide the small deterministic
+        # pass-through runtime used by the filesystem hand-off instead.
+        if _is_control_flow_step(step):
+            runtime_artifact, dockerfile = _control_flow_runtime(step)
             codegen_runtime_artifacts.append(runtime_artifact)
             codegen_dockerfiles.append(dockerfile)
             continue
@@ -490,10 +525,41 @@ def _has_attached_python_entrypoint(step: dict[str, Any]) -> bool:
 
 
 def _is_managed_adapter(step: dict[str, Any]) -> bool:
-    return str(step.get("type") or "").strip().lower() in {
+    kind = str(step.get("type") or "").strip().lower()
+    if kind not in {
         "source",
         "destination",
-    }
+    }:
+        return False
+
+    # Custom boundaries are intentionally extensible.  If the user attached
+    # main.py, preserve that runtime exactly as we do for Tasks.  Explicit
+    # Database/Object Storage/etc. selections remain platform-owned adapters,
+    # so stale generated code cannot silently bypass the configured connector.
+    template = str(
+        step.get("template")
+        or step.get("template_label")
+        or "Custom"
+    ).strip().lower()
+    if template in {"", "custom"} and _has_attached_python_entrypoint(step):
+        generated_artifact = step.get("generated_artifact")
+        provenance = (
+            generated_artifact.get("provenance")
+            if isinstance(generated_artifact, dict)
+            else None
+        )
+        # AI-generated connector artifacts remain platform-managed.  A user
+        # edit explicitly marked user_modified (or a standalone uploaded
+        # main.py) is the opt-in for a custom boundary runtime.
+        if not isinstance(generated_artifact, dict) or not generated_artifact or (
+            isinstance(provenance, dict) and provenance.get("user_modified") is True
+        ):
+            return False
+    return True
+
+
+def _is_control_flow_step(step: dict[str, Any]) -> bool:
+    return str(step.get("type") or "").strip().lower() == "flow"
 
 
 def _deterministic_python_dockerfile(
@@ -501,6 +567,7 @@ def _deterministic_python_dockerfile(
     filenames: list[str],
     *,
     base_image: str = "python:3.11-slim",
+    entrypoint: Optional[list[str]] = None,
 ) -> tuple[str, str]:
     """Create the transient build definition owned by the deployment exporter."""
     runtime_filenames = [
@@ -521,6 +588,7 @@ def _deterministic_python_dockerfile(
         if "requirements.txt" in runtime_filenames
         else []
     )
+    command = entrypoint or ["python", "/app/main.py"]
     content = "\n".join(
         [
             "# syntax=docker/dockerfile:1.7",
@@ -529,7 +597,7 @@ def _deterministic_python_dockerfile(
             "WORKDIR /app",
             *copy_lines,
             *install_lines,
-            'CMD ["python", "/app/main.py"]',
+            f"CMD {json.dumps(command)}",
             "",
         ]
     )
@@ -560,62 +628,17 @@ def _read_entries(manifest_path: Path):
 def _source_outputs(entries, output_dir: Path):
     resolved = []
     for index, entry in enumerate(entries):
-        filename = Path(
-            str(entry.get("filename") or entry.get("name") or f"input-{{index + 1}}")
-        ).name
+        filename = str(
+            entry.get("filename") or entry.get("name") or f"input-{{index + 1}}"
+        ).replace("\\\\", "/").lstrip("/")
+        if not filename or ".." in Path(filename).parts:
+            raise ValueError(f"Source adapter received unsafe filename: {{filename!r}}")
         source_path = Path(str(entry.get("path") or filename))
         if not source_path.is_absolute():
             source_path = Path(os.environ["INLUMEN_INPUT_MANIFEST"]).parent / source_path
         if not source_path.is_file():
             raise FileNotFoundError(f"Source adapter input does not exist: {{source_path}}")
         resolved.append((entry, filename, source_path))
-
-    if len(resolved) > 1:
-        package = {{"files": []}}
-        json_documents = []
-        for entry, filename, source_path in resolved:
-            kind = str(entry.get("kind") or "binary")
-            file_format = str(
-                entry.get("format") or source_path.suffix.lstrip(".")
-            ).lower()
-            package["files"].append({{
-                "filename": filename,
-                "kind": kind,
-                "format": file_format,
-                "size_bytes": source_path.stat().st_size,
-            }})
-            if file_format == "pdf":
-                package.setdefault(
-                    "pdf_base64",
-                    base64.b64encode(source_path.read_bytes()).decode("ascii"),
-                )
-                package.setdefault("source", filename)
-            elif kind == "json" or file_format == "json":
-                with source_path.open("r", encoding="utf-8") as handle:
-                    value = json.load(handle)
-                json_documents.append({{"filename": filename, "data": value}})
-                if isinstance(value, dict):
-                    for key, nested_value in value.items():
-                        package.setdefault(str(key), nested_value)
-            elif kind == "text" or file_format in {{"txt", "md"}}:
-                package.setdefault("text", source_path.read_text(encoding="utf-8"))
-            else:
-                package.setdefault(
-                    "content_base64",
-                    base64.b64encode(source_path.read_bytes()).decode("ascii"),
-                )
-        if json_documents:
-            package["json_documents"] = json_documents
-        package_path = output_dir / "source-package.json"
-        with package_path.open("w", encoding="utf-8") as handle:
-            json.dump(package, handle, indent=2, sort_keys=True)
-        return [{{
-            "name": "source_package",
-            "filename": package_path.name,
-            "path": str(package_path.resolve()),
-            "kind": "json",
-            "format": "json",
-        }}]
 
     outputs = []
     for entry, filename, source_path in resolved:
@@ -652,18 +675,17 @@ def _destination_outputs(entries, output_dir: Path):
 
 
 def main():
-    input_manifest = Path(os.environ["INLUMEN_INPUT_MANIFEST"])
-    output_dir = Path(os.environ["INLUMEN_OUTPUT_DIR"])
-    output_manifest = Path(os.environ["INLUMEN_OUTPUT_MANIFEST"])
+    input_dir = Path(os.environ["PIPELINE_INPUT_DIR"])
+    output_dir = Path(os.environ["PIPELINE_OUTPUT_DIR"])
     output_dir.mkdir(parents=True, exist_ok=True)
-    entries = _read_entries(input_manifest)
+    entries = [{{
+        "filename": path.relative_to(input_dir).as_posix(),
+        "path": str(path),
+    }} for path in sorted(input_dir.rglob("*")) if path.is_file()]
     if ADAPTER_SPEC["kind"] == "source":
-        outputs = _source_outputs(entries, output_dir)
+        _source_outputs(entries, output_dir)
     else:
-        outputs = _destination_outputs(entries, output_dir)
-    output_manifest.parent.mkdir(parents=True, exist_ok=True)
-    with output_manifest.open("w", encoding="utf-8") as handle:
-        json.dump({{"schema_version": "inlumen.output-manifest@1", "outputs": outputs}}, handle, indent=2)
+        _destination_outputs(entries, output_dir)
 
 
 if __name__ == "__main__":
@@ -671,16 +693,276 @@ if __name__ == "__main__":
 '''
 
 
+def _managed_adapter_main_source_v2(adapter_spec: dict[str, Any]) -> str:
+    """Return the runtime for database extraction and object-store delivery."""
+    embedded_spec = json.dumps(json.dumps(adapter_spec, sort_keys=True))
+    source = '''import csv
+import hashlib
+import json
+import mimetypes
+import os
+import re
+import shutil
+from pathlib import Path
+from urllib.parse import urlparse
+
+
+ADAPTER_SPEC = json.loads(__SPEC__)
+
+
+def _parameter(name, default=""):
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", str(name)).upper().strip("_")
+    for env_name in (f"PIPELINE_PARAM_{normalized}", f"INLUMEN_PARAM_{normalized}", normalized):
+        value = os.getenv(env_name)
+        if value not in (None, ""):
+            return value
+    value = (ADAPTER_SPEC.get("parameters") or {}).get(name)
+    if value in (None, ""):
+        value = (ADAPTER_SPEC.get("settings") or {}).get(name)
+    return default if value in (None, "") else value
+
+
+def _entries(input_dir):
+    if not input_dir.is_dir():
+        return []
+    return [
+        {"filename": path.relative_to(input_dir).as_posix(), "path": str(path)}
+        for path in sorted(input_dir.rglob("*"))
+        if path.is_file() and path.name not in {"input_manifest.json", "output_manifest.json", ".gitkeep"}
+    ]
+
+
+def _port_directory(output_dir, direction="outputs"):
+    ports = (ADAPTER_SPEC.get("ports") or {}).get(direction) or []
+    port = ports[0] if isinstance(ports[0], dict) else {}
+    port_id = str(port.get("id") or port.get("name") or "data")
+    port_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", port_id).strip("-") or "data"
+    return output_dir / port_id
+
+
+def _copy_source_files(entries, output_dir):
+    port_dir = _port_directory(output_dir)
+    for entry in entries:
+        filename = str(entry["filename"]).replace("\\\\", "/").lstrip("/")
+        if not filename or ".." in Path(filename).parts:
+            raise ValueError(f"Source adapter received unsafe filename: {filename!r}")
+        destination = port_dir / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(entry["path"], destination)
+
+
+def _database_source(output_dir):
+    connection_url = _parameter("connection_url") or os.getenv("DATABASE_URL", "")
+    query = _parameter("query")
+    if not connection_url:
+        raise RuntimeError("Database Source requires the connection_url parameter.")
+    if not query:
+        raise RuntimeError("Database Source requires the query parameter.")
+
+    import psycopg
+
+    output_format = str(_parameter("output_format", "csv")).strip().lower()
+    if output_format not in {"csv", "parquet"}:
+        raise RuntimeError("Database Source output_format must be csv or parquet.")
+    default_filename = f"database_rows.{output_format}"
+    filename = Path(str(_parameter("output_filename", default_filename))).name
+    port_dir = _port_directory(output_dir)
+    port_dir.mkdir(parents=True, exist_ok=True)
+    output_path = port_dir / filename
+    with psycopg.connect(connection_url, connect_timeout=int(_parameter("connect_timeout", "10"))) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(query)
+            if cursor.description is None:
+                raise RuntimeError("Database query did not return rows.")
+            columns = [getattr(column, "name", column[0]) for column in cursor.description]
+            if output_format == "parquet":
+                import pyarrow as pa
+                import pyarrow.parquet as parquet
+                rows = cursor.fetchall()
+                table = pa.Table.from_pylist([
+                    dict(zip(columns, row)) for row in rows
+                ])
+                parquet.write_table(table, output_path)
+                row_count = len(rows)
+            else:
+                row_count = 0
+                with output_path.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.writer(handle)
+                    writer.writerow(columns)
+                    while True:
+                        rows = cursor.fetchmany(1000)
+                        if not rows:
+                            break
+                        writer.writerows(rows)
+                        row_count += len(rows)
+
+    manifest_path = output_dir / "output_manifest.json"
+    manifest = {
+        "schema_version": "inlumen.data-artifact@1",
+        "name": output_path.stem,
+        "kind": "table",
+        "format": output_format,
+        "filename": str(output_path.relative_to(output_dir)),
+        "columns": columns,
+        "row_count": row_count,
+        "query_sha256": hashlib.sha256(query.encode("utf-8")).hexdigest(),
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\\n", encoding="utf-8")
+
+
+def _object_storage_source(output_dir):
+    bucket = str(_parameter("bucket"))
+    if not bucket:
+        raise RuntimeError("Object Storage Source requires the bucket parameter.")
+    prefix = str(_parameter("prefix", "")).strip("/")
+    object_name = str(_parameter("object_name", "")).strip("/")
+    client = _storage_client()
+    if object_name:
+        object_names = [object_name]
+    else:
+        object_names = [
+            item.object_name
+            for item in client.list_objects(bucket, prefix=prefix, recursive=True)
+            if not item.is_dir
+        ]
+    if not object_names:
+        raise RuntimeError(f"No objects found in bucket {bucket!r} for prefix {prefix!r}.")
+
+    port_dir = _port_directory(output_dir)
+    downloaded = []
+    for object_key in object_names:
+        relative = object_key
+        if prefix and relative.startswith(prefix + "/"):
+            relative = relative[len(prefix) + 1:]
+        relative_path = Path(relative)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise ValueError(f"Object Storage Source received unsafe object key: {object_key!r}")
+        destination = port_dir / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        client.fget_object(bucket, object_key, str(destination))
+        downloaded.append({
+            "filename": str(destination.relative_to(output_dir)),
+            "bucket": bucket,
+            "object": object_key,
+        })
+
+    (output_dir / "output_manifest.json").write_text(
+        json.dumps({
+            "schema_version": "inlumen.data-artifact@1",
+            "kind": "object-set",
+            "bucket": bucket,
+            "prefix": prefix,
+            "objects": downloaded,
+        }, indent=2) + "\\n",
+        encoding="utf-8",
+    )
+
+
+def _storage_client():
+    endpoint = str(_parameter("endpoint", "minio:9000"))
+    parsed = urlparse(endpoint if "://" in endpoint else f"http://{endpoint}")
+    host = parsed.netloc or parsed.path
+    secure = str(_parameter("secure", "true" if parsed.scheme == "https" else "false")).lower() in {"1", "true", "yes"}
+    from minio import Minio
+    return Minio(host, access_key=str(_parameter("access_key", "minio-datapact")), secret_key=str(_parameter("secret_key", "minio-datapact")), secure=secure)
+
+
+def _destination_outputs(entries, output_dir):
+    bucket = str(_parameter("bucket"))
+    if not bucket:
+        raise RuntimeError("Object Storage Destination requires the bucket parameter.")
+    prefix = str(_parameter("prefix", "")).strip("/")
+    object_name = str(_parameter("object_name", ""))
+    client = _storage_client()
+    if not client.bucket_exists(bucket):
+        client.make_bucket(bucket)
+    uploaded = []
+    for entry in entries:
+        filename = str(entry["filename"]).replace("\\\\", "/").lstrip("/")
+        target = object_name if object_name and len(entries) == 1 else filename
+        key = "/".join(part for part in (prefix, target) if part)
+        client.fput_object(bucket, key, entry["path"], content_type=mimetypes.guess_type(filename)[0] or "application/octet-stream")
+        uploaded.append({"filename": filename, "bucket": bucket, "object": key})
+
+    receipt_path = output_dir / "delivery-receipt.json"
+    receipt_path.write_text(json.dumps({"bucket": bucket, "uploaded": uploaded}, indent=2) + "\\n", encoding="utf-8")
+
+
+def _generic_destination_outputs(entries, output_dir):
+    """Keep a connector-neutral copy for Custom/File/Folder destinations."""
+    copied = []
+    requested_filename = str(_parameter("filename", "")).strip()
+    for index, entry in enumerate(entries):
+        filename = str(entry.get("filename") or "").replace("\\\\", "/").lstrip("/")
+        if not filename or Path(filename).is_absolute() or ".." in Path(filename).parts:
+            raise ValueError(f"Destination received unsafe filename: {filename!r}")
+        target = requested_filename if requested_filename and len(entries) == 1 else filename
+        target_path = output_dir / target
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(entry["path"], target_path)
+        copied.append({
+            "filename": str(target_path.relative_to(output_dir)),
+            "source": filename,
+        })
+    (output_dir / "delivery-receipt.json").write_text(
+        json.dumps({"mode": "filesystem", "copied": copied}, indent=2) + "\\n",
+        encoding="utf-8",
+    )
+
+
+def main():
+    input_dir = Path(os.environ.get("PIPELINE_INPUT_DIR", "."))
+    output_dir = Path(os.environ["PIPELINE_OUTPUT_DIR"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    kind = str(ADAPTER_SPEC.get("kind") or "")
+    template = str(ADAPTER_SPEC.get("template") or "").strip().lower()
+    if kind == "source" and template == "database":
+        _database_source(output_dir)
+    elif kind == "source" and template == "object storage":
+        _object_storage_source(output_dir)
+    elif kind == "source":
+        _copy_source_files(_entries(input_dir), output_dir)
+    elif kind == "destination" and template == "object storage":
+        _destination_outputs(_entries(input_dir), output_dir)
+    elif kind == "destination" and template in {
+        "custom",
+        "file",
+        "folder",
+        "json",
+        "json output",
+        "structured json",
+        "structured object",
+        "report",
+    }:
+        _generic_destination_outputs(_entries(input_dir), output_dir)
+    else:
+        raise RuntimeError(
+            f"No managed boundary adapter is registered for {kind}/{template}."
+        )
+
+
+if __name__ == "__main__":
+    main()
+'''.replace("__SPEC__", embedded_spec)
+    return source
+
+
 def _managed_adapter_runtime(
     step: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build the deterministic runtime owned by inLumen for graph boundaries."""
     flow_id = str(step.get("flow_id") or "").strip()
-    adapter_parameters = (
+    raw_parameters = (
         dict(step.get("param"))
         if isinstance(step.get("param"), dict)
         else {}
     )
+    secret_parameters = set(
+        normalize_secret_param_keys(step.get("secret_params"), raw_parameters)
+    )
+    adapter_parameters = {
+        key: value for key, value in raw_parameters.items() if key not in secret_parameters
+    }
     adapter_parameters.pop("model_plan", None)
     adapter_settings = {
         key: value
@@ -695,15 +977,63 @@ def _managed_adapter_runtime(
         "kind": str(step.get("type") or "").strip().lower(),
         "template": str(step.get("template") or "").strip(),
         "label": str(step.get("label") or "").strip(),
+        "ports": step.get("ports") if isinstance(step.get("ports"), dict) else {},
         "parameters": adapter_parameters,
         "settings": adapter_settings,
     }
-    main_content = _managed_adapter_main_source(adapter_spec)
+    main_content = _managed_adapter_main_source_v2(adapter_spec)
+    adapter_kind = adapter_spec["kind"]
+    adapter_template = adapter_spec["template"].strip().lower()
+    runtime_requirements = []
+    if (
+        adapter_kind == "source"
+        and adapter_template == "object storage"
+    ) or (
+        adapter_kind == "destination"
+        and adapter_template == "object storage"
+    ):
+        runtime_requirements.append("minio>=7.2,<8")
+    if adapter_kind == "source" and adapter_template == "database":
+        runtime_requirements.append("psycopg[binary]>=3.2,<4")
+        if str(adapter_parameters.get("output_format") or "csv").strip().lower() == "parquet":
+            runtime_requirements.append("pyarrow>=18,<23")
+    data_outputs = []
+    if adapter_kind == "source" and adapter_template == "database":
+        output_ports = adapter_spec.get("ports", {}).get("outputs") or []
+        output_port = output_ports[0] if output_ports and isinstance(output_ports[0], dict) else {}
+        output_port_id = str(output_port.get("id") or output_port.get("name") or "data")
+        output_format = str(adapter_parameters.get("output_format") or "csv").strip().lower()
+        output_filename = str(
+            adapter_parameters.get("output_filename")
+            or f"database_rows.{output_format}"
+        )
+        data_outputs.append({
+            "name": "database_rows",
+            "port": output_port_id,
+            "filename": f"{output_port_id}/{output_filename}",
+            "kind": "table",
+            "format": output_format,
+            "description": "Rows materialized by the configured read-only database query.",
+        })
+    elif adapter_kind == "source" and adapter_template == "object storage":
+        output_ports = adapter_spec.get("ports", {}).get("outputs") or []
+        output_port = output_ports[0] if output_ports and isinstance(output_ports[0], dict) else {}
+        output_port_id = str(output_port.get("id") or output_port.get("name") or "data")
+        data_outputs.append({
+            "name": "objects",
+            "port": output_port_id,
+            "kind": "object-set",
+            "format": "original",
+            "description": "Objects downloaded from the configured S3-compatible location.",
+        })
     node_manifest = {
         "schema_version": "inlumen.node-manifest@1",
         "flow_id": flow_id,
         "entrypoint": ["python", "/app/main.py"],
-        "data_contract": {"inputs": [], "outputs": []},
+        "data_contract": {
+            "inputs": [] if adapter_kind == "source" else [{"name": "input_artifacts", "kind": "artifact"}],
+            "outputs": data_outputs,
+        },
         "adapter": adapter_spec,
         "source": "inLumen managed boundary adapter",
     }
@@ -715,7 +1045,7 @@ def _managed_adapter_runtime(
         },
         {
             "filename": "requirements.txt",
-            "content": "",
+            "content": "\n".join(runtime_requirements) + ("\n" if runtime_requirements else ""),
             "content_type": "text/plain;charset=utf-8",
         },
         {
@@ -727,6 +1057,7 @@ def _managed_adapter_runtime(
     dockerfile_filename, dockerfile_content = _deterministic_python_dockerfile(
         flow_id,
         [item["filename"] for item in runtime_files],
+        entrypoint=["python", "/app/main.py"],
     )
     configuration_hash = hashlib.sha256(
         json.dumps(
@@ -772,6 +1103,155 @@ def _managed_adapter_runtime(
     }
 
 
+def _control_flow_main_source(flow_spec: dict[str, Any]) -> str:
+    """Return the self-contained runtime for an engine-neutral Flow node."""
+    embedded_spec = json.dumps(flow_spec, sort_keys=True)
+    return f'''import json
+import os
+import shutil
+from pathlib import Path
+
+
+FLOW_SPEC = json.loads({embedded_spec!r})
+
+
+def _runtime_directories():
+    input_dir = os.getenv("PIPELINE_INPUT_DIR")
+    output_dir = os.getenv("PIPELINE_OUTPUT_DIR")
+    if input_dir and output_dir:
+        return Path(input_dir), Path(output_dir)
+
+    # Compatibility with the legacy Dagster launcher.
+    input_manifest = os.getenv("INLUMEN_INPUT_MANIFEST")
+    return (
+        Path(input_manifest).parent if input_manifest else Path.cwd(),
+        Path(os.environ["INLUMEN_OUTPUT_DIR"]),
+    )
+
+
+def _copy_inputs(input_dir: Path, output_dir: Path):
+    outputs = []
+    if not input_dir.is_dir():
+        return outputs
+    for source in sorted(input_dir.rglob("*")):
+        if not source.is_file():
+            continue
+        relative = source.relative_to(input_dir)
+        if relative.as_posix() in {{"input_manifest.json", "output_manifest.json"}}:
+            continue
+        target = output_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        outputs.append({{
+            "name": relative.as_posix(),
+            "filename": relative.as_posix(),
+            "path": str(target.resolve()),
+        }})
+    return outputs
+
+
+def main():
+    input_dir, output_dir = _runtime_directories()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    outputs = _copy_inputs(input_dir, output_dir)
+
+    output_manifest = os.getenv("INLUMEN_OUTPUT_MANIFEST")
+    if output_manifest:
+        manifest_path = Path(output_manifest)
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(
+            json.dumps({{"schema_version": "inlumen.output-manifest@1", "outputs": outputs}}, indent=2),
+            encoding="utf-8",
+        )
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def _control_flow_runtime(
+    step: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build the deterministic runtime owned by inLUMEN for Flow nodes."""
+    flow_id = str(step.get("flow_id") or "").strip()
+    flow_spec = {
+        "kind": "flow",
+        "template": str(step.get("template") or "").strip(),
+        "label": str(step.get("label") or "").strip(),
+        "parameters": dict(step.get("param"))
+        if isinstance(step.get("param"), dict)
+        else {},
+    }
+    main_content = _control_flow_main_source(flow_spec)
+    ports = step.get("ports") if isinstance(step.get("ports"), dict) else {}
+    node_manifest = {
+        "schema_version": "inlumen.node-manifest@1",
+        "flow_id": flow_id,
+        "entrypoint": ["python", "/app/main.py"],
+        "data_contract": {
+            "inputs": ports.get("inputs") or [],
+            "outputs": ports.get("outputs") or [],
+        },
+        "adapter": flow_spec,
+        "source": "inLUMEN deterministic control-flow adapter",
+    }
+    runtime_files = [
+        {
+            "filename": "main.py",
+            "content": main_content,
+            "content_type": "text/x-python;charset=utf-8",
+        },
+        {
+            "filename": "requirements.txt",
+            "content": "",
+            "content_type": "text/plain;charset=utf-8",
+        },
+        {
+            "filename": "node-manifest.json",
+            "content": json.dumps(node_manifest, indent=2) + "\n",
+            "content_type": "application/json",
+        },
+    ]
+    dockerfile_filename, dockerfile_content = _deterministic_python_dockerfile(
+        flow_id,
+        [item["filename"] for item in runtime_files],
+        entrypoint=["python", "/app/main.py"],
+    )
+    configuration_hash = hashlib.sha256(
+        json.dumps(
+            {"flow_id": flow_id, "flow": flow_spec, "runtime": main_content},
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    image = f"inlumen/control-flow-{_sanitize_fragment(flow_id, 'flow')}:{configuration_hash[:12]}"
+    runtime_artifact = {
+        "flow_id": flow_id,
+        "definition_id": str(step.get("definition_id") or ""),
+        "definition_version": step.get("definition_version") or 1,
+        "generator": CONTROL_FLOW_GENERATOR,
+        "generator_version": "1",
+        "configuration_hash": configuration_hash,
+        "entrypoint": ["python", "/app/main.py"],
+        "data_contract": node_manifest["data_contract"],
+        "files": runtime_files,
+        "manifest": node_manifest,
+        "validation_report": {"status": "valid", "errors": [], "warnings": []},
+    }
+    return runtime_artifact, {
+        "dockerfile_filename": dockerfile_filename,
+        "content": dockerfile_content,
+        "flow_id": flow_id,
+        "image": image,
+        "command": ["python", "/app/main.py"],
+        "files": [item["filename"] for item in runtime_files],
+        "generator": CONTROL_FLOW_GENERATOR,
+        "configuration_hash": configuration_hash,
+        "build_manifest": "node-manifest.json",
+        "data_contract": node_manifest["data_contract"],
+    }
+
+
 def _is_attached_runtime_file(file_ref: dict[str, Any]) -> bool:
     filename = str(file_ref.get("filename") or "").strip().lower()
     role = str(file_ref.get("role") or "").strip().lower()
@@ -780,6 +1260,656 @@ def _is_attached_runtime_file(file_ref: dict[str, Any]) -> bool:
     return role == "code" or filename in {"main.py", "requirements.txt"} or filename.endswith(
         (".py", ".pyi", ".json", ".toml", ".yaml", ".yml", ".sql", ".sh")
     )
+
+
+def _is_function_style_task(source: object) -> bool:
+    """Recognize the small, portable ``run(input, params)`` upload contract."""
+    if not isinstance(source, str):
+        return False
+    try:
+        tree = ast.parse(source, filename="main.py")
+    except SyntaxError:
+        return False
+    return any(
+        isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and statement.name == "run"
+        for statement in tree.body
+    )
+
+
+def _cli_task_contract(source: object) -> dict[str, Any]:
+    """Recognize a conventional CLI task and its portable I/O options."""
+    if not isinstance(source, str):
+        return {}
+    try:
+        tree = ast.parse(source, filename="main.py")
+    except SyntaxError:
+        return {}
+
+    options: set[str] = set()
+    path_variables: set[str] = set()
+    output_is_directory = False
+    output_is_file = False
+
+    def is_args_option(value: ast.AST, option: str) -> bool:
+        return (
+            isinstance(value, ast.Attribute)
+            and value.attr == option
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "args"
+        )
+
+    def is_path_of_output(value: ast.AST) -> bool:
+        return (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "Path"
+            and bool(value.args)
+            and is_args_option(value.args[0], "output")
+        )
+
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_argument"
+        ):
+            for argument in node.args:
+                if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+                    if argument.value.startswith("--"):
+                        options.add(argument.value)
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            value = node.value
+            if value is not None and is_path_of_output(value):
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        path_variables.add(target.id)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            target = node.func.value
+            is_output_path = is_path_of_output(target) or (
+                isinstance(target, ast.Name) and target.id in path_variables
+            )
+            if is_output_path and node.func.attr == "mkdir":
+                output_is_directory = True
+            if is_output_path and node.func.attr in {"write_text", "write_bytes", "open"}:
+                output_is_file = True
+
+    if not {"--input", "--output"}.issubset(options):
+        return {}
+    return {
+        "input_option": "--input",
+        "output_option": "--output",
+        "options": sorted(options),
+        "output_kind": "directory" if output_is_directory or not output_is_file else "file",
+    }
+
+
+def _declared_task_io_contract(runtime_files: list[dict[str, Any]]) -> dict[str, Any]:
+    """Read an optional portable I/O override shipped with an uploaded task."""
+    for filename in ("inlumen.task.json", "task-io.json"):
+        candidate = next(
+            (item for item in runtime_files if item.get("filename") == filename),
+            None,
+        )
+        if candidate is None:
+            continue
+        try:
+            value = json.loads(str(candidate.get("content") or ""))
+        except json.JSONDecodeError as exc:
+            raise DeploymentArtifactValidationError(
+                "Attached Python runtime validation failed",
+                [f"{filename} is not valid JSON: {exc}"],
+            ) from exc
+        if not isinstance(value, dict):
+            raise DeploymentArtifactValidationError(
+                "Attached Python runtime validation failed",
+                [f"{filename} must contain an object."],
+            )
+        return value
+    return {}
+
+
+def _task_io_contract(
+    source: object,
+    runtime_files: list[dict[str, Any]],
+    *,
+    declared: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Resolve the one portable I/O contract for an uploaded task package."""
+    declared = declared if isinstance(declared, dict) else _declared_task_io_contract(runtime_files)
+    adapter = str(
+        ((declared.get("execution") or {}).get("adapter"))
+        if isinstance(declared.get("execution"), dict)
+        else ""
+    ).strip().lower()
+    cli = _cli_task_contract(source)
+
+    if not adapter and _is_function_style_task(source):
+        adapter = "function"
+    if not adapter and cli:
+        adapter = "cli"
+    if not adapter and isinstance(source, str) and all(
+        name in source
+        for name in ("INLUMEN_INPUT_MANIFEST", "INLUMEN_OUTPUT_MANIFEST")
+    ):
+        adapter = "manifest"
+    # A regular main.py is the canonical Task package. It does not need a
+    # marker file or an inferred function/CLI shape: the workspace directories
+    # are the complete public contract.
+    if not adapter:
+        adapter = "filesystem"
+    if adapter not in {"filesystem", "function", "cli", "manifest"}:
+        raise DeploymentArtifactValidationError(
+            "Attached Python runtime validation failed",
+            [
+                "Unsupported task execution adapter. Use a regular main.py "
+                "that reads PIPELINE_INPUT_DIR and writes PIPELINE_OUTPUT_DIR, "
+                "or one of the legacy function, CLI, or manifest adapters."
+            ],
+        )
+
+    execution = {
+        "adapter": adapter,
+        **(
+            {
+                "input_option": cli["input_option"],
+                "output_option": cli["output_option"],
+                "options": cli["options"],
+            }
+            if adapter == "cli" and cli
+            else {}
+        ),
+    }
+    if adapter == "cli" and not cli:
+        supplied = declared.get("execution") if isinstance(declared.get("execution"), dict) else {}
+        if not all(isinstance(supplied.get(key), str) for key in ("input_option", "output_option")):
+            raise DeploymentArtifactValidationError(
+                "Attached Python runtime validation failed",
+                ["CLI task contract requires execution.input_option and execution.output_option."],
+            )
+        execution.update({
+            "input_option": supplied["input_option"],
+            "output_option": supplied["output_option"],
+            "options": list(supplied.get("options") or []),
+        })
+
+    declared_input = declared.get("input") if isinstance(declared.get("input"), dict) else {}
+    declared_output = declared.get("output") if isinstance(declared.get("output"), dict) else {}
+    input_delivery = str(declared_input.get("delivery") or (
+        "object" if adapter == "function" else "manifest" if adapter == "manifest" else "directory" if adapter == "filesystem" else "auto"
+    )).lower()
+    output_discovery = str(declared_output.get("discovery") or (
+        "return-value" if adapter == "function" else "manifest" if adapter == "manifest" else "scan"
+    )).lower()
+    output_target = str(declared_output.get("target") or (
+        "directory" if not cli else cli["output_kind"]
+    )).lower()
+    if input_delivery not in {"object", "auto", "file", "directory", "manifest"}:
+        raise DeploymentArtifactValidationError(
+            "Attached Python runtime validation failed",
+            [f"Unsupported task input delivery: {input_delivery}."],
+        )
+    if output_discovery not in {"return-value", "scan", "manifest"} or output_target not in {"file", "directory"}:
+        raise DeploymentArtifactValidationError(
+            "Attached Python runtime validation failed",
+            ["Task output contract must use discovery return-value, scan, or manifest and target file or directory."],
+        )
+    required_semantics = {
+        "filesystem": ("directory", "scan"),
+        "function": ("object", "return-value"),
+        "cli": (None, "scan"),
+        "manifest": ("manifest", "manifest"),
+    }
+    required_input, required_output = required_semantics[adapter]
+    if required_input is not None and input_delivery != required_input:
+        raise DeploymentArtifactValidationError(
+            "Attached Python runtime validation failed",
+            [
+                f"The {adapter} adapter requires input.delivery={required_input}; "
+                f"received {input_delivery}."
+            ],
+        )
+    if output_discovery != required_output:
+        raise DeploymentArtifactValidationError(
+            "Attached Python runtime validation failed",
+            [
+                f"The {adapter} adapter requires output.discovery={required_output}; "
+                f"received {output_discovery}."
+            ],
+        )
+    return {
+        "schema_version": "inlumen.task-io@1",
+        "execution": execution,
+        "input": {"delivery": input_delivery},
+        "output": {"discovery": output_discovery, "target": output_target},
+    }, "declared" if declared else "inferred"
+
+
+def _task_capability_contract(
+    declared: dict[str, Any],
+    io_contract: dict[str, Any],
+    inferred_model_plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Create the authoritative build-time contract for an uploaded Task.
+
+    Code inspection is used only to fill in missing defaults.  Once persisted,
+    this contract is what deployment generation validates and consumes.
+    """
+    dependencies = declared.get("dependencies") if isinstance(declared.get("dependencies"), dict) else {}
+    python_dependencies = dependencies.get("python") or []
+    system_dependencies = dependencies.get("system") or []
+    if not all(isinstance(item, str) and item.strip() for item in python_dependencies):
+        raise DeploymentArtifactValidationError(
+            "Attached Python runtime validation failed",
+            ["capabilities.dependencies.python must be a list of non-empty requirement strings."],
+        )
+    if system_dependencies:
+        raise DeploymentArtifactValidationError(
+            "Attached Python runtime validation failed",
+            [
+                "System dependencies are declared but are not supported by the portable "
+                "Python runtime yet. Package them in a custom container task."
+            ],
+        )
+
+    raw_models = declared.get("models") or []
+    if raw_models and not isinstance(raw_models, list):
+        raise DeploymentArtifactValidationError(
+            "Attached Python runtime validation failed",
+            ["capabilities.models must be a list."],
+        )
+    models: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_models):
+        if not isinstance(item, dict):
+            raise DeploymentArtifactValidationError(
+                "Attached Python runtime validation failed",
+                [f"capabilities.models[{index}] must be an object."],
+            )
+        model_id = str(item.get("model_id") or item.get("id") or "").strip()
+        model_revision = str(item.get("model_revision") or item.get("revision") or "").strip()
+        runtime = str(item.get("runtime") or "local").strip().lower()
+        if runtime not in {"local", "remote"} or not model_id:
+            raise DeploymentArtifactValidationError(
+                "Attached Python runtime validation failed",
+                [f"capabilities.models[{index}] requires model_id and runtime local or remote."],
+            )
+        if runtime == "local" and not re.fullmatch(r"[0-9a-fA-F]{7,64}", model_revision):
+            raise DeploymentArtifactValidationError(
+                "Attached Python runtime validation failed",
+                [f"Local model {model_id!r} requires a pinned commit revision."],
+            )
+        credential = str(item.get("credential") or item.get("secret") or "").strip()
+        if runtime == "remote" and not credential:
+            raise DeploymentArtifactValidationError(
+                "Attached Python runtime validation failed",
+                [f"Remote model {model_id!r} requires a named credential reference."],
+            )
+        models.append({
+            "model_id": model_id,
+            "model_revision": model_revision,
+            "runtime": runtime,
+            "adapter_id": str(item.get("adapter_id") or "user-declared-model").strip(),
+            **({"credential": credential} if credential else {}),
+        })
+    if not models and inferred_model_plan.get("model_id") and inferred_model_plan.get("model_revision"):
+        models.append({
+            "model_id": str(inferred_model_plan["model_id"]),
+            "model_revision": str(inferred_model_plan["model_revision"]),
+            "runtime": "local",
+            "adapter_id": str(inferred_model_plan.get("adapter_id") or "inferred-model"),
+        })
+
+    resources = declared.get("resources") if isinstance(declared.get("resources"), dict) else {}
+    for field in ("cpu", "memory", "gpu", "timeout_seconds"):
+        if field in resources and not isinstance(resources[field], (str, int, float)):
+            raise DeploymentArtifactValidationError(
+                "Attached Python runtime validation failed",
+                [f"capabilities.resources.{field} must be a string or number."],
+            )
+    secrets = declared.get("secrets") or []
+    if not isinstance(secrets, list) or not all(isinstance(item, str) and item.strip() for item in secrets):
+        raise DeploymentArtifactValidationError(
+            "Attached Python runtime validation failed",
+            ["capabilities.secrets must be a list of named secret references."],
+        )
+    secrets = [
+        *secrets,
+        *(model["credential"] for model in models if model.get("credential")),
+    ]
+    side_effects = declared.get("side_effects") or []
+    if not isinstance(side_effects, list) or not all(isinstance(item, dict) for item in side_effects):
+        raise DeploymentArtifactValidationError(
+            "Attached Python runtime validation failed",
+            ["capabilities.side_effects must be a list of objects."],
+        )
+    if str(declared.get("mode") or "batch").strip().lower() != "batch":
+        raise DeploymentArtifactValidationError(
+            "Attached Python runtime validation failed",
+            ["Only batch Task execution is supported by the current bundle runtime."],
+        )
+    return {
+        "schema_version": "inlumen.task-capability@1",
+        "mode": "batch",
+        "execution": io_contract["execution"],
+        "input": io_contract["input"],
+        "output": io_contract["output"],
+        "dependencies": {
+            "python": list(dict.fromkeys(item.strip() for item in python_dependencies)),
+            "system": [],
+        },
+        "models": models,
+        "resources": resources,
+        "secrets": list(dict.fromkeys(item.strip() for item in secrets)),
+        "side_effects": side_effects,
+    }
+
+
+def _merge_python_requirements(content: object, declared: list[str]) -> str:
+    """Merge declared package requirements without losing user comments/order."""
+    existing = str(content or "")
+    lines = existing.splitlines()
+    seen = {line.strip().lower() for line in lines if line.strip() and not line.strip().startswith("#")}
+    for requirement in declared:
+        if requirement.lower() not in seen:
+            lines.append(requirement)
+            seen.add(requirement.lower())
+    return "\n".join(lines).rstrip() + ("\n" if lines else "")
+
+
+def _cli_task_launcher_source(flow_id: str, contract: dict[str, Any]) -> str:
+    """Adapt conventional ``--input``/``--output`` scripts to the file ABI."""
+    encoded_contract = json.dumps(contract, sort_keys=True)
+    return f'''"""Compatibility launcher generated by inLUMEN for CLI tasks."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+FLOW_ID = {flow_id!r}
+CONTRACT = {encoded_contract}
+JSON_EXTENSIONS = {{".json", ".jsonl", ".ndjson"}}
+TEXT_EXTENSIONS = {{".txt", ".md", ".csv", ".tsv", ".xml", ".yaml", ".yml"}}
+IMAGE_EXTENSIONS = {{".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}}
+TABLE_EXTENSIONS = {{".csv", ".tsv", ".parquet", ".xlsx", ".xls"}}
+
+
+def _load_manifest(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        value = json.load(handle)
+    return value if isinstance(value, dict) else {{}}
+
+
+def _entry_path(entry: dict, manifest_path: Path) -> Path:
+    value = Path(str(entry.get("path") or entry.get("filename") or ""))
+    return value if value.is_absolute() else manifest_path.parent / value
+
+
+def _input_path(manifest: dict, manifest_path: Path, output_dir: Path) -> Path:
+    entries = manifest.get("inputs") or manifest.get("files") or []
+    paths = [
+        _entry_path(entry, manifest_path)
+        for entry in entries
+        if isinstance(entry, dict) and _entry_path(entry, manifest_path).is_file()
+    ]
+    if not paths:
+        raise FileNotFoundError("The task received no readable input artifacts.")
+    delivery = CONTRACT.get("input_delivery", "auto")
+    if delivery == "manifest":
+        return manifest_path
+    if delivery == "file":
+        if len(paths) != 1:
+            raise RuntimeError("This task requires exactly one input file.")
+        return paths[0]
+    if delivery == "auto" and len(paths) == 1:
+        return paths[0]
+
+    staging = output_dir / "_inlumen_inputs"
+    staging.mkdir(parents=True, exist_ok=True)
+    for index, path in enumerate(paths, start=1):
+        destination = staging / path.name
+        if destination.exists():
+            destination = staging / f"{{index}}-{{path.name}}"
+        try:
+            destination.symlink_to(path)
+        except OSError:
+            shutil.copy2(path, destination)
+    (staging / "input_manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
+    return staging
+
+
+def _kind_and_format(path: Path) -> tuple[str, str]:
+    suffix = path.suffix.lower().lstrip(".") or "binary"
+    if path.suffix.lower() in JSON_EXTENSIONS:
+        return "json", suffix
+    if path.suffix.lower() in TABLE_EXTENSIONS:
+        return "table", suffix
+    if path.suffix.lower() in TEXT_EXTENSIONS:
+        return "text", suffix
+    if path.suffix.lower() in IMAGE_EXTENSIONS:
+        return "image", suffix
+    return "binary", suffix
+
+
+def _output_descriptors(output_dir: Path, manifest_path: Path) -> list[dict]:
+    descriptors = []
+    for path in sorted(output_dir.rglob("*")):
+        if (
+            not path.is_file()
+            or path == manifest_path
+            or path.name.startswith("_dagster_")
+            or any(part.startswith("_inlumen_") for part in path.relative_to(output_dir).parts)
+        ):
+            continue
+        kind, file_format = _kind_and_format(path)
+        relative = path.relative_to(output_dir).as_posix()
+        descriptors.append({{
+            "name": path.stem,
+            "filename": relative,
+            "path": str(path),
+            "kind": kind,
+            "format": file_format,
+        }})
+    if not descriptors:
+        raise RuntimeError("CLI task completed but did not produce any output files.")
+    return descriptors
+
+
+def _parameters() -> dict:
+    try:
+        value = json.loads(os.getenv("INLUMEN_PARAMS_JSON", "{{}}"))
+    except json.JSONDecodeError:
+        return {{}}
+    return value if isinstance(value, dict) else {{}}
+
+
+def main() -> None:
+    input_manifest_path = Path(os.environ["INLUMEN_INPUT_MANIFEST"])
+    output_dir = Path(os.environ["INLUMEN_OUTPUT_DIR"])
+    output_manifest_path = Path(os.environ["INLUMEN_OUTPUT_MANIFEST"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    selected_input = _input_path(_load_manifest(input_manifest_path), input_manifest_path, output_dir)
+    selected_output = output_dir if CONTRACT["output_kind"] == "directory" else output_dir / "result.json"
+    command = [
+        sys.executable,
+        str(Path(__file__).with_name("main.py")),
+        CONTRACT["input_option"],
+        str(selected_input),
+        CONTRACT["output_option"],
+        str(selected_output),
+    ]
+    for key, value in _parameters().items():
+        option = "--" + str(key).replace("_", "-")
+        if option not in CONTRACT["options"]:
+            continue
+        if isinstance(value, bool):
+            if value:
+                command.append(option)
+        elif value is not None:
+            command.extend([option, str(value)])
+    subprocess.run(command, check=True)
+    outputs = _output_descriptors(output_dir, output_manifest_path)
+    output_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    output_manifest_path.write_text(json.dumps({{
+        "schema_version": "inlumen.output-manifest@1",
+        "flow_id": os.getenv("INLUMEN_FLOW_ID", FLOW_ID),
+        "outputs": outputs,
+    }}, indent=2) + "\\n", encoding="utf-8")
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def _function_style_task_launcher_source(flow_id: str) -> str:
+    """Adapt ``run(input, params)`` uploads to the inLUMEN file-manifest ABI."""
+    return f'''"""Compatibility launcher generated by inLUMEN.
+
+It preserves the uploaded task module and adapts its ``run(input, params)``
+function to the portable runtime contract used by generated and uploaded tasks.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import inspect
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+
+FLOW_ID = {flow_id!r}
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {{}}
+    with path.open("r", encoding="utf-8") as handle:
+        value = json.load(handle)
+    return value if isinstance(value, dict) else {{}}
+
+
+def _entry_path(entry: dict[str, Any], manifest_path: Path) -> Path:
+    value = Path(str(entry.get("path") or entry.get("filename") or ""))
+    if value.is_absolute():
+        return value
+    return manifest_path.parent / value
+
+
+def _input_value(manifest: dict[str, Any], manifest_path: Path) -> Any:
+    entries = manifest.get("inputs") or manifest.get("files") or []
+    entries = [entry for entry in entries if isinstance(entry, dict)]
+    if not entries:
+        return {{}}
+
+    def value_for(entry: dict[str, Any]) -> dict[str, Any]:
+        path = _entry_path(entry, manifest_path)
+        value = {{
+            "path": str(path),
+            "file_path": str(path),
+            "filename": str(entry.get("filename") or path.name),
+        }}
+        if str(entry.get("format") or "").lower() == "json" and path.is_file():
+            try:
+                decoded = _load_json(path)
+                value["data"] = decoded
+                value.update(decoded)
+            except (OSError, json.JSONDecodeError):
+                pass
+        return value
+
+    values = [value_for(entry) for entry in entries]
+    if len(values) == 1:
+        return values[0]
+    return {{"files": values, "data": values}}
+
+
+def _load_task_module():
+    task_path = Path(__file__).with_name("main.py")
+    task_dir = str(task_path.parent)
+    if task_dir not in sys.path:
+        sys.path.insert(0, task_dir)
+    specification = importlib.util.spec_from_file_location(
+        "inlumen_uploaded_task", task_path
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError(f"Could not load uploaded main.py at {{task_path}}")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    function = getattr(module, "run", None)
+    if not callable(function):
+        raise RuntimeError("Uploaded main.py must define callable run(input, params)")
+    if inspect.iscoroutinefunction(function):
+        raise RuntimeError("Async run functions are not supported; upload a synchronous run(input, params) function")
+    return function
+
+
+def _invoke(function, value: Any, parameters: dict[str, Any]) -> Any:
+    signature = inspect.signature(function)
+    positional = [
+        parameter for parameter in signature.parameters.values()
+        if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    if not positional:
+        return function()
+    if len(positional) == 1 and not any(
+        parameter.kind == parameter.VAR_POSITIONAL
+        for parameter in signature.parameters.values()
+    ):
+        return function(value)
+    return function(value, parameters)
+
+
+def main() -> None:
+    input_manifest_path = Path(os.environ["INLUMEN_INPUT_MANIFEST"])
+    output_dir = Path(os.environ["INLUMEN_OUTPUT_DIR"])
+    output_manifest_path = Path(os.environ["INLUMEN_OUTPUT_MANIFEST"])
+    parameters = json.loads(os.getenv("INLUMEN_PARAMS_JSON", "{{}}") or "{{}}")
+    if not isinstance(parameters, dict):
+        parameters = {{}}
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    result = _invoke(
+        _load_task_module(),
+        _input_value(_load_json(input_manifest_path), input_manifest_path),
+        parameters,
+    )
+    result_path = output_dir / "result.json"
+    with result_path.open("w", encoding="utf-8") as handle:
+        json.dump(result, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\\n")
+
+    manifest = {{
+        "schema_version": "inlumen.output-manifest@1",
+        "flow_id": os.getenv("INLUMEN_FLOW_ID", FLOW_ID),
+        "outputs": [{{
+            "name": "result",
+            "kind": "json",
+            "format": "json",
+            "filename": result_path.name,
+            "path": str(result_path),
+        }}],
+    }}
+    output_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_manifest_path.open("w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\\n")
+
+
+if __name__ == "__main__":
+    main()
+'''
 
 
 async def _read_attached_python_runtime(
@@ -850,15 +1980,98 @@ async def _read_attached_python_runtime(
             }
         )
 
+    main_file = next(
+        (item for item in runtime_files if item["filename"] == "main.py"),
+        {},
+    )
+    declared_task_contract = _declared_task_io_contract(runtime_files)
+    task_io_contract, task_io_origin = _task_io_contract(
+        main_file.get("content"),
+        runtime_files,
+        declared=declared_task_contract,
+    )
+    task_adapter = task_io_contract["execution"]["adapter"]
+    function_style = task_adapter == "function"
+    cli_contract = (
+        {
+            "input_option": task_io_contract["execution"]["input_option"],
+            "output_option": task_io_contract["execution"]["output_option"],
+            "options": task_io_contract["execution"].get("options") or [],
+            "output_kind": task_io_contract["output"]["target"],
+            "input_delivery": task_io_contract["input"]["delivery"],
+        }
+        if task_adapter == "cli"
+        else None
+    )
+    inferred_model_plan = infer_implementation_plan_from_python_source(
+        main_file.get("content"),
+        parameters=step.get("param"),
+    )
+    task_capabilities = _task_capability_contract(
+        declared_task_contract,
+        task_io_contract,
+        inferred_model_plan,
+    )
+    unresolved_model_warnings = unresolved_model_plan_errors_from_python_source(
+        main_file.get("content"),
+        parameters=step.get("param"),
+    )
+    requirements_file = next(
+        (item for item in runtime_files if item["filename"] == "requirements.txt"),
+        None,
+    )
+    if requirements_file is not None:
+        requirements_file["content"] = _merge_python_requirements(
+            requirements_file.get("content"),
+            task_capabilities["dependencies"]["python"],
+        )
+    entrypoint = (
+        ["python", "/app/launcher.py"]
+        if function_style
+        else ["python", "/app/cli_launcher.py"]
+        if cli_contract
+        else ["python", "/app/main.py"]
+    )
+    if function_style:
+        runtime_files.append(
+            {
+                "filename": "launcher.py",
+                "content": _function_style_task_launcher_source(flow_id),
+                "content_type": "text/x-python;charset=utf-8",
+            }
+        )
+    elif cli_contract:
+        runtime_files.append(
+            {
+                "filename": "cli_launcher.py",
+                "content": _cli_task_launcher_source(flow_id, cli_contract),
+                "content_type": "text/x-python;charset=utf-8",
+            }
+        )
+
     node_manifest = {
         "schema_version": "inlumen.node-manifest@1",
         "flow_id": flow_id,
-        "entrypoint": ["python", "/app/main.py"],
+        "entrypoint": entrypoint,
         "data_contract": {
             "inputs": fixture_descriptors,
             "outputs": [],
         },
-        "source": "user-attached runtime package",
+        "capabilities": task_capabilities,
+        "model_requirements": task_capabilities["models"],
+        **(
+            {"implementation_plan": inferred_model_plan}
+            if inferred_model_plan
+            else {}
+        ),
+        "source": (
+            "user-attached function-style task adapter"
+            if function_style
+            else "user-attached CLI task adapter"
+            if cli_contract
+            else "user-attached filesystem-native task"
+        ),
+        "io_contract": task_io_contract,
     }
     runtime_files.append(
         {
@@ -870,21 +2083,43 @@ async def _read_attached_python_runtime(
     dockerfile_filename, dockerfile_content = _deterministic_python_dockerfile(
         flow_id,
         [item["filename"] for item in runtime_files],
+        entrypoint=entrypoint,
     )
     runtime_artifact = {
         "flow_id": flow_id,
         "definition_id": str(step.get("definition_id") or ""),
         "definition_version": step.get("definition_version") or 1,
         "generator": ATTACHED_RUNTIME_GENERATOR,
-        "entrypoint": ["python", "/app/main.py"],
+        "entrypoint": entrypoint,
         "data_contract": node_manifest["data_contract"],
+        "io_contract": task_io_contract,
+        "capabilities": task_capabilities,
         "files": runtime_files,
         "manifest": node_manifest,
         "validation_report": {
             "status": "valid",
             "errors": [],
             "warnings": [
-                "Output filenames are discovered after execution because this attached package did not declare them."
+                (
+                    f"inLUMEN {task_io_origin} task I/O contract: "
+                    f"adapter={task_adapter}, input={task_io_contract['input']['delivery']}, "
+                    f"output={task_io_contract['output']['discovery']}."
+                ),
+                *(
+                    [
+                        "inLUMEN inferred and pinned a local model requirement "
+                        "from the uploaded Python source."
+                    ]
+                    if inferred_model_plan
+                    else []
+                ),
+                *[
+                    f"Node {flow_id}: user-managed model detected. "
+                    "It will not be prefetched or pinned by inLUMEN; "
+                    "ensure the Task can obtain it at runtime."
+                    for _warning in unresolved_model_warnings
+                    if not task_capabilities["models"]
+                ],
             ],
         },
     }
@@ -909,12 +2144,14 @@ async def _read_attached_python_runtime(
         "content": dockerfile_content,
         "flow_id": flow_id,
         "image": image,
-        "command": ["python", "/app/main.py"],
+        "command": entrypoint,
         "files": [item["filename"] for item in runtime_files],
         "generator": ATTACHED_RUNTIME_GENERATOR,
         "configuration_hash": configuration_hash,
         "build_manifest": "node-manifest.json",
         "data_contract": node_manifest["data_contract"],
+        "io_contract": task_io_contract,
+        "capabilities": task_capabilities,
     }
 
 
@@ -1081,6 +2318,7 @@ async def _read_persisted_codegen_artifact(
         flow_id,
         context_files,
         base_image=base_image,
+        entrypoint=entrypoint,
     )
     image_reference = _codegen_image_reference(flow_id, artifact)
     configuration_hash = str(artifact.get("configuration_hash") or "").strip()

@@ -365,7 +365,7 @@ export const normalizeConfigurationStatus = (
 
 // Every graph component may carry artifacts; implementation type is expressed
 // in implementation metadata rather than by inventing another graph kind.
-export const typeHasFiles = (_type: StepType) => true;
+export const typeHasFiles = (type: StepType) => type === "source" || type === "task";
 
 export const typeSupportsInputFiles = (type: StepType) =>
   type === "source";

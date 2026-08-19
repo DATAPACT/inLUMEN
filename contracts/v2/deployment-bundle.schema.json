@@ -3,9 +3,23 @@
   "$id": "urn:inlumen:schema:deployment-bundle:1",
   "title": "inLUMEN Deployment Bundle Manifest",
   "type": "object",
-  "required": ["schema_version", "run_spec", "targets", "readme", "node_order", "nodes", "connections", "inputs", "outputs"],
+  "required": ["schema_version", "artifact_contract", "run_spec", "targets", "readme", "node_order", "nodes", "connections", "inputs", "outputs"],
   "properties": {
     "schema_version": { "const": "inlumen.deployment-bundle@1" },
+    "artifact_contract": {
+      "type": "object",
+      "required": ["schema_version", "transport", "input_environment", "output_environment", "recursive", "source_agnostic", "connector_agnostic"],
+      "properties": {
+        "schema_version": { "const": "inlumen.artifact-contract@1" },
+        "transport": { "const": "filesystem" },
+        "input_environment": { "const": "PIPELINE_INPUT_DIR" },
+        "output_environment": { "const": "PIPELINE_OUTPUT_DIR" },
+        "recursive": { "const": true },
+        "source_agnostic": { "const": true },
+        "connector_agnostic": { "const": true }
+      },
+      "additionalProperties": true
+    },
     "run_spec": { "const": "run-spec.json" },
     "readme": { "const": "README.md" },
     "targets": {
@@ -32,12 +46,12 @@
     "connections": { "type": "array", "items": { "type": "object" } },
     "inputs": {
       "type": "object",
-      "required": ["path", "manifest", "file_count", "lifecycle"],
+      "required": ["path", "file_count", "lifecycle", "transport"],
       "properties": {
         "path": { "const": "inputs" },
-        "manifest": { "const": "inputs/input_manifest.json" },
         "file_count": { "type": "integer", "minimum": 0 },
-        "lifecycle": { "const": "per-run" }
+        "lifecycle": { "type": "string" },
+        "transport": { "const": "filesystem" }
       },
       "additionalProperties": true
     },

@@ -1135,6 +1135,8 @@ def run_docker_validation(
             if str(key).strip() and str(key) != "model_plan"
         }
         runtime_environment = {
+            "PIPELINE_INPUT_DIR": "/inlumen/inputs",
+            "PIPELINE_OUTPUT_DIR": "/inlumen/outputs",
             "INLUMEN_FLOW_ID": flow_id,
             "INLUMEN_INPUT_MANIFEST": "/inlumen/inputs/input_manifest.json",
             "INLUMEN_OUTPUT_DIR": "/inlumen/outputs",
@@ -1142,6 +1144,11 @@ def run_docker_validation(
             "INLUMEN_CONTEXT_PATH": "/inlumen/context.json",
         }
         if runtime_parameters:
+            runtime_environment["PIPELINE_PARAMS_JSON"] = json.dumps(
+                runtime_parameters,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
             runtime_environment["INLUMEN_PARAMS_JSON"] = json.dumps(
                 runtime_parameters,
                 ensure_ascii=False,
@@ -1153,6 +1160,12 @@ def run_docker_validation(
             ).upper().strip("_")
             if env_name != "INLUMEN_PARAM_":
                 runtime_environment[env_name] = str(value)
+                runtime_environment[env_name.replace("INLUMEN_", "PIPELINE_")] = str(value)
+            if (
+                re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
+                and not key.startswith(("PIPELINE_", "INLUMEN_"))
+            ):
+                runtime_environment[key] = str(value)
         container = client.containers.run(
             image.id,
             command=["python", "/app/main.py"],
@@ -1241,14 +1254,27 @@ def validate_output_manifest(
     expected_outputs: list[ExpectedArtifact],
 ) -> list[str]:
     if not output_manifest_path.exists():
-        return ["Generated script did not write INLUMEN_OUTPUT_MANIFEST."]
-    try:
-        manifest = json.loads(output_manifest_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        return [f"Output manifest is invalid JSON: {exc}"]
-    outputs = manifest.get("outputs") or manifest.get("files") or []
-    if not isinstance(outputs, list):
-        return ["Output manifest must contain an outputs list."]
+        # The filesystem runtime discovers outputs after the process exits. A
+        # manifest is accepted only as a compatibility path for older code.
+        outputs = [
+            {
+                "name": path.stem,
+                "filename": path.relative_to(outputs_dir).as_posix(),
+                "path": str(path),
+            }
+            for path in sorted(outputs_dir.rglob("*"))
+            if path.is_file()
+        ]
+        if not outputs:
+            return ["Generated script did not produce files in PIPELINE_OUTPUT_DIR."]
+    else:
+        try:
+            manifest = json.loads(output_manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return [f"Output manifest is invalid JSON: {exc}"]
+        outputs = manifest.get("outputs") or manifest.get("files") or []
+        if not isinstance(outputs, list):
+            return ["Output manifest must contain an outputs list."]
     by_name = {
         str(item.get("name") or Path(str(item.get("filename") or "")).stem): item
         for item in outputs
@@ -1257,6 +1283,15 @@ def validate_output_manifest(
     errors: list[str] = []
     for expected in expected_outputs:
         actual = by_name.get(expected.name)
+        if actual is None:
+            actual = next(
+                (
+                    item for item in outputs
+                    if isinstance(item, dict)
+                    and Path(str(item.get("filename") or "")).name == expected.filename
+                ),
+                None,
+            )
         if actual is None:
             errors.append(
                 f"Missing declared output in output manifest: {expected.name}"

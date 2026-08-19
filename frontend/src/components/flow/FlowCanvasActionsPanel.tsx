@@ -1,6 +1,6 @@
 import React from 'react';
 import { Panel } from 'reactflow';
-import { AlertTriangle, CircleDot, Download, Redo2, Save, ShieldCheck, Trash2, Undo2, Upload, Wand2 } from 'lucide-react';
+import { AlertTriangle, CircleDot, Download, PackageOpen, Redo2, Save, ShieldCheck, Trash2, Undo2, Upload, Wand2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 type FlowCanvasActionsPanelProps = {
@@ -11,6 +11,9 @@ type FlowCanvasActionsPanelProps = {
   onExportJson: () => void;
   onImportClick: () => void;
   onImport: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  taskPackageInputRef: React.RefObject<HTMLInputElement>;
+  onTaskPackageImportClick: () => void;
+  onTaskPackageImport: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onGenerateScripts: () => void;
   isGeneratingScripts?: boolean;
   showPortDetails: boolean;
@@ -32,6 +35,9 @@ export const FlowCanvasActionsPanel = ({
   onExportJson,
   onImportClick,
   onImport,
+  taskPackageInputRef,
+  onTaskPackageImportClick,
+  onTaskPackageImport,
   onGenerateScripts,
   isGeneratingScripts,
   showPortDetails,
@@ -94,6 +100,11 @@ export const FlowCanvasActionsPanel = ({
         className="hidden"
         onChange={onImport}
       />
+      <Button size="sm" variant="ghost" className="flex h-7 items-center gap-1 px-2" onClick={onTaskPackageImportClick} title="Import ZIP Task packages">
+        <PackageOpen className="h-3.5 w-3.5" />
+        Packages
+      </Button>
+      <input ref={taskPackageInputRef} type="file" accept=".zip,application/zip" className="hidden" onChange={onTaskPackageImport} />
       <Button
         size="sm"
         variant="ghost"

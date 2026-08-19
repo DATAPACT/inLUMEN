@@ -120,7 +120,10 @@ export const validateGraph = (
     const templateName = String(objectValue(data.template).name || data.template_label || "");
     const template = findTemplateForType(kind, templateName);
     const requiredParameterNames = new Set(template?.requiredParameters || []);
-    const validatesImplementationParameters = kind === "flow";
+    // Connector configuration is part of a Source/Destination's boundary
+    // contract.  Tasks validate their implementation separately, while Flow
+    // validates both its behavior parameters and their values.
+    const validatesRequiredParameters = ["flow", "source", "destination"].includes(kind);
 
     if (kind === "source" && FILE_SOURCE_TEMPLATES.has(templateName.trim().toLowerCase())) {
       const hasInputFile = Array.isArray(data.files) && data.files.some((file) =>
@@ -158,7 +161,10 @@ export const validateGraph = (
     });
 
     Object.entries(parameters).forEach(([name, value]) => {
-      if (!validatesImplementationParameters) return;
+      // Empty optional fields are allowed for connectors (for example an
+      // optional object prefix). Flow behavior fields remain strict because
+      // an empty value would make the behavior ambiguous.
+      if (kind !== "flow") return;
       if (!requiredParameterNames.has(name) && (value == null || (typeof value === "string" && !value.trim()))) add({
         severity: "error",
         category: "configuration",
@@ -168,7 +174,7 @@ export const validateGraph = (
       });
     });
     (template?.requiredParameters || []).forEach((name) => {
-      if (!validatesImplementationParameters) return;
+      if (!validatesRequiredParameters) return;
       if (!(name in parameters) || parameters[name] == null || String(parameters[name]).trim() === "") add({
         severity: "error",
         category: "configuration",
