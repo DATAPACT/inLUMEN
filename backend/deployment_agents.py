@@ -910,6 +910,29 @@ def _generic_destination_outputs(entries, output_dir):
     )
 
 
+def _is_filesystem_destination_template(template):
+    """Accept current and legacy local-output labels without weakening connector routing."""
+    normalized = " ".join(str(template or "").strip().lower().split())
+    if normalized in {
+        "custom",
+        "file",
+        "file output",
+        "folder",
+        "folder output",
+        "json",
+        "json output",
+        "structured json",
+        "structured object",
+        "report",
+        "report output",
+    }:
+        return True
+    if normalized.endswith(" output"):
+        format_name = normalized[: -len(" output")].strip()
+        return format_name in {"csv", "parquet", "text", "binary"}
+    return False
+
+
 def main():
     input_dir = Path(os.environ.get("PIPELINE_INPUT_DIR", "."))
     output_dir = Path(os.environ["PIPELINE_OUTPUT_DIR"])
@@ -924,16 +947,7 @@ def main():
         _copy_source_files(_entries(input_dir), output_dir)
     elif kind == "destination" and template == "object storage":
         _destination_outputs(_entries(input_dir), output_dir)
-    elif kind == "destination" and template in {
-        "custom",
-        "file",
-        "folder",
-        "json",
-        "json output",
-        "structured json",
-        "structured object",
-        "report",
-    }:
+    elif kind == "destination" and _is_filesystem_destination_template(template):
         _generic_destination_outputs(_entries(input_dir), output_dir)
     else:
         raise RuntimeError(

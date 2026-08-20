@@ -136,6 +136,38 @@ class DeploymentAgentsTest(unittest.TestCase):
             self.assertTrue((output_dir / "result.json").is_file())
             self.assertTrue((output_dir / "delivery-receipt.json").is_file())
 
+    def test_legacy_file_output_destination_uses_filesystem_sink(self):
+        artifact, _ = _managed_adapter_runtime(
+            {
+                "flow_id": "file-output",
+                "type": "destination",
+                "template": "File Output",
+                "param": {},
+            }
+        )
+        main_source = next(
+            item["content"] for item in artifact["files"] if item["filename"] == "main.py"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            (input_dir / "result.txt").write_text("ready\n", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "PIPELINE_INPUT_DIR": str(input_dir),
+                    "PIPELINE_OUTPUT_DIR": str(output_dir),
+                },
+                clear=False,
+            ):
+                namespace = {"__name__": "__main__"}
+                exec(compile(main_source, "file-output-main.py", "exec"), namespace)
+
+            self.assertEqual("ready\n", (output_dir / "result.txt").read_text(encoding="utf-8"))
+            self.assertTrue((output_dir / "delivery-receipt.json").is_file())
+
     def test_managed_source_adapter_copies_multiple_input_files_as_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
