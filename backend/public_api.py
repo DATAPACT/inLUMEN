@@ -673,7 +673,6 @@ def _build_dockerfile_artifacts_or_error(graph: dict[str, Any]) -> dict[str, Any
             generate_dockerfiles_with_agent(
                 filenames,
                 ids,
-                None,
                 pipeline_graph=graph,
                 file_refs=file_refs,
             )
@@ -1843,6 +1842,7 @@ def _ui_api_openapi_paths(
                                 "required": ["file"],
                                 "properties": {
                                     "file": {"type": "string", "format": "binary"},
+                                    "role": {"type": "string", "enum": ["code", "data"]},
                                 },
                             }
                         }
@@ -1967,8 +1967,14 @@ def _ui_api_openapi_paths(
         "/simple_chat": {
             "post": _chat_operation("sendSimpleChatMessage", "Send a message to the pipeline editing agent"),
         },
+        "/simple_chat/cancel": {
+            "post": _chat_cancel_operation("cancelSimpleChatMessage"),
+        },
         "/agentic_pipeline_editor": {
             "post": _chat_operation("sendPipelineEditorMessage", "Send a message to the pipeline editing agent"),
+        },
+        "/agentic_pipeline_editor/cancel": {
+            "post": _chat_cancel_operation("cancelPipelineEditorMessage"),
         },
         "/simple_chat/reset": {
             "post": _chat_reset_operation("resetSimpleChatSession"),
@@ -2003,6 +2009,23 @@ def _chat_reset_operation(operation_id: str) -> dict[str, Any]:
         "requestBody": _json_request("#/components/schemas/ChatResetRequest"),
         "responses": {
             "200": _json_response("#/components/schemas/OkResponse"),
+            "400": {"$ref": "#/components/responses/BadRequest"},
+            "401": {"$ref": "#/components/responses/Unauthorized"},
+            "403": {"$ref": "#/components/responses/Forbidden"},
+            "500": {"$ref": "#/components/responses/InternalError"},
+        },
+    }
+
+
+def _chat_cancel_operation(operation_id: str) -> dict[str, Any]:
+    return {
+        "tags": ["Agentic"],
+        "summary": "Cancel an in-flight pipeline editing turn",
+        "operationId": operation_id,
+        "requestBody": _json_request("#/components/schemas/ChatCancelRequest"),
+        "responses": {
+            "200": _json_response("#/components/schemas/ChatCancelResponse"),
+            "202": _json_response("#/components/schemas/ChatCancelResponse"),
             "400": {"$ref": "#/components/responses/BadRequest"},
             "401": {"$ref": "#/components/responses/Unauthorized"},
             "403": {"$ref": "#/components/responses/Forbidden"},
@@ -2065,7 +2088,7 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
         },
         "ChatbotConfig": {
             "type": "object",
-            "required": ["id", "name", "provider", "model", "baseUrl"],
+            "required": ["id", "name", "provider", "model", "codegenModel", "baseUrl"],
             "properties": {
                 "id": {"type": "string"},
                 "name": {"type": "string"},
@@ -2084,7 +2107,7 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
         },
         "ChatbotConfigUpsertRequest": {
             "type": "object",
-            "required": ["name", "model", "baseUrl"],
+            "required": ["name", "model", "codegenModel", "baseUrl"],
             "properties": {
                 "name": {"type": "string"},
                 "provider": {"type": "string"},
@@ -2114,6 +2137,39 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
             "properties": {"deleted_id": {"type": "string"}},
             "additionalProperties": True,
         },
+        "PipelineNodeKind": {
+            "type": "string",
+            "enum": ["source", "task", "destination", "flow", "subpipeline"],
+        },
+        "NodePort": {
+            "type": "object",
+            "required": ["id", "name", "type", "required", "description"],
+            "properties": {
+                "id": {"type": "string"},
+                "name": {"type": "string"},
+                "type": {"type": "string"},
+                "required": {"type": "boolean"},
+                "description": {"type": "string"},
+                "format": {"type": "string"},
+                "schema": {"type": "object", "additionalProperties": True},
+            },
+            "additionalProperties": False,
+        },
+        "NodePorts": {
+            "type": "object",
+            "required": ["inputs", "outputs"],
+            "properties": {
+                "inputs": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/NodePort"},
+                },
+                "outputs": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/NodePort"},
+                },
+            },
+            "additionalProperties": False,
+        },
         "ReactFlowNode": {
             "type": "object",
             "required": ["id"],
@@ -2137,6 +2193,8 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                 "id": {"type": "string"},
                 "source": {"type": "string"},
                 "target": {"type": "string"},
+                "sourceHandle": {"type": "string", "nullable": True},
+                "targetHandle": {"type": "string", "nullable": True},
             },
         },
         "ReactFlowGraph": {
@@ -2160,8 +2218,21 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                     "properties": {
                         "flow_id": {"type": "string"},
                         "label": {"type": "string"},
-                        "type": {"type": "string"},
+                        "type": {"$ref": "#/components/schemas/PipelineNodeKind"},
                         "description": {"type": "string"},
+                        "template_label": {"type": "string"},
+                        "template": {"type": "object", "additionalProperties": True},
+                        "ports": {"$ref": "#/components/schemas/NodePorts"},
+                        "param": {"type": "object", "additionalProperties": True},
+                        "secret_params": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "implementation": {
+                            "type": "object",
+                            "additionalProperties": True,
+                        },
+                        "subpipeline": {"type": "object", "additionalProperties": True},
                         "x": {"type": "number"},
                         "y": {"type": "number"},
                     },
@@ -2341,6 +2412,7 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                 "filename": {"type": "string"},
                 "bucket": {"type": "string"},
                 "step_id": {"type": "string"},
+                "role": {"type": "string", "enum": ["code", "data"]},
             },
             "additionalProperties": True,
         },
@@ -2400,6 +2472,7 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
             "type": "object",
             "required": ["user_message", "llm_config"],
             "properties": {
+                "turn_id": {"type": "string"},
                 "session_id": {"type": "string", "nullable": True},
                 "user_message": {"type": "string"},
                 "canvas_graph": {"$ref": "#/components/schemas/ReactFlowGraph"},
@@ -2413,6 +2486,7 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
             "type": "object",
             "required": ["session_id", "assistant_message", "graph", "sync"],
             "properties": {
+                "turn_id": {"type": "string"},
                 "session_id": {"type": "string"},
                 "assistant_message": {"type": "string"},
                 "graph": {"$ref": "#/components/schemas/ReactFlowGraph"},
@@ -2422,6 +2496,23 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
         "ChatResetRequest": {
             "type": "object",
             "properties": {"session_id": {"type": "string"}},
+        },
+        "ChatCancelRequest": {
+            "type": "object",
+            "required": ["turn_id"],
+            "properties": {"turn_id": {"type": "string"}},
+        },
+        "ChatCancelResponse": {
+            "type": "object",
+            "required": ["turn_id", "status", "active"],
+            "properties": {
+                "turn_id": {"type": "string"},
+                "status": {"type": "string", "enum": ["cancelled", "cancelling", "cancel_queued"]},
+                "active": {"type": "boolean"},
+                "completed": {"type": "boolean"},
+                "rollback_applied": {"type": "boolean"},
+                "detail": {"type": "string"},
+            },
         },
         "OkResponse": {
             "type": "object",

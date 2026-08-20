@@ -29,20 +29,20 @@ jobs:
       - name: Run backend tests
         run: python scripts/run_tests.py --component backend
 
-  deployment-validation:
-    name: Deployment validation
+  codegen:
+    name: Code generation service
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.11"
           cache: pip
-          cache-dependency-path: deployment_validation/pyproject.toml
-      - name: Install deployment validation dependencies
-        run: python -m pip install -e deployment_validation
-      - name: Run deployment validation tests
-        run: python scripts/run_tests.py --component deployment-validation
+          cache-dependency-path: codegen/pyproject.toml
+      - name: Install codegen dependencies
+        run: python -m pip install -e "codegen[dev]"
+      - name: Run codegen tests
+        run: python scripts/run_tests.py --component codegen
 
   frontend:
     name: Frontend

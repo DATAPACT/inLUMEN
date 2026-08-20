@@ -4,13 +4,16 @@ import {
   Download,
   Save,
   Send,
+  Square,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Textarea } from '@/components/ui/textarea';
 import { ChatbotConfig, formatProviderLabel } from '@/services/chatbotService';
 import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
+import { sanitizeAssistantMessage } from '@/features/chat/messageSafety';
 import { cn } from '@/lib/utils';
+import { AssistantMessageContent } from './AssistantMessageContent';
 
 type ChatPanelProps = {
   activeConfig: ChatbotConfig;
@@ -23,6 +26,7 @@ type ChatPanelProps = {
   formatConfigDescription: (config: ChatbotConfig) => string;
   onUserInputChange: (value: string) => void;
   onSendMessage: () => void;
+  onStopProcessing: () => void;
   onClearConversation: () => void;
   onSaveConversation: () => void;
   onExportConversation: () => void;
@@ -40,6 +44,7 @@ export const ChatPanel = ({
   formatConfigDescription,
   onUserInputChange,
   onSendMessage,
+  onStopProcessing,
   onClearConversation,
   onSaveConversation,
   onExportConversation,
@@ -118,6 +123,7 @@ export const ChatPanel = ({
             variant="ghost"
             size="sm"
             onClick={onClearConversation}
+            disabled={isProcessing}
             className="h-8 rounded-xl px-3 text-xs text-muted-foreground"
           >
             Clear
@@ -160,9 +166,15 @@ export const ChatPanel = ({
                           : "border-border bg-muted/55 text-foreground",
                       )}
                     >
-                      <div className="whitespace-pre-wrap break-words">
-                        {msg.content}
-                      </div>
+                      {msg.role === 'assistant' ? (
+                        <AssistantMessageContent
+                          content={sanitizeAssistantMessage(msg.content)}
+                        />
+                      ) : (
+                        <div className="whitespace-pre-wrap break-words">
+                          {msg.content}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -197,7 +209,7 @@ export const ChatPanel = ({
               </p>
 
               <div className="mt-4 space-y-2">
-                {promptSuggestions.slice(0, 2).map((prompt) => (
+                {promptSuggestions.slice(0, 3).map((prompt) => (
                   <button
                     key={prompt}
                     type="button"
@@ -230,14 +242,19 @@ export const ChatPanel = ({
 
             <div className="mt-2 flex items-center justify-end border-t border-border pt-2">
               <Button
-                onClick={onSendMessage}
-                disabled={isProcessing || !userInput.trim()}
-                className="h-9 rounded-xl bg-[linear-gradient(135deg,#34d399,#0f766e)] px-3.5 font-semibold text-slate-950 shadow-[0_18px_40px_rgba(16,185,129,0.22)] hover:opacity-95"
+                onClick={isProcessing ? onStopProcessing : onSendMessage}
+                disabled={!isProcessing && !userInput.trim()}
+                className={cn(
+                  "h-9 rounded-xl px-3.5 font-semibold hover:opacity-95",
+                  isProcessing
+                    ? "bg-rose-500 text-white shadow-[0_18px_40px_rgba(244,63,94,0.2)] hover:bg-rose-500"
+                    : "bg-[linear-gradient(135deg,#34d399,#0f766e)] text-slate-950 shadow-[0_18px_40px_rgba(16,185,129,0.22)]",
+                )}
               >
                 {isProcessing ? (
                   <>
-                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-950/30 border-t-slate-950" />
-                    Thinking
+                    <Square className="h-4 w-4 fill-current" />
+                    Stop
                   </>
                 ) : (
                   <>

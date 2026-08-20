@@ -9,6 +9,8 @@ import { WrappedFlowCanvas, FlowCanvasRef } from '@/components/FlowCanvas';
 import { ChatPanel } from '@/components/chat/ChatPanel';
 import { VersionsPanel } from '@/components/versions/VersionsPanel';
 import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
+import { sanitizeAssistantMessage } from '@/features/chat/messageSafety';
+import { CHAT_PROMPT_SUGGESTIONS } from '@/features/chat/promptSuggestions';
 import {
   MAIN_PIPELINE_VERSION_UID,
   clearPipelineWorkspace,
@@ -19,6 +21,7 @@ import {
   setPipelineVersionAsMain,
   type PipelineVersionSummary,
 } from '@/features/flow/flowPersistence';
+import { notifyReusablePipelineCatalogChanged } from '@/features/flow/subpipelinePersistence';
 import { toast } from 'sonner';
 import {
   Settings,
@@ -72,12 +75,13 @@ const CHAT_HISTORY_KEY = "inlumen-chat-history";
 const PIPELINE_PROMPT_KEY = "inlumen-pipeline-high-level-prompt";
 const PANEL_STATE_KEY = "inlumen-panel-preferences";
 const THEME_KEY = "inlumen-theme";
-const CHAT_PROMPT_SUGGESTIONS = [
-  "Design a remote patient monitoring pipeline with ingestion, preprocessing, model training, and alerting.",
-  "Create a document retrieval pipeline that ingests PDFs, chunks content, stores embeddings, and answers questions.",
-  "Build a fraud detection workflow with batch feature engineering, real-time scoring, and monitoring.",
-];
-
+const CHAT_PROCESSING_TOAST_ID = "pipeline-chat-processing";
+const createChatTurnId = () => {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `turn-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+};
 type RightPanel = 'inspector' | 'chat' | 'versions' | null;
 
 type PanelPreferences = {
@@ -150,7 +154,12 @@ const normalizeSavedConversation = (value: unknown): ChatMessage[] => {
     const entry = message as Partial<ChatMessage>;
     if (entry.role !== "user" && entry.role !== "assistant") return [];
     if (typeof entry.content !== "string") return [];
-    return [{ role: entry.role, content: entry.content }];
+    return [{
+      role: entry.role,
+      content: entry.role === "assistant"
+        ? sanitizeAssistantMessage(entry.content)
+        : entry.content,
+    }];
   });
 };
 
@@ -177,18 +186,24 @@ type DragNodeType = {
 };
 
 type ChatApiResponse = {
+  turn_id?: string;
   session_id?: string;
+  status?: string;
+  rollback_applied?: boolean;
   assistant_message?: string;
   graph?: unknown;
   sync?: {
     status?: string;
     guardrail_passed?: boolean;
+    graph_safe_to_apply?: boolean;
+    rollback_applied?: boolean;
     expected_graph_change?: boolean;
     graph_changed?: boolean;
     message?: string;
     node_count?: number;
     edge_count?: number;
     updated_at?: string | null;
+    validation_errors?: string[];
   };
 };
 
@@ -208,12 +223,18 @@ const Index = () => {
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const flowCanvasRef = useRef<FlowCanvasRef>(null);
+  const activeChatTurnRef = useRef<{
+    turnId: string;
+    controller: AbortController;
+    beforeGraph: ReturnType<FlowCanvasRef["getCurrentGraph"]> | null;
+  } | null>(null);
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
   const [pipelineLastUpdate, setPipelineLastUpdate] = useState<string>('Never');
   const [pipelineCreatedAt, setPipelineCreatedAt] = useState<string>('Never');
   const [configs, setConfigs] = useState<ChatbotConfig[]>([]);
   const [selectedConfig, setSelectedConfig] = useState<ChatbotConfig | null>(null);
   const [isConfigFormOpen, setIsConfigFormOpen] = useState(false);
+  const [isConfigMenuOpen, setIsConfigMenuOpen] = useState(false);
   const [configToEdit, setConfigToEdit] = useState<ChatbotConfig | undefined>(undefined);
   const [versionsRefreshKey, setVersionsRefreshKey] = useState(0);
   const [isRestoringVersion, setIsRestoringVersion] = useState(false);
@@ -436,14 +457,18 @@ const Index = () => {
     }
   }, []);
 
-  const onNodeUpdate = useCallback((id: string, data: FlowNodeData) => {
+  const onNodeUpdate = useCallback((
+    id: string,
+    data: FlowNodeData,
+    options?: { remapSubpipeline?: boolean },
+  ) => {
     setFlowNodes(prev => prev.map(node =>
       node.id === id ? { ...node, data: { ...node.data, ...data } } : node
     ));
     setSelectedNode(prev =>
-      prev?.id === id ? { ...prev, data: { ...prev.data, ...data } } : prev
+      prev?.id === id ? { ...prev, data } : prev
     );
-    flowCanvasRef.current?.updateNode(id, data);
+    flowCanvasRef.current?.updateNode(id, data, options);
   }, []);
 
   const onNodesChange = useCallback((nodes: Node[]) => {
@@ -462,6 +487,7 @@ const Index = () => {
   const activeConfig = selectedConfig || defaultConfig;
 
   const handleSendMessage = async () => {
+    if (isProcessing) return;
     const messageText = userInput;
 
     if (!messageText.trim()) {
@@ -473,22 +499,28 @@ const Index = () => {
 
     setUserInput('');
     setIsProcessing(true);
-    toast("Processing your input", {
+    toast.loading("Processing your input", {
+      id: CHAT_PROCESSING_TOAST_ID,
       description: "AI is thinking...",
     });
 
     const newUserMessage = { role: 'user' as const, content: messageText };
     const updatedConversation = [...conversation, newUserMessage];
     setConversation(updatedConversation);
+    const turnId = createChatTurnId();
+    const controller = new AbortController();
+    const canvasGraph = flowCanvasRef.current?.getCurrentGraph() ?? null;
+    activeChatTurnRef.current = { turnId, controller, beforeGraph: canvasGraph };
 
     try {
       const activeCfg = selectedConfig || defaultConfig;
-      const canvasGraph = flowCanvasRef.current?.getCurrentGraph() ?? null;
 
       const res = await apiFetch(`${INLUMEN_API_URL}/simple_chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
+          turn_id: turnId,
           session_id: chatSessionId || null,
           user_message: messageText,
           canvas_graph: canvasGraph,
@@ -499,24 +531,50 @@ const Index = () => {
         }),
       });
 
+      if (activeChatTurnRef.current?.turnId !== turnId) return;
+
+      if (res.status === 409) {
+        const stopped = await res.json() as ChatApiResponse;
+        if (stopped.status === "cancelled") {
+          const restored = stopped.rollback_applied !== false;
+          const message = stopped.assistant_message || (
+            restored
+              ? "Stopped. The pipeline from before this request was restored."
+              : "Stopped, but the previous pipeline could not be restored automatically."
+          );
+          setConversation(prev => [...prev, { role: 'assistant', content: message }]);
+          setCanvasSyncStatus({
+            state: restored ? 'warning' : 'error',
+            message,
+          });
+          if (restored) {
+            toast.info("Pipeline agent stopped", { description: message });
+          } else {
+            toast.error("Pipeline agent stopped with a rollback error", { description: message });
+          }
+          return;
+        }
+      }
+
       if (!res.ok) {
         const errText = await res.text();
         throw new Error(`Chat failed (${res.status}): ${errText}`);
       }
 
       const data = await res.json() as ChatApiResponse;
+      if (activeChatTurnRef.current?.turnId !== turnId) return;
+
+      // Agent turns may create a separately saved reusable pipeline. Refresh
+      // every mounted catalog consumer immediately instead of waiting for a
+      // page reload or a manual library refresh.
+      notifyReusablePipelineCatalogChanged();
 
       if (data.session_id && data.session_id !== chatSessionId) {
         setChatSessionId(data.session_id);
       }
 
-      const responseText = data.assistant_message ?? "";
+      const responseText = sanitizeAssistantMessage(data.assistant_message);
       setConversation(prev => [...prev, { role: 'assistant', content: responseText }]);
-
-      setCanvasSyncStatus({
-        state: 'syncing',
-        message: 'Applying agent graph changes to the canvas...',
-      });
 
       if (!flowCanvasRef.current) {
         setCanvasSyncStatus({
@@ -526,6 +584,28 @@ const Index = () => {
         return;
       }
 
+      const sync = data.sync;
+      const guardrailPassed = sync?.guardrail_passed !== false;
+      const graphSafeToApply = sync?.graph_safe_to_apply ?? guardrailPassed;
+      const syncMessage = sync?.message || 'The agent graph could not be verified.';
+
+      if (!graphSafeToApply) {
+        setCanvasSyncStatus({
+          state: 'warning',
+          message: syncMessage,
+          updatedAt: sync?.updated_at ?? null,
+        });
+        toast.warning("Agent graph was not applied", {
+          description: syncMessage,
+        });
+        return;
+      }
+
+      setCanvasSyncStatus({
+        state: 'syncing',
+        message: 'Applying validated agent graph changes to the canvas...',
+      });
+
       const syncedGraph = await flowCanvasRef.current.syncFromBackend(data.graph);
       const visibleNodeCountBefore = Array.isArray(canvasGraph?.nodes)
         ? canvasGraph.nodes.length
@@ -533,27 +613,30 @@ const Index = () => {
       if (visibleNodeCountBefore === 0 && syncedGraph.nodes.length > 0) {
         setPipelineHighLevelPrompt(messageText.trim());
       }
-      scheduleActiveVersionSnapshot();
-      const sync = data.sync;
+      if (guardrailPassed) {
+        scheduleActiveVersionSnapshot();
+      }
       const nodeCount = sync?.node_count ?? syncedGraph.nodes.length;
       const edgeCount = sync?.edge_count ?? syncedGraph.edges.length;
       const updatedAt = sync?.updated_at ?? syncedGraph.updated_at;
-      const guardrailPassed = sync?.guardrail_passed !== false;
-      const syncMessage = sync?.message
+      const appliedSyncMessage = sync?.message
         || `Canvas sync needs attention: ${nodeCount} node${nodeCount === 1 ? '' : 's'} and ${edgeCount} edge${edgeCount === 1 ? '' : 's'}.`;
 
       setCanvasSyncStatus({
         state: guardrailPassed ? 'idle' : 'warning',
-        message: guardrailPassed ? '' : syncMessage,
+        message: guardrailPassed ? '' : appliedSyncMessage,
         updatedAt,
       });
 
       if (!guardrailPassed) {
         toast.warning("Canvas sync guardrail", {
-          description: syncMessage,
+          description: appliedSyncMessage,
         });
       }
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
       console.error("Error processing request:", error);
       setCanvasSyncStatus({
         state: 'error',
@@ -563,8 +646,63 @@ const Index = () => {
         description: error instanceof Error ? error.message : "Unknown error occurred",
       });
     } finally {
-      setIsProcessing(false);
+      if (activeChatTurnRef.current?.turnId === turnId) {
+        activeChatTurnRef.current = null;
+        setIsProcessing(false);
+      }
+      toast.dismiss(CHAT_PROCESSING_TOAST_ID);
     }
+  };
+
+  const handleStopProcessing = () => {
+    const activeTurn = activeChatTurnRef.current;
+    if (!activeTurn) return;
+
+    // The visible turn ends synchronously. Restore the immutable pre-turn
+    // snapshot from memory and keep backend polling paused while the server
+    // finishes its own consistency rollback in the background.
+    activeChatTurnRef.current = null;
+    activeTurn.controller.abort();
+    setIsProcessing(false);
+    toast.dismiss(CHAT_PROCESSING_TOAST_ID);
+    if (activeTurn.beforeGraph && flowCanvasRef.current) {
+      flowCanvasRef.current.restoreGraphLocally(activeTurn.beforeGraph);
+    }
+    setConversation((current) => [
+      ...current,
+      {
+        role: 'assistant',
+        content: "Stopped. Changes from the interrupted turn were discarded.",
+      },
+    ]);
+    setCanvasSyncStatus({
+      state: 'idle',
+      message: 'Canvas is ready',
+    });
+
+    void apiFetch(`${INLUMEN_API_URL}/simple_chat/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        turn_id: activeTurn.turnId,
+        session_id: chatSessionId || null,
+      }),
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Stop request failed (${response.status}): ${await response.text()}`);
+        }
+        const stopped = await response.json() as ChatApiResponse & { completed?: boolean };
+        if (stopped.completed === false) {
+          flowCanvasRef.current?.pauseBackendSync(30000);
+        }
+      })
+      .catch((error) => {
+        // The user-facing turn is already stopped. A transport failure here
+        // must not resurrect a spinner or overwrite the restored local graph.
+        console.warn("Background pipeline cancellation could not be confirmed:", error);
+        flowCanvasRef.current?.pauseBackendSync(30000);
+      });
   };
 
   const resetLocalConversation = useCallback(() => {
@@ -706,12 +844,14 @@ const Index = () => {
   };
 
   const handleCreateConfig = () => {
+    setIsConfigMenuOpen(false);
     setConfigToEdit(undefined);
     setIsConfigFormOpen(true);
   };
 
   const handleEditConfig = (config: ChatbotConfig) => {
     if (config.readOnly) return;
+    setIsConfigMenuOpen(false);
     setConfigToEdit(config);
     setIsConfigFormOpen(true);
   };
@@ -934,11 +1074,6 @@ const Index = () => {
   };
 
   const handleClearAll = async () => {
-    const confirmed = window.confirm(
-      "Clear the entire workspace? This will empty Main, delete all saved versions except Main, clear the chat session, and clean the provenance report."
-    );
-    if (!confirmed) return;
-
     if (activeVersionSaveTimeoutRef.current) {
       window.clearTimeout(activeVersionSaveTimeoutRef.current);
       activeVersionSaveTimeoutRef.current = null;
@@ -972,9 +1107,15 @@ const Index = () => {
         message: '',
         updatedAt,
       });
-      toast.success("Workspace cleared", {
-        description: "Main is empty, saved versions are deleted, chat is reset, and provenance is clean.",
-      });
+      if (result.status === "partial") {
+        toast.warning("Workspace graph cleared", {
+          description: "Some object-storage files could not be removed. Check the backend logs before release.",
+        });
+      } else {
+        toast.success("Workspace cleared", {
+          description: "Pipelines, files, chat, provenance, and generation history were deleted.",
+        });
+      }
     } catch (error) {
       console.error("Error clearing workspace:", error);
       toast.error("Failed to clear workspace", {
@@ -1082,12 +1223,16 @@ const Index = () => {
             onOverviewUpdated={handleOverviewUpdated}
             activeChatbotConfig={activeConfig}
             workspaceResetKey={workspaceResetKey}
+            getCurrentPipelineGraph={() => flowCanvasRef.current?.getCurrentGraph() || { nodes: [], edges: [] }}
+            replaceCurrentPipelineGraph={(graph) => flowCanvasRef.current?.replaceCurrentGraph(graph)}
+            currentPipelineName={activeVersionName}
+            currentPipelineDescription={activePipelineDescription}
           />
         )}
 
         {showFlowLayout ? (
           <ResizablePanelGroup direction="horizontal" className="min-w-0 flex-1">
-            <ResizablePanel defaultSize={rightPanel ? 72 : 100} minSize={45}>
+            <ResizablePanel id="canvas-panel" order={1} defaultSize={rightPanel ? 72 : 100} minSize={45}>
               <div className="h-full bg-background">
                 <WrappedFlowCanvas
                   onNodeSelect={onNodeSelect}
@@ -1102,6 +1247,7 @@ const Index = () => {
                   onActiveVersionChange={updateActiveVersion}
                   onActiveVersionNameChange={handleActiveVersionNameChange}
                   onPipelineDescriptionChange={setActivePipelineDescription}
+                  workspaceResetKey={workspaceResetKey}
                   flowCanvasRef={flowCanvasRef}
                 />
               </div>
@@ -1109,14 +1255,24 @@ const Index = () => {
 
             {rightPanel && (
               <>
-                <ResizableHandle withHandle />
-                <ResizablePanel defaultSize={28} minSize={24} maxSize={42} className="min-w-[320px]">
+                <ResizableHandle id="right-panel-handle" withHandle />
+                <ResizablePanel
+                  id="right-panel"
+                  order={2}
+                  defaultSize={28}
+                  minSize={24}
+                  maxSize={42}
+                  className="min-w-[320px]"
+                >
                   {rightPanel === 'inspector' ? (
                     <PropertiesPanel
                       className="bg-card/95"
                       selectedNode={selectedNode}
                       onNodeUpdate={onNodeUpdate}
                       onRemoveNode={handleRemoveNode}
+                      onGenerateCode={(nodeId) => {
+                        flowCanvasRef.current?.openCodeGeneration([nodeId]);
+                      }}
                       activeChatbotConfig={activeConfig}
                     />
                   ) : rightPanel === 'chat' ? (
@@ -1131,6 +1287,7 @@ const Index = () => {
                       formatConfigDescription={formatConfigDescription}
                       onUserInputChange={setUserInput}
                       onSendMessage={handleSendMessage}
+                      onStopProcessing={handleStopProcessing}
                       onClearConversation={handleClearConversation}
                       onSaveConversation={handleSaveConversation}
                       onExportConversation={handleExportConversation}
@@ -1274,7 +1431,7 @@ const Index = () => {
                 LLM configuration
               </div>
               <p className="mb-3 text-xs text-muted-foreground">
-                Used by Pipeline Chat and Generate Deployment Artifacts.
+                The design model powers Pipeline Chat; the code model generates runtime code.
               </p>
               <div className="mb-3 rounded-md bg-background/70 p-3 text-xs text-muted-foreground space-y-1">
                 <div>
@@ -1294,7 +1451,7 @@ const Index = () => {
                   {activeConfig.baseUrl}
                 </div>
               </div>
-              <DropdownMenu>
+              <DropdownMenu open={isConfigMenuOpen} onOpenChange={setIsConfigMenuOpen}>
                 <DropdownMenuTrigger asChild>
                   <Button variant="outline" className="w-full justify-between">
                     <span className="min-w-0 truncate text-left">

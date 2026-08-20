@@ -15,6 +15,8 @@ const completeConfig = (overrides: Partial<ChatbotConfig> = {}): ChatbotConfig =
   provider: "openrouter",
   model: "gpt-oss:120b",
   codegenModel: "openai/gpt-5.2-codex",
+  openrouterProviderOnly: ["cerebras"],
+  codegenOpenrouterProviderOnly: ["cerebras"],
   baseUrl: "https://openrouter.ai/api/v1",
   apiKey: "secret-key",
   ...overrides,
@@ -52,6 +54,9 @@ describe("chatbot configuration contracts", () => {
       name: "OpenRouter",
       provider: "openrouter",
       model: "gpt-oss-120b",
+      codegenModel: "",
+      openrouterProviderOnly: [],
+      codegenOpenrouterProviderOnly: [],
       baseUrl: "https://openrouter.ai/api/v1",
       apiKey: "",
     });
@@ -68,17 +73,32 @@ describe("chatbot configuration contracts", () => {
       supports_json_output: true,
       supports_structured_output: true,
       supports_vision: false,
+      openrouter_provider_only: ["cerebras"],
     });
   });
 
-  it("uses the dedicated code generation model and timeout", () => {
+  it("uses the dedicated code generation model", () => {
     expect(buildCodegenLLMRequestConfig(completeConfig())).toMatchObject({
       provider: "openrouter",
       model: "openai/gpt-5.2-codex",
       base_url: "https://openrouter.ai/api/v1",
       api_key: "secret-key",
-      timeout_seconds: 90,
+      timeout_seconds: 180,
+      openrouter_provider_only: ["cerebras"],
     });
+  });
+
+  it("keeps chat and code-generation provider routing independent", () => {
+    expect(buildLLMRequestConfig(completeConfig({
+      openrouterProviderOnly: [" Cerebras ", "cerebras"],
+      codegenOpenrouterProviderOnly: [],
+    }))).toMatchObject({
+      openrouter_provider_only: ["cerebras"],
+    });
+    expect(buildCodegenLLMRequestConfig(completeConfig({
+      openrouterProviderOnly: ["cerebras"],
+      codegenOpenrouterProviderOnly: [],
+    }))).not.toHaveProperty("openrouter_provider_only");
   });
 
   it("rejects LLM requests without locally supplied credentials", () => {

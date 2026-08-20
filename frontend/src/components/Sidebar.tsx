@@ -24,7 +24,6 @@ import {
   Hash,
   Paperclip,
   Download,
-  ShieldCheck
 } from 'lucide-react';
 import {
   createNodeDataFromDefinition,
@@ -37,6 +36,13 @@ import {
   getNodeDefinitionIcon,
 } from '@/features/nodes/registry/iconRegistry';
 import type { NodeDefinition } from '@/features/nodes/registry/types';
+import { ReusablePipelineManagerDialog } from '@/components/subpipeline/ReusablePipelineManagerDialog';
+import { publicPortsForSubpipeline } from '@/features/flow/subpipeline';
+import {
+  fetchReusablePipelines,
+  REUSABLE_PIPELINE_CATALOG_CHANGED_EVENT,
+  type ReusablePipelineSummary,
+} from '@/features/flow/subpipelinePersistence';
 
 interface PipelineOverview {
   version: string;
@@ -67,11 +73,17 @@ interface SidebarProps {
   onOverviewUpdated?: (overview: PipelineOverviewUpdate) => void;
   activeChatbotConfig?: ChatbotConfig;
   workspaceResetKey?: number;
+  getCurrentPipelineGraph?: () => unknown;
+  replaceCurrentPipelineGraph?: (graph: unknown) => Promise<unknown> | unknown;
+  currentPipelineName?: string;
+  currentPipelineDescription?: string;
 }
 
 type DragNodeType = {
   type: string;
-  data: ReturnType<typeof createNodeDataFromDefinition>;
+  data: ReturnType<typeof createNodeDataFromDefinition> & {
+    subpipeline?: Record<string, unknown>;
+  };
 };
 
 type DockerfileGenerationResponse = {
@@ -82,6 +94,9 @@ type DockerfileGenerationResponse = {
   }>;
   runtime_artifacts?: Array<{
     flow_id?: string;
+    data_contract?: {
+      inputs?: Array<Record<string, unknown>>;
+    };
     files?: Array<{
       filename?: string;
       content?: string;
@@ -90,13 +105,18 @@ type DockerfileGenerationResponse = {
   }>;
   deployment_files?: DeploymentBundleFile[];
   input_files?: DeploymentBundleFile[];
+  root_flow_ids?: string[];
 };
 
 type DeploymentValidationReport = {
   ok?: boolean;
   errors?: string[];
   argo?: { ok?: boolean; errors?: string[] } | null;
-  dagster?: { ok?: boolean; errors?: string[] } | null;
+  dagster?: {
+    ok?: boolean;
+    errors?: string[];
+    steps?: Array<{ ok?: boolean; output?: string }>;
+  } | null;
 };
 
 type DeploymentRepairReport = {
@@ -110,6 +130,16 @@ type DeploymentBundleGenerationResponse = {
   manifest?: Record<string, unknown>;
   validation_report?: DeploymentValidationReport | null;
   repair_report?: DeploymentRepairReport | null;
+  run?: PipelineRunResult | null;
+};
+
+type PipelineRunResult = {
+  run_id?: string;
+  status?: string;
+  engine?: string;
+  created_at?: string;
+  package_manager?: string;
+  outputs?: Array<{ path?: string; filename?: string; size_bytes?: number }>;
 };
 
 type DeploymentBundleFile = {
@@ -136,15 +166,72 @@ type PipelineOverviewResponse = {
 const errorToMessage = (error: unknown, fallback: string) =>
   error instanceof Error ? error.message : fallback;
 
-type DockerfileDownload = { name: string; url: string };
+const deploymentFailureMessage = (
+  payload: Record<string, unknown>,
+  fallback: string,
+) => {
+  const report = payload.validation_report as DeploymentValidationReport | undefined;
+  const messages = [
+    ...(Array.isArray(report?.errors) ? report.errors : []),
+    ...(Array.isArray(report?.dagster?.errors) ? report.dagster.errors : []),
+    ...(Array.isArray(report?.argo?.errors) ? report.argo.errors : []),
+  ];
+  const failedStep = [...(report?.dagster?.steps || [])]
+    .reverse()
+    .find((step) => step.ok === false);
+  const diagnostic = String(failedStep?.output || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .reverse()
+    .find((line) => /(?:FileNotFoundError|ValueError|RuntimeError):/.test(line));
+  if (diagnostic) messages.push(diagnostic);
+  if (messages.length === 0 && typeof payload.error === "string") {
+    messages.push(payload.error);
+  }
+  return Array.from(new Set(messages.filter(Boolean))).slice(0, 4).join(" ") || fallback;
+};
+
 type RuntimeArtifactDownload = { name: string; url: string };
 type YamlDownload = { name: string; url: string };
 type DeploymentBundleDownload = { name: string; url: string };
 type DeploymentTargets = { argo: boolean; dagster: boolean };
 type DeploymentValidationMode = "fast" | "validate" | "repair";
 
+const groupRuntimeArtifactDownloads = (downloads: RuntimeArtifactDownload[]) => {
+  const groups = new Map<string, {
+    label: string;
+    downloads: Array<RuntimeArtifactDownload & { displayName: string }>;
+  }>();
+
+  downloads.forEach((download) => {
+    const [scope, nodeSlug, ...filenameParts] = download.name.split("__");
+    const isNodeFile = scope === "nodes" && Boolean(nodeSlug) && filenameParts.length > 0;
+    const key = isNodeFile ? `${scope}__${nodeSlug}` : "other";
+    const label = isNodeFile
+      ? nodeSlug
+          .replace(/^node-\d+-/, "")
+          .split("-")
+          .filter(Boolean)
+          .map((word) => `${word.charAt(0).toUpperCase()}${word.slice(1)}`)
+          .join(" ")
+      : "Other files";
+    const group = groups.get(key) || { label, downloads: [] };
+    group.downloads.push({
+      ...download,
+      displayName: isNodeFile ? filenameParts.join("__") : download.name,
+    });
+    groups.set(key, group);
+  });
+
+  return Array.from(groups.entries()).map(([key, group]) => ({ key, ...group }));
+};
+
 const FAMILY_LABELS: Record<string, string> = {
-  core: "Core",
+  sources: "Sources",
+  tasks: "Tasks",
+  destinations: "Destinations",
+  flow: "Flow",
+  subpipeline: "Subpipeline",
 };
 
 export function Sidebar({
@@ -159,6 +246,10 @@ export function Sidebar({
   onOverviewUpdated,
   activeChatbotConfig,
   workspaceResetKey = 0,
+  getCurrentPipelineGraph,
+  replaceCurrentPipelineGraph,
+  currentPipelineName,
+  currentPipelineDescription,
 }: SidebarProps) {
   // --- overview state (fetched when Overview tab is opened)
   const [overviewData, setOverviewData] = useState<Partial<PipelineOverview> | null>(null);
@@ -169,23 +260,28 @@ export function Sidebar({
   const [isSavingOverview, setIsSavingOverview] = useState(false);
   const [overviewSaveError, setOverviewSaveError] = useState("");
 
-  // --- Dockerfiles state
+  // --- Deployment artifact state
   const [isGeneratingDeployment, setIsGeneratingDeployment] = useState(false);
-  const [dockerfileDownloads, setDockerfileDownloads] = useState<DockerfileDownload[]>([]);
   const [runtimeArtifactDownloads, setRuntimeArtifactDownloads] = useState<RuntimeArtifactDownload[]>([]);
   const [yamlDownload, setYamlDownload] = useState<YamlDownload | null>(null);
   const [deploymentBundleDownload, setDeploymentBundleDownload] = useState<DeploymentBundleDownload | null>(null);
   const [deploymentError, setDeploymentError] = useState<string>("");
   const [deploymentValidationReport, setDeploymentValidationReport] = useState<DeploymentValidationReport | null>(null);
   const [deploymentRepairReport, setDeploymentRepairReport] = useState<DeploymentRepairReport | null>(null);
-  const [deploymentValidationMode, setDeploymentValidationMode] = useState<DeploymentValidationMode>("validate");
-  const [deploymentTargets, setDeploymentTargets] = useState<DeploymentTargets>({
-    argo: true,
-    dagster: false,
-  });
+  const [pipelineRunResult, setPipelineRunResult] = useState<PipelineRunResult | null>(null);
   const [nodeDefinitions, setNodeDefinitions] = useState<NodeDefinition[]>(
     getFallbackNodeDefinitions,
   );
+  const [reusablePipelines, setReusablePipelines] = useState<ReusablePipelineSummary[]>([]);
+  const [reusablePipelineError, setReusablePipelineError] = useState("");
+  const [isReusablePipelineManagerOpen, setIsReusablePipelineManagerOpen] = useState(false);
+
+  const refreshReusablePipelineCatalog = async () => {
+    const pipelines = await fetchReusablePipelines();
+    setReusablePipelines(pipelines);
+    setReusablePipelineError("");
+    return pipelines;
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -203,23 +299,37 @@ export function Sidebar({
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    const loadCatalog = () => {
+      fetchReusablePipelines()
+        .then((pipelines) => {
+          if (cancelled) return;
+          setReusablePipelines(pipelines);
+          setReusablePipelineError("");
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          setReusablePipelineError(error instanceof Error ? error.message : "Could not load reusable pipelines.");
+        });
+    };
+    loadCatalog();
+    window.addEventListener(REUSABLE_PIPELINE_CATALOG_CHANGED_EVENT, loadCatalog);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(REUSABLE_PIPELINE_CATALOG_CHANGED_EVENT, loadCatalog);
+    };
+  }, [workspaceResetKey]);
+
   // Cleanup blob URLs on unmount
   useEffect(() => {
     return () => {
-      dockerfileDownloads.forEach((d) => URL.revokeObjectURL(d.url));
       runtimeArtifactDownloads.forEach((d) => URL.revokeObjectURL(d.url));
       if (yamlDownload?.url) URL.revokeObjectURL(yamlDownload.url);
       if (deploymentBundleDownload?.url) URL.revokeObjectURL(deploymentBundleDownload.url);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const clearDockerfileDownloads = () => {
-    setDockerfileDownloads((prev) => {
-      prev.forEach((d) => URL.revokeObjectURL(d.url));
-      return [];
-    });
-  };
 
   const clearRuntimeArtifactDownloads = () => {
     setRuntimeArtifactDownloads((prev) => {
@@ -243,13 +353,13 @@ export function Sidebar({
   };
 
   useEffect(() => {
-    clearDockerfileDownloads();
     clearRuntimeArtifactDownloads();
     clearYamlDownload();
     clearDeploymentBundleDownload();
     setDeploymentError("");
     setDeploymentValidationReport(null);
     setDeploymentRepairReport(null);
+    setPipelineRunResult(null);
     // The reset key changes only after a confirmed workspace-wide clear.
   }, [workspaceResetKey]);
 
@@ -329,14 +439,14 @@ export function Sidebar({
     });
   };
 
-  const generateDockerfiles = async (): Promise<DockerfileGenerationResponse> => {
+  const prepareDeploymentRuntime = async (): Promise<DockerfileGenerationResponse> => {
     const genRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_dockerfiles`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        // Dagster exports are attachment-driven. A Python script is sufficient;
-        // requirements, manifests, Dockerfiles, and input files are optional.
-        require_attached_runtime: deploymentTargets.dagster,
+        // Both exporters require reviewed/generated runtime code. Deployment build
+        // definitions are derived deterministically on the backend.
+        require_attached_runtime: true,
       }),
     });
 
@@ -361,15 +471,17 @@ export function Sidebar({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         dockerfile_json: dockerfileJson,
-        targets: deploymentTargets,
-        validation_mode: deploymentValidationMode,
+        // Dagster is an implementation detail of the first bundle target.
+        // The editor deliberately exposes one outcome: a runnable bundle.
+        targets: { argo: false, dagster: true },
+        validation_mode: "fast",
         validate_bundle: true,
         validation: {
           enabled: true,
-          mode: deploymentValidationMode,
-          materialize: deploymentValidationMode !== "fast" && deploymentTargets.dagster,
-          validate_argo: deploymentValidationMode !== "fast" && deploymentTargets.argo,
-          validate_dagster: deploymentValidationMode !== "fast" && deploymentTargets.dagster,
+          mode: "fast",
+          materialize: false,
+          validate_argo: false,
+          validate_dagster: false,
           argo_lint: false,
           argo_dry_run: false,
         },
@@ -377,8 +489,11 @@ export function Sidebar({
     });
 
     if (!bundleRes.ok) {
-      const errText = await bundleRes.text().catch(() => "");
-      throw new Error(`Failed to generate deployment bundle: ${bundleRes.status} ${bundleRes.statusText} ${errText}`);
+      const payload = await bundleRes.json().catch(() => ({}));
+      throw new Error(deploymentFailureMessage(
+        payload,
+        `Failed to generate deployment bundle (${bundleRes.status}).`,
+      ));
     }
 
     return await bundleRes.json();
@@ -434,30 +549,18 @@ export function Sidebar({
       setDeploymentError("");
       setDeploymentValidationReport(null);
       setDeploymentRepairReport(null);
-      if (!deploymentTargets.argo && !deploymentTargets.dagster) {
-        throw new Error("Select at least one deployment target.");
-      }
+      setPipelineRunResult(null);
       setIsGeneratingDeployment(true);
-      clearDockerfileDownloads();
       clearRuntimeArtifactDownloads();
       clearYamlDownload();
       clearDeploymentBundleDownload();
 
-      const dockerfile_json = await generateDockerfiles();
+      const dockerfile_json = await prepareDeploymentRuntime();
 
       const dockerfiles = dockerfile_json?.dockerfiles ?? [];
       if (!Array.isArray(dockerfiles) || dockerfiles.length === 0) {
-        throw new Error("No Dockerfiles were generated (dockerfiles array is empty).");
+        throw new Error("No deterministic deployment build definitions were generated.");
       }
-
-      const links: DockerfileDownload[] = dockerfiles.map(
-        (df, idx: number) => {
-          const name = df?.dockerfile_filename || `Dockerfile_${idx + 1}`;
-          const blob = new Blob([df?.content ?? ""], { type: "text/plain;charset=utf-8" });
-          const url = URL.createObjectURL(blob);
-          return { name, url };
-        }
-      );
 
       const runtimeLinks = (dockerfile_json.runtime_artifacts ?? []).flatMap((artifact) =>
         (artifact.files ?? [])
@@ -501,26 +604,22 @@ export function Sidebar({
         : null;
       const bundleBlob = await buildDeploymentZip(bundledFiles);
       const bundleUrl = URL.createObjectURL(bundleBlob);
-      const targetName = [
-        deploymentTargets.argo ? "argo" : "",
-        deploymentTargets.dagster ? "dagster" : "",
-      ].filter(Boolean).join("-");
 
-      setDockerfileDownloads(links);
       setRuntimeArtifactDownloads(deploymentRuntimeLinks.length > 0 ? deploymentRuntimeLinks : runtimeLinks);
       setYamlDownload(yamlDownloadLink);
       setDeploymentValidationReport(bundle.validation_report || null);
       setDeploymentRepairReport(bundle.repair_report || null);
+      setPipelineRunResult(bundle.run || null);
       setDeploymentBundleDownload({
-        name: `inlumen-${targetName || "deployment"}-artifacts-${Date.now()}.zip`,
+        name: `inlumen-runnable-bundle-${Date.now()}.zip`,
         url: bundleUrl,
       });
     } catch (e: unknown) {
-      clearDockerfileDownloads();
       clearRuntimeArtifactDownloads();
       clearDeploymentBundleDownload();
       setDeploymentValidationReport(null);
       setDeploymentRepairReport(null);
+      setPipelineRunResult(null);
       console.error("[Sidebar.tsx] Generate deployment artifacts error:", e);
       setDeploymentError(errorToMessage(e, "Failed to generate deployment artifacts."));
     } finally {
@@ -534,11 +633,8 @@ export function Sidebar({
     ...overviewData,
   } as PipelineOverview;
   const isMainVersion = activeVersionUid === MAIN_PIPELINE_VERSION_UID;
-  const deploymentButtonLabel = deploymentValidationMode === "repair"
-    ? "Generate, Repair & Validate"
-    : deploymentValidationMode === "validate"
-      ? "Generate & Validate"
-      : "Generate Deployment Artifacts";
+  const deploymentButtonLabel = "Build bundle";
+  const runtimeArtifactGroups = groupRuntimeArtifactDownloads(runtimeArtifactDownloads);
 
   useEffect(() => {
     setOverviewVersionDraft(overview?.version ?? "");
@@ -592,7 +688,8 @@ export function Sidebar({
   };
 
   return (
-    <div className={cn("w-64 border-r border-border bg-card flex flex-col", className)}>
+    <>
+    <div className={cn("flex w-64 min-w-0 flex-col overflow-hidden border-r border-border bg-card", className)}>
       <Tabs value={activeTab} onValueChange={onTabChange} className="w-full">
         <TabsList className="grid h-12 w-full grid-cols-3 rounded-none border-b border-border p-1">
           <TabsTrigger value="lab" className="min-w-0 gap-1 px-1.5 text-xs">
@@ -610,13 +707,13 @@ export function Sidebar({
         </TabsList>
       </Tabs>
 
-      <ScrollArea className="flex-1 px-4">
+      <ScrollArea className="min-w-0 flex-1 px-3">
         {activeTab === "lab" && (
           <div className="py-4 space-y-6">
             <div>
               <h3 className="text-sm font-medium mb-3 flex items-center gap-2">
                 <Plus className="w-4 h-4" />
-                Node Types
+                Pipeline Components
               </h3>
               <div className="space-y-5">
                 {groupNodeDefinitions(nodeDefinitions).map(([family, definitions]) => (
@@ -652,6 +749,76 @@ export function Sidebar({
                     })}
                   </div>
                 ))}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      Reusable pipelines
+                    </p>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-[11px]"
+                      onClick={() => setIsReusablePipelineManagerOpen(true)}
+                    >
+                      Manage
+                    </Button>
+                  </div>
+                  {reusablePipelineError && (
+                    <p className="rounded-md border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-700 dark:text-amber-300">
+                      {reusablePipelineError}
+                    </p>
+                  )}
+                  {reusablePipelines.length === 0 && !reusablePipelineError && (
+                    <p className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">
+                      Saved reusable pipelines appear here. Use Manage to save the current canvas.
+                    </p>
+                  )}
+                  {reusablePipelines.flatMap((pipeline) => pipeline.versions.map((version) => {
+                    const definition = {
+                      label: pipeline.name,
+                      description: pipeline.description || `Pinned reusable pipeline · ${version.name}`,
+                      type: "subpipeline" as const,
+                      definition_id: "core.subpipeline",
+                      definition_version: 1,
+                      implementation: {},
+                      template_label: "Subpipeline",
+                      template: { id: "core.subpipeline", name: "Subpipeline" },
+                      ports: publicPortsForSubpipeline({ interface: version.interface }),
+                      param: {},
+                      configuration_status: "valid" as const,
+                      subpipeline: {
+                        version: 2,
+                        reference: {
+                          pipeline_uid: pipeline.uid,
+                          pipeline_name: pipeline.name,
+                          version_uid: version.uid,
+                          version_name: version.name,
+                        },
+                        interface: version.interface,
+                        expanded: false,
+                      },
+                    };
+                    return (
+                      <div
+                        key={`${pipeline.uid}::${version.uid}`}
+                        draggable
+                        onDragStart={(event) => onDragStart(event, { type: "custom", data: definition })}
+                        className="flex cursor-move items-start gap-3 rounded-md border border-cyan-400/20 p-2.5 transition-colors hover:bg-muted/50"
+                      >
+                        <div className="rounded-md bg-cyan-500/10 p-1.5 text-cyan-600 dark:text-cyan-300">
+                          <LayoutGrid className="h-4 w-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <h4 className="truncate text-sm font-medium">{pipeline.name}</h4>
+                          <p className="mt-0.5 text-xs text-muted-foreground">
+                            {version.name} · {version.interface.inputs.length} in / {version.interface.outputs.length} out
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  }))}
+                </div>
               </div>
             </div>
           </div>
@@ -753,83 +920,17 @@ export function Sidebar({
         )}
 
         {activeTab === "simulate" && (
-          <div className="py-4 space-y-4">
-            {/* Deployment artifacts */}
-            <div className="p-4 border rounded-lg border-border">
-              <h3 className="text-sm font-medium mb-2">Generate Deployment Artifacts</h3>
+          <div className="w-full min-w-0 max-w-full space-y-4 overflow-hidden py-4">
+            <div className="min-w-0 overflow-hidden rounded-lg border border-border p-3">
+              <h3 className="text-sm font-medium mb-2">Build runnable bundle</h3>
               <p className="text-xs text-muted-foreground mb-3">
-                Builds from the scripts and input files attached to each node.
+                Package the current Sources, Tasks, Destinations, flow logic, uploaded code, generated code, dependencies, connectors, and model requirements into a complete local project. This does not generate Task code.
               </p>
-
-              <div className="mb-3 rounded-md border border-border bg-muted/20 p-2">
-                <div className="mb-2 text-xs font-medium">Deployment target</div>
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <input
-                    type="checkbox"
-                    checked={deploymentTargets.argo}
-                    onChange={(event) =>
-                      setDeploymentTargets((current) => ({
-                        ...current,
-                        argo: event.target.checked,
-                      }))
-                    }
-                  />
-                  <span>Argo Workflow</span>
-                </label>
-                <label className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
-                  <input
-                    type="checkbox"
-                    checked={deploymentTargets.dagster}
-                    onChange={(event) =>
-                      setDeploymentTargets((current) => ({
-                        ...current,
-                        dagster: event.target.checked,
-                      }))
-                    }
-                  />
-                  <span>Dagster project</span>
-                </label>
-              </div>
-
-              <div className="mb-3 rounded-md border border-border bg-muted/20 p-2">
-                <div className="mb-2 flex items-center gap-2 text-xs font-medium">
-                  <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                  Deployment validation
-                </div>
-                <div className="grid grid-cols-3 gap-1">
-                  {([
-                    ["fast", "Fast"],
-                    ["validate", "Validate"],
-                    ["repair", "Repair"],
-                  ] as const).map(([mode, label]) => (
-                    <button
-                      key={mode}
-                      type="button"
-                      onClick={() => setDeploymentValidationMode(mode)}
-                      className={cn(
-                        "rounded-md border px-2 py-1.5 text-xs transition-colors",
-                        deploymentValidationMode === mode
-                          ? "border-primary bg-primary/15 text-primary"
-                          : "border-border bg-background text-muted-foreground hover:bg-muted",
-                      )}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  {deploymentValidationMode === "repair"
-                    ? "Normalize the bundle layout, then validate before download."
-                    : deploymentValidationMode === "validate"
-                      ? "Validate contracts and materialize selected Dagster assets before download."
-                      : "Validate bundle structure, required inputs, contracts, paths, sizes, and checksums without installing or materializing targets."}
-                </p>
-              </div>
 
               <Button
                 className="h-auto min-h-10 w-full whitespace-normal px-3 py-2 text-center leading-snug"
                 onClick={handleGenerateDeploymentArtifacts}
-                disabled={isGeneratingDeployment || (!deploymentTargets.argo && !deploymentTargets.dagster)}
+                disabled={isGeneratingDeployment}
               >
                 {isGeneratingDeployment ? "Generating..." : deploymentButtonLabel}
               </Button>
@@ -853,6 +954,17 @@ export function Sidebar({
                 </div>
               )}
 
+              {pipelineRunResult && (
+                <div className="mt-3 rounded-md border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs">
+                  <div className="font-medium text-emerald-300">
+                    Bundle check {pipelineRunResult.status || "completed"}
+                  </div>
+                  <div className="mt-1 text-muted-foreground">
+                    Run {String(pipelineRunResult.run_id || "").slice(0, 8)} · {pipelineRunResult.package_manager || "uv"} · {pipelineRunResult.outputs?.length || 0} output files
+                  </div>
+                </div>
+              )}
+
               {deploymentRepairReport && (
                 <div className="mt-3 rounded-md border border-border bg-muted/20 p-2 text-xs">
                   <div className="font-medium">
@@ -867,99 +979,86 @@ export function Sidebar({
               )}
 
               {deploymentBundleDownload && (
-                <div className="mt-4">
-                  <div className="text-xs font-medium mb-2">Deployment Bundle</div>
+                <div className="mt-4 min-w-0">
+                  <div className="mb-2 text-xs font-medium">Runnable bundle</div>
                   <a
                     href={deploymentBundleDownload.url}
                     download={deploymentBundleDownload.name}
-                    className="flex items-center gap-2 text-xs underline"
+                    title={deploymentBundleDownload.name}
+                    className="flex w-full min-w-0 items-center justify-center gap-2 overflow-hidden rounded-md border border-border bg-background px-2 py-2 text-xs font-medium hover:bg-muted"
                   >
-                    <Download className="w-3.5 h-3.5" />
-                    <span className="truncate">{deploymentBundleDownload.name}</span>
+                    <Download className="h-3.5 w-3.5 shrink-0" />
+                    <span className="min-w-0 truncate">Download bundle</span>
                   </a>
                   <Button
                     variant="outline"
                     size="sm"
-                    className="mt-3 w-full"
+                    className="mt-2 h-auto w-full whitespace-normal px-2 py-1.5 text-xs"
                     onClick={clearDeploymentBundleDownload}
                   >
-                    Clear Bundle Link
-                  </Button>
-                </div>
-              )}
-
-              {dockerfileDownloads.length > 0 && (
-                <div className="mt-4">
-                  <div className="text-xs font-medium mb-2">Dockerfile Downloads</div>
-                  <div className="space-y-1">
-                    {dockerfileDownloads.map((d) => (
-                      <a
-                        key={d.url}
-                        href={d.url}
-                        download={d.name}
-                        className="flex items-center gap-2 text-xs underline"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                        <span className="truncate">{d.name}</span>
-                      </a>
-                    ))}
-                  </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="mt-3 w-full"
-                    onClick={clearDockerfileDownloads}
-                  >
-                    Clear Dockerfile Links
+                    Remove bundle link
                   </Button>
                 </div>
               )}
 
               {runtimeArtifactDownloads.length > 0 && (
-                <div className="mt-4">
-                  <div className="text-xs font-medium mb-2">Runtime Artifact Downloads</div>
-                  <div className="space-y-1">
-                    {runtimeArtifactDownloads.map((download) => (
-                      <a
-                        key={download.url}
-                        href={download.url}
-                        download={download.name}
-                        className="flex items-center gap-2 text-xs underline"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                        <span className="truncate">{download.name}</span>
-                      </a>
+                <details className="mt-3 min-w-0 rounded-md border border-border">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-2 py-2 text-xs font-medium [&::-webkit-details-marker]:hidden">
+                    <span>Runtime files</span>
+                    <span className="shrink-0 text-muted-foreground">{runtimeArtifactDownloads.length}</span>
+                  </summary>
+                  <div className="min-w-0 space-y-1 border-t border-border p-2">
+                    {runtimeArtifactGroups.map((group) => (
+                      <div key={group.key} className="min-w-0 rounded-md bg-muted/30 p-1.5">
+                        <div className="truncate text-[10px] font-semibold uppercase tracking-wide text-muted-foreground" title={group.label}>
+                          {group.label}
+                        </div>
+                        <div className="mt-1 min-w-0 space-y-1">
+                          {group.downloads.map((download) => (
+                            <a
+                              key={download.url}
+                              href={download.url}
+                              download={download.name}
+                              title={download.name}
+                              className="flex min-w-0 items-center gap-2 overflow-hidden text-xs underline"
+                            >
+                              <Download className="h-3.5 w-3.5 shrink-0" />
+                              <span className="min-w-0 truncate">{download.displayName}</span>
+                            </a>
+                          ))}
+                        </div>
+                      </div>
                     ))}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="mt-2 h-auto w-full whitespace-normal px-2 py-1.5 text-xs"
+                      onClick={clearRuntimeArtifactDownloads}
+                    >
+                      Remove runtime links
+                    </Button>
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="mt-3 w-full"
-                    onClick={clearRuntimeArtifactDownloads}
-                  >
-                    Clear Runtime Artifact Links
-                  </Button>
-                </div>
+                </details>
               )}
 
               {yamlDownload && (
-                <div className="mt-4">
-                  <div className="text-xs font-medium mb-2">YAML Download</div>
+                <div className="mt-3 min-w-0">
                   <a
                     href={yamlDownload.url}
                     download={yamlDownload.name}
-                    className="flex items-center gap-2 text-xs underline"
+                    title={yamlDownload.name}
+                    className="flex w-full min-w-0 items-center justify-center gap-2 overflow-hidden rounded-md border border-border bg-background px-2 py-2 text-xs font-medium hover:bg-muted"
                   >
-                    <Download className="w-3.5 h-3.5" />
-                    <span className="truncate">{yamlDownload.name}</span>
+                    <Download className="h-3.5 w-3.5 shrink-0" />
+                    <span className="min-w-0 truncate">Download Argo YAML</span>
                   </a>
                   <Button
                     variant="outline"
                     size="sm"
-                    className="mt-3 w-full"
+                    className="mt-2 h-auto w-full whitespace-normal px-2 py-1.5 text-xs"
                     onClick={clearYamlDownload}
                   >
-                    Clear YAML Link
+                    Remove YAML link
                   </Button>
                 </div>
               )}
@@ -968,5 +1067,16 @@ export function Sidebar({
         )}
       </ScrollArea>
     </div>
+    <ReusablePipelineManagerDialog
+      open={isReusablePipelineManagerOpen}
+      pipelines={reusablePipelines}
+      onOpenChange={setIsReusablePipelineManagerOpen}
+      onRefresh={refreshReusablePipelineCatalog}
+      getCurrentGraph={getCurrentPipelineGraph}
+      replaceCurrentGraph={replaceCurrentPipelineGraph}
+      currentPipelineName={currentPipelineName}
+      currentPipelineDescription={currentPipelineDescription}
+    />
+    </>
   );
 }

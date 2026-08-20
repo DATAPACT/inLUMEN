@@ -10,6 +10,9 @@ from runtime_config import add_cors_headers
 
 app = Flask(__name__)
 
+WORKSPACE_BUCKET_PREFIXES = ("files-step-id-",)
+WORKSPACE_BUCKET_NAMES = {"pipeline-version-file-snapshots"}
+
 
 # Apply the CORS function to all routes using the after_request decorator
 @app.after_request
@@ -141,6 +144,44 @@ def minio_clear_bucket():
     except Exception as e:
         return jsonify({'status': 500, 'error': 'Failed to remove bucket from MinIO', 'details': str(e)}), 500
     return jsonify({'status': 200, 'clear_date':now.strftime("%Y-%m-%d %H:%M:%S")})
+
+
+def _workspace_bucket_names(client) -> list[str]:
+    return sorted(
+        bucket.name
+        for bucket in client.list_buckets()
+        if bucket.name in WORKSPACE_BUCKET_NAMES
+        or bucket.name.startswith(WORKSPACE_BUCKET_PREFIXES)
+    )
+
+
+def _remove_bucket_strict(client, bucket_name: str) -> None:
+    for item in client.list_objects(bucket_name, recursive=True):
+        client.remove_object(bucket_name, item.object_name)
+    client.remove_bucket(bucket_name)
+
+
+@app.route('/minio_clear_workspace', methods=['DELETE', 'OPTIONS'])
+@require_auth
+def minio_clear_workspace():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    client = get_minio_client()
+    deleted_buckets = []
+    failures = []
+    for bucket_name in _workspace_bucket_names(client):
+        try:
+            _remove_bucket_strict(client, bucket_name)
+            deleted_buckets.append(bucket_name)
+        except Exception as exc:
+            failures.append({"bucket": bucket_name, "error": str(exc)})
+    payload = {
+        "status": "ok" if not failures else "partial",
+        "deleted_buckets": deleted_buckets,
+        "deleted_bucket_count": len(deleted_buckets),
+        "failures": failures,
+    }
+    return jsonify(payload), 200 if not failures else 500
 
 @app.route('/minio_local_download', methods=['GET'])
 @require_auth

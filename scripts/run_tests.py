@@ -20,11 +20,19 @@ class Check:
     name: str
     command: tuple[str, ...]
     cwd: Path
+    environment: dict[str, str] | None = None
 
 
 def executable(name: str) -> str:
     candidate = f"{name}.cmd" if os.name == "nt" else name
     return shutil.which(candidate) or candidate
+
+
+def project_python(project: Path) -> str:
+    """Prefer a component's managed virtualenv when it is available locally."""
+    relative = Path("Scripts/python.exe") if os.name == "nt" else Path("bin/python")
+    candidate = project / ".venv" / relative
+    return str(candidate) if candidate.is_file() else sys.executable
 
 
 def checks_for(component: str) -> list[Check]:
@@ -46,24 +54,6 @@ def checks_for(component: str) -> list[Check]:
                 ROOT / "backend",
             )
         ]
-    if component == "deployment-validation":
-        return [
-            Check(
-                "deployment validation tests",
-                (
-                    sys.executable,
-                    "-m",
-                    "unittest",
-                    "discover",
-                    "-s",
-                    "tests",
-                    "-p",
-                    "test_*.py",
-                    "-v",
-                ),
-                ROOT / "deployment_validation",
-            )
-        ]
     if component == "frontend":
         npm = executable("npm")
         return [
@@ -71,6 +61,15 @@ def checks_for(component: str) -> list[Check]:
             Check("frontend lint", (npm, "run", "lint"), ROOT / "frontend"),
             Check("frontend type check", (npm, "run", "typecheck"), ROOT / "frontend"),
             Check("frontend production build", (npm, "run", "build"), ROOT / "frontend"),
+        ]
+    if component == "codegen":
+        codegen_root = ROOT / "codegen"
+        return [
+            Check(
+                "code generation service tests",
+                (project_python(codegen_root), "-m", "pytest", "tests"),
+                codegen_root,
+            )
         ]
     if component == "compose":
         docker = executable("docker")
@@ -91,6 +90,9 @@ def checks_for(component: str) -> list[Check]:
                     "--quiet",
                 ),
                 ROOT,
+                environment={
+                    "INLUMEN_CODEGEN_SERVICE_API_KEY": "compose-validation-token",
+                },
             ),
         ]
     raise ValueError(f"Unknown test component: {component}")
@@ -101,7 +103,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--component",
         action="append",
-        choices=("backend", "deployment-validation", "frontend", "compose"),
+        choices=("backend", "codegen", "frontend", "compose"),
         help="Run only this component. Repeat the option to select more than one.",
     )
     return parser.parse_args()
@@ -111,7 +113,7 @@ def main() -> int:
     args = parse_args()
     components = args.component or [
         "backend",
-        "deployment-validation",
+        "codegen",
         "frontend",
         "compose",
     ]
@@ -121,7 +123,14 @@ def main() -> int:
         for check in checks_for(component):
             print(f"\n=== {check.name} ===", flush=True)
             try:
-                result = subprocess.run(check.command, cwd=check.cwd, check=False)
+                environment = os.environ.copy()
+                environment.update(check.environment or {})
+                result = subprocess.run(
+                    check.command,
+                    cwd=check.cwd,
+                    check=False,
+                    env=environment,
+                )
             except FileNotFoundError as error:
                 print(f"Unable to start {check.command[0]}: {error}", file=sys.stderr)
                 failures.append(check.name)

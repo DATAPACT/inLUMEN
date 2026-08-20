@@ -1,10 +1,9 @@
-import { Edge, Node } from 'reactflow';
+import { Connection, Edge, Node } from 'reactflow';
 import { apiFetch } from '@/utils/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
 import {
-  ChatbotConfig,
   buildCodegenLLMRequestConfig,
-  buildLLMRequestConfig,
+  ChatbotConfig,
 } from '@/services/chatbotService';
 import {
   normalizeType,
@@ -52,6 +51,7 @@ export type PipelineWorkspaceClearResult = {
   deleted_step_flow_ids?: string[];
   deleted_version_uids?: string[];
   deleted_version_count?: number;
+  deleted_entity_count?: number;
   deleted_provenance_event_count?: number;
   provenance_cleared?: boolean;
   version: PipelineVersionSummary;
@@ -68,10 +68,53 @@ export type PipelineOverviewMetadata = {
   updated_at?: string | null;
 };
 
-export type PipelineScriptGenerationMode = "fast" | "generic" | "full";
+export type PipelineScriptGenerationMode = "draft" | "validated";
+export type PipelineScriptGenerationScope = "missing_changed" | "selected" | "all";
+
+export type PipelineGenerationPreflightNode = {
+  flow_id: string;
+  label: string;
+  type?: string;
+  runtime_status: "missing" | "current" | "stale" | "invalid" | "manual" | "modified";
+  ownership: "none" | "generated" | "user";
+  reusable: boolean;
+  code_files?: string[];
+  validation_status?: string;
+};
+
+export type PipelineGenerationPreflight = {
+  scope: PipelineScriptGenerationScope;
+  nodes: PipelineGenerationPreflightNode[];
+  node_count: number;
+  target_flow_ids: string[];
+  target_count: number;
+  selected_flow_ids: string[];
+  reusable_flow_ids: string[];
+  reused_count: number;
+  replacement_flow_ids: string[];
+  replacement_count: number;
+  protected_flow_ids: string[];
+  protected_count: number;
+  requires_full_generation?: boolean;
+  candidate_flow_ids?: string[];
+  candidate_count?: number;
+  sample_data: {
+    has_sample_data?: boolean;
+    sample_file_count?: number;
+    sample_nodes?: Array<{
+      flow_id?: string;
+      label?: string;
+      type?: string;
+      files?: Array<{ filename?: string; kind?: string; format?: string }>;
+    }>;
+  };
+};
 
 export type PipelineScriptGenerationOptions = {
   mode?: PipelineScriptGenerationMode;
+  scope?: PipelineScriptGenerationScope;
+  selectedFlowIds?: string[];
+  overwriteManualCode?: boolean;
   includeSampleData?: boolean;
   validationMode?: "static" | "unit" | "edge" | "pipeline_sample";
   generationStrategy?: "auto" | "single_pass" | "per_node";
@@ -99,6 +142,19 @@ export type PipelineGenerationRun = {
   steps?: PipelineGenerationRunStep[];
   errors?: string[];
   warnings?: string[];
+  stage_timings_ms?: Record<string, number>;
+  current_stage?: string;
+  stage_started_at?: string | null;
+  progress_updated_at?: string | null;
+  progress_revision?: number;
+  generation_usage?: {
+    request_count?: number;
+    usage_reported_count?: number;
+    prompt_tokens?: number | null;
+    completion_tokens?: number | null;
+    total_tokens?: number | null;
+    cost_usd?: number | null;
+  } | null;
 };
 
 export type PipelineGenerationJob = {
@@ -110,6 +166,11 @@ export type PipelineGenerationJob = {
   result?: unknown;
   error?: string | null;
   mode?: string;
+  generation_scope?: PipelineScriptGenerationScope;
+  target_flow_ids?: string[];
+  reusable_flow_ids?: string[];
+  preflight?: PipelineGenerationPreflight;
+  model?: { provider?: string; model?: string };
   data_awareness?: {
     has_sample_data?: boolean;
     sample_file_count?: number;
@@ -121,6 +182,8 @@ export type PipelineGenerationJob = {
     result?: unknown;
     warning?: string;
   };
+  created_at?: string | null;
+  updated_at?: string | null;
 };
 
 export type ExternalRuntimePrompt = {
@@ -169,7 +232,11 @@ export const updateNodePositionInBackend = async (node: Node) => {
   }
 };
 
-export const addEdgeToBackend = async (sourceNode: Node, targetNode: Node) => {
+export const addEdgeToBackend = async (
+  sourceNode: Node,
+  targetNode: Node,
+  connection?: Pick<Edge, "sourceHandle" | "targetHandle"> | Connection,
+) => {
   try {
     const response = await apiFetch(`${INLUMEN_API_URL}/api/graph/edges`, {
       method: 'POST',
@@ -178,6 +245,8 @@ export const addEdgeToBackend = async (sourceNode: Node, targetNode: Node) => {
         properties: {
           flow_id_source: sourceNode.id,
           flow_id_target: targetNode.id,
+          source_port: connection?.sourceHandle ?? null,
+          target_port: connection?.targetHandle ?? null,
         },
       }),
     });
@@ -190,25 +259,34 @@ export const addEdgeToBackend = async (sourceNode: Node, targetNode: Node) => {
   }
 };
 
-export const deleteEdgeFromBackend = async (sourceNode: Node, targetNode: Node) => {
-  try {
-    const response = await apiFetch(`${INLUMEN_API_URL}/api/graph/edges`, {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        properties: {
-          flow_id_source: sourceNode.id,
-          flow_id_target: targetNode.id,
-        },
-      }),
-    });
+export const deleteEdgeFromBackend = async (
+  sourceNode: Node,
+  targetNode: Node,
+  connection?: Pick<Edge, "sourceHandle" | "targetHandle">,
+) => {
+  const response = await apiFetch(`${INLUMEN_API_URL}/api/graph/edges`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      properties: {
+        flow_id_source: sourceNode.id,
+        flow_id_target: targetNode.id,
+        source_port: connection?.sourceHandle ?? null,
+        target_port: connection?.targetHandle ?? null,
+      },
+    }),
+  });
 
-    if (!response.ok) throw new Error('Failed to delete edge');
-    const result = await response.json();
-    console.log("[flowPersistence.ts] Graph deleting edge:", result);
-  } catch (err) {
-    console.error("[flowPersistence.ts] Graph delete edge error:", err);
+  if (!response.ok) {
+    const message = await response.text().catch(() => "");
+    throw new Error(message || 'Failed to delete edge');
   }
+  const result = await response.json();
+  if (Number(result?.deleted_count) < 1) {
+    throw new Error("The backend did not find the selected connection.");
+  }
+  console.log("[flowPersistence.ts] Graph deleting edge:", result);
+  return result;
 };
 
 export const deleteNodeFromBackend = async (nodeId: string) => {
@@ -512,7 +590,7 @@ export const rebuildBackendFromFlow = async (
       );
       continue;
     }
-    await addEdgeToBackend(sourceNode, targetNode);
+    await addEdgeToBackend(sourceNode, targetNode, edge);
   }
 };
 
@@ -520,20 +598,50 @@ const buildPipelineGenerationPayload = (
   activeChatbotConfig?: ChatbotConfig,
   options: PipelineScriptGenerationOptions = {},
 ) => {
-  let llm_config: ReturnType<typeof buildLLMRequestConfig> | undefined;
-  if (activeChatbotConfig) {
-    llm_config = buildCodegenLLMRequestConfig(activeChatbotConfig);
+  if (!activeChatbotConfig) {
+    throw new Error("Select an LLM configuration before generating code.");
   }
   return {
+    llm_config: buildCodegenLLMRequestConfig(activeChatbotConfig),
     include_sample_data: options.includeSampleData ?? true,
     validation_mode: options.validationMode ?? "pipeline_sample",
     generation_strategy: options.generationStrategy ?? "auto",
-    generation_mode: options.mode ?? "full",
+    generation_mode: options.mode ?? "validated",
+    generation_scope: options.scope ?? "missing_changed",
+    selected_flow_ids: options.selectedFlowIds ?? [],
+    overwrite_manual_code: options.overwriteManualCode ?? false,
     allow_deterministic_fallback: options.allowDeterministicFallback ?? false,
     repair_attempts: options.repairAttempts ?? 7,
     high_level_prompt: options.userInstruction?.trim() || "",
-    ...(llm_config ? { llm_config } : {}),
   };
+};
+
+export const preparePipelineScriptGeneration = async (
+  options: Pick<
+    PipelineScriptGenerationOptions,
+    "scope" | "selectedFlowIds"
+  > = {},
+): Promise<PipelineGenerationPreflight> => {
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/pipeline/generation-preflight`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        generation_scope: options.scope ?? "missing_changed",
+        selected_flow_ids: options.selectedFlowIds ?? [],
+      }),
+    },
+  );
+  if (!response.ok) {
+    const payload = await response.json().catch(async () => ({
+      error: await response.text().catch(() => ""),
+    }));
+    throw new Error(
+      formatPipelineGenerationError(payload, response.status, response.statusText),
+    );
+  }
+  return response.json();
 };
 
 export const prepareExternalRuntimePrompt = async (
@@ -620,6 +728,48 @@ export const startPipelineScriptGenerationRun = async (
   return response.json();
 };
 
+export const listPipelineScriptGenerationRuns = async (
+  limit = 20,
+): Promise<PipelineGenerationJob[]> => {
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/pipeline/generation-runs?limit=${encodeURIComponent(limit)}`,
+    { method: "GET" },
+  );
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(async () => ({
+      error: await response.text().catch(() => ""),
+    }));
+    throw new Error(
+      formatPipelineGenerationError(
+        errorPayload,
+        response.status,
+        response.statusText,
+      ),
+    );
+  }
+  const payload = await response.json().catch(() => ({ runs: [] }));
+  return Array.isArray(payload?.runs) ? payload.runs : [];
+};
+
+export const clearPipelineScriptGenerationRuns = async (): Promise<void> => {
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/pipeline/generation-runs`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(async () => ({
+      error: await response.text().catch(() => ""),
+    }));
+    throw new Error(
+      formatPipelineGenerationError(
+        errorPayload,
+        response.status,
+        response.statusText,
+      ),
+    );
+  }
+};
+
 export const fetchPipelineScriptGenerationRun = async (
   runId: string,
 ): Promise<PipelineGenerationJob> => {
@@ -675,9 +825,9 @@ export const resumePipelineScriptGenerationRun = async (
     userInstruction?: string;
   } = {},
 ): Promise<PipelineGenerationJob> => {
-  const llm_config = activeChatbotConfig
-    ? buildCodegenLLMRequestConfig(activeChatbotConfig)
-    : undefined;
+  if (!activeChatbotConfig) {
+    throw new Error("Select an LLM configuration before repairing generated code.");
+  }
   const response = await apiFetch(
     `${INLUMEN_API_URL}/api/pipeline/generation-runs/${encodeURIComponent(runId)}/resume`,
     {
@@ -686,10 +836,10 @@ export const resumePipelineScriptGenerationRun = async (
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
+        llm_config: buildCodegenLLMRequestConfig(activeChatbotConfig),
         flow_id: options.flowId || "",
         repair_attempts: options.repairAttempts ?? 7,
         user_instruction: options.userInstruction || "",
-        ...(llm_config ? { llm_config } : {}),
       }),
     },
   );

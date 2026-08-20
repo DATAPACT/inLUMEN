@@ -1,6 +1,0 @@
-.venv/
-.inlumen_dagster_validation_venv/
-__pycache__/
-*.py[cod]
-*.egg-info/
-.dagster_home/

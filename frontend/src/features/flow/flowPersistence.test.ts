@@ -1,0 +1,228 @@
+import type { Edge, Node } from "reactflow";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+describe("edge persistence", () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.stubEnv("VITE_AUTH_ENABLED", "false");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    globalThis.fetch = originalFetch;
+  });
+
+  it("sends the displayed port identity when deleting a connection", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      deleted_count: 1,
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    globalThis.fetch = fetchMock;
+    const { deleteEdgeFromBackend } = await import("@/features/flow/flowPersistence");
+    const source = { id: "source" } as Node;
+    const target = { id: "target" } as Node;
+    const edge = { sourceHandle: "file", targetHandle: "input" } as Edge;
+
+    await deleteEdgeFromBackend(source, target, edge);
+
+    const [, request] = fetchMock.mock.calls[0];
+    expect(request.method).toBe("DELETE");
+    expect(JSON.parse(request.body)).toEqual({
+      properties: {
+        flow_id_source: "source",
+        flow_id_target: "target",
+        source_port: "file",
+        target_port: "input",
+      },
+    });
+  });
+
+  it("surfaces backend deletion failures so the canvas can recover", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response("legacy edge was not deleted", {
+      status: 500,
+    }));
+    const { deleteEdgeFromBackend } = await import("@/features/flow/flowPersistence");
+
+    await expect(deleteEdgeFromBackend(
+      { id: "source" } as Node,
+      { id: "target" } as Node,
+      { sourceHandle: "file", targetHandle: "input" } as Edge,
+    )).rejects.toThrow("legacy edge was not deleted");
+  });
+
+  it("rejects a successful response that removed no connection", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      deleted_count: 0,
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    const { deleteEdgeFromBackend } = await import("@/features/flow/flowPersistence");
+
+    await expect(deleteEdgeFromBackend(
+      { id: "source" } as Node,
+      { id: "target" } as Node,
+      { sourceHandle: "file", targetHandle: "input" } as Edge,
+    )).rejects.toThrow("did not find the selected connection");
+  });
+});
+
+describe("background code generation", () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.stubEnv("VITE_AUTH_ENABLED", "false");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    globalThis.fetch = originalFetch;
+  });
+
+  it("lists durable runs that can be reattached after a reload", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      runs: [{ run_id: "run-1", status: "running" }],
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    globalThis.fetch = fetchMock;
+    const { listPipelineScriptGenerationRuns } = await import(
+      "@/features/flow/flowPersistence"
+    );
+
+    await expect(listPipelineScriptGenerationRuns(5)).resolves.toEqual([
+      { run_id: "run-1", status: "running" },
+    ]);
+    expect(fetchMock.mock.calls[0][0]).toContain(
+      "/api/pipeline/generation-runs?limit=5",
+    );
+  });
+
+  it("clears durable generation history through the collection endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      status: "cleared",
+      deleted_count: 3,
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    globalThis.fetch = fetchMock;
+    const { clearPipelineScriptGenerationRuns } = await import(
+      "@/features/flow/flowPersistence"
+    );
+
+    await clearPipelineScriptGenerationRuns();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toContain(
+      "/api/pipeline/generation-runs",
+    );
+    expect(fetchMock.mock.calls[0][1].method).toBe("DELETE");
+  });
+
+  it("sends the dedicated code model instead of the chat model", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      run_id: "run-code",
+      status: "queued",
+    }), {
+      status: 202,
+      headers: { "Content-Type": "application/json" },
+    }));
+    globalThis.fetch = fetchMock;
+    const { startPipelineScriptGenerationRun } = await import(
+      "@/features/flow/flowPersistence"
+    );
+
+    await startPipelineScriptGenerationRun({
+      name: "Split models",
+      provider: "openrouter",
+      model: "openai/gpt-oss-120b",
+      codegenModel: "openai/gpt-5.2-codex",
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "provider-secret",
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.llm_config.model).toBe("openai/gpt-5.2-codex");
+    expect(body.llm_config.model).not.toBe("openai/gpt-oss-120b");
+    expect(body.llm_config.api_key).toBe("provider-secret");
+  });
+
+  it("sends incremental scope and overwrite safeguards with a generation run", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      run_id: "run-scoped",
+      status: "queued",
+    }), {
+      status: 202,
+      headers: { "Content-Type": "application/json" },
+    }));
+    globalThis.fetch = fetchMock;
+    const { startPipelineScriptGenerationRun } = await import(
+      "@/features/flow/flowPersistence"
+    );
+
+    await startPipelineScriptGenerationRun({
+      name: "Code model",
+      provider: "openrouter",
+      model: "openai/gpt-oss-120b",
+      codegenModel: "openai/gpt-5.2-codex",
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "provider-secret",
+    }, {
+      mode: "draft",
+      scope: "selected",
+      selectedFlowIds: ["task-2"],
+      overwriteManualCode: true,
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.generation_scope).toBe("selected");
+    expect(body.selected_flow_ids).toEqual(["task-2"]);
+    expect(body.overwrite_manual_code).toBe(true);
+    expect(body).not.toHaveProperty("checkpoint_version_uid");
+  });
+
+  it("requests a pipeline generation preflight for the selected scope", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      scope: "selected",
+      nodes: [],
+      node_count: 1,
+      target_flow_ids: ["task-2"],
+      target_count: 1,
+      selected_flow_ids: ["task-2"],
+      reusable_flow_ids: [],
+      reused_count: 0,
+      replacement_flow_ids: [],
+      replacement_count: 0,
+      protected_flow_ids: [],
+      protected_count: 0,
+      sample_data: {},
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    globalThis.fetch = fetchMock;
+    const { preparePipelineScriptGeneration } = await import(
+      "@/features/flow/flowPersistence"
+    );
+
+    await preparePipelineScriptGeneration({
+      scope: "selected",
+      selectedFlowIds: ["task-2"],
+    });
+
+    expect(fetchMock.mock.calls[0][0]).toContain(
+      "/api/pipeline/generation-preflight",
+    );
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      generation_scope: "selected",
+      selected_flow_ids: ["task-2"],
+    });
+  });
+});

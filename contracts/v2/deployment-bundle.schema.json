@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inlumen:schema:deployment-bundle:1",
+  "title": "inLUMEN Deployment Bundle Manifest",
+  "type": "object",
+  "required": ["schema_version", "artifact_contract", "run_spec", "targets", "readme", "node_order", "nodes", "connections", "inputs", "outputs"],
+  "properties": {
+    "schema_version": { "const": "inlumen.deployment-bundle@1" },
+    "artifact_contract": {
+      "type": "object",
+      "required": ["schema_version", "transport", "input_environment", "output_environment", "recursive", "source_agnostic", "connector_agnostic"],
+      "properties": {
+        "schema_version": { "const": "inlumen.artifact-contract@1" },
+        "transport": { "const": "filesystem" },
+        "input_environment": { "const": "PIPELINE_INPUT_DIR" },
+        "output_environment": { "const": "PIPELINE_OUTPUT_DIR" },
+        "recursive": { "const": true },
+        "source_agnostic": { "const": true },
+        "connector_agnostic": { "const": true }
+      },
+      "additionalProperties": true
+    },
+    "run_spec": { "const": "run-spec.json" },
+    "readme": { "const": "README.md" },
+    "targets": {
+      "type": "object",
+      "required": ["argo", "dagster"],
+      "properties": { "argo": { "type": "boolean" }, "dagster": { "type": "boolean" } },
+      "additionalProperties": true
+    },
+    "node_order": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["flow_id", "path", "output_path", "parents"],
+        "properties": {
+          "flow_id": { "type": "string", "minLength": 1 },
+          "path": { "type": "string", "pattern": "^nodes/" },
+          "output_path": { "type": "string", "pattern": "^outputs/" },
+          "parents": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+        },
+        "additionalProperties": true
+      }
+    },
+    "connections": { "type": "array", "items": { "type": "object" } },
+    "inputs": {
+      "type": "object",
+      "required": ["path", "file_count", "lifecycle", "transport"],
+      "properties": {
+        "path": { "const": "inputs" },
+        "file_count": { "type": "integer", "minimum": 0 },
+        "lifecycle": { "type": "string" },
+        "transport": { "const": "filesystem" }
+      },
+      "additionalProperties": true
+    },
+    "outputs": {
+      "type": "object",
+      "required": ["path", "per_node"],
+      "properties": {
+        "path": { "const": "outputs" },
+        "per_node": { "type": "array", "items": { "type": "string", "pattern": "^outputs/" } }
+      },
+      "additionalProperties": true
+    },
+    "argo": { "type": ["object", "null"] },
+    "dagster": { "type": ["object", "null"] }
+  },
+  "additionalProperties": true
+}

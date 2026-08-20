@@ -65,3 +65,9 @@ backend/state/
 .env
 docker-compose.override.yml
 frontend/.env
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+codegen/secrets/
+codegen/state/

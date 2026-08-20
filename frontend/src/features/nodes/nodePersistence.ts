@@ -1,9 +1,14 @@
 import { apiFetch } from '@/utils/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
 import {
+  buildCodegenLLMRequestConfig,
+  ChatbotConfig,
+} from '@/services/chatbotService';
+import {
   getNodeFileBucket,
   getNodeFileName,
   NodeFileReference,
+  NodeFileRole,
 } from '@/features/nodes/nodeSchema';
 
 export const updateNodePropertiesInBackend = async (
@@ -28,10 +33,46 @@ export const updateNodePropertiesInBackend = async (
   }
 };
 
-export const uploadNodeFile = async (nodeId: string, file: File) => {
+export const fetchConfiguredNodeSecrets = async (nodeId: string) => {
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/nodes/${encodeURIComponent(nodeId)}/secrets`,
+    { method: "GET" },
+  );
+  if (!response.ok) throw new Error(`Could not read secret status (${response.status})`);
+  const payload = await response.json().catch(() => ({}));
+  return Array.isArray(payload?.configured)
+    ? payload.configured.map((name: unknown) => String(name || "").trim()).filter(Boolean)
+    : [];
+};
+
+export const storeNodeSecret = async (nodeId: string, name: string, value: string) => {
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/nodes/${encodeURIComponent(nodeId)}/secrets/${encodeURIComponent(name)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    },
+  );
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(String(payload?.error || `Could not store ${name} securely`));
+  }
+};
+
+export const deleteNodeSecret = async (nodeId: string, name: string) => {
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/nodes/${encodeURIComponent(nodeId)}/secrets/${encodeURIComponent(name)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) throw new Error(`Could not remove secret ${name} (${response.status})`);
+};
+
+export const uploadNodeFile = async (nodeId: string, file: File, role?: NodeFileRole) => {
   try {
     const form = new FormData();
     form.append("file", file);
+    if (role) form.append("role", role);
     const res = await apiFetch(`${INLUMEN_API_URL}/api/nodes/${encodeURIComponent(nodeId)}/files`, {
       method: "POST",
       body: form,
@@ -145,16 +186,22 @@ export const updateNodeTextFile = async (
 
 export const generateNodeScript = async (
   nodeId: string,
+  activeChatbotConfig?: ChatbotConfig | null,
   payload: {
-    llm_config?: Record<string, unknown>;
     user_instruction?: string;
     include_sample_data?: boolean;
   } = {},
 ) => {
+  if (!activeChatbotConfig) {
+    throw new Error("Select an LLM configuration before generating code.");
+  }
   const res = await apiFetch(`${INLUMEN_API_URL}/api/nodes/${encodeURIComponent(nodeId)}/generate-script`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      ...payload,
+      llm_config: buildCodegenLLMRequestConfig(activeChatbotConfig),
+    }),
   });
   if (!res.ok) {
     const txt = await res.text().catch(() => "");

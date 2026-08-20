@@ -10,6 +10,8 @@ export interface ChatbotConfig {
   provider: LLMProvider;
   model: string;
   codegenModel?: string;
+  openrouterProviderOnly?: string[];
+  codegenOpenrouterProviderOnly?: string[];
   baseUrl: string;
   apiKey?: string;
   readOnly?: boolean;
@@ -28,6 +30,7 @@ export interface LLMRequestConfig extends Record<string, unknown> {
   supports_json_output: boolean;
   supports_structured_output: boolean;
   supports_vision: boolean;
+  openrouter_provider_only?: string[];
 }
 
 export const LLM_PROVIDER_DETAILS: Record<
@@ -64,8 +67,21 @@ const REMOTE_CONFIG_SYNC_ENABLED =
   "false";
 
 type StoredConfigValues = Partial<
-  Pick<ChatbotConfig, "provider" | "baseUrl" | "apiKey" | "codegenModel">
+  Pick<
+    ChatbotConfig,
+    | "provider"
+    | "baseUrl"
+    | "apiKey"
+    | "codegenModel"
+    | "openrouterProviderOnly"
+    | "codegenOpenrouterProviderOnly"
+  >
 >;
+
+const normalizeProviderOnly = (value: unknown): string[] => {
+  const values = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : [];
+  return Array.from(new Set(values.map((item) => String(item).trim().toLowerCase()).filter(Boolean)));
+};
 
 const getLocalStorage = (): Storage | null => {
   if (typeof window === "undefined") return null;
@@ -112,6 +128,12 @@ const readStoredConfigValues = (): Record<string, StoredConfigValues> => {
               : typeof item.codegen_model === "string"
                 ? item.codegen_model
                 : undefined,
+            openrouterProviderOnly: normalizeProviderOnly(
+              item.openrouterProviderOnly ?? item.openrouter_provider_only,
+            ),
+            codegenOpenrouterProviderOnly: normalizeProviderOnly(
+              item.codegenOpenrouterProviderOnly ?? item.codegen_openrouter_provider_only,
+            ),
           },
         ];
       }),
@@ -252,6 +274,9 @@ export const getDefaultChatbotConfig = (): ChatbotConfig => ({
   name: "OpenRouter",
   provider: "openrouter",
   model: LLM_PROVIDER_DETAILS.openrouter.defaultModel,
+  codegenModel: "",
+  openrouterProviderOnly: [],
+  codegenOpenrouterProviderOnly: [],
   baseUrl: LLM_PROVIDER_DETAILS.openrouter.baseUrl,
   apiKey: "",
 });
@@ -294,6 +319,16 @@ const normalizeConfig = (config: Partial<ChatbotConfig> & Record<string, unknown
         stored.codegenModel ||
         ""
     ).trim(),
+    openrouterProviderOnly: normalizeProviderOnly(
+      config.openrouterProviderOnly ??
+        config.openrouter_provider_only ??
+        stored.openrouterProviderOnly,
+    ),
+    codegenOpenrouterProviderOnly: normalizeProviderOnly(
+      config.codegenOpenrouterProviderOnly ??
+        config.codegen_openrouter_provider_only ??
+        stored.codegenOpenrouterProviderOnly,
+    ),
     baseUrl,
     apiKey: String(
       (config.apiKey as string | undefined) ||
@@ -316,6 +351,8 @@ const persistLocalConfigValues = (config: ChatbotConfig) => {
     baseUrl: config.baseUrl,
     apiKey: config.apiKey || "",
     codegenModel: config.codegenModel || "",
+    openrouterProviderOnly: config.openrouterProviderOnly || [],
+    codegenOpenrouterProviderOnly: config.codegenOpenrouterProviderOnly || [],
   };
   writeStoredConfigValues(values);
   deleteLegacySessionApiKey(storageKey);
@@ -406,6 +443,10 @@ const backendConfigPayload = (config: ChatbotConfig) => ({
   model: config.model,
   codegenModel: config.codegenModel || "",
   codegen_model: config.codegenModel || "",
+  openrouterProviderOnly: config.openrouterProviderOnly || [],
+  openrouter_provider_only: config.openrouterProviderOnly || [],
+  codegenOpenrouterProviderOnly: config.codegenOpenrouterProviderOnly || [],
+  codegen_openrouter_provider_only: config.codegenOpenrouterProviderOnly || [],
   baseUrl: config.baseUrl,
   system_prompt: config.system_prompt || "",
   temperature: config.temperature ?? 0.7,
@@ -424,7 +465,15 @@ const readBackendError = async (response: Response) => {
 
 const configFromBackendPayload = (
   payload: unknown,
-  localValues?: Pick<ChatbotConfig, "apiKey" | "baseUrl" | "provider" | "codegenModel">,
+  localValues?: Pick<
+    ChatbotConfig,
+    | "apiKey"
+    | "baseUrl"
+    | "provider"
+    | "codegenModel"
+    | "openrouterProviderOnly"
+    | "codegenOpenrouterProviderOnly"
+  >,
 ): ChatbotConfig => {
   const raw = (payload && typeof payload === "object" && "config" in payload)
     ? (payload as { config?: unknown }).config
@@ -436,6 +485,10 @@ const configFromBackendPayload = (
     baseUrl: localValues?.baseUrl || config.baseUrl,
     apiKey: localValues?.apiKey || config.apiKey || "",
     codegenModel: localValues?.codegenModel || config.codegenModel || "",
+    openrouterProviderOnly:
+      localValues?.openrouterProviderOnly || config.openrouterProviderOnly || [],
+    codegenOpenrouterProviderOnly:
+      localValues?.codegenOpenrouterProviderOnly || config.codegenOpenrouterProviderOnly || [],
   };
 };
 
@@ -494,7 +547,7 @@ export const buildLLMRequestConfig = (config: ChatbotConfig): LLMRequestConfig =
     throw new Error("Complete the LLM provider, model, and base URL in Settings before using LLM features.");
   }
   if (!normalizedConfig.apiKey) {
-    throw new Error("Enter an LLM API key in Settings before using chat or artifact generation.");
+    throw new Error("Enter an LLM API key in Settings before using Pipeline Chat.");
   }
   const requestConfig: LLMRequestConfig = {
     provider: normalizedConfig.provider,
@@ -509,15 +562,20 @@ export const buildLLMRequestConfig = (config: ChatbotConfig): LLMRequestConfig =
   if (normalizedConfig.apiKey) {
     requestConfig.api_key = normalizedConfig.apiKey;
   }
+  if (normalizedConfig.provider === "openrouter" && normalizedConfig.openrouterProviderOnly?.length) {
+    requestConfig.openrouter_provider_only = normalizedConfig.openrouterProviderOnly;
+  }
   return requestConfig;
 };
 
 export const buildCodegenLLMRequestConfig = (config: ChatbotConfig): LLMRequestConfig => {
-  const normalizedConfig = normalizeConfig(config as Partial<ChatbotConfig> & Record<string, unknown>);
+  const normalizedConfig = normalizeConfig(
+    config as Partial<ChatbotConfig> & Record<string, unknown>,
+  );
   const codegenModel = normalizedConfig.codegenModel?.trim();
   if (!codegenModel) {
     throw new Error(
-      "Code Generation Model is required before LLM script generation can run.",
+      "Code Generation Model is required before script generation can run.",
     );
   }
   if (!normalizedConfig.provider || !normalizedConfig.baseUrl) {
@@ -530,20 +588,30 @@ export const buildCodegenLLMRequestConfig = (config: ChatbotConfig): LLMRequestC
       "Enter an LLM API key in Settings before using code generation.",
     );
   }
+  const normalizedCodegenModel = normalizedConfig.provider === "openrouter"
+    ? normalizeOpenRouterModel(codegenModel)
+    : codegenModel;
   const requestConfig: LLMRequestConfig = {
     provider: normalizedConfig.provider,
-    model: codegenModel,
+    model: normalizedCodegenModel,
     base_url: normalizedConfig.baseUrl,
     api_key: normalizedConfig.apiKey,
-    model_family: "unknown",
+    model_family: "code",
     supports_function_calling: true,
     supports_json_output: true,
     supports_structured_output: true,
     supports_vision: false,
-    timeout_seconds: 90,
+    timeout_seconds: 180,
   };
+  if (
+    normalizedConfig.provider === "openrouter" &&
+    normalizedConfig.codegenOpenrouterProviderOnly?.length
+  ) {
+    requestConfig.openrouter_provider_only = normalizedConfig.codegenOpenrouterProviderOnly;
+  }
   return requestConfig;
 };
+
 
 export const formatProviderLabel = (provider: LLMProvider) => LLM_PROVIDER_DETAILS[provider].label;
 

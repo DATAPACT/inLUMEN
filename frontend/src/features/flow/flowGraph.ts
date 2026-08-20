@@ -5,8 +5,15 @@ import {
   normalizeDefinitionVersion,
   normalizeGeneratedArtifact,
   normalizeNodeImplementation,
+  normalizeNodePorts,
+  normalizeSecretParamKeys,
+  withoutSensitiveParameterValues,
   normalizeType,
 } from '@/features/nodes/nodeSchema';
+import {
+  defaultParametersForTemplate,
+  findTemplateForType,
+} from '@/features/nodes/templateCatalog';
 
 export type NormalizedGraph = {
   updated_at: string | null;
@@ -29,15 +36,20 @@ export type AgentGraphSnapshot = {
     database?: string;
     files?: string[];
     param?: Record<string, unknown>;
+    secret_params?: string[];
     definition_id?: string;
     definition_version?: number;
     implementation?: Record<string, unknown>;
+    template?: string;
+    ports?: ReturnType<typeof normalizeNodePorts>;
     configuration_status?: string;
     generated_artifact?: Record<string, unknown>;
   }>;
   edges: Array<{
     source: string;
     target: string;
+    source_port?: string;
+    target_port?: string;
   }>;
 };
 
@@ -51,6 +63,32 @@ const fileNameFromUnknown = (file: unknown) => {
   return "";
 };
 
+const objectValue = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+
+const templateNameFromData = (data: Record<string, unknown>) =>
+  String(
+    (typeof data.template === "string" ? data.template : objectValue(data.template).name)
+    || data.template_label
+    || "",
+  );
+
+const migrateFlowPorts = (data: Record<string, unknown>, nodeType: ReturnType<typeof normalizeType>) => {
+  const current = normalizeNodePorts(data.ports, nodeType);
+  if (nodeType !== "flow") return current;
+  const templateName = templateNameFromData(data);
+  const template = findTemplateForType("flow", templateName);
+  if (!template?.ports) return current;
+  const usesLegacyGenericContract =
+    current.inputs.length === 1 && current.inputs[0].id === "input"
+    && current.outputs.length === 1 && current.outputs[0].id === "output";
+  return usesLegacyGenericContract
+    ? normalizeNodePorts(template.ports, "flow")
+    : current;
+};
+
 export const normalizeGraph = (data: unknown): NormalizedGraph => {
   const parsedGraph = (data && typeof data === "object" ? data : {}) as {
     nodes?: unknown[];
@@ -61,22 +99,47 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
   const incomingNodes = Array.isArray(parsedGraph.nodes) ? parsedGraph.nodes : [];
   const incomingEdges = Array.isArray(parsedGraph.edges) ? parsedGraph.edges : [];
 
-  const nodes: Node[] = incomingNodes.flatMap((nodeEntry) => {
-    const node = (nodeEntry && typeof nodeEntry === "object" ? nodeEntry : {}) as Node;
-    if (node.id == null || String(node.id).trim() === "") return [];
-    const position = node.position || { x: 0, y: 0 };
+  const nodes: Node[] = incomingNodes.flatMap((nodeEntry, index) => {
+    const rawNode = objectValue(nodeEntry);
+    if (rawNode.id == null || String(rawNode.id).trim() === "") return [];
+    const nestedData = objectValue(rawNode.data);
+    const hasNestedData = Object.keys(nestedData).length > 0;
+    const nodeData = hasNestedData
+      ? nestedData
+      : Object.fromEntries(
+        Object.entries(rawNode).filter(([key]) => !["id", "position", "data"].includes(key)),
+      );
+    const rawPosition = objectValue(rawNode.position);
+    const position = {
+      x: rawPosition.x ?? index * 280,
+      y: rawPosition.y ?? 120,
+    };
+    const nodeType = normalizeType(nodeData.type);
+    const templateName = templateNameFromData(nodeData);
+    const normalizedFiles = Array.isArray(nodeData.file_buckets)
+      ? nodeData.file_buckets
+      : Array.isArray(nodeData.files)
+        ? nodeData.files
+        : [];
     return [{
-      ...node,
-      id: String(node.id),
+      ...rawNode,
+      id: String(rawNode.id),
+      type: hasNestedData ? String(rawNode.type || "custom") : "custom",
       position: {
         x: Number.isFinite(Number(position.x)) ? Number(position.x) : 0,
         y: Number.isFinite(Number(position.y)) ? Number(position.y) : 0,
       },
       data: {
-        ...node.data,
-        label: node.data?.label || "",
-        description: node.data?.description || "",
-        type: normalizeType(node.data?.type),
+        ...nodeData,
+        label: nodeData.label || "",
+        description: nodeData.description || "",
+        type: nodeType,
+        ...(templateName ? { template_label: templateName } : {}),
+        ports: migrateFlowPorts(nodeData, nodeType),
+        ...(nodeType === "flow" && findTemplateForType("flow", templateName)
+          ? { param: { ...defaultParametersForTemplate("flow", templateName), ...objectValue(nodeData.param) } }
+          : {}),
+        files: normalizedFiles,
       },
     }];
   });
@@ -86,10 +149,36 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
   const edges: Edge[] = [];
 
   incomingEdges.forEach((edgeEntry) => {
-    const edge = (edgeEntry && typeof edgeEntry === "object" ? edgeEntry : {}) as Edge;
+    const edge = (edgeEntry && typeof edgeEntry === "object" ? edgeEntry : {}) as Edge & {
+      source_port?: unknown;
+      target_port?: unknown;
+    };
     const source = String(edge.source || "");
     const target = String(edge.target || "");
-    const edgeKey = `${source}->${target}`;
+    const sourceNode = nodes.find((node) => node.id === source);
+    const targetNode = nodes.find((node) => node.id === target);
+    const sourcePorts = sourceNode
+      ? normalizeNodePorts(sourceNode.data?.ports, normalizeType(sourceNode.data?.type))
+      : null;
+    const targetPorts = targetNode
+      ? normalizeNodePorts(targetNode.data?.ports, normalizeType(targetNode.data?.type))
+      : null;
+    const requestedSourceHandle = String(edge.sourceHandle || edge.source_port || "");
+    const requestedTargetHandle = String(edge.targetHandle || edge.target_port || "");
+    const sourceHandle = requestedSourceHandle === "output"
+      && !sourcePorts?.outputs.some((port) => port.id === requestedSourceHandle)
+      ? String(sourcePorts?.outputs[0]?.id || "")
+      : String(requestedSourceHandle || sourcePorts?.outputs[0]?.id || "");
+    const targetHandle = requestedTargetHandle === "input"
+      && !targetPorts?.inputs.some((port) => port.id === requestedTargetHandle)
+      ? String(targetPorts?.inputs[0]?.id || "")
+      : String(requestedTargetHandle || targetPorts?.inputs[0]?.id || "");
+    const edgeKey = `${source}:${sourceHandle}->${target}:${targetHandle}`;
+    const conditionBranch = sourceHandle === "when_true"
+      ? { label: "true", color: "#8b5cf6" }
+      : sourceHandle === "when_false"
+        ? { label: "false", color: "#0891b2" }
+        : null;
 
     if (!source || !target || source === target) return;
     if (!nodeIds.has(source) || !nodeIds.has(target)) return;
@@ -98,9 +187,40 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
 
     edges.push({
       ...edge,
-      id: edge?.id ? String(edge.id) : `e-${String(edge.source)}-${String(edge.target)}`,
+      id: edge?.id
+        ? String(edge.id)
+        : `e-${source}-${sourceHandle || "default"}-${target}-${targetHandle || "default"}`,
       source,
       target,
+      sourceHandle,
+      targetHandle,
+      ...(conditionBranch
+        ? {
+          label: edge.label || conditionBranch.label,
+          labelStyle: {
+            fill: conditionBranch.color,
+            fontSize: 10,
+            fontWeight: 700,
+            ...(edge.labelStyle || {}),
+          },
+          labelBgStyle: {
+            fill: "hsl(var(--card))",
+            fillOpacity: 0.94,
+            ...(edge.labelBgStyle || {}),
+          },
+          labelBgPadding: edge.labelBgPadding || [5, 3],
+          labelBgBorderRadius: edge.labelBgBorderRadius ?? 5,
+          style: {
+            stroke: conditionBranch.color,
+            strokeWidth: 2,
+            ...(edge.style || {}),
+          },
+          data: {
+            ...objectValue(edge.data),
+            conditionBranch: sourceHandle,
+          },
+        }
+        : {}),
     });
   });
 
@@ -142,11 +262,18 @@ export const createAgentGraphSnapshot = (graph: NormalizedGraph): AgentGraphSnap
       ...(typeof data.database === "string" ? { database: data.database } : {}),
       ...(files && files.length > 0 ? { files } : {}),
       ...(data.param && typeof data.param === "object" && !Array.isArray(data.param)
-        ? { param: data.param as Record<string, unknown> }
+        ? { param: withoutSensitiveParameterValues(data.param, data.secret_params) }
         : {}),
+      ...(Array.isArray(data.secret_params)
+        ? { secret_params: normalizeSecretParamKeys(data.secret_params, data.param) }
+        : {}),
+      ...(typeof data.template_label === "string" && data.template_label.trim()
+        ? { template: data.template_label.trim() }
+        : {}),
+      ports: normalizeNodePorts(data.ports, normalizeType(data.type)),
       ...(definitionId ? { definition_id: definitionId } : {}),
       ...(definitionId && definitionVersion ? { definition_version: definitionVersion } : {}),
-      ...(definitionId
+      ...(Object.keys(normalizeNodeImplementation(data.implementation)).length > 0
         ? { implementation: normalizeNodeImplementation(data.implementation) }
         : {}),
       ...(configurationStatus ? { configuration_status: configurationStatus } : {}),
@@ -156,6 +283,12 @@ export const createAgentGraphSnapshot = (graph: NormalizedGraph): AgentGraphSnap
   edges: graph.edges.map((edge) => ({
     source: String(edge.source),
     target: String(edge.target),
+    ...(typeof edge.sourceHandle === "string" && edge.sourceHandle
+      ? { source_port: edge.sourceHandle }
+      : {}),
+    ...(typeof edge.targetHandle === "string" && edge.targetHandle
+      ? { target_port: edge.targetHandle }
+      : {}),
   })),
 });
 
@@ -168,7 +301,7 @@ export const getNextNumericNodeId = (nodes: Node[], fallback = 1) => {
 };
 
 export const downloadJsonFile = (data: unknown, fileName: string) => {
-  const dataStr = JSON.stringify(data);
+  const dataStr = JSON.stringify(data, null, 2);
   const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr);
   const linkElement = document.createElement('a');
   linkElement.setAttribute('href', dataUri);

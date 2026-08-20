@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inlumen:schema:project:2",
+  "title": "inLUMEN Project",
+  "type": "object",
+  "required": ["schema_version", "project", "pipeline"],
+  "properties": {
+    "schema_version": { "const": "inlumen.project@2" },
+    "project": {
+      "type": "object",
+      "required": ["name", "description", "exported_at"],
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "exported_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": true
+    },
+    "pipeline": {
+      "type": "object",
+      "required": ["nodes", "connections"],
+      "properties": {
+        "nodes": { "type": "array", "items": { "$ref": "#/$defs/node" } },
+        "connections": { "type": "array", "items": { "$ref": "#/$defs/connection" } }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "port": {
+      "type": "object",
+      "required": ["id", "name", "type", "required", "description"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "minLength": 1 },
+        "required": { "type": "boolean" },
+        "description": { "type": "string" },
+        "format": { "type": "string" },
+        "schema": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+    "node": {
+      "type": "object",
+      "required": ["id", "kind", "template", "label", "description", "position", "inputs", "outputs", "parameters"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["source", "task", "destination", "flow", "subpipeline"] },
+        "template": {
+          "type": "object",
+          "required": ["id", "name"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "name": { "type": "string", "minLength": 1 },
+            "version": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": true
+        },
+        "label": { "type": "string" },
+        "description": { "type": "string" },
+        "position": {
+          "type": "object",
+          "required": ["x", "y"],
+          "properties": { "x": { "type": "number" }, "y": { "type": "number" } },
+          "additionalProperties": false
+        },
+        "inputs": { "type": "array", "items": { "$ref": "#/$defs/port" } },
+        "outputs": { "type": "array", "items": { "$ref": "#/$defs/port" } },
+        "parameters": { "type": "object" },
+        "implementation": { "type": "object" },
+        "sample_data": { "type": "array" },
+        "subpipeline": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+    "endpoint": {
+      "type": "object",
+      "required": ["node", "port"],
+      "properties": {
+        "node": { "type": "string", "minLength": 1 },
+        "port": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "connection": {
+      "type": "object",
+      "required": ["id", "from", "to"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "from": { "$ref": "#/$defs/endpoint" },
+        "to": { "$ref": "#/$defs/endpoint" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

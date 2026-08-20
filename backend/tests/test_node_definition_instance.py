@@ -71,13 +71,64 @@ class NodeDefinitionInstanceTest(unittest.TestCase):
 
         self.assertEqual(data, restored)
 
-    def test_legacy_node_has_no_definition_properties(self):
-        properties = {"label": "Legacy", "implementation": {"ignored": True}}
+    def test_implementation_is_independent_of_a_registered_template(self):
+        properties = {"label": "Generic Task", "implementation": {"kind": "shell"}}
 
         normalize_definition_properties(properties)
 
-        self.assertEqual({"label": "Legacy"}, properties)
-        self.assertEqual({}, definition_data_from_properties(properties))
+        self.assertEqual("Generic Task", properties["label"])
+        self.assertNotIn("implementation", properties)
+        self.assertEqual({"kind": "shell"}, json.loads(properties["implementation_json"]))
+        self.assertEqual(
+            {"implementation": {"kind": "shell"}},
+            definition_data_from_properties(properties),
+        )
+
+    def test_round_trips_template_and_reusable_pipeline_reference(self):
+        data = {
+            "template": {"id": "source.rest-api", "name": "REST API"},
+            "subpipeline": {
+                "version": 2,
+                "reference": {
+                    "pipeline_uid": "reusable-1",
+                    "pipeline_name": "Conversation Understanding",
+                    "version_uid": "version-1",
+                    "version_name": "Version 1",
+                },
+                "interface": {"inputs": [], "outputs": []},
+                "resolved_graph": {"nodes": [{"id": "transient"}], "edges": []},
+            },
+        }
+
+        properties = definition_properties_from_data(data)
+        restored = definition_data_from_properties(properties)
+
+        self.assertEqual(data["template"], restored["template"])
+        self.assertEqual(data["subpipeline"]["reference"], restored["subpipeline"]["reference"])
+        self.assertNotIn("resolved_graph", restored["subpipeline"])
+        self.assertTrue(all(key.endswith("_json") for key in properties))
+
+    def test_source_config_is_not_persisted_or_restored(self):
+        properties = definition_properties_from_data({
+            "source_config": {"base_url": "https://example.test"},
+        })
+        restored = definition_data_from_properties({
+            "source_config_json": '{"base_url":"https://legacy.test"}',
+        })
+
+        self.assertEqual({}, properties)
+        self.assertEqual({}, restored)
+
+    def test_preserves_legacy_embedded_graph_until_it_is_converted(self):
+        legacy_graph = {"nodes": [{"id": "legacy-step"}], "edges": []}
+
+        properties = definition_properties_from_data({
+            "subpipeline": {"version": 1, "graph": legacy_graph, "expanded": False},
+        })
+        restored = definition_data_from_properties(properties)
+
+        self.assertEqual(1, restored["subpipeline"]["version"])
+        self.assertEqual(legacy_graph, restored["subpipeline"]["graph"])
 
     def test_dynamic_model_plan_marks_artifact_stale_when_revision_changes(self):
         model_plan = {

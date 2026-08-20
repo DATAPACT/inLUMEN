@@ -22,11 +22,13 @@ from analytics_api import (
     agentic_generate_version_yamls,
     agentic_generate_yaml,
     agentic_pipeline_editor,
+    agentic_pipeline_editor_cancel,
     agentic_pipeline_editor_reset,
 )
 from attachment_validation import attachment_input_errors, read_attachment_probe
 from auth_middleware import require_auth
 from chat_state import clear_state_from_disk
+from codegen_runs import CodegenRunStore
 from generators.routes import create_generator_blueprint
 from graph_client import dispatch_graph_request
 from local_api_client import LocalApiResponse
@@ -36,11 +38,20 @@ from node_definitions.artifacts import (
     configuration_hash,
     implementation_plan_from_data,
 )
+from node_ports import normalize_node_ports
+from node_secrets import (
+    clear_node_secrets,
+    configured_node_secrets,
+    delete_node_secret,
+    normalize_parameter_name,
+    set_node_secret,
+)
 from object_client import dispatch_object_request
 from provenance_provo import build_prov_o_jsonld, provenance_prov_o_filename
 from provenance_report import build_provenance_pdf, provenance_report_filename
 from public_api import create_public_api_blueprint
 from runtime_config import add_cors_headers, get_service_port
+from step_types import normalize_step_type
 
 
 INLUMEN_API_PORT = get_service_port("INLUMEN_API_PORT", 5000)
@@ -57,6 +68,9 @@ CODEGEN_PIPELINE_REQUEST_TIMEOUT_SECONDS = int(
 )
 CODEGEN_SAMPLE_BINARY_MAX_BYTES = int(
     os.getenv("INLUMEN_CODEGEN_SAMPLE_BINARY_MAX_BYTES", str(16 * 1024 * 1024))
+)
+CODEGEN_RUN_STORE = CodegenRunStore(
+    os.getenv("INLUMEN_CODEGEN_RUN_DB_PATH", "state/codegen-runs.sqlite3")
 )
 DEFAULT_CODEGEN_ALLOWED_PACKAGES = [
     "pandas",
@@ -75,6 +89,7 @@ CODEGEN_RUNTIME_FILENAMES = {
     "node-manifest.json",
     "validation-report.json",
 }
+USER_TASK_RUNTIME_FILENAMES = {"main.py", "requirements.txt"}
 PIPELINE_RUNTIME_BEHAVIOR_INSTRUCTION = """Design the entire pipeline as one coherent program before writing any node.
 For every edge, decide the exact output filename, format, schema or object shape, and required runtime dependencies. The producer must write that contract and the consumer must read the same contract.
 Implement every capability requested by the high-level request and graph. A terminal behavior such as answering questions, alerting, or publishing results must produce that real result, not only an intermediate score, index, or status.
@@ -88,8 +103,11 @@ PIPELINE_RUNTIME_ATTACHMENT_INSTRUCTION = f"""{PIPELINE_RUNTIME_BEHAVIOR_INSTRUC
 
 Create the files needed to run every pipeline node.
 For each flow_id, return main.py and requirements.txt. Leave requirements.txt empty when the script only uses the Python 3.11 standard library.
-When a node runs, its input files and files from the previous node are in the current working directory. Read them from there and write the node's output files there.
-Keep connected nodes consistent about output filenames and formats.
+When a node runs, the platform provides a standard workspace through
+PIPELINE_INPUT_DIR and PIPELINE_OUTPUT_DIR. Read input files recursively from
+PIPELINE_INPUT_DIR and write every downstream artifact beneath
+PIPELINE_OUTPUT_DIR. Keep connected nodes consistent about output filenames and
+formats.
 Each main.py must be a finite, non-interactive batch program: do not call input(), start a server or UI, watch for files, or loop forever. Validate required input files before loading large models or doing other slow setup, then exit when the output files are written.
 Associate each returned file with its flow_id so inLUMEN can attach it to the correct node."""
 EXTERNAL_AI_RUNTIME_RESPONSE_INSTRUCTION = f"""{PIPELINE_RUNTIME_BEHAVIOR_INSTRUCTION}
@@ -98,16 +116,18 @@ For every node, create:
 - main.py
 - requirements.txt only if main.py needs third-party packages
 
-Return code files only. Never create or return input data, example data, fake files, placeholder files, credentials, Dockerfiles, Dagster files, or manifests. The user will upload real input data separately.
+Return code files only. Never create or return input data, example data, fake files, placeholder files, credentials, Dockerfiles, Dagster files, or manifests. Real input data is attached to Source nodes separately from generated code.
 
-Each main.py runs with that node's uploaded input files and the previous node's output files in the current folder. It must read from that folder and write its results back to that folder. Connected nodes must agree on output filenames and formats.
+Each main.py runs with its Source node's attached input files or the previous
+node's output files materialized under PIPELINE_INPUT_DIR. It must write its
+results beneath PIPELINE_OUTPUT_DIR. Connected nodes must agree on output
+filenames and formats.
 
 Each main.py must be a one-shot, non-interactive Python 3.11 batch program. It must not call input(), start a server or UI, watch for files, sleep indefinitely, or loop forever. It must validate required input files before loading large models, downloading resources, or doing other slow setup; invalid inputs must fail immediately with a clear error. A node with a downstream connection must write at least one real output file, then exit successfully.
 
 If you can create files, return one ZIP with folders named nodes/<flow_id>/. Otherwise, show each file in its own code block under a clear NODE <flow_id> heading. Return complete working code, not pseudocode.
 
-Finish with a short INPUT UPLOAD MAP. For every real external input the user must provide, state the flow_id and node label that first reads it. Inputs must be uploaded to that first consumer node, never to a later node."""
-PIPELINE_GENERATION_RUNS: dict[str, dict[str, Any]] = {}
+Finish with a short SOURCE INPUT MAP. For every real external input the user must provide, state the exact filename, flow_id, and Source node label that first reads it. The user attaches these files to the corresponding Source node; they must never be created by code generation or attached as runtime code."""
 CHATBOT_CONFIGS_PATH = Path(
     os.getenv("CHATBOT_CONFIGS_PATH", "state/chatbot_configurations.json")
 )
@@ -165,9 +185,21 @@ app.add_url_rule(
     methods=["POST", "OPTIONS"],
 )
 app.add_url_rule(
+    "/simple_chat/cancel",
+    endpoint="simple_chat_cancel",
+    view_func=agentic_pipeline_editor_cancel,
+    methods=["POST", "OPTIONS"],
+)
+app.add_url_rule(
     "/agentic_pipeline_editor/reset",
     endpoint="agentic_pipeline_editor_reset",
     view_func=agentic_pipeline_editor_reset,
+    methods=["POST", "OPTIONS"],
+)
+app.add_url_rule(
+    "/agentic_pipeline_editor/cancel",
+    endpoint="agentic_pipeline_editor_cancel",
+    view_func=agentic_pipeline_editor_cancel,
     methods=["POST", "OPTIONS"],
 )
 
@@ -368,6 +400,94 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _codegen_job_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep progress metadata while avoiding duplicate generated file payloads."""
+    return {
+        key: deepcopy(payload[key])
+        for key in (
+            "run_id",
+            "status",
+            "resumed_from_run_id",
+            "resume_from_flow_id",
+            "generation_run",
+            "error",
+            "created_at",
+            "updated_at",
+        )
+        if key in payload
+    }
+
+
+def _codegen_context_fingerprint(context: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        context,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _codegen_run_summary(local_run: dict[str, Any]) -> dict[str, Any]:
+    metadata = (
+        local_run.get("metadata")
+        if isinstance(local_run.get("metadata"), dict)
+        else {}
+    )
+    remote_job = (
+        local_run.get("remote_job")
+        if isinstance(local_run.get("remote_job"), dict)
+        else {}
+    )
+    if local_run.get("cancelled"):
+        persistence = {"status": "cancelled"}
+    elif local_run.get("persisted_response"):
+        persistence = {
+            "status": "persisted"
+            if local_run.get("persisted")
+            else "not_persisted"
+        }
+    else:
+        persistence = {"status": "pending"}
+    return {
+        **remote_job,
+        "run_id": str(local_run.get("run_id") or remote_job.get("run_id") or ""),
+        "status": str(
+            local_run.get("status") or remote_job.get("status") or "queued"
+        ),
+        "mode": metadata.get("generation_mode", ""),
+        "data_awareness": metadata.get("data_awareness", {}),
+        "generation_scope": metadata.get("generation_scope", "all"),
+        "target_flow_ids": metadata.get("target_flow_ids", []),
+        "reusable_flow_ids": metadata.get("reusable_flow_ids", []),
+        "preflight": metadata.get("preflight", {}),
+        "model": metadata.get("model", {}),
+        "persistence": persistence,
+        "created_at": local_run.get("created_at"),
+        "updated_at": local_run.get("updated_at"),
+    }
+
+
+def _codegen_run_response_metadata(
+    local_run: dict[str, Any] | None,
+) -> dict[str, Any]:
+    metadata = (
+        local_run.get("metadata")
+        if isinstance(local_run, dict)
+        and isinstance(local_run.get("metadata"), dict)
+        else {}
+    )
+    return {
+        "mode": metadata.get("generation_mode", ""),
+        "data_awareness": metadata.get("data_awareness", {}),
+        "generation_scope": metadata.get("generation_scope", "all"),
+        "target_flow_ids": metadata.get("target_flow_ids", []),
+        "reusable_flow_ids": metadata.get("reusable_flow_ids", []),
+        "preflight": metadata.get("preflight", {}),
+        "model": metadata.get("model", {}),
+    }
+
+
 def _node_data(node: dict[str, Any]) -> dict[str, Any]:
     data = node.get("data")
     return data if isinstance(data, dict) else node
@@ -525,21 +645,39 @@ def _node_descriptor(
     parameters = (
         dict(data.get("param"))
         if isinstance(data.get("param"), dict)
-        else dict(data.get("implementation"))
-        if isinstance(data.get("implementation"), dict)
         else {}
     )
+    secret_parameter_names = {
+        str(name)
+        for name in (data.get("secret_params") or [])
+        if str(name).strip()
+    }
+    parameters = {
+        key: value
+        for key, value in parameters.items()
+        if str(key) not in secret_parameter_names
+    }
     content = data.get("content")
     if isinstance(content, str) and content.strip():
         parameters["content"] = content.strip()
     implementation = implementation_plan_from_data(data)
+    subpipeline = data.get("subpipeline")
+    if not isinstance(subpipeline, dict):
+        try:
+            subpipeline = json.loads(data.get("subpipeline_json") or "{}")
+        except (TypeError, ValueError):
+            subpipeline = {}
     return {
         "flow_id": str(node.get("id") or data.get("flow_id") or data.get("id") or ""),
         "label": str(data.get("label") or ""),
         "description": str(data.get("description") or ""),
-        "type": str(data.get("type") or "custom"),
+        "type": normalize_step_type(data.get("type")),
+        "template": str(data.get("template_label") or data.get("definition_id") or ""),
         "parameters": parameters,
+        "secret_parameters": sorted(secret_parameter_names),
         "implementation": implementation,
+        "subpipeline": subpipeline if isinstance(subpipeline, dict) else {},
+        "ports": normalize_node_ports(data.get("ports"), data.get("type")),
         "files": _node_file_entries(node, include_samples=include_samples),
     }
 
@@ -597,7 +735,12 @@ def _build_codegen_context(
         "graph": {
             "nodes": descriptors,
             "edges": [
-                {"source": str(edge.get("source")), "target": str(edge.get("target"))}
+                {
+                    "source": str(edge.get("source")),
+                    "target": str(edge.get("target")),
+                    "source_port": str(edge.get("sourceHandle") or edge.get("source_port") or ""),
+                    "target_port": str(edge.get("targetHandle") or edge.get("target_port") or ""),
+                }
                 for edge in edges
                 if isinstance(edge, dict) and edge.get("source") and edge.get("target")
             ],
@@ -626,12 +769,11 @@ def _build_codegen_context(
 
 
 def _post_codegen_request(payload: dict[str, Any]) -> dict[str, Any]:
-    request_payload, llm_api_key = _prepare_codegen_request(payload)
-    encoded = json.dumps(request_payload).encode("utf-8")
+    encoded, headers = _codegen_request_parts(payload)
     http_request = Request(
         f"{CODEGEN_SERVICE_URL}/v1/generate/node-script",
         data=encoded,
-        headers=_codegen_request_headers(llm_api_key=llm_api_key),
+        headers=headers,
         method="POST",
     )
     try:
@@ -649,12 +791,11 @@ def _post_codegen_request(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _post_codegen_pipeline_request(payload: dict[str, Any]) -> dict[str, Any]:
-    request_payload, llm_api_key = _prepare_codegen_request(payload)
-    encoded = json.dumps(request_payload).encode("utf-8")
+    encoded, headers = _codegen_request_parts(payload)
     http_request = Request(
         f"{CODEGEN_SERVICE_URL}/v1/generate/pipeline-scripts",
         data=encoded,
-        headers=_codegen_request_headers(llm_api_key=llm_api_key),
+        headers=headers,
         method="POST",
     )
     try:
@@ -675,12 +816,11 @@ def _post_codegen_pipeline_request(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _post_codegen_pipeline_run_request(payload: dict[str, Any]) -> dict[str, Any]:
-    request_payload, llm_api_key = _prepare_codegen_request(payload)
-    encoded = json.dumps(request_payload).encode("utf-8")
+    encoded, headers = _codegen_request_parts(payload)
     http_request = Request(
         f"{CODEGEN_SERVICE_URL}/v1/generate/pipeline-scripts/runs",
         data=encoded,
-        headers=_codegen_request_headers(llm_api_key=llm_api_key),
+        headers=headers,
         method="POST",
     )
     try:
@@ -700,16 +840,12 @@ def _post_codegen_pipeline_run_request(payload: dict[str, Any]) -> dict[str, Any
 def _post_codegen_pipeline_run_resume_request(
     run_id: str,
     payload: dict[str, Any],
-    *,
-    llm_api_key: str = "",
 ) -> dict[str, Any]:
-    request_payload, request_llm_api_key = _prepare_codegen_request(payload)
-    selected_llm_api_key = str(llm_api_key or request_llm_api_key).strip()
-    encoded = json.dumps(request_payload).encode("utf-8")
+    encoded, headers = _codegen_request_parts(payload)
     http_request = Request(
         f"{CODEGEN_SERVICE_URL}/v1/generate/pipeline-scripts/runs/{run_id}/resume",
         data=encoded,
-        headers=_codegen_request_headers(llm_api_key=selected_llm_api_key),
+        headers=headers,
         method="POST",
     )
     try:
@@ -773,26 +909,75 @@ def _cancel_codegen_pipeline_run_request(run_id: str) -> dict[str, Any]:
     return parsed
 
 
+def _clear_codegen_pipeline_runs_request() -> dict[str, Any]:
+    http_request = Request(
+        f"{CODEGEN_SERVICE_URL}/v1/generate/pipeline-scripts/runs",
+        headers=_codegen_request_headers(include_content_type=False),
+        method="DELETE",
+    )
+    try:
+        with urlopen(
+            http_request,
+            timeout=min(CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS, 10),
+        ) as response:
+            response_payload = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Codegen service rejected history cleanup: {exc.code} {detail}"
+        ) from exc
+    except URLError as exc:
+        raise RuntimeError(
+            f"Codegen service unavailable at {CODEGEN_SERVICE_URL}: {exc}"
+        ) from exc
+    parsed = json.loads(response_payload)
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Codegen service returned an invalid cleanup response")
+    return parsed
+
+
+def _clear_codegen_run_history() -> dict[str, Any]:
+    """Clear gateway history even if the private service is unavailable."""
+    deleted_count = len(CODEGEN_RUN_STORE.list(limit=100))
+    remote_cleanup: dict[str, Any] | None = None
+    warning = ""
+    try:
+        remote_cleanup = _clear_codegen_pipeline_runs_request()
+    except Exception as exc:
+        warning = str(exc)
+    CODEGEN_RUN_STORE.clear()
+    return {
+        "status": "cleared",
+        "deleted_count": deleted_count,
+        "remote_cleanup": remote_cleanup,
+        **({"warning": warning} if warning else {}),
+    }
+
+
 def _prepare_codegen_request(
     payload: dict[str, Any],
-) -> tuple[dict[str, Any], str]:
+) -> dict[str, Any]:
     request_payload = deepcopy(payload)
-    llm_config = request_payload.get("llm_config")
-    if not isinstance(llm_config, dict):
-        return request_payload, ""
+    raw_config = request_payload.get("llm_config")
+    if isinstance(raw_config, dict):
+        raw_config.pop("api_key", None)
+        raw_config.pop("apiKey", None)
+    return request_payload
 
-    llm_api_key = str(
-        llm_config.get("api_key") or llm_config.get("apiKey") or ""
-    ).strip()
-    llm_config.pop("api_key", None)
-    llm_config.pop("apiKey", None)
-    return request_payload, llm_api_key
+
+def _codegen_llm_api_key(payload: dict[str, Any] | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    config = payload.get("llm_config")
+    if not isinstance(config, dict):
+        return ""
+    return str(config.get("api_key") or config.get("apiKey") or "").strip()
 
 
 def _codegen_request_headers(
     *,
-    llm_api_key: str = "",
     include_content_type: bool = True,
+    llm_api_key: str = "",
 ) -> dict[str, str]:
     headers = {"Accept": "application/json"}
     if include_content_type:
@@ -811,18 +996,13 @@ def _codegen_request_headers(
 
 def _codegen_request_parts(
     payload: dict[str, Any] | None = None,
-    *,
-    include_llm_key: bool = False,
-    llm_api_key: str = "",
 ) -> tuple[bytes | None, dict[str, str]]:
     request_payload: dict[str, Any] | None = None
-    request_llm_api_key = ""
     if payload is not None:
-        request_payload, request_llm_api_key = _prepare_codegen_request(payload)
-    selected_llm_api_key = str(llm_api_key or request_llm_api_key).strip()
+        request_payload = _prepare_codegen_request(payload)
     headers = _codegen_request_headers(
-        llm_api_key=selected_llm_api_key if include_llm_key else "",
         include_content_type=payload is not None,
+        llm_api_key=_codegen_llm_api_key(payload),
     )
     encoded = (
         json.dumps(request_payload).encode("utf-8")
@@ -830,27 +1010,6 @@ def _codegen_request_parts(
         else None
     )
     return encoded, headers
-
-
-def _codegen_llm_config_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    raw_config = (
-        payload.get("llm_config")
-        if isinstance(payload.get("llm_config"), dict)
-        else {}
-    )
-    return {
-        key: value
-        for key, value in {
-            "model": raw_config.get("model"),
-            "base_url": raw_config.get("base_url")
-            or raw_config.get("baseUrl"),
-            "api_key": raw_config.get("api_key")
-            or raw_config.get("apiKey"),
-            "temperature": raw_config.get("temperature"),
-            "timeout_seconds": raw_config.get("timeout_seconds"),
-        }.items()
-        if value not in (None, "")
-    }
 
 
 def _codegen_configuration_hash(
@@ -889,7 +1048,36 @@ def _persist_codegen_artifact(
     graph: dict[str, Any],
 ) -> dict[str, Any]:
     files = artifact.get("files") if isinstance(artifact.get("files"), list) else []
+    new_filenames = {
+        str(item.get("filename") or "").strip()
+        for item in files
+        if isinstance(item, dict) and str(item.get("filename") or "").strip()
+    }
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    current_node = next(
+        (
+            item
+            for item in nodes
+            if isinstance(item, dict)
+            and str(item.get("id") or item.get("flow_id") or "") == node_id
+        ),
+        None,
+    )
+    current_data = _node_data(current_node) if isinstance(current_node, dict) else {}
+    current_artifact = (
+        current_data.get("generated_artifact")
+        if isinstance(current_data.get("generated_artifact"), dict)
+        else {}
+    )
+    stale_filenames = {
+        str(item.get("filename") or "").strip()
+        for item in current_artifact.get("files") or []
+        if isinstance(item, dict)
+        and str(item.get("filename") or "").strip()
+        and str(item.get("filename") or "").strip() not in new_filenames
+    }
     stored_files = []
+    file_hashes: dict[str, str] = {}
     bucket = f"files-step-id-{node_id}".lower()
     for file_item in files:
         if not isinstance(file_item, dict):
@@ -915,7 +1103,13 @@ def _persist_codegen_artifact(
             "neo4j_add_file",
             method="POST",
             data=b"",
-            json_payload={"properties": {"flow_id": node_id, "filename": filename}},
+            json_payload={
+                "properties": {
+                    "flow_id": node_id,
+                    "filename": filename,
+                    "role": "code",
+                }
+            },
         )
         graph_response.raise_for_status()
         stored_files.append(
@@ -923,8 +1117,34 @@ def _persist_codegen_artifact(
                 "filename": filename,
                 "bucket": bucket,
                 "content_type": str(file_item.get("content_type") or "text/plain"),
+                "role": "code",
             }
         )
+        file_hashes[filename] = "sha256:" + hashlib.sha256(
+            content.encode("utf-8")
+        ).hexdigest()
+
+    for filename in sorted(stale_filenames):
+        storage_response = _proxy(
+            dispatch_object_request,
+            "minio_remove_file",
+            method="DELETE",
+            params={},
+            data=b"",
+            form={"bucket_id": node_id, "filename": filename},
+        )
+        storage_response.raise_for_status()
+        graph_response = _proxy(
+            dispatch_graph_request,
+            "neo4j_delete_file",
+            method="DELETE",
+            params={},
+            data=b"",
+            json_payload={
+                "properties": {"flow_id": node_id, "filename": filename}
+            },
+        )
+        graph_response.raise_for_status()
 
     generated_artifact = {
         **artifact,
@@ -932,6 +1152,17 @@ def _persist_codegen_artifact(
         "configuration_hash": artifact.get("configuration_hash")
         or _codegen_configuration_hash(graph, node_id, artifact),
         "files": stored_files,
+        "file_hashes": file_hashes,
+        "provenance": {
+            **(
+                artifact.get("provenance")
+                if isinstance(artifact.get("provenance"), dict)
+                else {}
+            ),
+            "origin": "ai_generated",
+            "user_modified": False,
+            "attached_at": _utc_now_iso(),
+        },
     }
     graph_response = _proxy(
         dispatch_graph_request,
@@ -945,6 +1176,60 @@ def _persist_codegen_artifact(
     )
     graph_response.raise_for_status()
     return generated_artifact
+
+
+def _mark_codegen_artifact_user_modified(node_id: str) -> None:
+    """Best-effort ownership marker used by generation overwrite protection."""
+    try:
+        graph_response = _proxy(
+            dispatch_graph_request,
+            "neo4j_get_graph",
+            method="GET",
+            data=b"",
+        )
+        graph_response.raise_for_status()
+        graph = _upstream_json(graph_response)
+        nodes = graph.get("nodes") if isinstance(graph, dict) else []
+        node = next(
+            (
+                item
+                for item in nodes or []
+                if isinstance(item, dict) and _node_flow_id(item) == node_id
+            ),
+            None,
+        )
+        data = _node_data(node) if isinstance(node, dict) else {}
+        artifact = (
+            deepcopy(data.get("generated_artifact"))
+            if isinstance(data.get("generated_artifact"), dict)
+            else None
+        )
+        if artifact is None:
+            return
+        artifact["provenance"] = {
+            **(
+                artifact.get("provenance")
+                if isinstance(artifact.get("provenance"), dict)
+                else {}
+            ),
+            "user_modified": True,
+            "modified_at": _utc_now_iso(),
+        }
+        update_response = _proxy(
+            dispatch_graph_request,
+            "neo4j_update_generated_artifact",
+            method="POST",
+            data=b"",
+            json_payload={
+                "flow_id": node_id,
+                "generated_artifact": artifact,
+            },
+        )
+        update_response.raise_for_status()
+    except Exception:
+        # File writes remain authoritative even if the ownership annotation
+        # cannot be recorded because a dependency is temporarily unavailable.
+        return
 
 
 def _persist_codegen_run_report(run_report: Any) -> dict[str, Any] | None:
@@ -1001,7 +1286,16 @@ def _build_pipeline_codegen_context(
         "graph": {
             "nodes": descriptors,
             "edges": [
-                {"source": str(edge.get("source")), "target": str(edge.get("target"))}
+                {
+                    "source": str(edge.get("source")),
+                    "target": str(edge.get("target")),
+                    "source_port": str(
+                        edge.get("sourceHandle") or edge.get("source_port") or ""
+                    ),
+                    "target_port": str(
+                        edge.get("targetHandle") or edge.get("target_port") or ""
+                    ),
+                }
                 for edge in edges
                 if isinstance(edge, dict) and edge.get("source") and edge.get("target")
             ],
@@ -1059,7 +1353,7 @@ def _pipeline_sample_data_summary(graph: dict[str, Any]) -> dict[str, Any]:
             {
                 "flow_id": flow_id,
                 "label": str(data.get("label") or ""),
-                "type": str(data.get("type") or "custom"),
+                "type": normalize_step_type(data.get("type")),
                 "files": [
                     {
                         "filename": str(item.get("filename") or ""),
@@ -1077,10 +1371,251 @@ def _pipeline_sample_data_summary(graph: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+PIPELINE_CODEGEN_SCOPES = {"missing_changed", "selected", "all"}
+
+
+def _node_flow_id(node: dict[str, Any]) -> str:
+    data = _node_data(node)
+    return str(
+        node.get("id") or data.get("flow_id") or data.get("id") or ""
+    ).strip()
+
+
+def _node_codegen_file_names(node: dict[str, Any]) -> list[str]:
+    data = _node_data(node)
+    raw_files = (
+        data.get("file_buckets")
+        if isinstance(data.get("file_buckets"), list)
+        else data.get("files")
+    )
+    if not isinstance(raw_files, list):
+        return []
+    names: list[str] = []
+    for item in raw_files:
+        if isinstance(item, str):
+            filename = item.strip()
+            role = ""
+        elif isinstance(item, dict):
+            filename = str(item.get("filename") or item.get("name") or "").strip()
+            role = str(item.get("role") or "").strip().lower()
+        else:
+            continue
+        if filename and (role == "code" or _is_codegen_runtime_file(filename)):
+            names.append(filename)
+    return sorted(set(names))
+
+
+def _node_codegen_preflight_item(node: dict[str, Any]) -> dict[str, Any]:
+    data = _node_data(node)
+    flow_id = _node_flow_id(node)
+    artifact = (
+        data.get("generated_artifact")
+        if isinstance(data.get("generated_artifact"), dict)
+        else {}
+    )
+    validation_report = (
+        artifact.get("validation_report")
+        if isinstance(artifact.get("validation_report"), dict)
+        else {}
+    )
+    provenance = (
+        artifact.get("provenance")
+        if isinstance(artifact.get("provenance"), dict)
+        else {}
+    )
+    generator = str(artifact.get("generator") or "").strip()
+    artifact_status = str(artifact.get("status") or "").strip().lower()
+    validation_status = _validation_status(validation_report)
+    code_files = _node_codegen_file_names(node)
+    is_inlumen_generated = generator == "inlumen-codegen-service"
+    user_modified = bool(provenance.get("user_modified"))
+    reusable = (
+        is_inlumen_generated
+        and artifact_status == "current"
+        and validation_status == "valid"
+        and bool(artifact.get("files"))
+        and not user_modified
+    )
+    if user_modified:
+        runtime_status = "modified"
+        ownership = "user"
+    elif code_files and not is_inlumen_generated:
+        runtime_status = "manual"
+        ownership = "user"
+    elif reusable:
+        runtime_status = "current"
+        ownership = "generated"
+    elif artifact:
+        runtime_status = "stale" if artifact_status == "stale" else "invalid"
+        ownership = "generated"
+    else:
+        runtime_status = "missing"
+        ownership = "none"
+    return {
+        "flow_id": flow_id,
+        "label": str(data.get("label") or flow_id),
+        "type": normalize_step_type(data.get("type")),
+        "runtime_status": runtime_status,
+        "ownership": ownership,
+        "reusable": reusable,
+        "code_files": code_files,
+        "validation_status": validation_status or "not_run",
+    }
+
+
+def _pipeline_codegen_preflight(
+    graph: dict[str, Any],
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    request_payload = payload if isinstance(payload, dict) else {}
+    scope = str(request_payload.get("generation_scope") or "missing_changed").strip()
+    if scope not in PIPELINE_CODEGEN_SCOPES:
+        scope = "missing_changed"
+    selected_flow_ids = {
+        str(flow_id).strip()
+        for flow_id in request_payload.get("selected_flow_ids") or []
+        if str(flow_id).strip()
+    }
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    items = [
+        _node_codegen_preflight_item(node)
+        for node in nodes
+        if isinstance(node, dict)
+        and _node_flow_id(node)
+        and normalize_step_type(_node_data(node).get("type")) == "task"
+    ]
+    all_flow_ids = {item["flow_id"] for item in items}
+    selected_flow_ids.intersection_update(all_flow_ids)
+    if scope == "all":
+        target_flow_ids = set(all_flow_ids)
+    elif scope == "selected":
+        target_flow_ids = set(selected_flow_ids)
+    else:
+        target_flow_ids = {
+            item["flow_id"]
+            for item in items
+            if not item["reusable"] and item["runtime_status"] != "manual"
+        }
+    protected_flow_ids = {
+        item["flow_id"]
+        for item in items
+        if item["flow_id"] in target_flow_ids
+        and item["ownership"] == "user"
+    }
+    replacement_flow_ids = {
+        item["flow_id"]
+        for item in items
+        if item["flow_id"] in target_flow_ids
+        and item["runtime_status"] != "missing"
+    }
+    reusable_flow_ids = {
+        item["flow_id"]
+        for item in items
+        if item["flow_id"] not in target_flow_ids and item["reusable"]
+    }
+    non_reusable_outside_scope = {
+        item["flow_id"]
+        for item in items
+        if item["flow_id"] not in target_flow_ids and not item["reusable"]
+    }
+    requires_full_generation = (
+        bool(non_reusable_outside_scope)
+        or scope == "all"
+        or (bool(all_flow_ids) and target_flow_ids == all_flow_ids)
+    )
+    sample_data = _pipeline_sample_data_summary(graph)
+    return {
+        "scope": scope,
+        "nodes": items,
+        "node_count": len(items),
+        "target_flow_ids": sorted(target_flow_ids),
+        "target_count": len(target_flow_ids),
+        "selected_flow_ids": sorted(selected_flow_ids),
+        "reusable_flow_ids": sorted(reusable_flow_ids),
+        "reused_count": len(reusable_flow_ids),
+        "replacement_flow_ids": sorted(replacement_flow_ids),
+        "replacement_count": len(replacement_flow_ids),
+        "protected_flow_ids": sorted(protected_flow_ids),
+        "protected_count": len(protected_flow_ids),
+        "requires_full_generation": requires_full_generation,
+        "candidate_flow_ids": sorted(
+            all_flow_ids if requires_full_generation else target_flow_ids
+        ),
+        "candidate_count": (
+            len(all_flow_ids) if requires_full_generation else len(target_flow_ids)
+        ),
+        "sample_data": sample_data,
+    }
+
+
+def _hydrate_reusable_codegen_node(
+    node: dict[str, Any],
+) -> dict[str, Any] | None:
+    data = _node_data(node)
+    artifact = (
+        deepcopy(data.get("generated_artifact"))
+        if isinstance(data.get("generated_artifact"), dict)
+        else {}
+    )
+    if (
+        str(artifact.get("status") or "").lower() != "current"
+        or _validation_status(artifact.get("validation_report")) != "valid"
+    ):
+        return None
+    hydrated_files: list[dict[str, Any]] = []
+    for file_item in artifact.get("files") or []:
+        if not isinstance(file_item, dict):
+            continue
+        filename = str(file_item.get("filename") or "").strip()
+        if not filename:
+            continue
+        content = file_item.get("content")
+        if not isinstance(content, str):
+            bucket = str(
+                file_item.get("bucket")
+                or f"files-step-id-{_node_flow_id(node)}"
+            ).strip().lower()
+            bucket_id = bucket.removeprefix("files-step-id-")
+            try:
+                response = _proxy(
+                    dispatch_object_request,
+                    "minio_read_file",
+                    method="GET",
+                    params={"bucket_id": bucket_id, "filename": filename},
+                    data=b"",
+                )
+                response.raise_for_status()
+                content = response.content.decode("utf-8")
+            except Exception:
+                return None
+        hydrated_files.append(
+            {
+                "filename": filename,
+                "content": content,
+                "content_type": str(
+                    file_item.get("content_type") or "text/plain"
+                ),
+            }
+        )
+    if not hydrated_files:
+        return None
+    artifact["files"] = hydrated_files
+    return {
+        "flow_id": _node_flow_id(node),
+        "generated_artifact": artifact,
+    }
+
+
 def _build_pipeline_codegen_payload(
     graph: dict[str, Any],
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    preflight = _pipeline_codegen_preflight(graph, payload)
+    llm_config = (
+        payload.get("llm_config")
+        if isinstance(payload.get("llm_config"), dict)
+        else {}
+    )
     include_sample_data = payload.get("include_sample_data", True) is not False
     validation_mode = str(payload.get("validation_mode") or "pipeline_sample").strip()
     if validation_mode not in {"static", "unit", "edge", "pipeline_sample"}:
@@ -1111,6 +1646,29 @@ def _build_pipeline_codegen_payload(
             "\n\nHIGH-LEVEL PIPELINE REQUEST:\n"
             + high_level_prompt
         )
+    target_flow_ids = list(preflight["target_flow_ids"])
+    reusable_nodes: list[dict[str, Any]] = []
+    if target_flow_ids and not preflight["requires_full_generation"]:
+        nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+        reusable_ids = set(preflight["reusable_flow_ids"])
+        for node in nodes:
+            if not isinstance(node, dict) or _node_flow_id(node) not in reusable_ids:
+                continue
+            hydrated = _hydrate_reusable_codegen_node(node)
+            if hydrated is None:
+                reusable_nodes = []
+                preflight["requires_full_generation"] = True
+                preflight["candidate_flow_ids"] = [
+                    item["flow_id"] for item in preflight["nodes"]
+                ]
+                preflight["candidate_count"] = preflight["node_count"]
+                break
+            reusable_nodes.append(hydrated)
+    if preflight["requires_full_generation"]:
+        reusable_nodes = []
+    elif target_flow_ids:
+        generation_strategy = "node_first"
+
     options = {
         "persist": False,
         "repair_attempts": repair_attempts,
@@ -1119,12 +1677,24 @@ def _build_pipeline_codegen_payload(
         "generation_strategy": generation_strategy,
         "allow_deterministic_fallback": bool(payload.get("allow_deterministic_fallback")),
         "user_instruction": user_instruction,
+        "target_flow_ids": (
+            target_flow_ids if generation_strategy == "node_first" else []
+        ),
     }
     metadata = {
         "generation_mode": str(payload.get("generation_mode") or "").strip(),
         "data_awareness": _pipeline_sample_data_summary(graph),
         "high_level_prompt": high_level_prompt,
         "options": options,
+        "generation_scope": preflight["scope"],
+        "target_flow_ids": target_flow_ids,
+        "reusable_flow_ids": preflight["reusable_flow_ids"],
+        "preflight": preflight,
+        "overwrite_manual_code": bool(payload.get("overwrite_manual_code")),
+        "model": {
+            "provider": str(llm_config.get("provider") or ""),
+            "model": str(llm_config.get("model") or ""),
+        },
     }
     return (
         {
@@ -1133,15 +1703,43 @@ def _build_pipeline_codegen_payload(
                 include_samples=include_sample_data,
             ),
             "options": options,
-            "llm_config": _codegen_llm_config_from_payload(payload),
+            "llm_config": payload.get("llm_config"),
+            "reusable_nodes": reusable_nodes,
         },
         metadata,
     )
 
 
+def _pipeline_codegen_conflict(
+    metadata: dict[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    preflight = (
+        metadata.get("preflight")
+        if isinstance(metadata.get("preflight"), dict)
+        else {}
+    )
+    target_flow_ids = preflight.get("target_flow_ids") or []
+    if not target_flow_ids:
+        return (
+            "No runtime packages need generation for the selected scope.",
+            preflight,
+        )
+    protected_flow_ids = preflight.get("protected_flow_ids") or []
+    if protected_flow_ids and not metadata.get("overwrite_manual_code"):
+        return (
+            "The selected scope includes manually edited or uploaded code. "
+            "Explicit replacement approval is required.",
+            preflight,
+        )
+    return None
+
+
 def _finalize_pipeline_codegen_response(
     codegen_response: dict[str, Any],
     graph: dict[str, Any],
+    *,
+    persist_flow_ids: set[str] | None = None,
+    reused_flow_ids: set[str] | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     generated_nodes = (
         codegen_response.get("nodes")
@@ -1155,6 +1753,9 @@ def _finalize_pipeline_codegen_response(
     )
     generation_run = _persist_codegen_run_report(codegen_response.get("generation_run"))
     graph_nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    # Boundary adapters and flow wiring are compiler-owned.  A Generate Code
+    # request may use them while validating the complete graph, but it only
+    # attaches implementations to Task components.
     expected_flow_ids = [
         str(
             node.get("id")
@@ -1164,17 +1765,25 @@ def _finalize_pipeline_codegen_response(
         ).strip()
         for node in graph_nodes
         if isinstance(node, dict)
+        and normalize_step_type(_node_data(node).get("type")) == "task"
     ]
     expected_flow_ids = [flow_id for flow_id in expected_flow_ids if flow_id]
+    task_flow_ids = set(expected_flow_ids)
+    generated_task_nodes = [
+        item
+        for item in generated_nodes
+        if isinstance(item, dict)
+        and str(item.get("flow_id") or "").strip() in task_flow_ids
+    ]
     invalid_nodes = _invalid_codegen_nodes(
-        generated_nodes,
+        generated_task_nodes,
         expected_flow_ids,
     )
     if _validation_status(integration_validation) != "valid" or invalid_nodes:
         return (
             False,
             {
-                "nodes": generated_nodes,
+                "nodes": generated_task_nodes,
                 "edges": codegen_response.get("edges", []),
                 "invalid_nodes": invalid_nodes,
                 "integration_validation": integration_validation,
@@ -1184,6 +1793,7 @@ def _finalize_pipeline_codegen_response(
         )
 
     persisted_nodes = []
+    run_id = str((generation_run or {}).get("run_id") or "").strip()
     for item in generated_nodes:
         if not isinstance(item, dict):
             continue
@@ -1191,6 +1801,14 @@ def _finalize_pipeline_codegen_response(
         artifact = item.get("generated_artifact")
         if not flow_id or not isinstance(artifact, dict):
             continue
+        if flow_id not in task_flow_ids:
+            continue
+        if persist_flow_ids is not None and flow_id not in persist_flow_ids:
+            continue
+        artifact = {
+            **artifact,
+            **({"generation_run_id": run_id} if run_id else {}),
+        }
         persisted_nodes.append(
             {
                 "flow_id": flow_id,
@@ -1205,6 +1823,10 @@ def _finalize_pipeline_codegen_response(
         True,
         {
             "nodes": persisted_nodes,
+            "reused_flow_ids": sorted(reused_flow_ids or set()),
+            "attached_flow_ids": [
+                item["flow_id"] for item in persisted_nodes
+            ],
             "edges": codegen_response.get("edges", []),
             "integration_validation": integration_validation,
             "generation_run": generation_run,
@@ -1233,6 +1855,15 @@ def _save_chatbot_configs(configs: list[dict[str, Any]]) -> None:
 
 
 def _chatbot_config_response(config: dict[str, Any]) -> dict[str, Any]:
+    openrouter_provider_only = _chatbot_provider_only(
+        config.get("openrouterProviderOnly", config.get("openrouter_provider_only"))
+    )
+    codegen_openrouter_provider_only = _chatbot_provider_only(
+        config.get(
+            "codegenOpenrouterProviderOnly",
+            config.get("codegen_openrouter_provider_only"),
+        )
+    )
     response = {
         "id": str(config.get("id") or ""),
         "name": str(config.get("name") or ""),
@@ -1240,6 +1871,10 @@ def _chatbot_config_response(config: dict[str, Any]) -> dict[str, Any]:
         "model": str(config.get("model") or ""),
         "codegenModel": str(config.get("codegenModel") or config.get("codegen_model") or ""),
         "codegen_model": str(config.get("codegenModel") or config.get("codegen_model") or ""),
+        "openrouterProviderOnly": openrouter_provider_only,
+        "openrouter_provider_only": openrouter_provider_only,
+        "codegenOpenrouterProviderOnly": codegen_openrouter_provider_only,
+        "codegen_openrouter_provider_only": codegen_openrouter_provider_only,
         "baseUrl": str(config.get("baseUrl") or config.get("base_url") or ""),
         "base_url": str(config.get("baseUrl") or config.get("base_url") or ""),
         "system_prompt": str(config.get("system_prompt") or ""),
@@ -1251,6 +1886,15 @@ def _chatbot_config_response(config: dict[str, Any]) -> dict[str, Any]:
         response["readOnly"] = True
         response["read_only"] = True
     return response
+
+
+def _chatbot_provider_only(value: Any) -> list[str]:
+    values = value if isinstance(value, (list, tuple)) else str(value or "").split(",")
+    return list(dict.fromkeys(
+        str(item).strip().lower()
+        for item in values
+        if str(item).strip()
+    ))
 
 
 def _validate_chatbot_config_payload(
@@ -1269,6 +1913,27 @@ def _validate_chatbot_config_payload(
         or existing.get("codegen_model")
         or ""
     ).strip()
+    openrouter_provider_only = _chatbot_provider_only(
+        payload.get(
+            "openrouterProviderOnly",
+            payload.get(
+                "openrouter_provider_only",
+                existing.get("openrouterProviderOnly", existing.get("openrouter_provider_only")),
+            ),
+        )
+    )
+    codegen_openrouter_provider_only = _chatbot_provider_only(
+        payload.get(
+            "codegenOpenrouterProviderOnly",
+            payload.get(
+                "codegen_openrouter_provider_only",
+                existing.get(
+                    "codegenOpenrouterProviderOnly",
+                    existing.get("codegen_openrouter_provider_only"),
+                ),
+            ),
+        )
+    )
     base_url = str(
         payload.get("baseUrl")
         or payload.get("base_url")
@@ -1280,6 +1945,8 @@ def _validate_chatbot_config_payload(
         return _json_error(400, "name is required")
     if not model:
         return _json_error(400, "model is required")
+    if not codegen_model:
+        return _json_error(400, "codegenModel is required")
     if not base_url:
         return _json_error(400, "baseUrl is required")
     now = _utc_now_iso()
@@ -1290,6 +1957,10 @@ def _validate_chatbot_config_payload(
         "model": model,
         "codegenModel": codegen_model,
         "codegen_model": codegen_model,
+        "openrouterProviderOnly": openrouter_provider_only,
+        "openrouter_provider_only": openrouter_provider_only,
+        "codegenOpenrouterProviderOnly": codegen_openrouter_provider_only,
+        "codegen_openrouter_provider_only": codegen_openrouter_provider_only,
         "baseUrl": base_url,
         "base_url": base_url,
         "system_prompt": str(payload.get("system_prompt") or existing.get("system_prompt") or ""),
@@ -1315,6 +1986,7 @@ def graph_nodes():
     deleted_ids = graph_payload.get("deleted_step_flow_ids") if isinstance(graph_payload, dict) else []
     storage_cleanup = []
     for flow_id in deleted_ids or []:
+        clear_node_secrets(flow_id)
         storage_response = _proxy(
             dispatch_object_request,
             "minio_clear_bucket",
@@ -1397,6 +2069,8 @@ def graph_node(node_id: str):
     graph_response = _proxy(dispatch_graph_request, f"neo4j_delete_node/{node_id}", data=b"")
     if not graph_response.ok:
         return _response_from_upstream(graph_response)
+
+    clear_node_secrets(node_id)
 
     storage_response = _proxy(
         dispatch_object_request,
@@ -1498,6 +2172,24 @@ def pipeline_version_set_main():
     return _proxy_response(dispatch_graph_request, "neo4j_set_pipeline_version_as_main")
 
 
+@app.route("/api/reusable-pipelines", methods=["GET", "POST", "DELETE", "OPTIONS"])
+@require_auth
+def reusable_pipelines():
+    return _proxy_response(dispatch_graph_request, "neo4j_reusable_pipelines")
+
+
+@app.route("/api/reusable-pipelines/version", methods=["GET", "OPTIONS"])
+@require_auth
+def reusable_pipeline_version():
+    return _proxy_response(dispatch_graph_request, "neo4j_reusable_pipeline_version")
+
+
+@app.route("/api/reusable-pipelines/attach", methods=["POST", "OPTIONS"])
+@require_auth
+def attach_reusable_pipeline_version():
+    return _proxy_response(dispatch_graph_request, "neo4j_attach_reusable_pipeline_version")
+
+
 @app.route("/api/workspace/clear-all", methods=["POST", "OPTIONS"])
 @require_auth
 def workspace_clear_all():
@@ -1516,36 +2208,70 @@ def workspace_clear_all():
         return _response_from_upstream(graph_response)
 
     graph_payload = _upstream_json(graph_response)
-    deleted_ids = graph_payload.get("deleted_step_flow_ids") if isinstance(graph_payload, dict) else []
-    storage_cleanup = []
-    for flow_id in deleted_ids or []:
-        storage_response = _proxy(
-            dispatch_object_request,
-            "minio_clear_bucket",
-            method="DELETE",
-            params={"bucket_id": flow_id},
-            data=b"",
-        )
-        storage_cleanup.append({
-            "flow_id": flow_id,
-            "status": storage_response.status_code,
-            "ok": storage_response.ok,
-        })
+    storage_response = _proxy(
+        dispatch_object_request,
+        "minio_clear_workspace",
+        method="DELETE",
+        data=b"",
+    )
+    storage_cleanup = [{
+        "status": storage_response.status_code,
+        "ok": storage_response.ok,
+        "result": _upstream_json(storage_response),
+    }]
 
     chat_reset = False
     if session_id:
         clear_state_from_disk(session_id)
         chat_reset = True
+    generation_cleanup = _clear_codegen_run_history()
+    secrets_cleared = clear_node_secrets()
 
     if isinstance(graph_payload, dict):
         graph_payload["storage_cleanup"] = storage_cleanup
         graph_payload["chat_reset"] = chat_reset
+        graph_payload["generation_cleanup"] = generation_cleanup
+        graph_payload["secrets_cleared"] = secrets_cleared
+        if not storage_response.ok:
+            graph_payload["status"] = "partial"
+            graph_payload["error"] = "Neo4j was cleared, but object storage cleanup was incomplete"
+            return jsonify(graph_payload), 207
         return jsonify(graph_payload), graph_response.status_code
     return jsonify({
         "graph": graph_payload,
         "storage_cleanup": storage_cleanup,
         "chat_reset": chat_reset,
+        "generation_cleanup": generation_cleanup,
+        "secrets_cleared": secrets_cleared,
     }), graph_response.status_code
+
+
+@app.route("/api/nodes/<node_id>/secrets", methods=["GET", "OPTIONS"])
+@require_auth
+def node_secrets(node_id: str):
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    return jsonify({"configured": configured_node_secrets(node_id)}), 200
+
+
+@app.route(
+    "/api/nodes/<node_id>/secrets/<parameter_name>",
+    methods=["PUT", "DELETE", "OPTIONS"],
+)
+@require_auth
+def node_secret(node_id: str, parameter_name: str):
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    try:
+        clean_name = normalize_parameter_name(parameter_name)
+        if request.method == "DELETE":
+            deleted = delete_node_secret(node_id, clean_name)
+            return jsonify({"name": clean_name, "configured": False, "deleted": deleted}), 200
+        value = _request_json().get("value")
+        set_node_secret(node_id, clean_name, value)
+        return jsonify({"name": clean_name, "configured": True}), 200
+    except ValueError as exc:
+        return _json_error(422, str(exc))
 
 
 @app.route("/api/provenance/report", methods=["GET", "OPTIONS"])
@@ -1660,16 +2386,24 @@ def node_generate_script(node_id: str):
         )
         if context is None:
             return _json_error(404, "node not found")
+        target_type = normalize_step_type(
+            (context.get("target_node") or {}).get("type")
+        )
+        if target_type != "task":
+            return _json_error(
+                422,
+                "Generate Code only creates Task implementations. Sources and Destinations are configured when you build the bundle.",
+            )
 
         codegen_payload = {
             "context": context,
+            "llm_config": payload.get("llm_config"),
             "options": {
                 "persist": False,
                 "repair_attempts": 7,
                 "include_sample_data": bool(payload.get("include_sample_data")),
                 "user_instruction": str(payload.get("user_instruction") or ""),
             },
-            "llm_config": _codegen_llm_config_from_payload(payload),
         }
         codegen_response = _post_codegen_request(codegen_payload)
         artifact = codegen_response.get("generated_artifact")
@@ -1728,11 +2462,17 @@ def pipeline_generate_scripts():
         if not codegen_context["graph"]["nodes"]:
             return _json_error(422, "pipeline graph has no nodes")
 
-        codegen_payload, _metadata = _build_pipeline_codegen_payload(graph, payload)
+        codegen_payload, metadata = _build_pipeline_codegen_payload(graph, payload)
+        conflict = _pipeline_codegen_conflict(metadata)
+        if conflict:
+            message, details = conflict
+            return _json_error(409, message, details)
         codegen_response = _post_codegen_pipeline_request(codegen_payload)
         is_valid, response_payload = _finalize_pipeline_codegen_response(
             codegen_response,
             graph,
+            persist_flow_ids=set(metadata.get("target_flow_ids") or []),
+            reused_flow_ids=set(metadata.get("reusable_flow_ids") or []),
         )
         if not is_valid:
             return _json_error(
@@ -1743,6 +2483,30 @@ def pipeline_generate_scripts():
         return jsonify(response_payload), 200
     except Exception as exc:
         return _json_error(502, "pipeline script generation failed", str(exc))
+
+
+@app.route(
+    "/api/pipeline/generation-preflight",
+    methods=["POST", "OPTIONS"],
+)
+@require_auth
+def pipeline_generation_preflight():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    try:
+        graph_response = _proxy(
+            dispatch_graph_request,
+            "neo4j_get_graph",
+            method="GET",
+            data=b"",
+        )
+        graph_response.raise_for_status()
+        graph = _upstream_json(graph_response)
+        graph = graph if isinstance(graph, dict) else {}
+        preflight = _pipeline_codegen_preflight(graph, _request_json())
+        return jsonify(preflight), 200
+    except Exception as exc:
+        return _json_error(502, "pipeline generation preflight failed", str(exc))
 
 
 @app.route("/api/pipeline/external-runtime-prompt", methods=["POST", "OPTIONS"])
@@ -1785,11 +2549,29 @@ def pipeline_external_runtime_prompt():
         return _json_error(502, "external AI runtime prompt preparation failed", str(exc))
 
 
-@app.route("/api/pipeline/generation-runs", methods=["POST", "OPTIONS"])
+@app.route(
+    "/api/pipeline/generation-runs",
+    methods=["GET", "POST", "DELETE", "OPTIONS"],
+)
 @require_auth
 def pipeline_generation_runs():
     if request.method == "OPTIONS":
         return _preflight_response()
+    if request.method == "GET":
+        try:
+            limit = min(max(int(request.args.get("limit") or 20), 1), 100)
+        except (TypeError, ValueError):
+            limit = 20
+        return jsonify(
+            {
+                "runs": [
+                    _codegen_run_summary(record)
+                    for record in CODEGEN_RUN_STORE.list(limit=limit)
+                ]
+            }
+        ), 200
+    if request.method == "DELETE":
+        return jsonify(_clear_codegen_run_history()), 200
     payload = _request_json()
     try:
         graph_response = _proxy(
@@ -1802,6 +2584,10 @@ def pipeline_generation_runs():
         graph = _upstream_json(graph_response)
         graph = graph if isinstance(graph, dict) else {}
         codegen_payload, metadata = _build_pipeline_codegen_payload(graph, payload)
+        conflict = _pipeline_codegen_conflict(metadata)
+        if conflict:
+            message, details = conflict
+            return _json_error(409, message, details)
         if not codegen_payload["context"]["graph"]["nodes"]:
             return _json_error(422, "pipeline graph has no nodes")
 
@@ -1809,18 +2595,24 @@ def pipeline_generation_runs():
         run_id = str(codegen_run.get("run_id") or "").strip()
         if not run_id:
             return _json_error(502, "codegen service did not return a run_id")
-        PIPELINE_GENERATION_RUNS[run_id] = {
+        now = _utc_now_iso()
+        CODEGEN_RUN_STORE.put({
+            "run_id": run_id,
+            "status": str(codegen_run.get("status") or "queued"),
             "graph": graph,
             "metadata": metadata,
+            "context_fingerprint": _codegen_context_fingerprint(
+                codegen_payload["context"]
+            ),
+            "remote_job": _codegen_job_snapshot(codegen_run),
             "persisted": False,
-            "created_at": _utc_now_iso(),
-            "updated_at": _utc_now_iso(),
-        }
+            "created_at": now,
+            "updated_at": now,
+        })
         return jsonify(
             {
                 **codegen_run,
-                "mode": metadata["generation_mode"],
-                "data_awareness": metadata["data_awareness"],
+                **_codegen_run_response_metadata({"metadata": metadata}),
                 "persistence": {"status": "pending"},
             }
         ), 202
@@ -1835,7 +2627,7 @@ def pipeline_generation_run_resume(run_id: str):
         return _preflight_response()
     payload = _request_json()
     try:
-        local_run = PIPELINE_GENERATION_RUNS.get(run_id)
+        local_run = CODEGEN_RUN_STORE.get(run_id)
         if local_run is None:
             return _json_error(
                 404,
@@ -1859,15 +2651,14 @@ def pipeline_generation_run_resume(run_id: str):
                 + repair_instruction
             )
         resume_payload = {
+            "llm_config": payload.get("llm_config"),
             "flow_id": str(payload.get("flow_id") or "").strip() or None,
             "repair_attempts": payload.get("repair_attempts", 7),
             "user_instruction": combined_instruction,
         }
-        resume_llm_config = _codegen_llm_config_from_payload(payload)
         codegen_run = _post_codegen_pipeline_run_resume_request(
             run_id,
             resume_payload,
-            llm_api_key=str(resume_llm_config.get("api_key") or ""),
         )
         new_run_id = str(codegen_run.get("run_id") or "").strip()
         if not new_run_id:
@@ -1884,19 +2675,23 @@ def pipeline_generation_run_resume(run_id: str):
             options["repair_attempts"] = 7
         metadata["options"] = options
         metadata["generation_mode"] = "repair"
-        PIPELINE_GENERATION_RUNS[new_run_id] = {
+        now = _utc_now_iso()
+        CODEGEN_RUN_STORE.put({
+            "run_id": new_run_id,
+            "status": str(codegen_run.get("status") or "queued"),
             "graph": local_run["graph"],
             "metadata": metadata,
+            "context_fingerprint": local_run.get("context_fingerprint", ""),
+            "remote_job": _codegen_job_snapshot(codegen_run),
             "persisted": False,
             "resumed_from_run_id": run_id,
-            "created_at": _utc_now_iso(),
-            "updated_at": _utc_now_iso(),
-        }
+            "created_at": now,
+            "updated_at": now,
+        })
         return jsonify(
             {
                 **codegen_run,
-                "mode": metadata["generation_mode"],
-                "data_awareness": metadata.get("data_awareness", {}),
+                **_codegen_run_response_metadata({"metadata": metadata}),
                 "persistence": {"status": "pending"},
             }
         ), 202
@@ -1915,32 +2710,31 @@ def pipeline_generation_run(run_id: str):
     try:
         if request.method == "DELETE":
             codegen_run = _cancel_codegen_pipeline_run_request(run_id)
-            local_run = PIPELINE_GENERATION_RUNS.get(run_id)
+            local_run = CODEGEN_RUN_STORE.get(run_id)
             if local_run is not None:
+                local_run["status"] = "cancelled"
                 local_run["updated_at"] = _utc_now_iso()
                 local_run["cancelled"] = True
+                local_run["remote_job"] = _codegen_job_snapshot(codegen_run)
+                CODEGEN_RUN_STORE.put(local_run)
             return jsonify(
                 {
                     **codegen_run,
-                    "mode": (local_run or {})
-                    .get("metadata", {})
-                    .get("generation_mode", ""),
-                    "data_awareness": (local_run or {})
-                    .get("metadata", {})
-                    .get("data_awareness", {}),
+                    **_codegen_run_response_metadata(local_run),
                     "persistence": {"status": "cancelled"},
                 }
             ), 200
 
         codegen_run = _get_codegen_pipeline_run_request(run_id)
-        local_run = PIPELINE_GENERATION_RUNS.get(run_id)
+        local_run = CODEGEN_RUN_STORE.get(run_id)
+        if local_run is not None:
+            local_run["status"] = str(codegen_run.get("status") or "running")
+            local_run["updated_at"] = _utc_now_iso()
+            local_run["remote_job"] = _codegen_job_snapshot(codegen_run)
+            CODEGEN_RUN_STORE.put(local_run)
         response_payload = {
             **codegen_run,
-            "mode": (local_run or {}).get("metadata", {}).get("generation_mode", ""),
-            "data_awareness": (local_run or {}).get("metadata", {}).get(
-                "data_awareness",
-                {},
-            ),
+            **_codegen_run_response_metadata(local_run),
             "persistence": {"status": "pending"},
         }
         status = str(codegen_run.get("status") or "").strip().lower()
@@ -1973,12 +2767,68 @@ def pipeline_generation_run(run_id: str):
             if persistence_status == "not_persisted":
                 response_payload["persistence"][
                     "reason"
-                ] = "pipeline script generation failed validation"
+                ] = local_run.get("finalization_error") or (
+                    "pipeline script generation failed validation"
+                )
             return jsonify(response_payload), 200
+
+        if status == "valid":
+            include_samples = (
+                local_run.get("metadata", {})
+                .get("options", {})
+                .get("include_sample_data", True)
+                is not False
+            )
+            current_graph_response = _proxy(
+                dispatch_graph_request,
+                "neo4j_get_graph",
+                method="GET",
+                data=b"",
+            )
+            current_graph_response.raise_for_status()
+            current_graph = _upstream_json(current_graph_response)
+            current_graph = current_graph if isinstance(current_graph, dict) else {}
+            current_context = _build_pipeline_codegen_context(
+                current_graph,
+                include_samples=include_samples,
+            )
+            expected_fingerprint = str(local_run.get("context_fingerprint") or "")
+            if (
+                expected_fingerprint
+                and _codegen_context_fingerprint(current_context)
+                != expected_fingerprint
+            ):
+                reason = (
+                    "The pipeline changed while code generation was running. "
+                    "Generated artifacts were not attached; start a new run for "
+                    "the current graph."
+                )
+                local_run["persisted"] = False
+                local_run["finalization_error"] = reason
+                local_run["persisted_response"] = {
+                    "status": "not_persisted",
+                    "reason": reason,
+                }
+                local_run["updated_at"] = _utc_now_iso()
+                CODEGEN_RUN_STORE.put(local_run)
+                response_payload["persistence"] = {
+                    "status": "not_persisted",
+                    "reason": reason,
+                    "result": local_run["persisted_response"],
+                }
+                return jsonify(response_payload), 200
 
         is_valid, finalized = _finalize_pipeline_codegen_response(
             result,
             local_run["graph"],
+            persist_flow_ids=(
+                set(local_run.get("metadata", {}).get("target_flow_ids") or [])
+                if local_run.get("metadata", {}).get("target_flow_ids") is not None
+                else None
+            ),
+            reused_flow_ids=set(
+                local_run.get("metadata", {}).get("reusable_flow_ids") or []
+            ),
         )
         local_run["updated_at"] = _utc_now_iso()
         if is_valid:
@@ -1996,9 +2846,31 @@ def pipeline_generation_run(run_id: str):
                 "reason": "pipeline script generation failed validation",
                 "result": finalized,
             }
+        CODEGEN_RUN_STORE.put(local_run)
         return jsonify(response_payload), 200
     except Exception as exc:
         return _json_error(502, "pipeline generation run lookup failed", str(exc))
+
+
+def _file_owner_node_type(node_id: str) -> tuple[str, Any | None]:
+    """Resolve the live graph type before accepting a node file mutation."""
+    graph_response = _proxy(
+        dispatch_graph_request,
+        "neo4j_get_graph",
+        method="GET",
+        params={},
+        data=b"",
+    )
+    if not graph_response.ok:
+        return "", graph_response
+    graph = _upstream_json(graph_response)
+    nodes = graph.get("nodes") if isinstance(graph, dict) else []
+    for node in nodes if isinstance(nodes, list) else []:
+        if not isinstance(node, dict):
+            continue
+        if _node_flow_id(node) == node_id:
+            return normalize_step_type(_node_data(node).get("type")), None
+    return "", None
 
 
 @app.route("/api/nodes/<node_id>/files", methods=["POST", "DELETE", "OPTIONS"])
@@ -2011,8 +2883,50 @@ def node_files(node_id: str):
         uploaded = request.files.get("file")
         if uploaded is None:
             return _json_error(400, "file is required")
+        file_role = str(request.form.get("role") or "").strip().lower()
+        if file_role not in {"code", "data"}:
+            file_role = ""
         uploaded_filename = str(uploaded.filename or "").strip()
-        if uploaded_filename and not _is_codegen_runtime_file(uploaded_filename):
+        node_type, graph_error = _file_owner_node_type(node_id)
+        if graph_error is not None:
+            return _response_from_upstream(graph_error)
+        if not node_type:
+            return _json_error(404, f"node {node_id!r} was not found in the current graph")
+        if file_role == "code":
+            if node_type != "task":
+                return _json_error(
+                    422,
+                    "code can only be uploaded to Task nodes",
+                    "Sources and Destinations are connector adapters generated during Build Bundle.",
+                )
+            safe_name = Path(uploaded_filename).name
+            lower_name = safe_name.lower()
+            if not safe_name or safe_name != uploaded_filename or "/" in uploaded_filename or "\\" in uploaded_filename:
+                return _json_error(422, "code files must use a plain filename")
+            if lower_name == "main.py" and safe_name != "main.py":
+                return _json_error(422, "the Python entrypoint must be named exactly main.py")
+            if lower_name in {"node-manifest.json", "validation-report.json"} or lower_name.startswith("dockerfile."):
+                return _json_error(
+                    422,
+                    "generated runtime files cannot be uploaded manually",
+                )
+            if lower_name not in USER_TASK_RUNTIME_FILENAMES:
+                return _json_error(
+                    422,
+                    "unsupported Task runtime file",
+                    "Upload main.py and, only when needed, requirements.txt.",
+                )
+        if file_role == "data" and node_type != "source":
+            return _json_error(
+                422,
+                "input files can only be uploaded to Source nodes",
+                "Tasks receive artifacts from Sources or upstream Tasks; Destinations receive pipeline outputs.",
+            )
+        if (
+            uploaded_filename
+            and file_role != "code"
+            and not _is_codegen_runtime_file(uploaded_filename)
+        ):
             try:
                 probe, size_bytes = read_attachment_probe(uploaded.stream)
             except (OSError, ValueError) as exc:
@@ -2061,11 +2975,15 @@ def node_files(node_id: str):
                 "properties": {
                     "flow_id": node_id,
                     "filename": uploaded.filename,
+                    **({"role": file_role} if file_role else {}),
                 }
             },
         )
         if not graph_response.ok:
             return _response_from_upstream(graph_response)
+
+        if file_role == "code" or _is_codegen_runtime_file(uploaded_filename):
+            _mark_codegen_artifact_user_modified(node_id)
 
         return jsonify({
             "file": _upstream_json(storage_response),
@@ -2102,6 +3020,9 @@ def node_files(node_id: str):
     if not graph_response.ok:
         return _response_from_upstream(graph_response)
 
+    if _is_codegen_runtime_file(filename):
+        _mark_codegen_artifact_user_modified(node_id)
+
     return jsonify({
         "file": _upstream_json(storage_response),
         "graph": _upstream_json(graph_response),
@@ -2121,6 +3042,16 @@ def node_text_file(node_id: str):
         return _json_error(400, "filename is required")
     if not isinstance(content, str):
         return _json_error(400, "content must be a string")
+    if filename.lower() in USER_TASK_RUNTIME_FILENAMES:
+        node_type, graph_error = _file_owner_node_type(node_id)
+        if graph_error is not None:
+            return _response_from_upstream(graph_error)
+        if node_type != "task":
+            return _json_error(
+                422,
+                "Task runtime files can only be edited on Task nodes",
+                "Sources and Destinations are managed connector adapters.",
+            )
     storage_response = _proxy(
         dispatch_object_request,
         "minio_update_text_file",
@@ -2134,6 +3065,8 @@ def node_text_file(node_id: str):
         },
     )
     if storage_response.ok:
+        if _is_codegen_runtime_file(filename):
+            _mark_codegen_artifact_user_modified(node_id)
         _proxy(
             dispatch_graph_request,
             "neo4j_record_provenance_event",

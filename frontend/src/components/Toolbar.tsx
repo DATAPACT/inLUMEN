@@ -21,6 +21,16 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { cn } from "@/lib/utils";
 import inlumenLogo from "@/assets/inlumen-logo.svg";
 
@@ -69,11 +79,12 @@ export function Toolbar({
   isGeneratingProvenanceReport = false,
   isDownloadingProvO = false
 }: ToolbarProps) {
+  const [isClearWarningOpen, setIsClearWarningOpen] = React.useState(false);
   const panelButtonClass = (isActive: boolean) =>
     cn(
       "h-8 rounded-lg px-2.5 text-xs",
       isActive
-        ? "border border-emerald-400/40 bg-emerald-500/15 text-emerald-500 hover:bg-emerald-500/20"
+        ? "border border-emerald-400/40 bg-emerald-500/15 text-[hsl(var(--success-foreground))] hover:bg-emerald-500/20"
         : "border border-transparent text-muted-foreground"
     );
   const currentVersionName = activeVersionName?.trim() || "Main";
@@ -84,11 +95,11 @@ export function Toolbar({
         <img src={inlumenLogo} alt="inLUMEN" className="h-8 w-8 shrink-0 rounded-lg" />
         <div className="hidden min-w-0 flex-col justify-center sm:flex">
           <h1 className="truncate text-sm font-semibold tracking-[0.18em]">
-            <span className="font-mono text-[#9EFF6B] drop-shadow-[0_0_4px_rgba(158,255,107,0.35)]">in</span>
+            <span className="font-mono text-[hsl(var(--brand-foreground))] drop-shadow-[0_0_4px_hsl(var(--brand-foreground)/0.25)]">in</span>
             <span className="ml-1 text-foreground">LUMEN</span>
           </h1>
           <p className="truncate text-[11px] text-muted-foreground">
-            Visual AI pipeline workspace
+            Visual AI pipeline design workspace
           </p>
         </div>
       </div>
@@ -149,17 +160,45 @@ export function Toolbar({
       </div>
       
       <div className="ml-auto flex shrink-0 items-center gap-1">
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-8 text-xs text-destructive hover:text-destructive"
-          onClick={onClearAll}
-          disabled={isClearingAll}
-          title="Clear canvas, chat, and saved versions"
-        >
-          <Trash2 className="h-3.5 w-3.5 mr-1" />
-          <span className="hidden sm:inline">{isClearingAll ? "Clearing..." : "Clear all"}</span>
-        </Button>
+        <AlertDialog open={isClearWarningOpen} onOpenChange={setIsClearWarningOpen}>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8 text-xs text-destructive hover:text-destructive"
+            onClick={() => setIsClearWarningOpen(true)}
+            disabled={isClearingAll}
+            title="Permanently clear the entire workspace"
+          >
+            <Trash2 className="h-3.5 w-3.5 mr-1" />
+            <span className="hidden sm:inline">{isClearingAll ? "Clearing..." : "Clear all"}</span>
+          </Button>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Clear the entire workspace?</AlertDialogTitle>
+              <AlertDialogDescription asChild>
+                <div className="space-y-3">
+                  <p>This action cannot be undone. It will permanently:</p>
+                  <ul className="list-disc space-y-1 pl-5">
+                    <li>empty the Main pipeline canvas,</li>
+                    <li>delete every saved and reusable pipeline version,</li>
+                    <li>remove all pipeline files and generated packages,</li>
+                    <li>clear the current chat session, and</li>
+                    <li>delete all Neo4j graph data and provenance.</li>
+                  </ul>
+                </div>
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Keep workspace</AlertDialogCancel>
+              <AlertDialogAction
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                onClick={onClearAll}
+              >
+                Clear workspace
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
 
         <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={onOpenHelp}>
           <HelpCircle className="h-3.5 w-3.5 mr-1" />

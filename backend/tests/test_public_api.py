@@ -147,10 +147,17 @@ class PublicApiTest(unittest.TestCase):
         self.assertIn("/api/nodes/{node_id}/files", schema["paths"])
         self.assertIn("/agentic_generate_yaml", schema["paths"])
         self.assertIn("/simple_chat", schema["paths"])
+        self.assertIn("/simple_chat/cancel", schema["paths"])
         self.assertFalse(any("sim-pipe" in path for path in schema["paths"]))
         self.assertIn("/openapi.json", schema["paths"])
         self.assertEqual(["Health"], schema["paths"]["/health"]["get"]["tags"])
         self.assertEqual(["Canvas Graph"], schema["paths"]["/api/graph/nodes"]["post"]["tags"])
+        self.assertEqual(
+            ["source", "task", "destination", "flow", "subpipeline"],
+            schema["components"]["schemas"]["PipelineNodeKind"]["enum"],
+        )
+        self.assertIn("ports", schema["components"]["schemas"]["NodeCreateRequest"]
+                      ["properties"]["properties"]["properties"])
 
     @patch("public_api.check_object_health")
     @patch("public_api.check_graph_health")

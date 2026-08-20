@@ -193,8 +193,8 @@ def select_model_client(
         kwargs["parallel_tool_calls"] = parallel_tool_calls
     if resolved_config.provider == "openrouter":
         default_headers = {
-            "HTTP-Referer": "http://localhost",
-            "X-Title": "inLUMEN",
+            "HTTP-Referer": "https://github.com/DATAPACT/inLUMEN",
+            "X-OpenRouter-Title": "inLUMEN",
         }
         kwargs["default_headers"] = default_headers
         if resolved_config.openrouter_provider_only:

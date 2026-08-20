@@ -5,16 +5,35 @@ import uuid
 import json
 import os
 import tempfile
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 from runtime_config import add_cors_headers, get_neo4j_settings
 from step_types import normalize_step_type
+from node_ports import (
+    default_input_port_id,
+    default_output_port_id,
+    normalize_node_ports,
+    ports_json,
+)
+from node_parameters import (
+    normalize_secret_param_keys,
+    secret_params_json,
+    without_secret_param_values,
+)
 from minio_access import create_bucket, list_objects, read_object_bytes, remove_object, upload_object
 from model_plans import resolve_implementation_plan
 from node_definitions.instance import (
     definition_data_from_properties,
     definition_properties_from_data,
     normalize_definition_properties,
+)
+from pipeline_graph_validation import validate_pipeline_graph
+from subpipeline_reference import (
+    derive_subpipeline_interface,
+    normalize_reusable_pipeline_graph,
+    plan_subpipeline_port_migration,
+    public_ports_for_interface,
 )
 
 NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD = get_neo4j_settings()
@@ -111,6 +130,7 @@ def _file_refs_from_graph_node(flow_id: str, data: dict) -> list[dict]:
         bucket = default_bucket
         snapshot_bucket = ""
         snapshot_object = ""
+        role = ""
         if isinstance(item, str):
             filename = item.strip()
         elif isinstance(item, dict):
@@ -118,6 +138,8 @@ def _file_refs_from_graph_node(flow_id: str, data: dict) -> list[dict]:
             bucket = str(item.get("bucket") or default_bucket).strip().lower()
             snapshot_bucket = str(item.get("snapshot_bucket") or "").strip().lower()
             snapshot_object = str(item.get("snapshot_object") or "").strip()
+            candidate_role = str(item.get("role") or "").strip().lower()
+            role = candidate_role if candidate_role in {"code", "data"} else ""
         if not filename:
             continue
         key = (filename, bucket)
@@ -125,6 +147,8 @@ def _file_refs_from_graph_node(flow_id: str, data: dict) -> list[dict]:
             continue
         seen.add(key)
         file_ref = {"filename": filename, "bucket": bucket}
+        if role:
+            file_ref["role"] = role
         if snapshot_bucket and snapshot_object:
             file_ref["snapshot_bucket"] = snapshot_bucket
             file_ref["snapshot_object"] = snapshot_object
@@ -157,13 +181,15 @@ def _parse_visible_graph(graph: dict) -> tuple[list[dict], list[dict]]:
         except Exception:
             y = 0.0
 
-        step_type = normalize_step_type(data.get("type"), default="custom")
+        step_type = normalize_step_type(data.get("type"), default="task")
         files = _file_refs_from_graph_node(flow_id, data)
         props = {
             "flow_id": flow_id,
             "type": step_type,
             "label": str(data.get("label") or ""),
             "description": str(data.get("description") or ""),
+            "template_label": str(data.get("template_label") or ""),
+            "ports_json": ports_json(data.get("ports"), step_type),
             "x": x,
             "y": y,
         }
@@ -189,27 +215,27 @@ def _parse_visible_graph(graph: dict) -> tuple[list[dict], list[dict]]:
                 label=str(data.get("label") or ""),
                 description=str(data.get("description") or ""),
             )
-        if param_obj or isinstance(data.get("param"), dict):
-            # Model-backed action nodes persist their reviewed implementation
-            # plan in param.model_plan, not only configuration nodes.
-            props["param_json"] = json.dumps(
-                param_obj,
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-        if step_type in ("input", "output"):
+        # Parameters are inspector metadata for every structural node kind.
+        secret_param_keys = data.get("secret_params")
+        param_obj = without_secret_param_values(param_obj, secret_param_keys)
+        props["param_json"] = json.dumps(
+            param_obj,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        props["secret_params_json"] = secret_params_json(
+            secret_param_keys,
+            param_obj,
+        )
+        if step_type == "destination":
             props["content"] = str(data.get("content") or "")
-            props["has_files"] = "yes" if files else str(data.get("has_files") or "no").lower().strip()
-        elif step_type in ("action", "custom"):
-            props["has_files"] = "yes" if files else str(data.get("has_files") or "no").lower().strip()
-        elif step_type == "config":
-            props.setdefault("param_json", "{}")
-        elif step_type == "storage":
+        props["has_files"] = "yes" if files else str(data.get("has_files") or "no").lower().strip()
+        # Preserve legacy adapter fields during migration without treating them
+        # as structural kinds.
+        if "endpoint" in data:
             props["endpoint"] = str(data.get("endpoint") or "")
-            db = str(data.get("database") or "minio").lower().strip()
-            props["database"] = db if db in ("minio", "sqlite", "chromadb") else "minio"
-        elif step_type == "api":
-            props["endpoint"] = str(data.get("endpoint") or "")
+        if "database" in data:
+            props["database"] = str(data.get("database") or "").lower().strip()
         nodes.append({"props": props, "files": files})
 
     visible_ids = {node["props"]["flow_id"] for node in nodes}
@@ -220,7 +246,9 @@ def _parse_visible_graph(graph: dict) -> tuple[list[dict], list[dict]]:
             continue
         source = str(raw_edge.get("source") or "").strip()
         target = str(raw_edge.get("target") or "").strip()
-        edge_key = (source, target)
+        source_port = str(raw_edge.get("sourceHandle") or raw_edge.get("source_port") or "").strip()
+        target_port = str(raw_edge.get("targetHandle") or raw_edge.get("target_port") or "").strip()
+        edge_key = (source, target, source_port, target_port)
         if (
             not source
             or not target
@@ -231,7 +259,12 @@ def _parse_visible_graph(graph: dict) -> tuple[list[dict], list[dict]]:
         ):
             continue
         seen_edges.add(edge_key)
-        edges.append({"source": source, "target": target})
+        edges.append({
+            "source": source,
+            "target": target,
+            "source_port": source_port,
+            "target_port": target_port,
+        })
     return nodes, edges
 
 
@@ -258,6 +291,64 @@ def _clear_active_steps(session) -> list[str]:
     DETACH DELETE step
     """)
     return flow_ids
+
+
+def _deep_clear_workspace(session) -> dict[str, Any]:
+    """Delete every persisted graph entity and return cleanup targets.
+
+    Clear all is intentionally stronger than clearing the active canvas. In
+    particular it must not leave the design PIPELINE node, its Main version,
+    reusable pipelines, FILE nodes, or provenance entities behind.
+    """
+    step_record = session.run("""
+    MATCH (step:STEP)
+    WHERE step.flow_id IS NOT NULL
+    RETURN collect(DISTINCT toString(step.flow_id)) AS flow_ids
+    """).single()
+    version_record = session.run("""
+    MATCH (version:PIPELINE_VERSION)
+    WHERE version.uid IS NOT NULL
+    RETURN collect(DISTINCT toString(version.uid)) AS version_uids
+    """).single()
+    count_record = session.run("""
+    MATCH (entity)
+    RETURN count(entity) AS entity_count
+    """).single()
+    provenance_record = session.run("""
+    MATCH (event:PROVENANCE_EVENT)
+    RETURN count(event) AS provenance_event_count
+    """).single()
+
+    flow_ids = step_record["flow_ids"] if step_record and step_record["flow_ids"] else []
+    version_uids = (
+        version_record["version_uids"]
+        if version_record and version_record["version_uids"]
+        else []
+    )
+    entity_count = int(
+        count_record["entity_count"]
+        if count_record and count_record["entity_count"] is not None
+        else 0
+    )
+    provenance_event_count = int(
+        provenance_record["provenance_event_count"]
+        if provenance_record and provenance_record["provenance_event_count"] is not None
+        else 0
+    )
+
+    for version_uid in version_uids:
+        _delete_version_file_snapshots(version_uid)
+
+    session.run("""
+    MATCH (entity)
+    DETACH DELETE entity
+    """).consume()
+    return {
+        "flow_ids": flow_ids,
+        "version_uids": version_uids,
+        "entity_count": entity_count,
+        "provenance_event_count": provenance_event_count,
+    }
 
 
 def _sync_graph_to_session(
@@ -331,6 +422,7 @@ def _sync_graph_to_session(
         MERGE (s:STEP {flow_id: $flow_id})
         ON CREATE SET s.uid = randomUUID()
         SET s += $props
+        REMOVE s.source_config, s.source_config_json
         MERGE (p)-[:HAS_STEP]->(s)
         SET p.updated_at = CASE
             WHEN $touch_pipeline_updated_at THEN datetime()
@@ -358,8 +450,9 @@ def _sync_graph_to_session(
             MATCH (s:STEP {flow_id: $flow_id})
             MERGE (f:FILE {filename: $filename, bucket: $bucket})
             ON CREATE SET f.uid = randomUUID(), f.added_at = datetime()
+            SET f.role = CASE WHEN $role = '' THEN f.role ELSE $role END
             MERGE (s)-[:HAS_FILE]->(f)
-            """, flow_id=props["flow_id"], filename=file_ref["filename"], bucket=file_ref["bucket"])
+            """, flow_id=props["flow_id"], filename=file_ref["filename"], bucket=file_ref["bucket"], role=file_ref.get("role", ""))
 
     session.run("""
     MATCH (:STEP)-[r:FLOWS_TO]->(:STEP)
@@ -370,8 +463,12 @@ def _sync_graph_to_session(
         session.run("""
         MATCH (source:STEP {flow_id: $source})
         MATCH (target:STEP {flow_id: $target})
-        MERGE (source)-[:FLOWS_TO]->(target)
-        """, source=edge["source"], target=edge["target"])
+        MERGE (source)-[r:FLOWS_TO {
+          source_port: $source_port,
+          target_port: $target_port
+        }]->(target)
+        """, source=edge["source"], target=edge["target"],
+             source_port=edge["source_port"], target_port=edge["target_port"])
 
     record = session.run("""
     MATCH (p:PIPELINE {uid: $pipeline_uid})
@@ -506,6 +603,7 @@ def _iter_graph_file_entries(graph: dict):
             bucket = default_bucket
             snapshot_bucket = ""
             snapshot_object = ""
+            role = ""
             if isinstance(item, str):
                 filename = item.strip()
             elif isinstance(item, dict):
@@ -513,6 +611,8 @@ def _iter_graph_file_entries(graph: dict):
                 bucket = str(item.get("bucket") or default_bucket).strip().lower()
                 snapshot_bucket = str(item.get("snapshot_bucket") or "").strip().lower()
                 snapshot_object = str(item.get("snapshot_object") or "").strip()
+                candidate_role = str(item.get("role") or "").strip().lower()
+                role = candidate_role if candidate_role in {"code", "data"} else ""
             if not filename:
                 continue
             yield file_list, index, item, {
@@ -520,6 +620,7 @@ def _iter_graph_file_entries(graph: dict):
                 "bucket": bucket,
                 "snapshot_bucket": snapshot_bucket,
                 "snapshot_object": snapshot_object,
+                "role": role,
             }
 
 
@@ -772,7 +873,7 @@ def _provenance_graph_snapshot(session, pipeline_uid: str) -> dict:
     RETURN
       toString(step.flow_id) AS id,
       coalesce(step.label, '') AS label,
-      coalesce(step.type, 'custom') AS type,
+      coalesce(step.type, 'task') AS type,
       coalesce(step.x, 0.0) AS x,
       coalesce(step.y, 0.0) AS y
     ORDER BY
@@ -780,10 +881,13 @@ def _provenance_graph_snapshot(session, pipeline_uid: str) -> dict:
       toString(step.flow_id)
     """, pipeline_uid=pipeline_uid))
     edge_records = list(session.run("""
-    MATCH (p:PIPELINE {uid: $pipeline_uid})-[:HAS_STEP]->(source:STEP)-[:FLOWS_TO]->(target:STEP)
+    MATCH (p:PIPELINE {uid: $pipeline_uid})-[:HAS_STEP]->(source:STEP)-[r:FLOWS_TO]->(target:STEP)
     WHERE (p)-[:HAS_STEP]->(target)
-    RETURN toString(source.flow_id) AS source, toString(target.flow_id) AS target
-    ORDER BY source, target
+    RETURN toString(source.flow_id) AS source,
+           toString(target.flow_id) AS target,
+           coalesce(r.source_port, '') AS source_port,
+           coalesce(r.target_port, '') AS target_port
+    ORDER BY source, target, source_port, target_port
     """, pipeline_uid=pipeline_uid))
 
     node_limit = 60
@@ -795,7 +899,7 @@ def _provenance_graph_snapshot(session, pipeline_uid: str) -> dict:
             {
                 "id": record["id"],
                 "label": _short_text(record["label"], 80),
-                "type": record["type"],
+                "type": normalize_step_type(record["type"]),
                 "x": float(record["x"] or 0.0),
                 "y": float(record["y"] or 0.0),
             }
@@ -805,6 +909,8 @@ def _provenance_graph_snapshot(session, pipeline_uid: str) -> dict:
             {
                 "source": record["source"],
                 "target": record["target"],
+                "source_port": record["source_port"],
+                "target_port": record["target_port"],
             }
             for record in edge_records[:edge_limit]
         ],
@@ -823,7 +929,7 @@ def _provenance_graph_snapshot_from_graph(graph: dict) -> dict:
             {
                 "id": node["props"]["flow_id"],
                 "label": _short_text(node["props"].get("label"), 80),
-                "type": node["props"].get("type", "custom"),
+                "type": node["props"].get("type", "task"),
                 "x": float(node["props"].get("x") or 0.0),
                 "y": float(node["props"].get("y") or 0.0),
             }
@@ -833,6 +939,8 @@ def _provenance_graph_snapshot_from_graph(graph: dict) -> dict:
             {
                 "source": edge["source"],
                 "target": edge["target"],
+                "source_port": edge["source_port"],
+                "target_port": edge["target_port"],
             }
             for edge in edges[:edge_limit]
         ],
@@ -975,6 +1083,9 @@ def _mutation_query_type(query_type: str | None) -> bool:
     return str(query_type or "") in {
         "create_pipeline",
         "create_step",
+        "configure_flow_step",
+        "connect_steps",
+        "disconnect_steps",
         "insert_initial_step",
         "insert_between_steps",
         "delete_step",
@@ -1017,6 +1128,19 @@ def neo4j_add_node():
         properties.pop("position", None)
     properties.setdefault("x", 0)
     properties.setdefault("y", 0)
+    properties["ports_json"] = ports_json(properties.pop("ports", None), step_type)
+    param_obj = properties.pop("param", {})
+    secret_param_keys = properties.pop("secret_params", None)
+    param_obj = without_secret_param_values(param_obj, secret_param_keys)
+    properties["param_json"] = json.dumps(
+        param_obj,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    properties["secret_params_json"] = secret_params_json(
+        secret_param_keys,
+        param_obj,
+    )
     normalize_definition_properties(properties)
     # Normalize to floats (Neo4j-friendly)
     try:
@@ -1027,25 +1151,9 @@ def neo4j_add_node():
         properties["y"] = float(properties.get("y", 0) or 0)
     except Exception:
         properties["y"] = 0.0
-    # Add type-specific properties:
-    if step_type == "input":
+    if step_type == "destination":
         properties.setdefault("content", "")
-        properties.setdefault("has_files", "no")
-    elif step_type == "config":
-        properties.setdefault("param_json", json.dumps(properties.get("param", {})))
-        properties.pop("param", None)
-    elif step_type == "action":
-        properties.setdefault("has_files", "no")
-    elif step_type == "storage":
-        properties.setdefault("endpoint", "")
-        properties.setdefault("database", "minio")
-    elif step_type == "api":
-        properties.setdefault("endpoint", "")
-    elif step_type == "output":
-        properties.setdefault("content", "")
-        properties.setdefault("has_files", "no")
-    elif step_type == "custom":
-        properties.setdefault("has_files", "no")
+    properties.setdefault("has_files", "no")
     # Construct the Cypher query
     query = """
     WITH $props AS props
@@ -1098,7 +1206,7 @@ def neo4j_add_node():
                     session,
                     "node_created",
                     "manual",
-                    f"Created {step.get('type', 'custom')} step '{step.get('label', '')}'.",
+                    f"Created {step.get('type', 'task')} step '{step.get('label', '')}'.",
                     {
                         "flow_id": step.get("flow_id"),
                         "label": step.get("label"),
@@ -1122,6 +1230,9 @@ def neo4j_add_file():
     # TODO: Use uid instead of flow_id
     flow_id = str(properties.get("flow_id") or "")
     filename = str(properties.get("filename") or "")
+    role = str(properties.get("role") or "").strip().lower()
+    if role not in {"code", "data"}:
+        role = ""
     query = """
     MATCH (n:STEP {flow_id: $flow_id})
     OPTIONAL MATCH (p:PIPELINE)-[:HAS_STEP]->(n)
@@ -1132,12 +1243,13 @@ def neo4j_add_file():
     })
     SET f.added_at = datetime()
     SET f.uid = randomUUID()
+    SET f.role = CASE WHEN $role = '' THEN f.role ELSE $role END
     MERGE (n)-[:HAS_FILE]->(f)
     RETURN n
     """
     try:
         with driver.session() as session:
-            result = session.run(query, {"flow_id": flow_id, "filename": filename})
+            result = session.run(query, {"flow_id": flow_id, "filename": filename, "role": role})
             record = result.single()
             if record:
                 _record_provenance_event(
@@ -1207,33 +1319,23 @@ def neo4j_update_node():
     # Changes in label/description
     properties["label"] = properties.get("label", "")
     properties["description"] = properties.get("description", "")
+    properties["ports_json"] = ports_json(properties.pop("ports", None), step_type)
+    param_obj = properties.pop("param", {})
+    secret_param_keys = properties.pop("secret_params", None)
+    param_obj = without_secret_param_values(param_obj, secret_param_keys)
+    properties["param_json"] = json.dumps(
+        param_obj,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    properties["secret_params_json"] = secret_params_json(
+        secret_param_keys,
+        param_obj,
+    )
     normalize_definition_properties(properties)
-    # Changes specific to config step type:
-    if step_type == "config":
-        # Convert param dict -> JSON string
-        param_obj = properties.get("param")
-        if not isinstance(param_obj, dict):
-            param_obj = {}
-        properties["param_json"] = json.dumps(param_obj)
-        properties.pop("param", None)
-    # Changes specific to input/output step type:
-    elif step_type in ("input", "output"):
+    if step_type == "destination":
         properties["content"] =  properties.get("content", "")
-        properties["has_files"] = str(properties.get("has_files")).lower().strip()
-    # Changes specific to action/custom step type:
-    elif step_type in ("action", "custom"):
-        properties["has_files"] = str(properties.get("has_files")).lower().strip()
-    # Changes specific to storage step type:
-    elif step_type == "storage":
-        properties["endpoint"] = properties.get("endpoint", "")
-        # Database (lowercase)
-        db = str(properties.get("database", "minio")).lower().strip()
-        if db not in ("minio", "sqlite", "chromadb"):
-            db = "minio"
-        properties["database"] = db
-    # Changes specific to api step type:
-    elif step_type == "api":
-        properties["endpoint"] = properties.get("endpoint", "")
+    properties["has_files"] = str(properties.get("has_files") or "no").lower().strip()
     # Ensure we never attempt to store maps / File objects
     properties.pop("files", None)
     # ---- Cypher update ----
@@ -1242,6 +1344,7 @@ def neo4j_update_node():
     MATCH (n:STEP {flow_id: $flow_id})
     OPTIONAL MATCH (p:PIPELINE)-[:HAS_STEP]->(n)
     SET n += $props
+    REMOVE n.source_config, n.source_config_json
     SET p.updated_at = datetime()
     RETURN n
     """
@@ -1348,56 +1451,38 @@ def neo4j_clear_nodes():
 def neo4j_clear_pipeline_workspace():
     if request.method == 'OPTIONS':
         return jsonify({}), 200
-    print("[neo4j_api.py] Clearing pipeline workspace, preserving Main.")
+    print("[neo4j_api.py] Deep-clearing the pipeline workspace.")
     try:
         with driver.session() as session:
-            pipeline_uid = _ensure_design_pipeline(session)
-            deleted_step_flow_ids = _clear_active_steps(session)
+            cleanup = _deep_clear_workspace(session)
 
-            deleted_version_record = session.run("""
-            MATCH (p:PIPELINE {uid: $pipeline_uid})-[:HAS_VERSION]->(v:PIPELINE_VERSION)
-            WHERE coalesce(v.is_main, false) = false AND v.uid <> $main_uid
-            RETURN collect(toString(v.uid)) AS uids
-            """, pipeline_uid=pipeline_uid, main_uid=MAIN_VERSION_UID).single()
-            deleted_version_uids = (
-                deleted_version_record["uids"]
-                if deleted_version_record and deleted_version_record["uids"]
-                else []
-            )
-            for version_uid in deleted_version_uids:
-                _delete_version_file_snapshots(version_uid)
-
-            session.run("""
-            MATCH (p:PIPELINE {uid: $pipeline_uid})-[:HAS_VERSION]->(v:PIPELINE_VERSION)
-            WHERE coalesce(v.is_main, false) = false AND v.uid <> $main_uid
-            DETACH DELETE v
-            """, pipeline_uid=pipeline_uid, main_uid=MAIN_VERSION_UID).single()
-
-            sync_result = _sync_graph_to_session(
-                session,
-                _empty_pipeline_graph(),
-                version_name=MAIN_VERSION_NAME,
-                active_version_uid=MAIN_VERSION_UID,
-            )
-            main_version = _upsert_main_pipeline_version(
-                session,
-                pipeline_uid,
-                _empty_pipeline_graph(),
-                sync_result.get("updated_at"),
-                description="",
-            )
-            graph = _empty_pipeline_graph(
-                main_version.get("updated_at") if isinstance(main_version, dict) else sync_result.get("updated_at")
-            )
-            deleted_provenance_event_count = _clear_pipeline_provenance(session, pipeline_uid)
+        cleared_at = datetime.now(timezone.utc).isoformat()
+        graph = _empty_pipeline_graph(cleared_at)
+        # Give the client a fresh local Main state without recreating a Neo4j
+        # node. The first later edit lazily creates a new design pipeline.
+        main_version = {
+            "uid": MAIN_VERSION_UID,
+            "name": MAIN_VERSION_NAME,
+            "version": MAIN_VERSION_NAME,
+            "version_index": 0,
+            "is_main": True,
+            "node_count": 0,
+            "edge_count": 0,
+            "file_count": 0,
+            "description": "",
+            "created_at": cleared_at,
+            "updated_at": cleared_at,
+            "pipeline_updated_at": cleared_at,
+        }
 
         return jsonify({
             "status": "ok",
             "message": "Pipeline workspace cleared",
-            "deleted_step_flow_ids": deleted_step_flow_ids,
-            "deleted_version_uids": deleted_version_uids,
-            "deleted_version_count": len(deleted_version_uids),
-            "deleted_provenance_event_count": deleted_provenance_event_count,
+            "deleted_step_flow_ids": cleanup["flow_ids"],
+            "deleted_version_uids": cleanup["version_uids"],
+            "deleted_version_count": len(cleanup["version_uids"]),
+            "deleted_entity_count": cleanup["entity_count"],
+            "deleted_provenance_event_count": cleanup["provenance_event_count"],
             "provenance_cleared": True,
             "version": main_version,
             "graph": graph,
@@ -1478,14 +1563,21 @@ def neo4j_add_edge():
     properties = data.get("properties", {})
     from_flow_id = properties.get("flow_id_source")
     to_flow_id = properties.get("flow_id_target")
+    source_port = str(properties.get("source_port") or "").strip()
+    target_port = str(properties.get("target_port") or "").strip()
     if not from_flow_id or not to_flow_id:
         return jsonify({"error": "Missing from_flow_id or to_flow_id"}), 400
+    if not source_port or not target_port:
+        return jsonify({"error": "source_port and target_port are required"}), 400
     if str(from_flow_id) == str(to_flow_id):
         return jsonify({"error": "Cannot relate a node to itself"}), 400
     query = """
     MATCH (prev:STEP {flow_id: $from_flow_id})
     MATCH (next:STEP {flow_id: $to_flow_id})
-    MERGE (prev)-[:FLOWS_TO]->(next)
+    MERGE (prev)-[r:FLOWS_TO {
+      source_port: $source_port,
+      target_port: $target_port
+    }]->(next)
     WITH prev, next
     OPTIONAL MATCH (p:PIPELINE)-[:HAS_STEP]->(prev)
     SET p.updated_at = datetime()
@@ -1495,7 +1587,9 @@ def neo4j_add_edge():
         with driver.session() as session:
             record = session.run(query, {
                 "from_flow_id": str(from_flow_id),
-                "to_flow_id": str(to_flow_id)
+                "to_flow_id": str(to_flow_id),
+                "source_port": source_port,
+                "target_port": target_port,
             }).single()
             if not record:
                 return jsonify({"error": "STEP node(s) not found for given flow_id(s)"}), 404
@@ -1504,11 +1598,18 @@ def neo4j_add_edge():
                 "edge_created",
                 "manual",
                 f"Connected step {from_flow_id} to step {to_flow_id}.",
-                {"from_flow_id": from_flow_id, "to_flow_id": to_flow_id},
+                {
+                    "from_flow_id": from_flow_id,
+                    "to_flow_id": to_flow_id,
+                    "source_port": source_port,
+                    "target_port": target_port,
+                },
             )
             return jsonify({
                 "from_flow_id": record["from_flow_id"],
                 "to_flow_id": record["to_flow_id"],
+                "source_port": source_port or None,
+                "target_port": target_port or None,
                 "rel_type": "FLOWS_TO"
             }), 200
     except Exception as e:
@@ -1526,23 +1627,35 @@ def neo4j_delete_edge():
     properties = data.get("properties", {})
     from_flow_id = properties.get("flow_id_source")
     to_flow_id = properties.get("flow_id_target")
+    source_port = str(properties.get("source_port") or "").strip()
+    target_port = str(properties.get("target_port") or "").strip()
     if not from_flow_id or not to_flow_id:
         return jsonify({"error": "Missing from_flow_id or to_flow_id"}), 400
     query = """
     MATCH (prev:STEP {flow_id: $from_flow_id})
     MATCH (next:STEP {flow_id: $to_flow_id})
-    OPTIONAL MATCH (prev)-[r]->(next)
-    DELETE r
-    WITH prev, next
+    OPTIONAL MATCH (prev)-[r:FLOWS_TO]->(next)
+    WHERE ($source_port = '' AND $target_port = '')
+       OR (coalesce(r.source_port, '') = $source_port
+           AND coalesce(r.target_port, '') = $target_port)
+       OR (coalesce(r.source_port, '') = ''
+           AND coalesce(r.target_port, '') = '')
+    WITH prev, next, collect(r) AS relationships, count(r) AS deleted_count
+    FOREACH (relationship IN relationships | DELETE relationship)
+    WITH prev, next, deleted_count
     OPTIONAL MATCH (p:PIPELINE)-[:HAS_STEP]->(prev)
     SET p.updated_at = datetime()
-    RETURN prev.flow_id AS from_flow_id, next.flow_id AS to_flow_id
+    RETURN prev.flow_id AS from_flow_id,
+           next.flow_id AS to_flow_id,
+           deleted_count AS deleted_count
     """
     try:
         with driver.session() as session:
             record = session.run(query, {
                 "from_flow_id": str(from_flow_id),
-                "to_flow_id": str(to_flow_id)
+                "to_flow_id": str(to_flow_id),
+                "source_port": source_port,
+                "target_port": target_port,
             }).single()
             if not record:
                 return jsonify({"error": "STEP node(s) not found for given flow_id(s)"}), 404
@@ -1551,11 +1664,17 @@ def neo4j_delete_edge():
                 "edge_deleted",
                 "manual",
                 f"Removed connection from step {from_flow_id} to step {to_flow_id}.",
-                {"from_flow_id": from_flow_id, "to_flow_id": to_flow_id},
+                {
+                    "from_flow_id": from_flow_id,
+                    "to_flow_id": to_flow_id,
+                    "source_port": source_port,
+                    "target_port": target_port,
+                },
             )
             return jsonify({
                 "from_flow_id": record["from_flow_id"],
                 "to_flow_id": record["to_flow_id"],
+                "deleted_count": record["deleted_count"],
                 "rel_type": "FLOWS_TO"
             }), 200
     except Exception as e:
@@ -1568,7 +1687,7 @@ def neo4j_get_all_files():
     print("[neo4j_api.py] Received request to get all filenames and buckets.")
     query = """
     MATCH (n:STEP)-[:HAS_FILE]->(f:FILE)
-    RETURN f.filename AS filename, f.bucket AS bucket
+    RETURN f.filename AS filename, f.bucket AS bucket, f.role AS role
     """
     try:
         with driver.session() as session:
@@ -1576,7 +1695,8 @@ def neo4j_get_all_files():
             files = [
                 {
                     "filename": record["filename"],
-                    "bucket": record["bucket"]
+                    "bucket": record["bucket"],
+                    **({"role": record["role"]} if record["role"] in {"code", "data"} else {}),
                 }
                 for record in result
             ]
@@ -1801,6 +1921,398 @@ def neo4j_list_pipeline_versions():
             return jsonify({"versions": versions}), 200
     except Exception as e:
         print("[neo4j_api.py] Error listing pipeline versions:", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/neo4j_reusable_pipelines', methods=['GET', 'POST', 'DELETE', 'OPTIONS'])
+@require_auth
+def neo4j_reusable_pipelines():
+    """List reusable pipelines or save a new immutable reusable-pipeline version."""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    if request.method == 'DELETE':
+        payload = request.get_json(force=True) or {}
+        pipeline_uid = str(payload.get("pipeline_uid") or "").strip()
+        if not pipeline_uid:
+            return jsonify({"error": "pipeline_uid is required"}), 400
+        try:
+            with driver.session() as session:
+                referenced = session.run("""
+                CALL {
+                  MATCH (step:STEP)
+                  WHERE coalesce(step.subpipeline_json, '') CONTAINS $pipeline_uid
+                  RETURN count(step) AS parent_reference_count
+                }
+                CALL {
+                  MATCH (:PIPELINE {status:'reusable'})-[:HAS_VERSION]->(version:PIPELINE_VERSION)
+                  WHERE coalesce(version.graph_json, '') CONTAINS $pipeline_uid
+                  RETURN count(version) AS reusable_reference_count
+                }
+                RETURN parent_reference_count, reusable_reference_count
+                """, pipeline_uid=pipeline_uid).single()
+                parent_references = int(referenced["parent_reference_count"] or 0) if referenced else 0
+                reusable_references = int(referenced["reusable_reference_count"] or 0) if referenced else 0
+                if parent_references or reusable_references:
+                    return jsonify({
+                        "error": "Reusable pipeline is still referenced and cannot be deleted",
+                        "parent_reference_count": parent_references,
+                        "reusable_reference_count": reusable_references,
+                    }), 409
+                record = session.run("""
+                MATCH (p:PIPELINE {uid:$pipeline_uid, status:'reusable'})
+                OPTIONAL MATCH (p)-[:HAS_VERSION]->(v:PIPELINE_VERSION)
+                WITH p, collect(v) AS versions
+                DETACH DELETE p
+                FOREACH (version IN versions | DETACH DELETE version)
+                RETURN size(versions) AS deleted_version_count
+                """, pipeline_uid=pipeline_uid).single()
+                if not record:
+                    return jsonify({"error": "Reusable pipeline not found"}), 404
+                return jsonify({
+                    "deleted_pipeline_uid": pipeline_uid,
+                    "deleted_version_count": record["deleted_version_count"] or 0,
+                }), 200
+        except Exception as e:
+            print("[neo4j_api.py] Error deleting reusable pipeline:", e)
+            return jsonify({"error": str(e)}), 500
+    if request.method == 'GET':
+        try:
+            with driver.session() as session:
+                if not _label_exists(session, "PIPELINE"):
+                    return jsonify({"pipelines": []}), 200
+                rows = [record.data() for record in session.run("""
+                MATCH (p:PIPELINE {status:'reusable'})-[:HAS_VERSION]->(v:PIPELINE_VERSION)
+                RETURN p.uid AS pipeline_uid,
+                       coalesce(p.name, p.label, '') AS pipeline_name,
+                       coalesce(p.description, '') AS description,
+                       p.active_version_uid AS active_version_uid,
+                       v.uid AS version_uid,
+                       coalesce(v.name, v.version, '') AS version_name,
+                       v.interface_json AS interface_json,
+                       v.graph_json AS graph_json,
+                       v.node_count AS node_count,
+                       v.edge_count AS edge_count,
+                       toString(v.created_at) AS created_at,
+                       toString(v.updated_at) AS updated_at
+                ORDER BY pipeline_name, v.created_at DESC
+                """)]
+                pipelines: dict[str, dict[str, Any]] = {}
+                for row in rows:
+                    pipeline_uid = str(row.get("pipeline_uid") or "")
+                    pipeline = pipelines.setdefault(pipeline_uid, {
+                        "uid": pipeline_uid,
+                        "name": row.get("pipeline_name") or "",
+                        "description": row.get("description") or "",
+                        "active_version_uid": row.get("active_version_uid") or "",
+                        "versions": [],
+                    })
+                    try:
+                        stored_graph = json.loads(row.get("graph_json") or "{}")
+                    except (TypeError, ValueError):
+                        stored_graph = {}
+                    normalized_graph = normalize_reusable_pipeline_graph(stored_graph)
+                    interface = derive_subpipeline_interface(normalized_graph)
+                    pipeline["versions"].append({
+                        "uid": row.get("version_uid") or "",
+                        "name": row.get("version_name") or "",
+                        "interface": interface if isinstance(interface, dict) else {},
+                        "node_count": row.get("node_count") or 0,
+                        "edge_count": row.get("edge_count") or 0,
+                        "created_at": row.get("created_at"),
+                        "updated_at": row.get("updated_at"),
+                    })
+                return jsonify({"pipelines": list(pipelines.values())}), 200
+        except Exception as e:
+            print("[neo4j_api.py] Error listing reusable pipelines:", e)
+            return jsonify({"error": str(e)}), 500
+
+    payload = request.get_json(force=True) or {}
+    graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+    name = str(payload.get("name") or "").strip()
+    description = str(payload.get("description") or "").strip()
+    pipeline_uid = str(payload.get("pipeline_uid") or "").strip()
+    version_name = str(payload.get("version_name") or "").strip() or "Version 1"
+    if not name:
+        return jsonify({"error": "Reusable pipeline name is required"}), 400
+    graph = normalize_reusable_pipeline_graph(graph)
+    report = validate_pipeline_graph(graph)
+    if not report.get("valid"):
+        return jsonify({"error": "Reusable pipeline graph is invalid", "validation": report}), 422
+    interface = derive_subpipeline_interface(graph)
+    if not interface["inputs"] or not interface["outputs"]:
+        return jsonify({"error": "Reusable pipeline requires Source and Destination boundaries"}), 422
+
+    version_uid = str(uuid.uuid4())
+    graph_with_metadata = _graph_with_metadata(graph, graph.get("updated_at"))
+    graph_json = json.dumps(graph_with_metadata, ensure_ascii=False)
+    interface_json = json.dumps(interface, ensure_ascii=False, sort_keys=True)
+    public_ports_json = json.dumps(public_ports_for_interface(interface), ensure_ascii=False, sort_keys=True)
+    try:
+        with driver.session() as session:
+            if pipeline_uid:
+                existing = session.run("""
+                MATCH (p:PIPELINE {uid:$pipeline_uid, status:'reusable'})
+                RETURN p.uid AS uid
+                """, pipeline_uid=pipeline_uid).single()
+                if not existing:
+                    return jsonify({"error": "Reusable pipeline not found"}), 404
+                duplicate_version = session.run("""
+                MATCH (:PIPELINE {uid:$pipeline_uid, status:'reusable'})-[:HAS_VERSION]->(version:PIPELINE_VERSION)
+                WHERE toLower(trim(coalesce(version.name, ''))) = toLower(trim($version_name))
+                RETURN version.uid AS version_uid
+                LIMIT 1
+                """, pipeline_uid=pipeline_uid, version_name=version_name).single()
+                if duplicate_version:
+                    return jsonify({
+                        "error": "This reusable pipeline already has a version with that name",
+                        "version_uid": duplicate_version["version_uid"],
+                    }), 409
+            else:
+                duplicate = session.run("""
+                MATCH (existing:PIPELINE {status:'reusable'})
+                WHERE toLower(trim(coalesce(existing.name, ''))) = toLower(trim($name))
+                RETURN existing.uid AS pipeline_uid,
+                       existing.active_version_uid AS version_uid
+                LIMIT 1
+                """, name=name).single()
+                if duplicate:
+                    return jsonify({
+                        "error": "A reusable pipeline with this name already exists; select it or save a new version",
+                        "pipeline_uid": duplicate["pipeline_uid"],
+                        "version_uid": duplicate["version_uid"],
+                    }), 409
+                pipeline_uid = str(uuid.uuid4())
+            record = session.run("""
+            MERGE (p:PIPELINE {uid:$pipeline_uid})
+            ON CREATE SET p.created_at = datetime(), p.status = 'reusable'
+            SET p.name = $name,
+                p.label = $name,
+                p.description = $description,
+                p.status = 'reusable',
+                p.active_version_uid = $version_uid,
+                p.updated_at = datetime()
+            WITH p
+            OPTIONAL MATCH (p)-[:HAS_VERSION]->(existing:PIPELINE_VERSION)
+            WITH p, count(existing) + 1 AS version_index
+            CREATE (v:PIPELINE_VERSION {
+                uid:$version_uid,
+                name:$version_name,
+                version:$version_name,
+                version_index:version_index,
+                is_main:false,
+                description:$description,
+                graph_json:$graph_json,
+                interface_json:$interface_json,
+                public_ports_json:$public_ports_json,
+                node_count:$node_count,
+                edge_count:$edge_count,
+                file_count:0,
+                created_at:datetime(),
+                updated_at:datetime()
+            })
+            MERGE (p)-[:HAS_VERSION]->(v)
+            RETURN p.uid AS pipeline_uid,
+                   p.name AS pipeline_name,
+                   v.uid AS version_uid,
+                   v.name AS version_name,
+                   toString(v.created_at) AS created_at
+            """,
+                pipeline_uid=pipeline_uid,
+                name=name,
+                description=description,
+                version_uid=version_uid,
+                version_name=version_name,
+                graph_json=graph_json,
+                interface_json=interface_json,
+                public_ports_json=public_ports_json,
+                node_count=len(graph_with_metadata.get("nodes") or []),
+                edge_count=len(graph_with_metadata.get("edges") or []),
+            ).single()
+            saved = record.data() if record else {}
+            return jsonify({
+                "reference": {
+                    "pipeline_uid": saved.get("pipeline_uid") or pipeline_uid,
+                    "pipeline_name": saved.get("pipeline_name") or name,
+                    "version_uid": saved.get("version_uid") or version_uid,
+                    "version_name": saved.get("version_name") or "Version 1",
+                },
+                "interface": interface,
+                "graph": graph_with_metadata,
+            }), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error saving reusable pipeline:", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/neo4j_reusable_pipeline_version', methods=['GET'])
+@require_auth
+def neo4j_reusable_pipeline_version():
+    pipeline_uid = str(request.args.get("pipeline_uid") or "").strip()
+    version_uid = str(request.args.get("version_uid") or "").strip()
+    if not pipeline_uid or not version_uid:
+        return jsonify({"error": "pipeline_uid and version_uid are required"}), 400
+    try:
+        with driver.session() as session:
+            record = session.run("""
+            MATCH (p:PIPELINE {uid:$pipeline_uid, status:'reusable'})-[:HAS_VERSION]->(v:PIPELINE_VERSION {uid:$version_uid})
+            RETURN p.name AS pipeline_name,
+                   p.description AS description,
+                   v.name AS version_name,
+                   v.graph_json AS graph_json,
+                   v.interface_json AS interface_json,
+                   toString(v.created_at) AS created_at,
+                   toString(v.updated_at) AS updated_at
+            """, pipeline_uid=pipeline_uid, version_uid=version_uid).single()
+            if not record:
+                return jsonify({"error": "Reusable pipeline version not found"}), 404
+            try:
+                graph = json.loads(record["graph_json"] or "{}")
+            except (TypeError, ValueError):
+                graph = {}
+            try:
+                interface = json.loads(record["interface_json"] or "{}")
+            except (TypeError, ValueError):
+                interface = {}
+            graph = normalize_reusable_pipeline_graph(graph)
+            interface = derive_subpipeline_interface(graph)
+            return jsonify({
+                "reference": {
+                    "pipeline_uid": pipeline_uid,
+                    "pipeline_name": record["pipeline_name"] or "",
+                    "version_uid": version_uid,
+                    "version_name": record["version_name"] or "",
+                },
+                "description": record["description"] or "",
+                "graph": graph if isinstance(graph, dict) else {},
+                "interface": interface if isinstance(interface, dict) else {},
+                "created_at": record["created_at"],
+                "updated_at": record["updated_at"],
+            }), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error loading reusable pipeline version:", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/neo4j_attach_reusable_pipeline_version', methods=['POST', 'OPTIONS'])
+@require_auth
+def neo4j_attach_reusable_pipeline_version():
+    """Preview or atomically pin one parent Subpipeline to a reusable version."""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    payload = request.get_json(force=True) or {}
+    flow_id = str(payload.get("flow_id") or "").strip()
+    pipeline_uid = str(payload.get("pipeline_uid") or "").strip()
+    version_uid = str(payload.get("version_uid") or "").strip()
+    dry_run = bool(payload.get("dry_run"))
+    if not flow_id or not pipeline_uid or not version_uid:
+        return jsonify({"error": "flow_id, pipeline_uid, and version_uid are required"}), 400
+
+    try:
+        with driver.session() as session:
+            record = session.run("""
+            MATCH (parent:PIPELINE {status:'design'})-[:HAS_STEP]->(step:STEP {flow_id:$flow_id})
+            WHERE step.type = 'subpipeline'
+            MATCH (reusable:PIPELINE {uid:$pipeline_uid, status:'reusable'})-[:HAS_VERSION]->(version:PIPELINE_VERSION {uid:$version_uid})
+            OPTIONAL MATCH (:STEP)-[incoming:FLOWS_TO]->(step)
+            OPTIONAL MATCH (step)-[outgoing:FLOWS_TO]->(:STEP)
+            RETURN step.ports_json AS current_ports_json,
+                   reusable.name AS pipeline_name,
+                   version.name AS version_name,
+                   version.graph_json AS graph_json,
+                   version.interface_json AS interface_json,
+                   version.public_ports_json AS public_ports_json,
+                   collect(DISTINCT incoming.target_port) AS connected_inputs,
+                   collect(DISTINCT outgoing.source_port) AS connected_outputs
+            """,
+                flow_id=flow_id,
+                pipeline_uid=pipeline_uid,
+                version_uid=version_uid,
+            ).single()
+            if not record:
+                return jsonify({"error": "Parent Subpipeline or reusable pipeline version was not found"}), 404
+
+            try:
+                graph = normalize_reusable_pipeline_graph(json.loads(record["graph_json"] or "{}"))
+                interface = json.loads(record["interface_json"] or "{}")
+                public_ports = json.loads(record["public_ports_json"] or "{}")
+            except (TypeError, ValueError):
+                return jsonify({"error": "Reusable pipeline version has invalid persisted metadata"}), 422
+            if not isinstance(interface, dict) or not interface.get("inputs") or not interface.get("outputs"):
+                interface = derive_subpipeline_interface(graph)
+            if not isinstance(public_ports, dict) or not public_ports.get("inputs") or not public_ports.get("outputs"):
+                public_ports = public_ports_for_interface(interface)
+            current_ports = normalize_node_ports(record["current_ports_json"], "subpipeline")
+            connected_inputs = [str(value or "") for value in (record["connected_inputs"] or []) if value]
+            connected_outputs = [str(value or "") for value in (record["connected_outputs"] or []) if value]
+            compatibility = plan_subpipeline_port_migration(
+                current_ports,
+                public_ports,
+                connected_inputs,
+                connected_outputs,
+                requested_inputs=payload.get("input_mapping"),
+                requested_outputs=payload.get("output_mapping"),
+            )
+            reference = {
+                "pipeline_uid": pipeline_uid,
+                "pipeline_name": record["pipeline_name"] or "",
+                "version_uid": version_uid,
+                "version_name": record["version_name"] or "",
+            }
+            response_payload = {
+                "reference": reference,
+                "interface": interface,
+                "graph": graph,
+                "ports": public_ports,
+                "compatibility": compatibility,
+            }
+            if dry_run:
+                return jsonify(response_payload), 200
+            if not compatibility["compatible"]:
+                return jsonify({
+                    **response_payload,
+                    "error": "The selected version requires an explicit connection mapping",
+                }), 409
+
+            definition_json = json.dumps({
+                "version": 2,
+                "reference": reference,
+                "interface": interface,
+                "expanded": False,
+            }, ensure_ascii=False, sort_keys=True)
+            ports_value = ports_json(public_ports, "subpipeline")
+
+            def attach(tx):
+                updated = tx.run("""
+                MATCH (parent:PIPELINE {status:'design'})-[:HAS_STEP]->(step:STEP {flow_id:$flow_id})
+                WHERE step.type = 'subpipeline'
+                SET step.subpipeline_json = $definition_json,
+                    step.ports_json = $ports_json,
+                    parent.updated_at = datetime()
+                RETURN count(step) AS updated_count
+                """,
+                    flow_id=flow_id,
+                    definition_json=definition_json,
+                    ports_json=ports_value,
+                ).single()
+                if not updated or int(updated["updated_count"] or 0) != 1:
+                    raise ValueError("Parent Subpipeline disappeared while attaching the version")
+                for old_port, new_port in compatibility["input_mapping"].items():
+                    tx.run("""
+                    MATCH (:STEP)-[connection:FLOWS_TO]->(step:STEP {flow_id:$flow_id})
+                    WHERE step.type = 'subpipeline' AND connection.target_port = $old_port
+                    SET connection.target_port = $new_port
+                    """, flow_id=flow_id, old_port=old_port, new_port=new_port).consume()
+                for old_port, new_port in compatibility["output_mapping"].items():
+                    tx.run("""
+                    MATCH (step:STEP {flow_id:$flow_id})-[connection:FLOWS_TO]->(:STEP)
+                    WHERE step.type = 'subpipeline' AND connection.source_port = $old_port
+                    SET connection.source_port = $new_port
+                    """, flow_id=flow_id, old_port=old_port, new_port=new_port).consume()
+
+            session.execute_write(attach)
+            return jsonify({**response_payload, "attached": True}), 200
+    except Exception as e:
+        print("[neo4j_api.py] Error attaching reusable pipeline version:", e)
         return jsonify({"error": str(e)}), 500
 
 
@@ -2453,11 +2965,13 @@ def neo4j_sync_graph():
                     return jsonify({"error": f"Pipeline version not found: {active_version_uid}"}), 404
                 version_name = record["name"] or MAIN_VERSION_NAME
 
-            result = _sync_graph_to_session(
-                session,
-                graph,
-                version_name=version_name,
-                active_version_uid=active_version_uid,
+            result = session.execute_write(
+                lambda tx: _sync_graph_to_session(
+                    tx,
+                    graph,
+                    version_name=version_name,
+                    active_version_uid=active_version_uid,
+                )
             )
         return jsonify(result), 200
     except Exception as e:
@@ -2527,7 +3041,7 @@ def neo4j_get_graph():
          ranked[0].step_count AS pipeline_step_count,
          design_pipeline_count
     OPTIONAL MATCH (p)-[:HAS_STEP]->(s:STEP)
-    OPTIONAL MATCH (s)-[:FLOWS_TO]->(t:STEP)
+    OPTIONAL MATCH (s)-[r:FLOWS_TO]->(t:STEP)
     OPTIONAL MATCH (s)-[:HAS_FILE]->(f:FILE)
     WITH
       p,
@@ -2535,7 +3049,8 @@ def neo4j_get_graph():
       pipeline_step_count,
       s,
       t,
-      collect(DISTINCT f { .filename, .bucket, added_at: toString(f.added_at) }) AS files_for_step
+      r,
+      collect(DISTINCT f { .filename, .bucket, .role, added_at: toString(f.added_at) }) AS files_for_step
     RETURN
       toString(p.updated_at) AS updated_at,
       p {
@@ -2558,7 +3073,9 @@ def neo4j_get_graph():
       }) AS step_rows,
       collect(DISTINCT {
         source: s.flow_id,
-        target: t.flow_id
+        target: t.flow_id,
+        source_port: r.source_port,
+        target_port: r.target_port
       }) AS flows
     """
 
@@ -2626,7 +3143,7 @@ def neo4j_get_graph():
                 except Exception:
                     y = 0.0
 
-                step_kind = normalize_step_type(props.get("type"), default="custom")
+                step_kind = normalize_step_type(props.get("type"), default="task")
 
                 files_for_step = row.get("files") or []
                 # filenames list (simple)
@@ -2640,6 +3157,8 @@ def neo4j_get_graph():
                     "label": props.get("label", ""),
                     "description": props.get("description", ""),
                     "type": step_kind,
+                    "template_label": props.get("template_label", ""),
+                    "ports": normalize_node_ports(props.get("ports_json"), step_kind),
 
                     # add files so polling doesn't wipe them
                     "files": filenames,
@@ -2648,7 +3167,7 @@ def neo4j_get_graph():
                     "file_buckets": files_for_step,
                 }
 
-                if "content" in props:
+                if step_kind == "destination" and "content" in props:
                     data["content"] = props.get("content") or ""
                 if "has_files" in props:
                     data["has_files"] = props.get("has_files")
@@ -2664,7 +3183,42 @@ def neo4j_get_graph():
                     except Exception:
                         parsed_param = {}
                     data["param"] = parsed_param if isinstance(parsed_param, dict) else {}
+                    data["secret_params"] = normalize_secret_param_keys(
+                        props.get("secret_params_json"),
+                        data["param"],
+                    )
                 data.update(definition_data_from_properties(props))
+                if step_kind == "subpipeline" and isinstance(data.get("subpipeline"), dict):
+                    subpipeline = dict(data["subpipeline"])
+                    reference = subpipeline.get("reference")
+                    reference = reference if isinstance(reference, dict) else {}
+                    referenced_pipeline_uid = str(reference.get("pipeline_uid") or "").strip()
+                    referenced_version_uid = str(reference.get("version_uid") or "").strip()
+                    if referenced_pipeline_uid and referenced_version_uid:
+                        referenced = session.run("""
+                        MATCH (rp:PIPELINE {uid:$pipeline_uid, status:'reusable'})-[:HAS_VERSION]->(rv:PIPELINE_VERSION {uid:$version_uid})
+                        RETURN rp.name AS pipeline_name,
+                               rv.name AS version_name,
+                               rv.graph_json AS graph_json,
+                               rv.interface_json AS interface_json
+                        """, pipeline_uid=referenced_pipeline_uid, version_uid=referenced_version_uid).single()
+                        if referenced:
+                            try:
+                                resolved_graph = json.loads(referenced["graph_json"] or "{}")
+                            except (TypeError, ValueError):
+                                resolved_graph = {}
+                            resolved_graph = normalize_reusable_pipeline_graph(resolved_graph)
+                            resolved_interface = derive_subpipeline_interface(resolved_graph)
+                            subpipeline["reference"] = {
+                                **reference,
+                                "pipeline_name": referenced["pipeline_name"] or reference.get("pipeline_name") or "",
+                                "version_name": referenced["version_name"] or reference.get("version_name") or "",
+                            }
+                            subpipeline["interface"] = resolved_interface
+                            subpipeline["resolved_graph"] = resolved_graph
+                        else:
+                            subpipeline["resolution_error"] = "Referenced reusable pipeline version was not found."
+                    data["subpipeline"] = subpipeline
 
                 nodes.append({
                     "id": node_id,
@@ -2674,6 +3228,13 @@ def neo4j_get_graph():
                 })
 
             edges = []
+            node_connection_profiles_by_id = {
+                node["id"]: (
+                    node["data"]["type"],
+                    node["data"].get("template_label") or "",
+                )
+                for node in nodes
+            }
             for f in flows:
                 src = f.get("source") if isinstance(f, dict) else None
                 tgt = f.get("target") if isinstance(f, dict) else None
@@ -2681,12 +3242,19 @@ def neo4j_get_graph():
                     continue
                 src = str(src)
                 tgt = str(tgt)
+                source_profile = node_connection_profiles_by_id.get(src, ("task", ""))
+                target_profile = node_connection_profiles_by_id.get(tgt, ("task", ""))
+                source_port = f.get("source_port") or default_output_port_id(*source_profile)
+                target_port = f.get("target_port") or default_input_port_id(*target_profile)
                 edges.append({
-                    "id": f"reactflow__edge-{src}-{tgt}",
+                    "id": (
+                        f"reactflow__edge-{src}-{source_port or 'default'}-"
+                        f"{tgt}-{target_port or 'default'}"
+                    ),
                     "source": src,
                     "target": tgt,
-                    "sourceHandle": None,
-                    "targetHandle": None,
+                    "sourceHandle": source_port or None,
+                    "targetHandle": target_port or None,
                 })
 
             return jsonify({

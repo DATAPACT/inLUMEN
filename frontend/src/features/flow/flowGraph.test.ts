@@ -38,11 +38,17 @@ describe("flow graph normalization", () => {
     expect(graph.nodes[0]).toMatchObject({
       id: "1",
       position: { x: 12.5, y: 0 },
-      data: { type: "input" },
+      data: {
+        type: "source",
+        ports: {
+          inputs: [],
+          outputs: [{ id: "data", name: "data", type: "any", required: true, description: "Source data." }],
+        },
+      },
     });
-    expect(graph.nodes[1].data.type).toBe("output");
+    expect(graph.nodes[1].data.type).toBe("destination");
     expect(graph.edges).toEqual([
-      expect.objectContaining({ id: "e-1-2", source: "1", target: "2" }),
+      expect.objectContaining({ id: "e-1-data-2-data", source: "1", target: "2" }),
     ]);
     expect(graph.settings).toEqual({ version: "1.0" });
   });
@@ -64,7 +70,9 @@ describe("flow graph normalization", () => {
             ],
             definition_id: "core.input-data",
             definition_version: 1,
+            template_label: "File",
             implementation: { parser: "csv" },
+            secret_params: [],
             configuration_status: "valid",
             generated_artifact: { status: "current" },
           },
@@ -78,20 +86,181 @@ describe("flow graph normalization", () => {
       nodes: [
         {
           id: "4",
-          type: "input",
+          type: "source",
           label: "Input",
           description: "Load records",
           position: { x: 1, y: 2 },
           files: ["records.csv", "schema.json", "legacy.txt"],
           definition_id: "core.input-data",
           definition_version: 1,
+          template: "File",
+          ports: {
+            inputs: [],
+            outputs: [{ id: "data", name: "data", type: "any", required: true, description: "Source data." }],
+          },
           implementation: { parser: "csv" },
+          secret_params: [],
           configuration_status: "valid",
           generated_artifact: { status: "current" },
         },
       ],
       edges: [],
     });
+  });
+
+  it("restores an agent snapshot into renderable React Flow nodes", () => {
+    const graph = normalizeGraph({
+      nodes: [
+        { id: "audio", type: "source", label: "Audio Input", template: "Audio Recording" },
+        {
+          id: "transcribe",
+          type: "task",
+          label: "Transcription",
+          template: "Speech-to-Text",
+          implementation: { kind: "generated-code", task: "speech-to-text" },
+        },
+        { id: "output", type: "destination", label: "Analysis Output", template: "Structured Object" },
+      ],
+      edges: [
+        { source: "audio", source_port: "data", target: "transcribe", target_port: "input" },
+        { source: "transcribe", source_port: "output", target: "output", target_port: "data" },
+      ],
+    });
+
+    expect(graph.nodes).toHaveLength(3);
+    expect(graph.nodes[0]).toMatchObject({
+      id: "audio",
+      type: "custom",
+      position: { x: 0, y: 120 },
+      data: { type: "source", label: "Audio Input", template_label: "Audio Recording" },
+    });
+    expect(graph.nodes[1]).toMatchObject({
+      type: "custom",
+      position: { x: 280, y: 120 },
+      data: {
+        type: "task",
+        label: "Transcription",
+        implementation: { kind: "generated-code", task: "speech-to-text" },
+      },
+    });
+    expect(graph.edges).toEqual([
+      expect.objectContaining({ source: "audio", sourceHandle: "data", targetHandle: "input" }),
+      expect.objectContaining({ source: "transcribe", sourceHandle: "output", targetHandle: "data" }),
+    ]);
+  });
+
+  it("preserves explicit port connections in agent snapshots", () => {
+    const graph = normalizeGraph({
+      nodes: [
+        { id: "1", position: { x: 0, y: 0 }, data: { type: "source" } },
+        { id: "2", position: { x: 1, y: 1 }, data: { type: "task" } },
+      ],
+      edges: [
+        {
+          source: "1",
+          target: "2",
+          sourceHandle: "documents",
+          targetHandle: "records",
+        },
+      ],
+    });
+
+    expect(createAgentGraphSnapshot(graph).edges).toEqual([
+      {
+        source: "1",
+        target: "2",
+        source_port: "documents",
+        target_port: "records",
+      },
+    ]);
+  });
+
+  it("migrates legacy generic Flow contracts to their selected behavior", () => {
+    const graph = normalizeGraph({
+      nodes: [
+        { id: "source", position: { x: 0, y: 0 }, data: { type: "source" } },
+        {
+          id: "condition",
+          position: { x: 1, y: 0 },
+          data: {
+            type: "flow",
+            template_label: "Condition",
+            ports: {
+              inputs: [{ id: "input", name: "input", type: "any", required: true, description: "Flow input." }],
+              outputs: [{ id: "output", name: "output", type: "any", required: true, description: "Flow output." }],
+            },
+          },
+        },
+        { id: "destination", position: { x: 2, y: 0 }, data: { type: "destination" } },
+      ],
+      edges: [
+        { source: "source", target: "condition", sourceHandle: "data", targetHandle: "input" },
+        { source: "condition", target: "destination", sourceHandle: "output", targetHandle: "data" },
+      ],
+    });
+
+    expect(graph.nodes[1].data).toMatchObject({
+      param: { expression: "" },
+      ports: {
+        inputs: [{ id: "value" }],
+        outputs: [{ id: "when_true" }, { id: "when_false" }],
+      },
+    });
+    expect(graph.edges).toEqual([
+      expect.objectContaining({ targetHandle: "value" }),
+      expect.objectContaining({
+        sourceHandle: "when_true",
+        label: "true",
+        style: expect.objectContaining({ stroke: "#8b5cf6" }),
+        data: expect.objectContaining({ conditionBranch: "when_true" }),
+      }),
+    ]);
+  });
+
+  it("labels and distinguishes both Condition branches", () => {
+    const graph = normalizeGraph({
+      nodes: [
+        {
+          id: "condition",
+          position: { x: 0, y: 0 },
+          data: { type: "flow", template_label: "Condition" },
+        },
+        { id: "accepted", position: { x: 1, y: -1 }, data: { type: "task" } },
+        { id: "rejected", position: { x: 1, y: 1 }, data: { type: "task" } },
+      ],
+      edges: [
+        { source: "condition", target: "accepted", sourceHandle: "when_true", targetHandle: "input" },
+        { source: "condition", target: "rejected", sourceHandle: "when_false", targetHandle: "input" },
+      ],
+    });
+
+    expect(graph.edges).toEqual([
+      expect.objectContaining({ label: "true", style: expect.objectContaining({ stroke: "#8b5cf6" }) }),
+      expect.objectContaining({ label: "false", style: expect.objectContaining({ stroke: "#0891b2" }) }),
+    ]);
+  });
+
+  it("prefers persisted file metadata so code and data roles survive polling", () => {
+    const graph = normalizeGraph({
+      nodes: [{
+        id: "7",
+        position: { x: 0, y: 0 },
+        data: {
+          type: "task",
+          files: ["main.py", "records.csv"],
+          file_buckets: [
+            { filename: "main.py", bucket: "files-step-id-7", role: "code" },
+            { filename: "records.csv", bucket: "files-step-id-7", role: "data" },
+          ],
+        },
+      }],
+      edges: [],
+    });
+
+    expect(graph.nodes[0].data.files).toEqual([
+      { filename: "main.py", bucket: "files-step-id-7", role: "code" },
+      { filename: "records.csv", bucket: "files-step-id-7", role: "data" },
+    ]);
   });
 
   it("increments the largest numeric node id and supports an empty graph", () => {
