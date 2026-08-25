@@ -593,7 +593,7 @@ export function Sidebar({
       setDeploymentRepairReport(bundle.repair_report || null);
       setPipelineRunResult(bundle.run || null);
       setDeploymentBundleDownload({
-        name: `inlumen-runnable-bundle-${Date.now()}.zip`,
+        name: `inlumen-dagster-bundle-${Date.now()}.zip`,
         url: bundleUrl,
       });
     } catch (e: unknown) {
@@ -615,7 +615,7 @@ export function Sidebar({
     ...overviewData,
   } as PipelineOverview;
   const isMainVersion = activeVersionUid === MAIN_PIPELINE_VERSION_UID;
-  const deploymentButtonLabel = "Build bundle";
+  const deploymentButtonLabel = "Build Dagster + Argo artifacts";
   const runtimeArtifactGroups = groupRuntimeArtifactDownloads(runtimeArtifactDownloads);
 
   useEffect(() => {
@@ -904,9 +904,9 @@ export function Sidebar({
         {activeTab === "simulate" && (
           <div className="w-full min-w-0 max-w-full space-y-4 overflow-hidden py-4">
             <div className="min-w-0 overflow-hidden rounded-lg border border-border p-3">
-              <h3 className="text-sm font-medium mb-2">Build runnable bundle</h3>
+              <h3 className="text-sm font-medium mb-2">Build deployment artifacts</h3>
               <p className="text-xs text-muted-foreground mb-3">
-                Package the current Sources, Tasks, Destinations, flow logic, uploaded code, generated code, dependencies, connectors, and model requirements into a complete local project. This does not generate Task code.
+                Generate two outputs: a runnable Dagster bundle (.zip) and an Argo Workflow definition (.yaml). This does not generate Task code.
               </p>
 
               <Button
@@ -962,7 +962,7 @@ export function Sidebar({
 
               {deploymentBundleDownload && (
                 <div className="mt-4 min-w-0">
-                  <div className="mb-2 text-xs font-medium">Runnable bundle</div>
+                  <div className="mb-2 text-xs font-medium">Dagster bundle (.zip)</div>
                   <a
                     href={deploymentBundleDownload.url}
                     download={deploymentBundleDownload.name}
@@ -970,7 +970,7 @@ export function Sidebar({
                     className="flex w-full min-w-0 items-center justify-center gap-2 overflow-hidden rounded-md border border-border bg-background px-2 py-2 text-xs font-medium hover:bg-muted"
                   >
                     <Download className="h-3.5 w-3.5 shrink-0" />
-                    <span className="min-w-0 truncate">Download bundle</span>
+                    <span className="min-w-0 truncate">Download Dagster bundle</span>
                   </a>
                   <Button
                     variant="outline"
@@ -978,7 +978,7 @@ export function Sidebar({
                     className="mt-2 h-auto w-full whitespace-normal px-2 py-1.5 text-xs"
                     onClick={clearDeploymentBundleDownload}
                   >
-                    Remove bundle link
+                    Remove Dagster bundle link
                   </Button>
                 </div>
               )}
@@ -1025,6 +1025,7 @@ export function Sidebar({
 
               {yamlDownload && (
                 <div className="mt-3 min-w-0">
+                  <div className="mb-2 text-xs font-medium">Argo Workflow (.yaml)</div>
                   <a
                     href={yamlDownload.url}
                     download={yamlDownload.name}
@@ -1032,7 +1033,7 @@ export function Sidebar({
                     className="flex w-full min-w-0 items-center justify-center gap-2 overflow-hidden rounded-md border border-border bg-background px-2 py-2 text-xs font-medium hover:bg-muted"
                   >
                     <Download className="h-3.5 w-3.5 shrink-0" />
-                    <span className="min-w-0 truncate">Download Argo YAML</span>
+                    <span className="min-w-0 truncate">Download Argo Workflow YAML</span>
                   </a>
                   <Button
                     variant="outline"
@@ -1040,7 +1041,7 @@ export function Sidebar({
                     className="mt-2 h-auto w-full whitespace-normal px-2 py-1.5 text-xs"
                     onClick={clearYamlDownload}
                   >
-                    Remove YAML link
+                    Remove Argo Workflow link
                   </Button>
                 </div>
               )}
