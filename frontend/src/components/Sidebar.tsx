@@ -43,6 +43,7 @@ import {
   REUSABLE_PIPELINE_CATALOG_CHANGED_EVENT,
   type ReusablePipelineSummary,
 } from '@/features/flow/subpipelinePersistence';
+import { buildDeploymentBundleRequest } from '@/features/deployment/deploymentBundleRequest';
 
 interface PipelineOverview {
   version: string;
@@ -194,9 +195,6 @@ const deploymentFailureMessage = (
 type RuntimeArtifactDownload = { name: string; url: string };
 type YamlDownload = { name: string; url: string };
 type DeploymentBundleDownload = { name: string; url: string };
-type DeploymentTargets = { argo: boolean; dagster: boolean };
-type DeploymentValidationMode = "fast" | "validate" | "repair";
-
 const groupRuntimeArtifactDownloads = (downloads: RuntimeArtifactDownload[]) => {
   const groups = new Map<string, {
     label: string;
@@ -469,23 +467,7 @@ export function Sidebar({
     const bundleRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_deployment_bundle`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        dockerfile_json: dockerfileJson,
-        // Dagster is an implementation detail of the first bundle target.
-        // The editor deliberately exposes one outcome: a runnable bundle.
-        targets: { argo: false, dagster: true },
-        validation_mode: "fast",
-        validate_bundle: true,
-        validation: {
-          enabled: true,
-          mode: "fast",
-          materialize: false,
-          validate_argo: false,
-          validate_dagster: false,
-          argo_lint: false,
-          argo_dry_run: false,
-        },
-      }),
+      body: JSON.stringify(buildDeploymentBundleRequest(dockerfileJson)),
     });
 
     if (!bundleRes.ok) {
