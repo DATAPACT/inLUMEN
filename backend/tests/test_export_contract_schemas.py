@@ -21,6 +21,8 @@ class ExportContractSchemaTest(unittest.TestCase):
         schemas = [
             self.load("project.schema.json"),
             self.load("deployment-bundle.schema.json"),
+            self.load("artifact-contract.schema.json"),
+            self.load("run-spec.schema.json"),
             self.load("run-result.schema.json"),
             self.load("node-output-manifest.schema.json"),
         ]
@@ -36,6 +38,8 @@ class ExportContractSchemaTest(unittest.TestCase):
             {
                 "inlumen.project@2",
                 "inlumen.deployment-bundle@1",
+                "inlumen.artifact-contract@2",
+                "inlumen.run-spec@2",
                 "inlumen.run-result@1",
                 "inlumen.output-manifest@1",
             },

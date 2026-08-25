@@ -43,7 +43,10 @@ import {
   REUSABLE_PIPELINE_CATALOG_CHANGED_EVENT,
   type ReusablePipelineSummary,
 } from '@/features/flow/subpipelinePersistence';
-import { buildDeploymentBundleRequest } from '@/features/deployment/deploymentBundleRequest';
+import {
+  buildArgoBundleRequest,
+  buildDagsterBundleRequest,
+} from '@/features/deployment/deploymentBundleRequest';
 
 interface PipelineOverview {
   version: string;
@@ -463,11 +466,16 @@ export function Sidebar({
 
   const generateDeploymentBundle = async (
     dockerfileJson: DockerfileGenerationResponse,
+    target: "argo" | "dagster",
   ): Promise<DeploymentBundleGenerationResponse> => {
     const bundleRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_deployment_bundle`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildDeploymentBundleRequest(dockerfileJson)),
+      body: JSON.stringify(
+        target === "dagster"
+          ? buildDagsterBundleRequest(dockerfileJson)
+          : buildArgoBundleRequest(dockerfileJson),
+      ),
     });
 
     if (!bundleRes.ok) {
@@ -526,7 +534,7 @@ export function Sidebar({
     };
   }, [activeTab, activeVersionUid, onOverviewUpdated]);
 
-  const handleGenerateDeploymentArtifacts = async () => {
+  const handleGenerateDeploymentArtifact = async (target: "argo" | "dagster") => {
     try {
       setDeploymentError("");
       setDeploymentValidationReport(null);
@@ -534,8 +542,8 @@ export function Sidebar({
       setPipelineRunResult(null);
       setIsGeneratingDeployment(true);
       clearRuntimeArtifactDownloads();
-      clearYamlDownload();
-      clearDeploymentBundleDownload();
+      if (target === "argo") clearYamlDownload();
+      if (target === "dagster") clearDeploymentBundleDownload();
 
       const dockerfile_json = await prepareDeploymentRuntime();
 
@@ -557,7 +565,7 @@ export function Sidebar({
             };
           }),
       );
-      const bundle = await generateDeploymentBundle(dockerfile_json);
+      const bundle = await generateDeploymentBundle(dockerfile_json, target);
       const bundledFiles = Array.isArray(bundle.files) ? bundle.files : [];
       if (bundledFiles.length === 0) {
         throw new Error("Deployment bundle response did not include files.");
@@ -578,27 +586,31 @@ export function Sidebar({
         });
       const argoWorkflowFile = bundledFiles.find((file) => file.path === "argo/workflow.yaml");
 
-      const yamlDownloadLink = argoWorkflowFile
+      const yamlDownloadLink = target === "argo" && argoWorkflowFile
         ? {
             name: argoWorkflowFile.filename || "workflow.yaml",
             url: URL.createObjectURL(new Blob([argoWorkflowFile.content ?? ""], { type: "application/x-yaml;charset=utf-8" })),
           }
         : null;
-      const bundleBlob = await buildDeploymentZip(bundledFiles);
-      const bundleUrl = URL.createObjectURL(bundleBlob);
+      const bundleUrl = target === "dagster"
+        ? URL.createObjectURL(await buildDeploymentZip(bundledFiles))
+        : null;
 
       setRuntimeArtifactDownloads(deploymentRuntimeLinks.length > 0 ? deploymentRuntimeLinks : runtimeLinks);
-      setYamlDownload(yamlDownloadLink);
+      if (target === "argo") setYamlDownload(yamlDownloadLink);
       setDeploymentValidationReport(bundle.validation_report || null);
       setDeploymentRepairReport(bundle.repair_report || null);
       setPipelineRunResult(bundle.run || null);
-      setDeploymentBundleDownload({
-        name: `inlumen-dagster-bundle-${Date.now()}.zip`,
-        url: bundleUrl,
-      });
+      if (target === "dagster" && bundleUrl) {
+        setDeploymentBundleDownload({
+          name: `inlumen-dagster-bundle-${Date.now()}.zip`,
+          url: bundleUrl,
+        });
+      }
     } catch (e: unknown) {
       clearRuntimeArtifactDownloads();
-      clearDeploymentBundleDownload();
+      if (target === "argo") clearYamlDownload();
+      if (target === "dagster") clearDeploymentBundleDownload();
       setDeploymentValidationReport(null);
       setDeploymentRepairReport(null);
       setPipelineRunResult(null);
@@ -615,7 +627,6 @@ export function Sidebar({
     ...overviewData,
   } as PipelineOverview;
   const isMainVersion = activeVersionUid === MAIN_PIPELINE_VERSION_UID;
-  const deploymentButtonLabel = "Build Dagster + Argo artifacts";
   const runtimeArtifactGroups = groupRuntimeArtifactDownloads(runtimeArtifactDownloads);
 
   useEffect(() => {
@@ -906,16 +917,26 @@ export function Sidebar({
             <div className="min-w-0 overflow-hidden rounded-lg border border-border p-3">
               <h3 className="text-sm font-medium mb-2">Build deployment artifacts</h3>
               <p className="text-xs text-muted-foreground mb-3">
-                Generate two outputs: a runnable Dagster bundle (.zip) and an Argo Workflow definition (.yaml).
+                Export Dagster and Argo independently from the same pipeline contract.
               </p>
 
-              <Button
-                className="h-auto min-h-10 w-full whitespace-normal px-3 py-2 text-center leading-snug"
-                onClick={handleGenerateDeploymentArtifacts}
-                disabled={isGeneratingDeployment}
-              >
-                {isGeneratingDeployment ? "Generating..." : deploymentButtonLabel}
-              </Button>
+              <div className="space-y-2">
+                <Button
+                  className="h-auto min-h-10 w-full whitespace-normal px-3 py-2 text-center leading-snug"
+                  onClick={() => { void handleGenerateDeploymentArtifact("dagster"); }}
+                  disabled={isGeneratingDeployment}
+                >
+                  {isGeneratingDeployment ? "Generating..." : "Build Dagster bundle"}
+                </Button>
+                <Button
+                  variant="outline"
+                  className="h-auto min-h-10 w-full whitespace-normal px-3 py-2 text-center leading-snug"
+                  onClick={() => { void handleGenerateDeploymentArtifact("argo"); }}
+                  disabled={isGeneratingDeployment}
+                >
+                  {isGeneratingDeployment ? "Generating..." : "Export Argo Workflow"}
+                </Button>
+              </div>
 
               {deploymentError && (
                 <div className="mt-3 text-xs text-red-400">

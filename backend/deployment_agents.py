@@ -4,6 +4,8 @@ import json
 import re
 from typing import Any, Optional
 
+from connector_catalog import require_supported_connector
+
 from pydantic import BaseModel, Field
 
 from attachment_validation import attachment_input_errors
@@ -705,6 +707,7 @@ import re
 import shutil
 from pathlib import Path
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 
 ADAPTER_SPEC = json.loads(__SPEC__)
@@ -867,6 +870,96 @@ def _storage_client():
     return Minio(host, access_key=str(_parameter("access_key", "minio-datapact")), secret_key=str(_parameter("secret_key", "minio-datapact")), secure=secure)
 
 
+def _api_headers(content_type=""):
+    configured = _parameter("headers", "{}")
+    try:
+        headers = json.loads(configured) if isinstance(configured, str) else dict(configured)
+    except (TypeError, ValueError):
+        raise RuntimeError("REST API headers must be a JSON object.")
+    if not isinstance(headers, dict):
+        raise RuntimeError("REST API headers must be a JSON object.")
+    headers = {str(key): str(value) for key, value in headers.items()}
+    api_key = str(_parameter("api_key") or os.getenv("API_KEY", ""))
+    if api_key:
+        header_name = str(_parameter("api_key_header", "Authorization"))
+        prefix = str(_parameter("api_key_prefix", "Bearer")).strip()
+        headers.setdefault(header_name, f"{prefix} {api_key}".strip())
+    if content_type:
+        headers.setdefault("Content-Type", content_type)
+    return headers
+
+
+def _api_endpoint():
+    endpoint = str(
+        _parameter("url")
+        or _parameter("endpoint")
+        or os.getenv("API_ENDPOINT", "")
+    ).strip()
+    if not endpoint:
+        raise RuntimeError(
+            "REST API connector requires url/endpoint or the API_ENDPOINT environment variable."
+        )
+    if urlparse(endpoint).scheme not in {"http", "https"}:
+        raise RuntimeError("REST API endpoint must use http or https.")
+    return endpoint
+
+
+def _rest_api_source(output_dir):
+    method = str(_parameter("method", "GET")).upper()
+    request = Request(
+        _api_endpoint(),
+        method=method,
+        headers=_api_headers(),
+    )
+    with urlopen(request, timeout=float(_parameter("timeout", "30"))) as response:
+        payload = response.read()
+        content_type = response.headers.get_content_type()
+    extension = {
+        "application/json": "json",
+        "text/csv": "csv",
+        "text/plain": "txt",
+    }.get(content_type, "bin")
+    filename = Path(str(_parameter("output_filename", f"response.{extension}"))).name
+    port_dir = _port_directory(output_dir)
+    port_dir.mkdir(parents=True, exist_ok=True)
+    output_path = port_dir / filename
+    output_path.write_bytes(payload)
+    (output_dir / "output_manifest.json").write_text(
+        json.dumps({
+            "schema_version": "inlumen.data-artifact@1",
+            "kind": "api-response",
+            "filename": str(output_path.relative_to(output_dir)),
+            "content_type": content_type,
+            "size_bytes": len(payload),
+        }, indent=2) + "\\n",
+        encoding="utf-8",
+    )
+
+
+def _rest_api_destination(entries, output_dir):
+    endpoint = _api_endpoint()
+    method = str(_parameter("method", "POST")).upper()
+    delivered = []
+    for entry in entries:
+        content_type = mimetypes.guess_type(str(entry["filename"]))[0] or "application/octet-stream"
+        request = Request(
+            endpoint,
+            data=Path(entry["path"]).read_bytes(),
+            method=method,
+            headers=_api_headers(content_type),
+        )
+        with urlopen(request, timeout=float(_parameter("timeout", "30"))) as response:
+            response.read()
+            delivered.append({
+                "filename": entry["filename"],
+                "status": response.status,
+            })
+    (output_dir / "delivery-receipt.json").write_text(
+        json.dumps({"endpoint": endpoint, "delivered": delivered}, indent=2) + "\\n",
+        encoding="utf-8",
+    )
+
+
 def _destination_outputs(entries, output_dir):
     bucket = str(_parameter("bucket"))
     if not bucket:
@@ -943,10 +1036,14 @@ def main():
         _database_source(output_dir)
     elif kind == "source" and template == "object storage":
         _object_storage_source(output_dir)
+    elif kind == "source" and template == "rest api":
+        _rest_api_source(output_dir)
     elif kind == "source":
         _copy_source_files(_entries(input_dir), output_dir)
     elif kind == "destination" and template == "object storage":
         _destination_outputs(_entries(input_dir), output_dir)
+    elif kind == "destination" and template == "rest api":
+        _rest_api_destination(_entries(input_dir), output_dir)
     elif kind == "destination" and _is_filesystem_destination_template(template):
         _generic_destination_outputs(_entries(input_dir), output_dir)
     else:
@@ -995,6 +1092,7 @@ def _managed_adapter_runtime(
         "parameters": adapter_parameters,
         "settings": adapter_settings,
     }
+    require_supported_connector(adapter_spec["kind"], adapter_spec["template"])
     main_content = _managed_adapter_main_source_v2(adapter_spec)
     adapter_kind = adapter_spec["kind"]
     adapter_template = adapter_spec["template"].strip().lower()
@@ -1040,6 +1138,37 @@ def _managed_adapter_runtime(
             "format": "original",
             "description": "Objects downloaded from the configured S3-compatible location.",
         })
+    runtime_environment = []
+    if adapter_template == "rest api":
+        runtime_environment.extend(
+            [
+                {
+                    "name": "API_ENDPOINT",
+                    "required": not bool(
+                        adapter_parameters.get("url")
+                        or adapter_parameters.get("endpoint")
+                        or adapter_settings.get("endpoint")
+                    ),
+                    "secret": False,
+                    "description": "REST endpoint fallback when no connector URL is configured.",
+                },
+                {
+                    "name": "API_KEY",
+                    "required": False,
+                    "secret": True,
+                    "description": "Optional credential for secured APIs; omit for an open API.",
+                },
+            ]
+        )
+    elif adapter_kind == "source" and adapter_template == "database":
+        runtime_environment.append(
+            {
+                "name": "DATABASE_URL",
+                "required": not bool(adapter_parameters.get("connection_url")),
+                "secret": True,
+                "description": "Database connection fallback.",
+            }
+        )
     node_manifest = {
         "schema_version": "inlumen.node-manifest@1",
         "flow_id": flow_id,
@@ -1049,6 +1178,7 @@ def _managed_adapter_runtime(
             "outputs": data_outputs,
         },
         "adapter": adapter_spec,
+        "runtime_environment": runtime_environment,
         "source": "inLumen managed boundary adapter",
     }
     runtime_files = [

@@ -15,12 +15,52 @@ from filesystem_runtime import (  # noqa: E402
     filesystem_shell_component_source,
     parameter_environment,
     prepare_workspace,
+    normalize_single_output_port,
+    stage_input_bindings,
     stage_input_directories,
     task_environment,
 )
 
 
 class FilesystemRuntimeTest(unittest.TestCase):
+    def test_port_bindings_remap_source_outputs_to_target_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent = root / "parent"
+            (parent / "data").mkdir(parents=True)
+            (parent / "ignored").mkdir()
+            (parent / "data" / "cities.csv").write_text("city\nOslo\n")
+            (parent / "ignored" / "private.txt").write_text("hidden")
+            staged = stage_input_bindings(
+                [
+                    {
+                        "source_dir": str(parent),
+                        "source_port": "data",
+                        "target_port": "input",
+                    }
+                ],
+                root / "workspace" / "input",
+            )
+            self.assertTrue((staged / "input" / "cities.csv").is_file())
+            self.assertFalse((staged / "ignored").exists())
+
+    def test_single_output_port_normalizes_legacy_root_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "output"
+            output.mkdir()
+            (output / "enriched.csv").write_text("city,temp\nOslo,12\n")
+            moved = normalize_single_output_port(output, ["result"])
+            self.assertEqual(["enriched.csv"], moved)
+            self.assertTrue((output / "result" / "enriched.csv").is_file())
+
+    def test_multiple_output_ports_reject_ambiguous_root_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "output"
+            output.mkdir()
+            (output / "result.json").write_text("{}")
+            with self.assertRaisesRegex(RuntimeError, "outside declared"):
+                normalize_single_output_port(output, ["left", "right"])
+
     def test_workspace_contract_stages_artifacts_and_discovers_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

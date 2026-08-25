@@ -4,10 +4,49 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from artifact_contract import classify_artifact
+from artifact_contract import artifact_bindings, classify_artifact, normalize_port_id
 
 
 class ArtifactContractTest(unittest.TestCase):
+    def test_normalizes_port_aware_bindings_deterministically(self):
+        bindings = artifact_bindings(
+            [
+                {
+                    "source": "source-b",
+                    "source_port": "rows out",
+                    "target": "merge",
+                    "target_port": "right",
+                },
+                {
+                    "source": "source-a",
+                    "source_port": "data",
+                    "target": "merge",
+                    "target_port": "left",
+                },
+            ]
+        )
+        self.assertEqual(
+            [
+                {
+                    "source_node": "source-a",
+                    "source_port": "data",
+                    "target_node": "merge",
+                    "target_port": "left",
+                },
+                {
+                    "source_node": "source-b",
+                    "source_port": "rows-out",
+                    "target_node": "merge",
+                    "target_port": "right",
+                },
+            ],
+            [binding.as_dict() for binding in bindings],
+        )
+
+    def test_port_ids_are_safe_for_workspace_paths(self):
+        self.assertEqual("weather-data", normalize_port_id(" weather data "))
+        self.assertEqual("input", normalize_port_id("", "input"))
+
     def test_supported_format_matrix(self):
         expected = {
             "audio.wav": ("audio", "wav"),

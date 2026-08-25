@@ -1,6 +1,7 @@
 import json
 from typing import Any
 
+from connector_catalog import require_supported_connector
 from graph_client import run_neo4j_query
 from model_plans import resolve_implementation_plan
 from node_definitions.registry import get_node_definition_registry
@@ -573,6 +574,7 @@ def build_pipeline_editor_tools(
                 raw_label,
                 raw_description,
             )
+            require_supported_connector(step_type, resolved_template)
             missing_parameters = missing_connector_parameters(
                 step_type, resolved_template, data.get("parameters")
             )
@@ -1300,6 +1302,7 @@ def build_pipeline_editor_tools(
                 raw_label,
                 raw_description,
             )
+            require_supported_connector(step_type, resolved_template)
             missing_parameters = missing_connector_parameters(
                 step_type, resolved_template, data.get("parameters")
             )

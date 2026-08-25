@@ -9,6 +9,8 @@ result.
 | --- | --- | --- |
 | Pipeline definition | `inlumen.project@2` | `project.schema.json` |
 | Deployment bundle manifest | `inlumen.deployment-bundle@1` | `deployment-bundle.schema.json` |
+| Artifact directory ABI | `inlumen.artifact-contract@2` | `artifact-contract.schema.json` |
+| Engine-neutral run specification | `inlumen.run-spec@2` | `run-spec.schema.json` |
 | Pipeline run result | `inlumen.run-result@1` | `run-result.schema.json` |
 | Node/pipeline output manifest | `inlumen.output-manifest@1` | `node-output-manifest.schema.json` |
 
@@ -31,6 +33,12 @@ large, streaming, or externally persisted artifacts use a durable `uri`.
 Persisted artifacts should include `size_bytes` and a lowercase
 `sha256:<64-hex-digits>` digest. Credentials, signed URLs, provider keys, and
 unmasked secret parameters must never be exported.
+
+At execution time, every connected artifact is routed from
+`PIPELINE_OUTPUT_DIR/<source_port>/...` to
+`PIPELINE_INPUT_DIR/<target_port>/...`. Orchestrators may use different physical
+transports, but must expose that same Task-facing directory layout and isolate
+mutable output paths by run id.
 
 The canonical logical kinds are `table`, `json`, `text`, `image`, `audio`,
 `video`, `document`, `model`, `directory`, and `binary`. `format` identifies the

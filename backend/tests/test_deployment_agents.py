@@ -68,6 +68,24 @@ class DeploymentAgentsTest(unittest.TestCase):
             storage_artifact["data_contract"]["inputs"],
         )
 
+    def test_rest_adapter_uses_optional_api_key_environment(self):
+        artifact, _ = _managed_adapter_runtime(
+            {
+                "flow_id": "weather-api",
+                "type": "source",
+                "template": "REST API",
+                "param": {"url": "https://example.test/weather"},
+            }
+        )
+        files = {item["filename"]: item for item in artifact["files"]}
+        source = files["main.py"]["content"]
+        manifest = json.loads(files["node-manifest.json"]["content"])
+        self.assertIn("_rest_api_source", source)
+        self.assertIn('os.getenv("API_KEY", "")', source)
+        by_name = {item["name"]: item for item in manifest["runtime_environment"]}
+        self.assertFalse(by_name["API_KEY"]["required"])
+        self.assertFalse(by_name["API_ENDPOINT"]["required"])
+
     def test_custom_destination_preserves_filesystem_artifacts(self):
         artifact, _ = _managed_adapter_runtime(
             {
@@ -755,7 +773,8 @@ parser.add_argument('--output')
                     "data": {
                         "label": "Capture",
                         "type": "destination",
-                        "template_label": "Notification",
+                        "template_label": "File",
+                        "param": {"filename": "capture.json"},
                     },
                 },
             ],

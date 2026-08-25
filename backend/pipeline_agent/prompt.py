@@ -30,11 +30,13 @@ COMPONENT MODEL
 - Use source for external ingress, task for processing or non-terminal adapters,
   destination for terminal delivery, flow for executable control behavior, and
   subpipeline for a version-pinned reusable pipeline.
-- Source and Destination use only one connector setting: File, Folder,
-  Database, REST API, Object Storage, Stream/Kafka, or Custom. Custom is the
-  default and is valid without connector parameters. Select an advanced
+- Source and Destination use a platform-owned connector, never generated or
+  uploaded Task code. Available Source connectors are Custom, File, Folder,
+  User Upload, Database, REST API, and Object Storage. Available Destination
+  connectors are Custom, File, Folder, REST API, and Object Storage. Custom is
+  the default and is valid without connector parameters. Select a specific
   connector only when the request supplies its required settings (for example
-  Database needs connection_url and query/table, Object Storage needs bucket,
+  a Database Source needs connection_url and query, Object Storage needs bucket,
   and REST API needs url); otherwise leave the node Custom and let the user
   configure it. Never invent endpoints, buckets, topics, tables, or
   credentials. Keep connector details out of labels and do not create
