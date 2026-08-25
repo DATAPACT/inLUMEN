@@ -23,7 +23,7 @@ surface, publish its schema, and consistently classify non-tabular artifacts.
 | --- | --- | --- | --- |
 | Project JSON export/import | Canvas | UI, source control, external tools | `inlumen.project@2` JSON Pipeline IR |
 | Generated node package | Codegen service | Backend, deployment builder | Native source files plus `node-manifest.json` and validation report |
-| Deployment bundle | Backend exporter | UI ZIP download, Dagster, Argo, CI | Deterministic files plus `inlumen.deployment-bundle@1` manifest and `inlumen.run-spec@1` |
+| Deployment bundle | Backend exporter | UI ZIP download, Dagster, Argo, CI | Deterministic files plus `inlumen.deployment-bundle@1` manifest and `inlumen.run-spec@2` (validators retain v1 compatibility) |
 | Node output | Generated runtime | Downstream nodes, Dagster validator | Native artifact plus `inlumen.output-manifest@1` descriptor |
 | Pipeline run result | Deployment validation | UI and downloaded bundle | `inlumen.run-result@1` JSON referencing output files |
 | Public workflow/artifact API | Backend | DATAPACT integrations and SDKs | OpenAPI-described JSON and native YAML/file responses |

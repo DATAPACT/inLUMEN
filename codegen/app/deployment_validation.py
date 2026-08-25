@@ -19,6 +19,11 @@ except ImportError:  # pragma: no cover - service image installs PyYAML.
     yaml = None
 
 
+SUPPORTED_RUN_SPEC_VERSIONS = frozenset(
+    {"inlumen.run-spec@1", "inlumen.run-spec@2"}
+)
+
+
 def _dagster_project_root(path: Path) -> Path:
     candidate = path.expanduser().resolve()
     if (candidate / "pyproject.toml").is_file() and (candidate / "src").is_dir():
@@ -601,8 +606,13 @@ def _validate_bundle_structure(
     if not missing:
         errors.extend(_input_contract_errors(bundle_root, manifest))
     run_spec = _load_json(bundle_root / run_spec_path) if run_spec_path else {}
-    if run_spec_path and run_spec.get("schema_version") != "inlumen.run-spec@1":
-        errors.append(f"{run_spec_path} must use schema_version inlumen.run-spec@1.")
+    run_spec_version = str(run_spec.get("schema_version") or "").strip()
+    if run_spec_path and run_spec_version not in SUPPORTED_RUN_SPEC_VERSIONS:
+        supported = ", ".join(sorted(SUPPORTED_RUN_SPEC_VERSIONS))
+        errors.append(
+            f"{run_spec_path} uses unsupported schema_version "
+            f"{run_spec_version or '<missing>'}; supported versions: {supported}."
+        )
     elif run_spec_path:
         run_nodes = (
             run_spec.get("nodes") if isinstance(run_spec.get("nodes"), list) else []

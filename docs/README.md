@@ -98,7 +98,7 @@ The canonical Pipeline IR is JSON: nodes contain their structural kind, template
 implementation metadata, parameters, explicit ports, and project-file references;
 edges identify both endpoint nodes and port IDs. This JSON contract drives version
 storage, project import/export, agent context, and deployment generation. Executable
-bundles add an engine-neutral `inlumen.run-spec@1`; the Dagster project (including
+bundles add an engine-neutral `inlumen.run-spec@2`; the Dagster project (including
 Docker Compose) and optional Argo Workflow are adapters derived from that contract.
 YAML is not an internal representation and the canvas deliberately accepts
 JSON project imports only; generated YAML remains export-only.
