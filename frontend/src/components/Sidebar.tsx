@@ -906,7 +906,7 @@ export function Sidebar({
             <div className="min-w-0 overflow-hidden rounded-lg border border-border p-3">
               <h3 className="text-sm font-medium mb-2">Build deployment artifacts</h3>
               <p className="text-xs text-muted-foreground mb-3">
-                Generate two outputs: a runnable Dagster bundle (.zip) and an Argo Workflow definition (.yaml). This does not generate Task code.
+                Generate two outputs: a runnable Dagster bundle (.zip) and an Argo Workflow definition (.yaml).
               </p>
 
               <Button
