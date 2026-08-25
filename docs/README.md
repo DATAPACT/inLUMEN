@@ -331,10 +331,12 @@ is:
    replace fixtures for that execution; their filenames must match the root node
    contract.
 
-inLUMEN runs every Task in a standard workspace. Task code reads files from
-`PIPELINE_INPUT_DIR` and writes downstream artifacts to
-`PIPELINE_OUTPUT_DIR`. Source and Destination implementations are
-platform-owned adapters.
+inLUMEN runs every Task in a standard, flat workspace. Upstream files are
+staged directly in `PIPELINE_INPUT_DIR`, and Task code writes downstream
+artifacts directly to `PIPELINE_OUTPUT_DIR`. Port names are orchestration
+metadata and never create implicit subdirectories. Artifact-owned relative
+paths are preserved, and path collisions fail before execution. Source and
+Destination implementations are platform-owned adapters.
 The runtime inventories files after each process exits and moves them to the
 next workspace internally, so the same Task package works locally, in Docker,
 and in future distributed runners. Users upload only `main.py` and, when it is

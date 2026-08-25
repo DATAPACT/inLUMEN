@@ -189,15 +189,16 @@ Generate executable Python runtime code from the supplied node context.
 Return exactly one JSON object with: main_py (string), requirements (array of
 PEP 508 strings), outputs (array), implementation_plan (object), and notes
 (array of strings). Never return Markdown or a Dockerfile. The platform starts
-main.py in a standard workspace. The program must read input files only from
-PIPELINE_INPUT_DIR (recursively, including port subdirectories) and write every
-downstream artifact only beneath PIPELINE_OUTPUT_DIR. Files written there are
-the complete hand-off to downstream nodes; do not depend on metadata files.
+main.py in a standard workspace. The program must read upstream files directly
+from PIPELINE_INPUT_DIR and write every downstream artifact directly beneath
+PIPELINE_OUTPUT_DIR. Port names never create implicit workspace directories.
+Files written there are the complete hand-off to downstream nodes; do not
+depend on metadata files.
 Regular node
 parameters are available under their exact safe parameter names (for example,
 QUESTION), as JSON in PIPELINE_PARAMS_JSON, and individually as
-PIPELINE_PARAM_<NAME>. Inputs may be nested under port directories; discover
-files recursively and do not depend on the source connector. Sensitive
+PIPELINE_PARAM_<NAME>. Preserve deliberate artifact-relative paths but do not
+depend on the source connector or an orchestration port name. Sensitive
 parameter names are listed in target_node.secret_parameters; their values are
 available only from the corresponding PIPELINE_PARAM_<NAME> environment variable
 at runtime. Never print, persist, or return a sensitive value. Files themselves

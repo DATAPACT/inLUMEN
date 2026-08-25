@@ -53,8 +53,9 @@ ARTIFACT_CONTRACT = {
     "input_environment": "PIPELINE_INPUT_DIR",
     "output_environment": "PIPELINE_OUTPUT_DIR",
     "recursive": True,
-    "input_layout": "<input_port>/...",
-    "output_layout": "<output_port>/...",
+    "input_layout": "<artifact-relative-path>",
+    "output_layout": "<artifact-relative-path>",
+    "port_namespaced": False,
     "run_isolation": "<run_id>",
     "source_agnostic": True,
     "connector_agnostic": True,
@@ -76,6 +77,7 @@ from pathlib import Path
 command = json.loads(sys.argv[1])
 ports = [str(value).strip() for value in json.loads(sys.argv[2]) if str(value).strip()]
 requirements = json.loads(sys.argv[3])
+staging_roots = [Path(value) for value in json.loads(sys.argv[4])]
 missing = [
     item["name"] for item in requirements
     if item.get("required") and not os.getenv(str(item.get("name") or ""))
@@ -84,6 +86,31 @@ if missing:
     raise RuntimeError(
         "Missing required runtime environment variable(s): " + ", ".join(sorted(missing))
     )
+if staging_roots:
+    input_dir = Path(os.environ["PIPELINE_INPUT_DIR"])
+    if input_dir.exists():
+        shutil.rmtree(input_dir)
+    input_dir.mkdir(parents=True, exist_ok=True)
+    owners = {}
+    for source_root in staging_roots:
+        if not source_root.is_dir():
+            raise RuntimeError(f"Required upstream artifact is missing: {source_root}")
+        for source in sorted(source_root.rglob("*")):
+            if not source.is_file():
+                continue
+            relative = source.relative_to(source_root)
+            destination = input_dir / relative
+            existing = owners.get(relative)
+            if existing is not None:
+                if source.read_bytes() == existing.read_bytes():
+                    continue
+                raise RuntimeError(
+                    f"Upstream artifacts collide at {relative.as_posix()!r}; "
+                    "add a Task that merges or renames them."
+                )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            owners[relative] = source
 result = subprocess.run(command)
 if result.returncode:
     raise SystemExit(result.returncode)
@@ -1390,6 +1417,10 @@ def _build_codegen_argo_workflow_object(
                         json.dumps(command),
                         json.dumps(output_port_ids),
                         json.dumps(runtime_environment),
+                        json.dumps([
+                            f"/inlumen/staging/{binding.target_port}"
+                            for binding in incoming_bindings
+                        ]),
                     ],
                     "env": env,
                 },
@@ -1401,7 +1432,7 @@ def _build_codegen_argo_workflow_object(
                 "artifacts": [
                     {
                         "name": _argo_name(binding.target_port, "input"),
-                        "path": f"/inlumen/inputs/{binding.target_port}",
+                        "path": f"/inlumen/staging/{binding.target_port}",
                     }
                     for binding in incoming_bindings
                 ]
@@ -2586,9 +2617,12 @@ The reusable component in `src/inlumen_dagster_project/components/shell_command.
 - `PIPELINE_INPUT_DIR`
 - `PIPELINE_OUTPUT_DIR`
 
-Task code reads files from the input directory and writes downstream artifacts
-to the output directory. Dagster inventories and moves those files internally;
-Task code does not read or write an output manifest.
+Task code reads upstream files directly from the input directory and writes
+downstream artifacts directly to the output directory. Port names never create
+implicit subdirectories in either public directory. Artifact-owned relative
+paths are preserved, and conflicting upstream paths fail before the Task runs.
+Dagster inventories and routes files internally; Task code does not read or
+write an output manifest.
 
 {sample_note}
 {model_note}

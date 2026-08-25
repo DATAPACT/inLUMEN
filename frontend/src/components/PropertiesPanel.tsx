@@ -1585,7 +1585,7 @@ export function PropertiesPanel({
                 </p>
                 <div className="rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
                   <p className="font-medium text-foreground">Task runtime contract</p>
-                  <p className="mt-1">Your code runs with a standard workspace. Read input files from <code className="rounded bg-background px-1">PIPELINE_INPUT_DIR</code> and write every result for downstream nodes to <code className="rounded bg-background px-1">PIPELINE_OUTPUT_DIR</code>.</p>
+                  <p className="mt-1">Your code runs with a flat standard workspace. Upstream files are placed directly in <code className="rounded bg-background px-1">PIPELINE_INPUT_DIR</code>; write every result directly to <code className="rounded bg-background px-1">PIPELINE_OUTPUT_DIR</code>. Port names never create implicit subdirectories.</p>
                 </div>
               </InspectorSection>
             )}

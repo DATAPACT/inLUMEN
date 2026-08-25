@@ -1,6 +1,8 @@
 import base64
 import hashlib
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -13,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from deployment_artifacts import (
     DeploymentArtifactValidationError,
+    _ARGO_PORT_RUNNER,
     _dagster_shell_command_component_source,
     _model_prefetch_source,
     build_argo_workflow_object,
@@ -404,11 +407,21 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             'from: "{{tasks.step-1.outputs.artifacts.data}}"',
             argo_workflow,
         )
-        self.assertIn('path: "/inlumen/inputs/input"', argo_workflow)
+        self.assertIn('path: "/inlumen/staging/input"', argo_workflow)
+        self.assertIn('"/inlumen/staging/input"', argo_workflow)
         self.assertEqual(1, argo_workflow.count('name: "pipeline-image"'))
         self.assertNotIn("name: image-1", argo_workflow)
         run_spec = json.loads(by_path["run-spec.json"])
         self.assertEqual("inlumen.run-spec@2", run_spec["schema_version"])
+        self.assertEqual(
+            "<artifact-relative-path>",
+            run_spec["artifact_contract"]["input_layout"],
+        )
+        self.assertEqual(
+            "<artifact-relative-path>",
+            run_spec["artifact_contract"]["output_layout"],
+        )
+        self.assertFalse(run_spec["artifact_contract"]["port_namespaced"])
         self.assertEqual("uv", run_spec["runtime"]["package_manager"])
         self.assertEqual("dagster", run_spec["runtime"]["default_engine"])
         self.assertEqual("filesystem", run_spec["run_inputs"]["transport"])
@@ -418,6 +431,57 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertEqual("python-package", run_spec["nodes"][1]["execution"]["kind"])
         self.assertEqual("user", run_spec["nodes"][1]["execution"]["ownership"])
         self.assertIn("package", run_spec["nodes"][1])
+
+    def test_argo_runner_flattens_private_port_staging_before_user_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            left = root / "staging" / "left"
+            right = root / "staging" / "right"
+            left.mkdir(parents=True)
+            right.mkdir(parents=True)
+            (left / "cities.csv").write_text("city\nOslo\n", encoding="utf-8")
+            (right / "weather.json").write_text("{}", encoding="utf-8")
+            input_dir = root / "input"
+            output_dir = root / "output"
+            command = [
+                sys.executable,
+                "-c",
+                (
+                    "import os; from pathlib import Path; "
+                    "root = Path(os.environ['PIPELINE_INPUT_DIR']); "
+                    "assert (root / 'cities.csv').is_file(); "
+                    "assert (root / 'weather.json').is_file(); "
+                    "output = Path(os.environ['PIPELINE_OUTPUT_DIR']); "
+                    "output.mkdir(parents=True, exist_ok=True); "
+                    "(output / 'merged.json').write_text('{}')"
+                ),
+            ]
+            environment = {
+                **os.environ,
+                "PIPELINE_INPUT_DIR": str(input_dir),
+                "PIPELINE_OUTPUT_DIR": str(output_dir),
+            }
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    _ARGO_PORT_RUNNER,
+                    json.dumps(command),
+                    json.dumps(["result"]),
+                    json.dumps([]),
+                    json.dumps([str(left), str(right)]),
+                ],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue((input_dir / "cities.csv").is_file())
+            self.assertTrue((input_dir / "weather.json").is_file())
+            self.assertFalse((input_dir / "left").exists())
+            self.assertTrue((output_dir / "result" / "merged.json").is_file())
 
     def test_reviewed_models_are_prefetched_and_runtime_is_local_only(self):
         payload = codegen_payload()
@@ -726,6 +790,8 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertIn('target_port: "left"', merge_defs)
         self.assertIn('target_port: "right"', merge_defs)
         argo = by_path["argo/workflow.yaml"]
+        self.assertIn('path: "/inlumen/staging/left"', argo)
+        self.assertIn('path: "/inlumen/staging/right"', argo)
         self.assertIn('name: "left"', argo)
         self.assertIn('from: "{{tasks.step-1.outputs.artifacts.data}}"', argo)
         self.assertIn('from: "{{tasks.step-2.outputs.artifacts.data}}"', argo)

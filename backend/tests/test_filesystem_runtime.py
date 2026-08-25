@@ -23,7 +23,7 @@ from filesystem_runtime import (  # noqa: E402
 
 
 class FilesystemRuntimeTest(unittest.TestCase):
-    def test_port_bindings_remap_source_outputs_to_target_inputs(self):
+    def test_port_bindings_stage_connected_artifacts_at_input_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             parent = root / "parent"
@@ -41,7 +41,9 @@ class FilesystemRuntimeTest(unittest.TestCase):
                 ],
                 root / "workspace" / "input",
             )
-            self.assertTrue((staged / "input" / "cities.csv").is_file())
+            self.assertTrue((staged / "cities.csv").is_file())
+            self.assertEqual(["cities.csv"], [path.name for path in staged.glob("*.csv")])
+            self.assertFalse((staged / "input").exists())
             self.assertFalse((staged / "ignored").exists())
 
     def test_single_output_port_normalizes_legacy_root_files(self):
@@ -122,6 +124,20 @@ class FilesystemRuntimeTest(unittest.TestCase):
             staged = root / "workspace" / "input"
             namespace["_stage_inputs"]([upstream], staged)
             self.assertEqual("result", (staged / "result.txt").read_text())
+
+            port_output = root / "port-output"
+            (port_output / "data").mkdir(parents=True)
+            (port_output / "data" / "cities.csv").write_text("city\nOslo\n")
+            namespace["_stage_input_bindings"](
+                [{
+                    "source_dir": str(port_output),
+                    "source_port": "data",
+                    "target_port": "input",
+                }],
+                staged,
+            )
+            self.assertTrue((staged / "cities.csv").is_file())
+            self.assertFalse((staged / "input").exists())
 
     def test_parameters_are_available_by_their_exact_safe_names(self):
         environment = parameter_environment({"QUESTION": "When is support available?"})

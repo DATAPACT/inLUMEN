@@ -105,10 +105,10 @@ PIPELINE_RUNTIME_ATTACHMENT_INSTRUCTION = f"""{PIPELINE_RUNTIME_BEHAVIOR_INSTRUC
 Create the files needed to run every pipeline node.
 For each flow_id, return main.py and requirements.txt. Leave requirements.txt empty when the script only uses the Python 3.11 standard library.
 When a node runs, the platform provides a standard workspace through
-PIPELINE_INPUT_DIR and PIPELINE_OUTPUT_DIR. Read input files recursively from
-PIPELINE_INPUT_DIR and write every downstream artifact beneath
-PIPELINE_OUTPUT_DIR. Keep connected nodes consistent about output filenames and
-formats.
+PIPELINE_INPUT_DIR and PIPELINE_OUTPUT_DIR. Read upstream files directly from
+PIPELINE_INPUT_DIR and write every downstream artifact directly beneath
+PIPELINE_OUTPUT_DIR. Port names never create implicit workspace directories.
+Keep connected nodes consistent about output filenames and formats.
 Each main.py must be a finite, non-interactive batch program: do not call input(), start a server or UI, watch for files, or loop forever. Validate required input files before loading large models or doing other slow setup, then exit when the output files are written.
 Associate each returned file with its flow_id so inLUMEN can attach it to the correct node."""
 EXTERNAL_AI_RUNTIME_RESPONSE_INSTRUCTION = f"""{PIPELINE_RUNTIME_BEHAVIOR_INSTRUCTION}

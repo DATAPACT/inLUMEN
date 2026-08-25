@@ -86,6 +86,7 @@ describe("PropertiesPanel", () => {
     expect(container.textContent).toContain("Implementation");
     expect(container.textContent).toContain("Task runtime contract");
     expect(container.textContent).toContain("PIPELINE_INPUT_DIR");
+    expect(container.textContent).toContain("Port names never create implicit subdirectories");
     expect(container.textContent).toContain("PIPELINE_OUTPUT_DIR");
     await act(async () => root.unmount());
   });

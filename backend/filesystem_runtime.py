@@ -134,11 +134,13 @@ def stage_input_bindings(
     bindings: Iterable[dict[str, object]],
     input_dir: Path | str,
 ) -> Path:
-    """Stage connected output ports beneath their target input ports.
+    """Stage connected output ports directly into the Task input directory.
 
     Each binding contains ``source_dir``, ``source_port``, and ``target_port``.
-    Only the connected source port is exposed to the consumer.  A binding with
-    an empty source and target port is reserved for a Source node's run input.
+    Only the connected source port is exposed to the consumer, but port names
+    are orchestration metadata and never become public workspace directories.
+    Artifact-owned relative paths are preserved and collisions fail loudly.
+    A binding with empty ports is reserved for a Source node's run input.
     """
     destination_root = Path(input_dir)
     if destination_root.exists():
@@ -149,7 +151,6 @@ def stage_input_bindings(
     for binding in bindings:
         source_root = Path(str(binding.get("source_dir") or ""))
         source_port = str(binding.get("source_port") or "").strip()
-        target_port = str(binding.get("target_port") or "").strip()
         if source_port:
             source_root = source_root / source_port
         if not source_root.is_dir():
@@ -158,14 +159,13 @@ def stage_input_bindings(
                     f"Required upstream artifact port is missing: {source_root}."
                 )
             continue
-        target_root = destination_root / target_port if target_port else destination_root
         for source in sorted(source_root.rglob("*"), key=lambda item: item.as_posix()):
             if not source.is_file():
                 continue
             relative = source.relative_to(source_root)
             if relative.as_posix() in {"input_manifest.json", "output_manifest.json", ".gitkeep"}:
                 continue
-            destination = target_root / relative
+            destination = destination_root / relative
             destination_relative = destination.relative_to(destination_root)
             existing = owners.get(destination_relative)
             if existing is not None:
@@ -184,11 +184,12 @@ def normalize_single_output_port(
     output_dir: Path | str,
     output_ports: Iterable[str],
 ) -> list[str]:
-    """Move legacy root outputs beneath the sole declared output port.
+    """Move public root outputs into the orchestration-owned output port.
 
-    New Tasks must write port directories directly.  This compatibility bridge
-    keeps existing user-owned packages working while making downstream routing
-    unambiguous.  Multiple-output Tasks must already use port directories.
+    Task code always writes directly to ``PIPELINE_OUTPUT_DIR``.  For a Task
+    with one output port, the runner namespaces those artifacts only after the
+    process exits so downstream routing remains internal to the orchestrator.
+    Multiple-output Tasks still require an explicit routing mechanism.
     """
     root = Path(output_dir)
     ports = [str(port).strip() for port in output_ports if str(port).strip()]
@@ -348,7 +349,6 @@ def _stage_input_bindings(bindings, input_dir):
     for binding in bindings:
         source_root = Path(str(binding.get("source_dir") or ""))
         source_port = str(binding.get("source_port") or "").strip()
-        target_port = str(binding.get("target_port") or "").strip()
         if source_port:
             source_root = source_root / source_port
         if not source_root.is_dir():
@@ -357,7 +357,6 @@ def _stage_input_bindings(bindings, input_dir):
                     f"Required upstream artifact port is missing: {source_root}."
                 )
             continue
-        target_root = input_dir / target_port if target_port else input_dir
         for source in sorted(source_root.rglob("*"), key=lambda item: item.as_posix()):
             if not source.is_file():
                 continue
@@ -366,7 +365,7 @@ def _stage_input_bindings(bindings, input_dir):
                 "input_manifest.json", "output_manifest.json", ".gitkeep"
             }:
                 continue
-            destination = target_root / relative
+            destination = input_dir / relative
             destination_relative = destination.relative_to(input_dir)
             existing = owners.get(destination_relative)
             if existing is not None:
@@ -583,8 +582,8 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
             )
             if moved:
                 context.log.warning(
-                    "Task wrote legacy root-level outputs; moved them under the "
-                    f"sole declared port {self.output_ports[0]!r}: {', '.join(moved)}"
+                    "Task outputs were routed internally through the sole declared "
+                    f"port {self.output_ports[0]!r}: {', '.join(moved)}"
                 )
             artifacts = _artifacts(output_dir)
             return dg.MaterializeResult(metadata={

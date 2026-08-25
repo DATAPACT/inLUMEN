@@ -91,6 +91,17 @@ not contain `..`. Node directories derive from stable flow IDs, not labels alone
 File entries retain native bytes and media types; transport-only base64 is
 declared with `content_encoding`.
 
+## Task workspace contract
+
+Every Task receives exactly two public filesystem locations:
+`PIPELINE_INPUT_DIR` and `PIPELINE_OUTPUT_DIR`. Upstream artifacts are staged at
+their artifact-relative paths directly beneath the input root, and Task results
+are written directly beneath the output root. Graph port names remain
+orchestration metadata and never create implicit directories visible to Task
+code. The orchestrator may use private staging directories for routing, but it
+must flatten that boundary before starting the Task. Conflicting upstream paths
+fail deterministically instead of being overwritten.
+
 ## Status and errors
 
 Run results use `succeeded`, `partial`, `failed`, or `cancelled`. A failed or

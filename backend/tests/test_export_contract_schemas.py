@@ -62,6 +62,17 @@ class ExportContractSchemaTest(unittest.TestCase):
             {entry["kind"] for entry in example["outputs"]},
         )
 
+    def test_task_workspace_contract_is_flat_and_not_port_namespaced(self):
+        schema = self.load("artifact-contract.schema.json")
+        properties = schema["properties"]
+        self.assertEqual(
+            "<artifact-relative-path>", properties["input_layout"]["const"]
+        )
+        self.assertEqual(
+            "<artifact-relative-path>", properties["output_layout"]["const"]
+        )
+        self.assertFalse(properties["port_namespaced"]["const"])
+
 
 if __name__ == "__main__":
     unittest.main()

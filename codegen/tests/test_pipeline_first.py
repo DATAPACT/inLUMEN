@@ -94,7 +94,8 @@ def file_content(node: dict, filename: str) -> str:
 def test_node_prompt_requires_filesystem_workspace_contract() -> None:
     assert "PIPELINE_INPUT_DIR" in NODE_SYSTEM_PROMPT
     assert "PIPELINE_OUTPUT_DIR" in NODE_SYSTEM_PROMPT
-    assert "PIPELINE_INPUT_DIR (recursively, including port subdirectories)" in NODE_SYSTEM_PROMPT
+    assert "directly\nfrom PIPELINE_INPUT_DIR" in NODE_SYSTEM_PROMPT
+    assert "Port names never create implicit workspace directories" in NODE_SYSTEM_PROMPT
     assert "Files written there are" in NODE_SYSTEM_PROMPT
 
 
