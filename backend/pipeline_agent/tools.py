@@ -117,7 +117,8 @@ def build_pipeline_editor_tools(
                 ],
                 "rule": (
                     "Use only these structural types. Design labels, descriptions, "
-                    "connector categories, control-flow behavior, and ports; runtime "
+                    "control-flow behavior, and ports. Source and Destination use "
+                    "their zero-configuration default boundaries; runtime "
                     "implementation and parameters are configured after design."
                 ),
             },
@@ -285,6 +286,10 @@ def build_pipeline_editor_tools(
         description: object,
     ) -> str:
         raw_template = str(template_label or "").strip()
+        if step_type in {"source", "destination"}:
+            # Connector choice is an advanced user configuration. Assistant-
+            # designed boundaries always use the managed zero-config default.
+            return "Custom"
         if step_type != "flow":
             return raw_template
         normalized_template = raw_template.lower()
@@ -499,16 +504,17 @@ def build_pipeline_editor_tools(
           "type": "source|task|destination|flow|subpipeline",
           "label": "step label",
           "description": "step description",
-          "template": "optional high-level semantic or connector category",
+          "template": "optional high-level semantic for Task or Flow only",
           "reusable_pipeline_name": "required for Subpipeline unless uid is supplied",
           "reusable_pipeline_uid": "optional saved reusable pipeline uid",
           "reusable_version_uid": "optional immutable version uid",
           "reusable_version_name": "optional version name; active version is the default"
         }
         Do not provide parameters, credentials, secret names, model choices, or
-        implementation metadata. Use source/destination templates for high-level
-        connector categories, task templates for domain operations, and flow for
-        execution control. Creating a subpipeline
+        implementation metadata. Source and Destination always use the default
+        managed boundary; connector selection is an advanced user configuration.
+        Use task descriptions for domain operations and Flow for execution
+        control. Creating a subpipeline
         atomically resolves and pins a saved reusable pipeline version and returns
         its exact public input/output ids; an unreferenced placeholder is never
         created. Never create configuration nodes.
@@ -1230,7 +1236,7 @@ def build_pipeline_editor_tools(
           "type": "source|task|destination|flow|subpipeline",
           "label": "step label",
           "description": "step description",
-          "template": "optional template name",
+          "template": "optional Task or Flow template name",
           "reusable_pipeline_uid": "required when inserting a Subpipeline",
           "reusable_version_uid": "required when inserting a Subpipeline",
           "before_flow_id": "required target flow_id",

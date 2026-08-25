@@ -210,6 +210,21 @@ class PipelineGraphValidationTest(unittest.TestCase):
         self.assertFalse(report["valid"])
         self.assertIn("unsupported-task-implementation", {issue["code"] for issue in report["issues"]})
 
+    def test_uploaded_main_py_satisfies_task_implementation_warning(self):
+        task = node(2, "task", "Transform")
+        task["data"]["files"] = [{"filename": "main.py", "role": "code"}]
+        graph = {
+            "nodes": [node(1, "source", "Input"), task, node(3, "destination", "Output")],
+            "edges": [edge(1, 2, "data", "input"), edge(2, 3, "output", "data")],
+        }
+
+        report = validate_pipeline_graph(graph)
+
+        self.assertNotIn(
+            "missing-implementation",
+            {issue["code"] for issue in report["issues"]},
+        )
+
     def test_condition_flow_uses_template_ports_and_real_branches(self):
         graph = {
             "nodes": [
@@ -567,6 +582,44 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertNotIn("HAS_FILE", query)
         self.assertNotIn("implementation", query)
         self.assertNotIn("param_json", query)
+
+    @patch("pipeline_agent.team.RoundRobinGroupChat")
+    @patch("pipeline_agent.team.AssistantAgent")
+    @patch("pipeline_agent.team.select_model_client")
+    @patch("pipeline_agent.tools.run_neo4j_query", new_callable=AsyncMock)
+    def test_assistant_boundaries_always_use_zero_configuration_default(
+        self,
+        run_query,
+        select_model_client,
+        assistant_agent,
+        _round_robin,
+    ):
+        config = LLMConfig(
+            provider="openrouter",
+            model="test/model",
+            base_url="https://example.test/v1",
+            api_key="secret",
+        )
+        select_model_client.return_value = MagicMock()
+        run_query.return_value = json.dumps([{"step": {"flow_id": "1"}}])
+
+        build_pipeline_editing_team(config)
+        create_step = next(
+            tool
+            for tool in assistant_agent.call_args.kwargs["tools"]
+            if tool.__name__ == "create_step"
+        )
+        asyncio.run(create_step(json.dumps({
+            "type": "source",
+            "label": "City Data CSV",
+            "description": "Receives city records.",
+            "template": "File",
+        })))
+
+        query = run_query.await_args.args[0]
+        self.assertIn("template_label:'Custom'", query)
+        self.assertIn("param_json: '{}'", query)
+        self.assertNotIn("template_label:'File'", query)
 
     @patch("pipeline_agent.team.RoundRobinGroupChat")
     @patch("pipeline_agent.team.AssistantAgent")

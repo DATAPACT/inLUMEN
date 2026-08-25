@@ -245,13 +245,12 @@ export const validateGraph = (
       const implementation = objectValue(data.implementation);
       const kindValue = normalizeImplementationKind(implementation.kind);
       const migrationError = taskImplementationMigrationError(implementation);
-      if (!implementation.kind) add({
-        severity: runtimeSeverity,
-        category: "implementation",
-        code: "missing-implementation",
-        nodeId,
-        message: "Task implementation is not configured.",
-      });
+      const codeFiles = Array.isArray(data.files)
+        ? data.files.filter((file) =>
+            getNodeFileRole(file as NodeFileReference) === "code"
+            && /(^|\/)main\.py$/i.test(getNodeFileName(file as NodeFileReference))
+          )
+        : [];
       if (migrationError) add({
         severity: "error",
         category: "implementation",
@@ -259,14 +258,15 @@ export const validateGraph = (
         nodeId,
         message: migrationError,
       });
-      if (!migrationError && ["python", "generated-code"].includes(kindValue)) {
-        const codeFiles = Array.isArray(data.files)
-          ? data.files.filter((file) =>
-              getNodeFileRole(file as NodeFileReference) === "code"
-              && /(^|\/)main\.py$/i.test(getNodeFileName(file as NodeFileReference))
-            )
-          : [];
-        if (codeFiles.length === 0) add({
+      if (!migrationError && codeFiles.length === 0) {
+        if (!implementation.kind) add({
+          severity: runtimeSeverity,
+          category: "implementation",
+          code: "missing-implementation",
+          nodeId,
+          message: "No Task implementation is attached. Generate code or upload main.py in the Implementation section.",
+        });
+        else if (["python", "generated-code"].includes(kindValue)) add({
           severity: runtimeSeverity,
           category: "implementation",
           code: "missing-code",

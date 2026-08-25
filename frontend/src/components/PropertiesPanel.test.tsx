@@ -48,7 +48,8 @@ describe("PropertiesPanel", () => {
     expect(container.textContent).toContain("Input Files");
     expect(container.textContent).not.toContain("Sample Inputs");
     expect(container.textContent).toContain("Connection");
-    expect(container.textContent).toContain("Advanced connection settings");
+    expect(container.textContent).toContain("Default boundary");
+    expect(container.textContent).toContain("Advanced connector configuration");
     expect(container.textContent).toContain("language");
     expect(container.textContent).not.toContain("Implementation");
     expect(container.textContent).not.toContain("main.py");

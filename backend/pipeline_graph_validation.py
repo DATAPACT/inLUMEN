@@ -53,6 +53,20 @@ def _parameters(data: dict[str, Any]) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _has_python_entrypoint(data: dict[str, Any]) -> bool:
+    files = data.get("files") or data.get("file_buckets")
+    if not isinstance(files, list):
+        return False
+    return any(
+        (
+            str(item.get("filename") or item.get("name") or "")
+            if isinstance(item, dict)
+            else str(item or "")
+        ).strip().lower() == "main.py"
+        for item in files
+    )
+
+
 def _subpipeline(data: dict[str, Any]) -> dict[str, Any]:
     nested = data.get("subpipeline")
     if isinstance(nested, dict):
@@ -207,14 +221,16 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
 
         if kind == "task":
             implementation = _implementation(data)
-            if not implementation:
+            if not implementation and not _has_python_entrypoint(data):
                 issues.append(_issue(
                     "implementation",
                     "missing-implementation",
-                    "Task implementation is not configured.",
+                    "No Task implementation is attached. Generate code or upload main.py.",
                     node_id=node_id,
                     severity="warning",
                 ))
+                continue
+            if not implementation:
                 continue
             implementation_kind = str(implementation.get("kind") or "").strip().lower()
             implementation_kind = (

@@ -1375,34 +1375,38 @@ export function PropertiesPanel({
               <InspectorSection
                 id="inspector-connection"
                 title="Connection"
-                description="Choose the boundary type. Describe the connection in chat; inLUMEN configures it while building the bundle."
+                description="Uses the inLUMEN-managed artifact boundary by default. No connector configuration is required for the high-level design."
                 status={sectionStatus("configuration")}
               >
-                <div className="space-y-2">
-                  <Label htmlFor="connector-type">Connector type</Label>
-                  <select
-                    id="connector-type"
-                    className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-                    value={currentTemplate}
-                    onChange={(event) => handleTemplateChange(event.target.value)}
-                  >
-                    {connectorTemplateGroups.map((group) => (
-                      <optgroup key={group.category} label={group.category}>
-                        {group.options.map((option) => (
-                          <option key={option.value} value={option.value}>{option.label}</option>
-                        ))}
-                      </optgroup>
-                    ))}
-                  </select>
+                <div className="rounded-md border border-emerald-500/25 bg-emerald-500/5 p-3 text-xs text-muted-foreground">
+                  <span className="font-medium text-foreground">Default boundary:</span>{" "}
+                  Sources expose supplied run artifacts and Destinations preserve the final artifacts.
                 </div>
                 <details className="rounded-md border border-border bg-muted/10">
                   <summary className="cursor-pointer px-3 py-2 text-xs font-medium">
-                    Advanced connection settings
+                    Advanced connector configuration
                   </summary>
-                  <div className="border-t border-border p-2">
+                  <div className="space-y-3 border-t border-border p-3">
+                    <div className="space-y-2">
+                      <Label htmlFor="connector-type">Connector type</Label>
+                      <select
+                        id="connector-type"
+                        className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                        value={currentTemplate}
+                        onChange={(event) => handleTemplateChange(event.target.value)}
+                      >
+                        {connectorTemplateGroups.map((group) => (
+                          <optgroup key={group.category} label={group.category}>
+                            {group.options.map((option) => (
+                              <option key={option.value} value={option.value}>{option.label}</option>
+                            ))}
+                          </optgroup>
+                        ))}
+                      </select>
+                    </div>
                     {renderParametersSection({
                       title: "Connection settings",
-                      description: "Optional overrides. Credentials are stored securely and are never included in the pipeline graph or bundle.",
+                      description: "Advanced overrides. Credentials are stored securely and are never included in the pipeline graph or bundle.",
                     })}
                   </div>
                 </details>
