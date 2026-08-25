@@ -72,9 +72,10 @@ def _issue(
     *,
     node_id: str = "",
     edge_id: str = "",
+    severity: str = "error",
 ) -> dict[str, str]:
     issue = {
-        "severity": "error",
+        "severity": severity,
         "category": category,
         "code": code,
         "message": message,
@@ -157,6 +158,7 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
                         "missing-required-parameter",
                         "Condition requires parameter 'expression'.",
                         node_id=node_id,
+                        severity="warning",
                     ))
                 elif not FLOW_EXPRESSION_PATTERN.fullmatch(expression):
                     issues.append(_issue(
@@ -173,6 +175,7 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
                         "invalid-flow-concurrency",
                         "Parallel Map maximum concurrency must be a positive whole number.",
                         node_id=node_id,
+                        severity="warning" if concurrency is None else "error",
                     ))
                 if str(parameters.get("failure_policy") or "") not in {"stop", "continue"}:
                     issues.append(_issue(
@@ -180,6 +183,11 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
                         "invalid-flow-failure-policy",
                         "Parallel Map requires a valid item failure policy.",
                         node_id=node_id,
+                        severity=(
+                            "warning"
+                            if parameters.get("failure_policy") in (None, "")
+                            else "error"
+                        ),
                     ))
 
         if kind in {"source", "destination"}:
@@ -194,6 +202,7 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
                     "missing-required-parameter",
                     f"{template_label} {kind} requires parameter '{parameter_name}'.",
                     node_id=node_id,
+                    severity="warning",
                 ))
 
         if kind == "task":
@@ -204,6 +213,7 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
                     "missing-implementation",
                     "Task implementation is not configured.",
                     node_id=node_id,
+                    severity="warning",
                 ))
                 continue
             implementation_kind = str(implementation.get("kind") or "").strip().lower()
@@ -464,7 +474,10 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
     if node_by_id and visited != len(node_by_id):
         issues.append(_issue("graph", "cycle", "Pipeline connections must form an acyclic graph."))
 
-    return {"valid": not issues, "issues": issues}
+    return {
+        "valid": not any(issue.get("severity") == "error" for issue in issues),
+        "issues": issues,
+    }
 
 
 def validation_issue_messages(report: dict[str, Any], limit: int = 8) -> list[str]:
@@ -472,7 +485,11 @@ def validation_issue_messages(report: dict[str, Any], limit: int = 8) -> list[st
     if not isinstance(issues, list):
         return []
     messages = []
-    for issue in issues[:limit]:
+    errors = [
+        issue for issue in issues
+        if isinstance(issue, dict) and issue.get("severity") == "error"
+    ]
+    for issue in errors[:limit]:
         if not isinstance(issue, dict):
             continue
         node = str(issue.get("node_id") or "").strip()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import re
 from typing import Any
 
@@ -115,3 +116,31 @@ def merge_runtime_environment(
                 "source": "node-manifest",
             }
     return [merged[name] for name in sorted(merged)]
+
+
+def runtime_environment_from_files(files: object) -> list[dict[str, Any]]:
+    """Analyze an in-memory Python package without inventing configuration."""
+    source = ""
+    declared: object = None
+    if not isinstance(files, list):
+        return []
+    for file_item in files:
+        if not isinstance(file_item, dict):
+            continue
+        filename = str(file_item.get("filename") or "").strip().lower()
+        content = file_item.get("content")
+        if not isinstance(content, str):
+            continue
+        if filename == "main.py":
+            source = content
+        elif filename == "node-manifest.json":
+            try:
+                manifest = json.loads(content)
+            except (TypeError, ValueError):
+                manifest = {}
+            if isinstance(manifest, dict):
+                declared = manifest.get("runtime_environment")
+    return merge_runtime_environment(
+        discover_runtime_environment(source),
+        declared,
+    )

@@ -82,7 +82,7 @@ def conversation_subpipeline_definition():
             nested("transcription", "task", {
                 "inputs": [{"id": "audio", "name": "audio", "type": "Audio", "required": True}],
                 "outputs": [{"id": "conversation_analysis", "name": "conversation_analysis", "type": "Object", "required": True}],
-            }, GENERATED_CODE),
+            }),
             nested("analysis-output", "destination", {
                 "inputs": [{"id": "conversation_analysis", "name": "conversation_analysis", "type": "Object", "required": True}],
                 "outputs": [],
@@ -410,7 +410,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertEqual("data", cleaned["edges"][0]["source_port"])
         self.assertEqual("records", cleaned["edges"][0]["target_port"])
 
-    def test_agent_context_uses_conceptual_parameters_without_adapter_overrides(self):
+    def test_agent_context_exposes_only_high_level_design_fields(self):
         graph = {
             "nodes": [{
                 **node(1, "source", "Audio Upload"),
@@ -428,13 +428,11 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
 
         summary = _graph_for_agent_context(graph)["nodes"][0]
 
-        self.assertNotIn("template", summary)
+        self.assertEqual("REST API", summary["template"])
         self.assertNotIn("endpoint", summary)
-        self.assertEqual("en", summary["parameters"]["language"])
-        self.assertEqual(
-            "<provided securely at runtime>",
-            summary["parameters"]["api_key"],
-        )
+        self.assertNotIn("parameters", summary)
+        self.assertNotIn("implementation", summary)
+        self.assertEqual("unconfigured", summary["configuration_status"])
 
     def test_guardrail_rejects_a_changed_but_invalid_graph(self):
         before = {"nodes": [], "edges": []}
@@ -513,9 +511,9 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         system_message = assistant_agent.call_args.kwargs["system_message"]
         self.assertIn("never `source.data`", system_message)
         self.assertIn("source_port `when_false`", system_message)
-        self.assertIn('value.sentiment == "negative"', system_message)
+        self.assertIn("do not translate it into an expression parameter", system_message)
         self.assertIn("Complaint has exactly one outgoing edge", system_message)
-        self.assertIn("Parallel Map owns iteration", system_message)
+        self.assertIn("owns iteration", system_message)
         self.assertIn("another distinct saved PIPELINE", system_message)
         self.assertIn("Conversation Understanding", system_message)
         self.assertIn("create_step pins the reference", system_message)
@@ -530,6 +528,45 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
             {"source", "task", "destination", "flow", "subpipeline"},
             {component["type"] for component in component_catalog["components"]},
         )
+        self.assertTrue(all(
+            "default_implementation" not in component
+            for component in component_catalog["components"]
+        ))
+
+    @patch("pipeline_agent.team.RoundRobinGroupChat")
+    @patch("pipeline_agent.team.AssistantAgent")
+    @patch("pipeline_agent.team.select_model_client")
+    @patch("pipeline_agent.tools.run_neo4j_query", new_callable=AsyncMock)
+    def test_overview_exposes_design_fields_without_runtime_configuration(
+        self,
+        run_query,
+        select_model_client,
+        assistant_agent,
+        _round_robin,
+    ):
+        config = LLMConfig(
+            provider="openrouter",
+            model="test/model",
+            base_url="https://example.test/v1",
+            api_key="secret",
+        )
+        select_model_client.return_value = MagicMock()
+        run_query.return_value = json.dumps([])
+
+        build_pipeline_editing_team(config)
+        overview = next(
+            tool
+            for tool in assistant_agent.call_args.kwargs["tools"]
+            if tool.__name__ == "overview"
+        )
+        asyncio.run(overview())
+
+        query = run_query.await_args.args[0]
+        self.assertIn(".ports_json", query)
+        self.assertNotIn("s AS step", query)
+        self.assertNotIn("HAS_FILE", query)
+        self.assertNotIn("implementation", query)
+        self.assertNotIn("param_json", query)
 
     @patch("pipeline_agent.team.RoundRobinGroupChat")
     @patch("pipeline_agent.team.AssistantAgent")
@@ -637,8 +674,10 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("definition_id:'core.flow'", query)
         self.assertIn("definition_version:1", query)
         self.assertIn("OPTIONAL MATCH (p)-[:HAS_STEP]->(prev:STEP)", query)
-        self.assertIn('"max_concurrency": 4', query)
-        self.assertIn('"failure_policy": "stop"', query)
+        self.assertIn("configuration_status:'unconfigured'", query)
+        self.assertIn("param_json: '{}'", query)
+        self.assertNotIn("max_concurrency", query)
+        self.assertNotIn("failure_policy", query)
         self.assertIn("flow.target_port = 'items'", query)
 
     @patch("pipeline_agent.team.RoundRobinGroupChat")
@@ -671,7 +710,6 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
             "type": "task",
             "label": "Validate Records",
             "description": "Validate each incoming record.",
-            "implementation": GENERATED_CODE,
             "after_flow_id": "1",
             "before_flow_id": "2",
         })))
@@ -684,6 +722,8 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("incomingFlow.target_port = 'input'", query)
         self.assertIn("MERGE (s)-[outgoingFlow:FLOWS_TO]->(before)", query)
         self.assertIn("outgoingFlow.source_port = 'output'", query)
+        self.assertNotIn("implementation_json", query)
+        self.assertIn("param_json: '{}'", query)
         self.assertEqual("insert_between_steps", run_query.await_args.args[1])
 
     @patch("pipeline_agent.team.RoundRobinGroupChat")
@@ -1037,7 +1077,6 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         asyncio.run(configure_flow_step(json.dumps({
             "flow_id": "4",
             "behavior": "Condition",
-            "parameters": {"expression": 'value.sentiment == "negative"'},
         })))
 
         query = run_query.await_args.args[0]
@@ -1045,6 +1084,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("connection.target_port = 'value'", query)
         self.assertIn("['when_true', 'when_false']", query)
         self.assertIn("'when_true'", query)
+        self.assertIn("flowStep.param_json = '{}'", query)
         self.assertEqual("configure_flow_step", run_query.await_args.args[1])
 
     @patch("pipeline_agent.team.RoundRobinGroupChat")

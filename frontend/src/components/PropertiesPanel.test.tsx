@@ -88,4 +88,44 @@ describe("PropertiesPanel", () => {
     expect(container.textContent).toContain("PIPELINE_OUTPUT_DIR");
     await act(async () => root.unmount());
   });
+
+  it("shows detected environment variables as read-only script warnings", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <PropertiesPanel
+          selectedNode={{
+            id: "task-weather",
+            type: "custom",
+            position: { x: 0, y: 0 },
+            data: {
+              type: "task",
+              label: "Fetch Weather",
+              files: [{ filename: "main.py", role: "code" }],
+              generated_artifact: {
+                status: "current",
+                runtime_environment: [
+                  { name: "API_ENDPOINT", required: true, secret: false },
+                  { name: "API_KEY", required: false, secret: true },
+                ],
+              },
+            },
+          }}
+          onNodeUpdate={vi.fn()}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Environment variables detected");
+    expect(container.textContent).toContain("API_ENDPOINT");
+    expect(container.textContent).toContain("API_KEY");
+    expect(container.textContent).toContain("Required");
+    expect(container.textContent).toContain("Optional");
+    expect(container.textContent).toContain("Sensitive");
+    expect(container.textContent).toContain("does not create parameters or store values");
+    expect(container.textContent).toContain("The pipeline assistant never fills this section");
+    expect(container.textContent).toContain("No parameters added");
+    await act(async () => root.unmount());
+  });
 });

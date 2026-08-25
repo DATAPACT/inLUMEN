@@ -3,7 +3,6 @@ from typing import Any
 
 from connector_catalog import require_supported_connector
 from graph_client import run_neo4j_query
-from model_plans import resolve_implementation_plan
 from node_definitions.registry import get_node_definition_registry
 from node_ports import (
     default_input_port_id,
@@ -13,13 +12,10 @@ from node_ports import (
     ports_json,
     ports_json_for_template,
 )
-from node_parameters import secret_params_json, without_secret_param_values
 from pipeline_agent.contract import (
     COMPONENT_DEFINITION_IDS,
     default_input_port_expression,
     default_output_port_expression,
-    normalize_agent_implementation,
-    missing_connector_parameters,
     require_agent_step_type,
     validate_insertion_kind,
 )
@@ -60,33 +56,35 @@ def build_pipeline_editor_tools(
         )
 
     async def overview() -> str:
-        """Gives an overview of the pipeline, the present steps and linked files."""
+        """Gives a design-only overview of the pipeline and its connections."""
         try:
             query_type = "overview"
             query = """
             MATCH (p:PIPELINE)
-            OPTIONAL MATCH (p)-[hs:HAS_STEP]->(s:STEP)
+            OPTIONAL MATCH (p)-[:HAS_STEP]->(s:STEP)
             OPTIONAL MATCH (s)-[r:FLOWS_TO]->(t:STEP)
-            OPTIONAL MATCH (s)-[:HAS_FILE]->(f:FILE)
             RETURN
-            p { .*,
+            p {
+                .uid, .name, .label, .description, .version, .status,
                 created_at: toString(p.created_at),
                 updated_at: toString(p.updated_at)
                 } AS pipeline,
-            s AS step,
-            hs AS step_link,
+            s {
+                .uid, .flow_id, .type, .label, .description, .template_label,
+                .configuration_status, .ports_json, .primary_input_port,
+                .primary_output_port, .x, .y
+                } AS step,
             CASE
                 WHEN s IS NULL OR s.flow_id IS NULL THEN NULL
                 WHEN toString(s.flow_id) =~ '^[0-9]+$' THEN toInteger(s.flow_id)
                 ELSE NULL
             END AS step_order,
-            r AS flow,
-            t AS next_step,
-            collect(
-                DISTINCT f { .*,
-                added_at: toString(f.added_at)
-                }
-            ) AS files_linked_to_step
+            r { .source_port, .target_port } AS flow,
+            t {
+                .uid, .flow_id, .type, .label, .description, .template_label,
+                .configuration_status, .ports_json, .primary_input_port,
+                .primary_output_port, .x, .y
+                } AS next_step
             ORDER BY pipeline.label, step_order;
             """
             result = await run_query(query, query_type)
@@ -114,13 +112,13 @@ def build_pipeline_editor_tools(
                         "type": definition.base_type,
                         "label": definition.palette.label,
                         "description": definition.palette.description,
-                        "default_implementation": definition.default_implementation,
                     }
                     for definition in definitions
                 ],
                 "rule": (
-                    "Use only these structural types. Configure domain behavior "
-                    "with template, parameters, implementation, and ports."
+                    "Use only these structural types. Design labels, descriptions, "
+                    "connector categories, control-flow behavior, and ports; runtime "
+                    "implementation and parameters are configured after design."
                 ),
             },
             ensure_ascii=False,
@@ -232,19 +230,14 @@ def build_pipeline_editor_tools(
             "subpipeline": "Subpipeline",
         }
         resolved_template_label = template_label or default_template_labels[step_type]
-        param_obj = dict(parameters) if isinstance(parameters, dict) else {}
+        if implementation or parameters or secret_parameters:
+            raise ValueError(
+                "Pipeline design tools do not accept implementations, runtime "
+                "parameters, credentials, or secret names. Configure those after "
+                "the high-level pipeline has been designed."
+            )
         if step_type == "flow":
-            if resolved_template_label == "Condition":
-                expression = str(param_obj.get("expression") or "").strip()
-                if not expression:
-                    raise ValueError(
-                        "Condition Flow requires parameters.expression, for example "
-                        "value.sentiment == \"negative\"."
-                    )
-            elif resolved_template_label == "Parallel Map":
-                param_obj.setdefault("max_concurrency", 4)
-                param_obj.setdefault("failure_policy", "stop")
-            else:
+            if resolved_template_label not in {"Condition", "Parallel Map"}:
                 raise ValueError(
                     "Flow template must be Condition or Parallel Map; generic Flow has no behavior."
                 )
@@ -256,6 +249,7 @@ def build_pipeline_editor_tools(
             f"definition_id:'{COMPONENT_DEFINITION_IDS[step_type]}'",
             "definition_version:1",
             "has_files: 'no'",
+            "configuration_status:'unconfigured'",
         ]
         template_json = json.dumps(
             {
@@ -280,33 +274,8 @@ def build_pipeline_editor_tools(
             props_lines.append(f"primary_output_port: '{primary_output}'")
         if step_type == "destination":
             props_lines.append("content: ''")
-        if step_type == "task" and not (
-            isinstance(implementation, dict) and implementation
-        ):
-            raise ValueError(
-                "Task components require an implementation object with a runtime kind"
-            )
-        if isinstance(implementation, dict) and implementation:
-            implementation = normalize_agent_implementation(implementation)
-            implementation = resolve_implementation_plan(
-                implementation,
-                label=label,
-                description=description,
-            )
-            param_obj["model_plan"] = implementation
-            implementation_json = json.dumps(
-                implementation,
-                ensure_ascii=True,
-                sort_keys=True,
-            ).replace("\\", "\\\\").replace("'", "\\'")
-            props_lines.append(f"implementation_json: '{implementation_json}'")
-        param_obj = without_secret_param_values(param_obj, secret_parameters)
-        param_json = json.dumps(param_obj, ensure_ascii=True, sort_keys=True)
-        escaped_param_json = param_json.replace("\\", "\\\\").replace("'", "\\'")
-        props_lines.append(f"param_json: '{escaped_param_json}'")
-        secret_json = secret_params_json(secret_parameters, param_obj)
-        escaped_secret_json = secret_json.replace("\\", "\\\\").replace("'", "\\'")
-        props_lines.append(f"secret_params_json: '{escaped_secret_json}'")
+        props_lines.append("param_json: '{}'")
+        props_lines.append("secret_params_json: '[]'")
         return props_lines
 
     def _resolved_template_for_step(
@@ -530,32 +499,16 @@ def build_pipeline_editor_tools(
           "type": "source|task|destination|flow|subpipeline",
           "label": "step label",
           "description": "step description",
-          "template": "optional template name such as Speech-to-Text",
+          "template": "optional high-level semantic or connector category",
           "reusable_pipeline_name": "required for Subpipeline unless uid is supplied",
           "reusable_pipeline_uid": "optional saved reusable pipeline uid",
           "reusable_version_uid": "optional immutable version uid",
-          "reusable_version_name": "optional version name; active version is the default",
-          "parameters": {"static_parameter": "value"},
-          "secret_parameters": ["api_key"],
-          "implementation": {
-            "kind": "generated-code|python|sql|container|git-repository|rest-api|shell|custom",
-            "task": "analytical or model-backed task",
-            "domain": "inferred domain",
-            "execution_profile": "classical_ml|trusted_heavy_model|custom_model",
-            "framework": "optional requested runtime framework",
-            "model_id": "only an explicitly requested or registry-known model identifier",
-            "model_revision": "optional explicit revision; trusted adapters resolve supported tasks",
-            "device": "auto|cpu|cuda",
-            "precision": "auto|float32|float16|bfloat16|int8",
-            "required_packages": ["package constraints"],
-            "inference_parameters": {},
-            "selection_rationale": ["why this model fits"]
-          }
+          "reusable_version_name": "optional version name; active version is the default"
         }
-        Include implementation for analytical steps. For ordinary structured
-        model training, specify task/domain and classical_ml but omit model_id.
-        Use source/destination templates for external adapters, task templates for
-        domain operations, and flow for execution control. Creating a subpipeline
+        Do not provide parameters, credentials, secret names, model choices, or
+        implementation metadata. Use source/destination templates for high-level
+        connector categories, task templates for domain operations, and flow for
+        execution control. Creating a subpipeline
         atomically resolves and pins a saved reusable pipeline version and returns
         its exact public input/output ids; an unreferenced placeholder is never
         created. Never create configuration nodes.
@@ -575,14 +528,6 @@ def build_pipeline_editor_tools(
                 raw_description,
             )
             require_supported_connector(step_type, resolved_template)
-            missing_parameters = missing_connector_parameters(
-                step_type, resolved_template, data.get("parameters")
-            )
-            if missing_parameters:
-                raise ValueError(
-                    f"{resolved_template} {step_type} requires connector parameter(s): "
-                    + ", ".join(missing_parameters)
-                )
             props_lines = _step_props_lines(
                 step_type,
                 label,
@@ -920,20 +865,18 @@ def build_pipeline_editor_tools(
             raise RuntimeError(f"disconnect_steps failed: {exc}") from exc
 
     async def configure_flow_step(params: str) -> str:
-        """Configures an existing Flow step with executable behavior and ports.
+        """Configures an existing Flow step's high-level behavior and ports.
 
         params JSON for a condition:
         {
           "flow_id": "existing Flow step flow_id",
-          "behavior": "Condition",
-          "parameters": {"expression": "value.sentiment == \"negative\""}
+          "behavior": "Condition"
         }
 
         params JSON for a parallel map:
         {
           "flow_id": "existing Flow step flow_id",
-          "behavior": "Parallel Map",
-          "parameters": {"max_concurrency": 4, "failure_policy": "stop"}
+          "behavior": "Parallel Map"
         }
 
         Existing generic connection handles are migrated to the selected
@@ -950,19 +893,11 @@ def build_pipeline_editor_tools(
             behavior = str(data.get("behavior") or "").strip()
             if behavior not in {"Condition", "Parallel Map"}:
                 raise ValueError("Flow behavior must be Condition or Parallel Map")
-            parameters = (
-                dict(data.get("parameters"))
-                if isinstance(data.get("parameters"), dict)
-                else {}
-            )
-            if behavior == "Condition" and not str(parameters.get("expression") or "").strip():
-                raise ValueError("Condition Flow requires parameters.expression")
-            if behavior == "Parallel Map":
-                parameters.setdefault("max_concurrency", 4)
-                parameters.setdefault("failure_policy", "stop")
-
-            param_json = json.dumps(parameters, ensure_ascii=True, sort_keys=True)
-            escaped_param_json = param_json.replace("\\", "\\\\").replace("'", "\\'")
+            if data.get("parameters"):
+                raise ValueError(
+                    "Pipeline design does not accept Flow runtime parameters; "
+                    "configure them after the high-level design phase."
+                )
             serialized_ports = ports_json_for_template(None, "flow", behavior)
             escaped_ports = serialized_ports.replace("\\", "\\\\").replace("'", "\\'")
             input_port = default_input_port_id("flow", behavior)
@@ -971,7 +906,8 @@ def build_pipeline_editor_tools(
             MATCH (p:PIPELINE {{status:'design'}})-[:HAS_STEP]->(flowStep:STEP {{flow_id:'{flow_id}'}})
             WHERE flowStep.type = 'flow'
             SET flowStep.template_label = '{behavior}',
-                flowStep.param_json = '{escaped_param_json}',
+                flowStep.param_json = '{{}}',
+                flowStep.configuration_status = 'unconfigured',
                 flowStep.ports_json = '{escaped_ports}',
                 p.updated_at = datetime()
             WITH p, flowStep
@@ -995,7 +931,6 @@ def build_pipeline_editor_tools(
             uid: flowStep.uid,
             label: flowStep.label,
             behavior: flowStep.template_label,
-            parameters: flowStep.param_json,
             ports: flowStep.ports_json,
             migrated_incoming_connections: size(incomingFlows),
             migrated_outgoing_connections: size(outgoingFlows),
@@ -1041,10 +976,12 @@ def build_pipeline_editor_tools(
           "graph": {"nodes": ["complete React Flow-shaped nodes"], "edges": ["connections"]}
         }
 
-        The graph must be runnable on its own, with Source and Destination
-        boundaries. Port ids and data contracts are inferred and frozen when
-        the version is saved; expert-supplied typed ports remain supported.
-        Source and Destination ports become the public contract.
+        The graph must be structurally complete on its own, with Source and
+        Destination boundaries. It is still a high-level design: do not include
+        runtime parameters, credentials, environment names, or implementation
+        metadata. Port ids and data contracts are inferred and frozen when the
+        version is saved; expert-supplied typed ports remain supported. Source
+        and Destination ports become the public contract.
         """
         try:
             data = json.loads(params)
@@ -1054,6 +991,28 @@ def build_pipeline_editor_tools(
             graph = data.get("graph") if isinstance(data.get("graph"), dict) else {}
             if not name:
                 raise ValueError("create_reusable_pipeline requires name")
+            for raw_node in graph.get("nodes") or []:
+                if not isinstance(raw_node, dict):
+                    continue
+                node_data = (
+                    raw_node.get("data")
+                    if isinstance(raw_node.get("data"), dict)
+                    else raw_node
+                )
+                if any(
+                    node_data.get(field)
+                    for field in (
+                        "implementation",
+                        "param",
+                        "parameters",
+                        "secret_params",
+                        "secret_parameters",
+                    )
+                ):
+                    raise ValueError(
+                        "Reusable pipeline design must not include implementations, "
+                        "runtime parameters, credentials, environment names, or secrets."
+                    )
             graph = normalize_reusable_pipeline_graph(graph)
             validation = validate_pipeline_graph(graph)
             if not validation.get("valid"):
@@ -1272,9 +1231,6 @@ def build_pipeline_editor_tools(
           "label": "step label",
           "description": "step description",
           "template": "optional template name",
-          "parameters": {"static_parameter": "value"},
-          "secret_parameters": ["api_key"],
-          "implementation": "optional model implementation object from create_step",
           "reusable_pipeline_uid": "required when inserting a Subpipeline",
           "reusable_version_uid": "required when inserting a Subpipeline",
           "before_flow_id": "required target flow_id",
@@ -1303,14 +1259,6 @@ def build_pipeline_editor_tools(
                 raw_description,
             )
             require_supported_connector(step_type, resolved_template)
-            missing_parameters = missing_connector_parameters(
-                step_type, resolved_template, data.get("parameters")
-            )
-            if missing_parameters:
-                raise ValueError(
-                    f"{resolved_template} {step_type} requires connector parameter(s): "
-                    + ", ".join(missing_parameters)
-                )
             before_flow_id = str(data["before_flow_id"]).replace("'", "\\'")
             raw_after_flow_id = data.get("after_flow_id")
             after_flow_id = (

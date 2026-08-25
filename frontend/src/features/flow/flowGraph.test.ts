@@ -9,6 +9,23 @@ import {
 
 
 describe("flow graph normalization", () => {
+  it("does not hydrate runtime parameters into an unconfigured agent design", () => {
+    const graph = normalizeGraph({
+      nodes: [{
+        id: "parallel",
+        type: "flow",
+        label: "Process items concurrently",
+        template_label: "Parallel Map",
+        configuration_status: "unconfigured",
+        param: {},
+      }],
+      edges: [],
+    });
+
+    expect(graph.nodes[0].data.param).toEqual({});
+    expect(graph.nodes[0].data.template_label).toBe("Parallel Map");
+  });
+
   it("normalizes nodes and removes invalid or duplicate edges", () => {
     const graph = normalizeGraph({
       updated_at: "2026-08-07T10:00:00Z",

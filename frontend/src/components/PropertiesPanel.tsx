@@ -690,10 +690,14 @@ export function PropertiesPanel({
       if (fileName) nameToIndex.set(fileName, idx);
     });
     const uploadedFiles = [...existing];
+    let latestGeneratedArtifact: GeneratedArtifact | undefined;
     let changedCount = 0;
     for (const f of picked) {
       try {
-        await uploadNodeFile(selectedNode.id, f, role);
+        const uploadResult = await uploadNodeFile(selectedNode.id, f, role);
+        if (uploadResult?.generated_artifact) {
+          latestGeneratedArtifact = uploadResult.generated_artifact as GeneratedArtifact;
+        }
         const uploadedRef = uploadedFileReference(selectedNode.id, f.name, role);
         const idx = nameToIndex.get(f.name);
         if (idx != null) {
@@ -712,7 +716,12 @@ export function PropertiesPanel({
     }
     if (changedCount > 0) {
       setFiles(uploadedFiles);
-      pushNodeUpdate({ files: uploadedFiles });
+      pushNodeUpdate({
+        files: uploadedFiles,
+        ...(latestGeneratedArtifact
+          ? { generated_artifact: latestGeneratedArtifact }
+          : {}),
+      });
     }
     e.target.value = "";
   };
@@ -722,10 +731,15 @@ export function PropertiesPanel({
     const fileToRemove = files[index];
     if (!fileToRemove) return;
     try {
-      await removeNodeFile(selectedNode.id, fileToRemove);
+      const removeResult = await removeNodeFile(selectedNode.id, fileToRemove);
       const updatedFiles = files.filter((_, i) => i !== index);
       setFiles(updatedFiles);
-      pushNodeUpdate({ files: updatedFiles });
+      pushNodeUpdate({
+        files: updatedFiles,
+        ...(removeResult?.generated_artifact
+          ? { generated_artifact: removeResult.generated_artifact as GeneratedArtifact }
+          : {}),
+      });
     } catch (err) {
       console.warn("[PropertiesPanel.tsx] File removal failed; keeping frontend state unchanged:", err);
     }
@@ -814,8 +828,12 @@ export function PropertiesPanel({
 
     try {
       const updatedFiles = [...files];
+      let updatedGeneratedArtifact: GeneratedArtifact | undefined;
       if (isBrowserFile(currentFile)) {
-        await uploadNodeFile(selectedNode.id, newFile, currentFileRole);
+        const uploadResult = await uploadNodeFile(selectedNode.id, newFile, currentFileRole);
+        if (uploadResult?.generated_artifact) {
+          updatedGeneratedArtifact = uploadResult.generated_artifact as GeneratedArtifact;
+        }
         updatedFiles[previewFileIndex] = uploadedFileReference(
           selectedNode.id,
           currentFileName,
@@ -823,7 +841,10 @@ export function PropertiesPanel({
         );
         setPreviewFile(newFile);
       } else {
-        await updateNodeTextFile(selectedNode.id, currentFile, editedContent);
+        const updateResult = await updateNodeTextFile(selectedNode.id, currentFile, editedContent);
+        if (updateResult?.generated_artifact) {
+          updatedGeneratedArtifact = updateResult.generated_artifact as GeneratedArtifact;
+        }
         updatedFiles[previewFileIndex] = {
           filename: currentFileName,
           bucket: getNodeFileBucket(currentFile, selectedNode.id),
@@ -832,7 +853,12 @@ export function PropertiesPanel({
       }
 
       setFiles(updatedFiles);
-      pushNodeUpdate({ files: updatedFiles });
+      pushNodeUpdate({
+        files: updatedFiles,
+        ...(updatedGeneratedArtifact
+          ? { generated_artifact: updatedGeneratedArtifact }
+          : {}),
+      });
       setPreviewContent(editedContent);
       setIsEditing(false);
     } catch (err) {
@@ -1083,6 +1109,13 @@ export function PropertiesPanel({
   };
 
   const validationReport = selectedNode?.data.generated_artifact?.validation_report;
+  const runtimeEnvironment = Array.isArray(
+    selectedNode?.data.generated_artifact?.runtime_environment,
+  )
+    ? selectedNode.data.generated_artifact.runtime_environment.filter((item) => (
+        item && typeof item === "object" && String(item.name || "").trim()
+      ))
+    : [];
   const designValidationIssues = selectedNode?.data.validation_issues || [];
   const visibleDesignValidationIssues = designValidationIssues.filter((issue) => (
     issue.category !== "ports" && issue.category !== "implementation"
@@ -1131,8 +1164,8 @@ export function PropertiesPanel({
     });
   };
   const renderParametersSection = ({
-    title = "Parameters",
-    description = "Optional values passed to code at runtime under the same name (for example, QUESTION).",
+    title = "Runtime parameters",
+    description = "Values you configure manually for the attached code. The pipeline assistant never fills this section.",
   }: {
     title?: string;
     description?: string;
@@ -1469,6 +1502,39 @@ export function PropertiesPanel({
             )}
 
             {canManageImplementation && renderParametersSection()}
+
+            {canManageImplementation && runtimeEnvironment.length > 0 && (
+              <InspectorSection
+                id="inspector-runtime-environment"
+                title="Environment variables detected"
+                description="Read-only requirements discovered from the attached Python script. This does not create parameters or store values."
+                status={runtimeEnvironment.some((item) => item.required) ? "warning" : undefined}
+              >
+                <div className="space-y-2">
+                  {runtimeEnvironment.map((item) => (
+                    <div
+                      key={String(item.name)}
+                      className="flex items-start justify-between gap-3 rounded-md border border-amber-500/25 bg-amber-500/5 p-2"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate font-mono text-xs font-medium">{item.name}</p>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          {item.description || "Referenced by main.py at runtime."}
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 gap-1">
+                        <Badge variant="outline" className="text-[10px]">
+                          {item.required ? "Required" : "Optional"}
+                        </Badge>
+                        {item.secret && (
+                          <Badge variant="outline" className="text-[10px]">Sensitive</Badge>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </InspectorSection>
+            )}
 
             {canManageImplementation && (
               <InspectorSection

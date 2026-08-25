@@ -1,10 +1,15 @@
+import json
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runtime_environment import discover_runtime_environment, merge_runtime_environment
+from runtime_environment import (
+    discover_runtime_environment,
+    merge_runtime_environment,
+    runtime_environment_from_files,
+)
 
 
 class RuntimeEnvironmentTest(unittest.TestCase):
@@ -37,6 +42,36 @@ input_dir = os.environ["PIPELINE_INPUT_DIR"]
     def test_dynamic_and_invalid_python_are_ignored_safely(self):
         self.assertEqual([], discover_runtime_environment('os.getenv(name)'))
         self.assertEqual([], discover_runtime_environment('def broken('))
+
+    def test_generated_package_analysis_merges_manifest_declarations(self):
+        values = runtime_environment_from_files([
+            {
+                "filename": "main.py",
+                "content": (
+                    'import os\nendpoint = os.environ["API_ENDPOINT"]\n'
+                    'key = os.getenv("API_KEY")\n'
+                ),
+            },
+            {
+                "filename": "node-manifest.json",
+                "content": json.dumps({
+                    "runtime_environment": [{
+                        "name": "API_ENDPOINT",
+                        "required": True,
+                        "description": "Weather service endpoint.",
+                    }],
+                }),
+            },
+        ])
+
+        by_name = {item["name"]: item for item in values}
+        self.assertTrue(by_name["API_ENDPOINT"]["required"])
+        self.assertEqual(
+            "Weather service endpoint.",
+            by_name["API_ENDPOINT"]["description"],
+        )
+        self.assertFalse(by_name["API_KEY"]["required"])
+        self.assertTrue(by_name["API_KEY"]["secret"])
 
 
 if __name__ == "__main__":
