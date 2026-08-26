@@ -10,6 +10,7 @@ from auth_middleware import require_auth
 from deployment_artifacts import extract_pipeline_steps
 from graph_client import dispatch_graph_request, fetch_pipeline_graph
 from minio_gateway import get_minio_client
+from runtime_environment import runtime_environment_from_files
 
 from .base import GeneratedRuntimeArtifacts
 from .registry import generate_runtime_artifacts
@@ -72,6 +73,13 @@ def _persist_artifacts(bundle: GeneratedRuntimeArtifacts) -> dict:
     artifact_record = bundle.to_dict(include_content=False)
     artifact_record["files"] = stored_files
     artifact_record["status"] = "current"
+    artifact_record["runtime_environment"] = runtime_environment_from_files([
+        {
+            "filename": generated_file.filename,
+            "content": generated_file.content,
+        }
+        for generated_file in bundle.files
+    ])
     update_response = dispatch_graph_request(
         "neo4j_update_generated_artifact",
         method="POST",
@@ -126,6 +134,13 @@ def create_generator_blueprint(
                 payload["generated_artifact"] = {
                     **bundle.to_dict(include_content=False),
                     "status": "current",
+                    "runtime_environment": runtime_environment_from_files([
+                        {
+                            "filename": generated_file.filename,
+                            "content": generated_file.content,
+                        }
+                        for generated_file in bundle.files
+                    ]),
                 }
             return jsonify(payload), 200
         except ValueError as exc:

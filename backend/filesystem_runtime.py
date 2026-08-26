@@ -14,6 +14,7 @@ import mimetypes
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Iterable
 
@@ -88,6 +89,49 @@ def _copy_entry(source: Path, destination: Path) -> None:
         shutil.copy2(source, destination)
 
 
+def _same_file_contents(first: Path, second: Path) -> bool:
+    """Compare files exactly with bounded memory."""
+    if first.stat().st_size != second.stat().st_size:
+        return False
+    with first.open("rb") as first_handle, second.open("rb") as second_handle:
+        while True:
+            first_chunk = first_handle.read(1024 * 1024)
+            second_chunk = second_handle.read(1024 * 1024)
+            if first_chunk != second_chunk:
+                return False
+            if not first_chunk:
+                return True
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def _publish_staged_directory(staging: Path, destination: Path) -> None:
+    """Publish a complete staging directory without exposing partial contents."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    previous: Path | None = None
+    if destination.exists() or destination.is_symlink():
+        previous = Path(tempfile.mkdtemp(
+            prefix=f".{destination.name}.previous-",
+            dir=destination.parent,
+        ))
+        previous.rmdir()
+        os.replace(destination, previous)
+    try:
+        os.replace(staging, destination)
+    except Exception:
+        if previous is not None and (previous.exists() or previous.is_symlink()):
+            os.replace(previous, destination)
+        raise
+    else:
+        if previous is not None:
+            _remove_path(previous)
+
+
 def stage_input_directories(
     source_directories: Iterable[Path | str],
     input_dir: Path | str,
@@ -99,35 +143,146 @@ def stage_input_directories(
     pipeline nondeterministic.
     """
     destination_root = Path(input_dir)
-    if destination_root.exists():
-        shutil.rmtree(destination_root)
-    destination_root.mkdir(parents=True, exist_ok=True)
+    destination_root.parent.mkdir(parents=True, exist_ok=True)
+    staging_root = Path(tempfile.mkdtemp(
+        prefix=f".{destination_root.name}.staging-",
+        dir=destination_root.parent,
+    ))
 
     owners: dict[Path, Path] = {}
-    for raw_source in source_directories:
-        source_root = Path(raw_source)
-        if not source_root.is_dir():
-            continue
-        for source in sorted(source_root.rglob("*"), key=lambda item: item.as_posix()):
-            if source.is_dir():
+    try:
+        for raw_source in source_directories:
+            source_root = Path(raw_source)
+            if not source_root.is_dir():
                 continue
-            relative = source.relative_to(source_root)
-            # Compatibility metadata from older bundle versions is not an
-            # artifact and must not leak into the next Task workspace.
-            if relative.as_posix() in {"input_manifest.json", "output_manifest.json"}:
-                continue
-            destination = destination_root / relative
-            existing = owners.get(relative)
-            if existing is not None:
-                if source.read_bytes() == existing.read_bytes():
+            for source in sorted(source_root.rglob("*"), key=lambda item: item.as_posix()):
+                if source.is_dir():
                     continue
-                raise RuntimeError(
-                    "Upstream artifacts collide at "
-                    f"{relative.as_posix()!r}; add a Task that merges or renames them."
-                )
-            _copy_entry(source, destination)
-            owners[relative] = source
+                relative = source.relative_to(source_root)
+                # Compatibility metadata from older bundle versions is not an
+                # artifact and must not leak into the next Task workspace.
+                if relative.as_posix() in {"input_manifest.json", "output_manifest.json"}:
+                    continue
+                destination = staging_root / relative
+                existing = owners.get(relative)
+                if existing is not None:
+                    if _same_file_contents(source, existing):
+                        continue
+                    raise RuntimeError(
+                        "Upstream artifacts collide at "
+                        f"{relative.as_posix()!r}; add a Task that merges or renames them."
+                    )
+                _copy_entry(source, destination)
+                owners[relative] = source
+        _publish_staged_directory(staging_root, destination_root)
+    except Exception:
+        _remove_path(staging_root)
+        raise
     return destination_root
+
+
+def stage_input_bindings(
+    bindings: Iterable[dict[str, object]],
+    input_dir: Path | str,
+) -> Path:
+    """Stage connected output ports directly into the Task input directory.
+
+    Each binding contains ``source_dir``, ``source_port``, and ``target_port``.
+    Only the connected source port is exposed to the consumer, but port names
+    are orchestration metadata and never become public workspace directories.
+    Artifact-owned relative paths are preserved and collisions fail loudly.
+    A binding with empty ports is reserved for a Source node's run input.
+    """
+    destination_root = Path(input_dir)
+    destination_root.parent.mkdir(parents=True, exist_ok=True)
+    staging_root = Path(tempfile.mkdtemp(
+        prefix=f".{destination_root.name}.staging-",
+        dir=destination_root.parent,
+    ))
+
+    owners: dict[Path, Path] = {}
+    try:
+        for binding in bindings:
+            source_root = Path(str(binding.get("source_dir") or ""))
+            source_port = str(binding.get("source_port") or "").strip()
+            if source_port:
+                source_root = source_root / source_port
+            if not source_root.is_dir():
+                if binding.get("required", True):
+                    raise RuntimeError(
+                        f"Required upstream artifact port is missing: {source_root}."
+                    )
+                continue
+            for source in sorted(source_root.rglob("*"), key=lambda item: item.as_posix()):
+                if not source.is_file():
+                    continue
+                relative = source.relative_to(source_root)
+                if relative.as_posix() in {"input_manifest.json", "output_manifest.json", ".gitkeep"}:
+                    continue
+                destination = staging_root / relative
+                existing = owners.get(relative)
+                if existing is not None:
+                    if _same_file_contents(source, existing):
+                        continue
+                    raise RuntimeError(
+                        "Upstream artifacts collide at "
+                        f"{relative.as_posix()!r}; add a Task that merges or renames them."
+                    )
+                _copy_entry(source, destination)
+                owners[relative] = source
+        _publish_staged_directory(staging_root, destination_root)
+    except Exception:
+        _remove_path(staging_root)
+        raise
+    return destination_root
+
+
+def normalize_single_output_port(
+    output_dir: Path | str,
+    output_ports: Iterable[str],
+) -> list[str]:
+    """Move public root outputs into the orchestration-owned output port.
+
+    Task code always writes directly to ``PIPELINE_OUTPUT_DIR``.  For a Task
+    with one output port, the runner namespaces those artifacts only after the
+    process exits so downstream routing remains internal to the orchestrator.
+    Tasks with multiple logical output sets are rejected; model those results
+    with an explicit split Task instead.
+    """
+    root = Path(output_dir)
+    ports = [str(port).strip() for port in output_ports if str(port).strip()]
+    if len(ports) > 1:
+        raise RuntimeError(
+            "The flat Task workspace supports exactly one logical output set; "
+            "fan out one output to multiple consumers or add an explicit split Task."
+        )
+    root.mkdir(parents=True, exist_ok=True)
+    declared = set(ports)
+    root_entries = [
+        path
+        for path in sorted(root.iterdir(), key=lambda item: item.as_posix())
+        if path.name not in declared and path.name != ".gitkeep"
+    ]
+    if not root_entries:
+        return []
+    if len(ports) != 1:
+        names = ", ".join(path.name for path in root_entries)
+        raise RuntimeError(
+            "Task wrote artifacts outside declared output-port directories: "
+            f"{names}."
+        )
+    port_root = root / ports[0]
+    port_root.mkdir(parents=True, exist_ok=True)
+    moved: list[str] = []
+    for source in root_entries:
+        destination = port_root / source.name
+        if destination.exists():
+            raise RuntimeError(
+                f"Legacy root output {source.name!r} collides with {ports[0]!r} output."
+            )
+        shutil.move(str(source), str(destination))
+        moved.append(source.name)
+    return moved
 
 
 def prepare_workspace(
@@ -193,6 +348,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -220,33 +376,160 @@ def _direct_parameter_environment_name(key):
     return name
 
 
+def _same_file_contents(first, second):
+    if first.stat().st_size != second.stat().st_size:
+        return False
+    with first.open("rb") as first_handle, second.open("rb") as second_handle:
+        while True:
+            first_chunk = first_handle.read(1024 * 1024)
+            second_chunk = second_handle.read(1024 * 1024)
+            if first_chunk != second_chunk:
+                return False
+            if not first_chunk:
+                return True
+
+
+def _remove_path(path):
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def _publish_staged_directory(staging, destination):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    previous = None
+    if destination.exists() or destination.is_symlink():
+        previous = Path(tempfile.mkdtemp(
+            prefix=f".{destination.name}.previous-",
+            dir=destination.parent,
+        ))
+        previous.rmdir()
+        os.replace(destination, previous)
+    try:
+        os.replace(staging, destination)
+    except Exception:
+        if previous is not None and (previous.exists() or previous.is_symlink()):
+            os.replace(previous, destination)
+        raise
+    else:
+        if previous is not None:
+            _remove_path(previous)
+
+
 def _stage_inputs(source_dirs, input_dir):
-    if input_dir.exists():
-        shutil.rmtree(input_dir)
-    input_dir.mkdir(parents=True, exist_ok=True)
+    input_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(
+        prefix=f".{input_dir.name}.staging-",
+        dir=input_dir.parent,
+    ))
     owners = {}
-    for source_root in source_dirs:
-        source_root = Path(source_root)
-        if not source_root.is_dir():
-            continue
-        for source in sorted(source_root.rglob("*"), key=lambda item: item.as_posix()):
-            if not source.is_file():
+    try:
+        for source_root in source_dirs:
+            source_root = Path(source_root)
+            if not source_root.is_dir():
                 continue
-            relative = source.relative_to(source_root)
-            if relative.as_posix() in {"input_manifest.json", "output_manifest.json"}:
-                continue
-            destination = input_dir / relative
-            existing = owners.get(relative)
-            if existing is not None:
-                if source.read_bytes() == existing.read_bytes():
+            for source in sorted(source_root.rglob("*"), key=lambda item: item.as_posix()):
+                if not source.is_file():
                     continue
-                raise RuntimeError(
-                    f"Upstream artifacts collide at {relative.as_posix()!r}; "
-                    "add a Task that merges or renames them."
-                )
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-            owners[relative] = source
+                relative = source.relative_to(source_root)
+                if relative.as_posix() in {"input_manifest.json", "output_manifest.json"}:
+                    continue
+                destination = staging_dir / relative
+                existing = owners.get(relative)
+                if existing is not None:
+                    if _same_file_contents(source, existing):
+                        continue
+                    raise RuntimeError(
+                        f"Upstream artifacts collide at {relative.as_posix()!r}; "
+                        "add a Task that merges or renames them."
+                    )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+                owners[relative] = source
+        _publish_staged_directory(staging_dir, input_dir)
+    except Exception:
+        _remove_path(staging_dir)
+        raise
+
+
+def _stage_input_bindings(bindings, input_dir):
+    input_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(
+        prefix=f".{input_dir.name}.staging-",
+        dir=input_dir.parent,
+    ))
+    owners = {}
+    try:
+        for binding in bindings:
+            source_root = Path(str(binding.get("source_dir") or ""))
+            source_port = str(binding.get("source_port") or "").strip()
+            if source_port:
+                source_root = source_root / source_port
+            if not source_root.is_dir():
+                if binding.get("required", True):
+                    raise RuntimeError(
+                        f"Required upstream artifact port is missing: {source_root}."
+                    )
+                continue
+            for source in sorted(source_root.rglob("*"), key=lambda item: item.as_posix()):
+                if not source.is_file():
+                    continue
+                relative = source.relative_to(source_root)
+                if relative.as_posix() in {
+                    "input_manifest.json", "output_manifest.json", ".gitkeep"
+                }:
+                    continue
+                destination = staging_dir / relative
+                existing = owners.get(relative)
+                if existing is not None:
+                    if _same_file_contents(source, existing):
+                        continue
+                    raise RuntimeError(
+                        f"Upstream artifacts collide at {relative.as_posix()!r}; "
+                        "add a Task that merges or renames them."
+                    )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+                owners[relative] = source
+        _publish_staged_directory(staging_dir, input_dir)
+    except Exception:
+        _remove_path(staging_dir)
+        raise
+
+
+def _normalize_single_output_port(output_dir, output_ports):
+    ports = [str(port).strip() for port in output_ports if str(port).strip()]
+    if len(ports) > 1:
+        raise RuntimeError(
+            "The flat Task workspace supports exactly one logical output set; "
+            "fan out one output to multiple consumers or add an explicit split Task."
+        )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    declared = set(ports)
+    root_entries = [
+        path for path in sorted(output_dir.iterdir(), key=lambda item: item.as_posix())
+        if path.name not in declared and path.name != ".gitkeep"
+    ]
+    if not root_entries:
+        return []
+    if len(ports) != 1:
+        names = ", ".join(path.name for path in root_entries)
+        raise RuntimeError(
+            "Task wrote artifacts outside declared output-port directories: " + names
+        )
+    port_root = output_dir / ports[0]
+    port_root.mkdir(parents=True, exist_ok=True)
+    moved = []
+    for source in root_entries:
+        destination = port_root / source.name
+        if destination.exists():
+            raise RuntimeError(
+                f"Legacy root output {source.name!r} collides with {ports[0]!r} output."
+            )
+        shutil.move(str(source), str(destination))
+        moved.append(source.name)
+    return moved
 
 
 def _sha256(path):
@@ -276,11 +559,14 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
     script_path: str
     upstream_assets: list[str] = []
     input_dirs: list[str] = []
+    input_bindings: list[dict] = []
     input_dir: str
     output_dir: str
+    output_ports: list[str] = []
     arguments: list[str] = []
     parameters: dict = {}
     secret_environment: dict = {}
+    runtime_environment: list[dict] = []
 
     def build_defs(self, context: dg.ComponentLoadContext) -> dg.Definitions:
         deps = [dg.AssetKey(asset_key) for asset_key in self.upstream_assets]
@@ -293,9 +579,23 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
                 path = Path(value)
                 return path if path.is_absolute() else project_root / path
 
-            input_dir = resolve(self.input_dir)
-            output_dir = resolve(self.output_dir)
-            _stage_inputs([resolve(value) for value in self.input_dirs], input_dir)
+            run_scope = re.sub(
+                r"[^A-Za-z0-9_.-]+", "-", str(context.run_id)
+            ).strip("-._") or "run"
+            input_dir = resolve(self.input_dir) / run_scope
+            output_dir = resolve(self.output_dir) / run_scope
+            bindings = []
+            for raw_binding in self.input_bindings:
+                binding = dict(raw_binding)
+                source_dir = resolve(binding.get("source_dir") or ".")
+                if binding.get("run_scoped", True):
+                    source_dir = source_dir / run_scope
+                binding["source_dir"] = str(source_dir)
+                bindings.append(binding)
+            if bindings:
+                _stage_input_bindings(bindings, input_dir)
+            else:
+                _stage_inputs([resolve(value) for value in self.input_dirs], input_dir)
             if output_dir.exists():
                 shutil.rmtree(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -335,6 +635,24 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
                 direct_name = _direct_parameter_environment_name(key)
                 if direct_name:
                     env[direct_name] = value
+
+            missing_required = []
+            for requirement in self.runtime_environment:
+                name = str(requirement.get("name") or "").strip()
+                if not name or env.get(name) not in (None, ""):
+                    continue
+                if requirement.get("required"):
+                    missing_required.append(name)
+                else:
+                    context.log.warning(
+                        f"Optional runtime environment variable {name} is not set "
+                        f"for {self.asset_key}."
+                    )
+            if missing_required:
+                raise RuntimeError(
+                    f"Node {self.asset_key} requires runtime environment variable(s): "
+                    + ", ".join(sorted(missing_required))
+                )
 
             started_at = time.monotonic()
             process = subprocess.Popen(
@@ -380,6 +698,16 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
                     f"{process.returncode}:\\n{diagnostic}"
                 )
             reader.join(timeout=1.0)
+            moved = (
+                _normalize_single_output_port(output_dir, self.output_ports)
+                if self.output_ports
+                else []
+            )
+            if moved:
+                context.log.warning(
+                    "Task outputs were routed internally through the sole declared "
+                    f"port {self.output_ports[0]!r}: {', '.join(moved)}"
+                )
             artifacts = _artifacts(output_dir)
             return dg.MaterializeResult(metadata={
                 "input_dir": str(input_dir),

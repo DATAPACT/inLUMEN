@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inlumen:schema:run-spec:3",
+  "title": "inLUMEN Engine-Neutral Run Specification",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "artifact_contract",
+    "runtime",
+    "node_order",
+    "nodes",
+    "connections",
+    "run_inputs",
+    "outputs",
+    "engines"
+  ],
+  "properties": {
+    "schema_version": { "const": "inlumen.run-spec@3" },
+    "artifact_contract": {
+      "type": "object",
+      "required": ["schema_version"],
+      "properties": {
+        "schema_version": { "const": "inlumen.artifact-contract@3" }
+      },
+      "additionalProperties": true
+    },
+    "runtime": {
+      "type": "object",
+      "required": ["default_engine", "package_manager", "python"],
+      "properties": {
+        "default_engine": { "enum": ["dagster", "argo"] },
+        "package_manager": { "type": "string" },
+        "python": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "node_order": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "inputs", "outputs", "runtime_environment"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "kind": { "enum": ["source", "task", "destination", "flow", "subpipeline"] },
+          "inputs": { "type": "array" },
+          "outputs": { "type": "array" },
+          "runtime_environment": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/runtimeEnvironment" }
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "connections": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/connection" }
+    },
+    "run_inputs": { "type": "object" },
+    "outputs": { "type": "object" },
+    "engines": {
+      "type": "object",
+      "required": ["dagster", "argo"],
+      "properties": {
+        "dagster": { "type": ["object", "null"] },
+        "argo": { "type": ["object", "null"] }
+      }
+    }
+  },
+  "$defs": {
+    "connection": {
+      "type": "object",
+      "required": ["source", "source_port", "target", "target_port"],
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "source_port": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
+        "target_port": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "runtimeEnvironment": {
+      "type": "object",
+      "required": ["name", "required", "secret", "source"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+        "required": { "type": "boolean" },
+        "secret": { "type": "boolean" },
+        "source": { "enum": ["static-python-analysis", "node-manifest"] }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

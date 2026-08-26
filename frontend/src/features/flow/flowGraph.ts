@@ -137,7 +137,14 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
         ...(templateName ? { template_label: templateName } : {}),
         ports: migrateFlowPorts(nodeData, nodeType),
         ...(nodeType === "flow" && findTemplateForType("flow", templateName)
-          ? { param: { ...defaultParametersForTemplate("flow", templateName), ...objectValue(nodeData.param) } }
+          ? {
+              param: nodeData.configuration_status === "unconfigured"
+                ? objectValue(nodeData.param)
+                : {
+                    ...defaultParametersForTemplate("flow", templateName),
+                    ...objectValue(nodeData.param),
+                  },
+            }
           : {}),
         files: normalizedFiles,
       },

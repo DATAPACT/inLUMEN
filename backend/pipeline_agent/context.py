@@ -232,38 +232,19 @@ def _graph_for_agent_context(graph: dict | None) -> dict:
     nodes = []
     for node in raw_nodes:
         summary = _node_payload(node)
-        node_type = str(summary.get("type") or "").strip().lower()
         template = node.get("template_label") or node.get("template")
-        if node_type in {"source", "task", "destination"}:
-            # Templates and old adapter fields are implementation hints, not
-            # conceptual user intent. Code generation chooses the implementation.
-            summary.pop("endpoint", None)
-            summary.pop("database", None)
-        elif template:
+        # Keep the high-level category visible, but hide every runtime
+        # configuration and implementation detail from the design-only agent.
+        summary.pop("content", None)
+        summary.pop("endpoint", None)
+        summary.pop("database", None)
+        if template:
             summary["template"] = _clip_text(template, 160)
-        parameters = node.get("param") or node.get("parameters")
-        if isinstance(parameters, dict):
-            secret_keys = {
-                str(key)
-                for key in (node.get("secret_params") or [])
-                if str(key).strip()
-            }
-            visible_parameters = {
-                str(key): "<provided securely at runtime>"
-                if str(key) in secret_keys
-                else _json_safe_copy(value)
-                for key, value in parameters.items()
-                if str(key).strip() and str(key) != "model_plan"
-            }
-            if visible_parameters:
-                summary["parameters"] = visible_parameters
-        implementation = node.get("implementation")
-        if isinstance(implementation, dict):
-            summary["implementation"] = {
-                key: _clip_text(implementation.get(key), 240)
-                for key in ("kind", "task", "domain", "framework", "model_id")
-                if implementation.get(key)
-            }
+        if node.get("configuration_status"):
+            summary["configuration_status"] = _clip_text(
+                node.get("configuration_status"),
+                80,
+            )
         nodes.append(summary)
     edges = [
         {

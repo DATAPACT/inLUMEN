@@ -61,6 +61,35 @@ describe("pipeline design validation", () => {
     ]));
   });
 
+  it("reports one implementation warning for a Task without code", () => {
+    const graph = normalizeGraph({
+      nodes: [{
+        id: "weather",
+        position: { x: 0, y: 0 },
+        data: { type: "task", label: "Fetch Weather Data" },
+      }],
+      edges: [],
+    });
+
+    const implementationIssues = validateGraph(
+      graph.nodes,
+      graph.edges,
+      { mode: "draft" },
+    ).issues.filter((issue) => issue.category === "implementation");
+    expect(implementationIssues).toEqual([
+      expect.objectContaining({
+        code: "missing-implementation",
+        severity: "warning",
+      }),
+    ]);
+
+    graph.nodes[0].data.files = [{ filename: "main.py", role: "code" }];
+    expect(validateGraph(graph.nodes, graph.edges, { mode: "draft" }).issues)
+      .not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ category: "implementation" }),
+      ]));
+  });
+
   it("does not validate hidden implementation presets as user parameters", () => {
     const graph = normalizeGraph({
       nodes: [{

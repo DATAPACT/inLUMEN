@@ -19,6 +19,14 @@ except ImportError:  # pragma: no cover - service image installs PyYAML.
     yaml = None
 
 
+SUPPORTED_BUNDLE_MANIFEST_VERSIONS = frozenset(
+    {"inlumen.deployment-bundle@1", "inlumen.deployment-bundle@2"}
+)
+SUPPORTED_RUN_SPEC_VERSIONS = frozenset(
+    {"inlumen.run-spec@1", "inlumen.run-spec@2", "inlumen.run-spec@3"}
+)
+
+
 def _dagster_project_root(path: Path) -> Path:
     candidate = path.expanduser().resolve()
     if (candidate / "pyproject.toml").is_file() and (candidate / "src").is_dir():
@@ -577,6 +585,7 @@ def _validate_bundle_structure(
             missing.append(item)
 
     manifest = _load_json(bundle_root / "bundle-manifest.json")
+    manifest_version = str(manifest.get("schema_version") or "").strip()
     run_spec_path = str(manifest.get("run_spec") or "").strip()
     if run_spec_path and not (bundle_root / run_spec_path).is_file():
         missing.append(run_spec_path)
@@ -595,15 +604,54 @@ def _validate_bundle_structure(
             missing_node_outputs.append(output_path)
 
     errors = [f"Missing required bundle path: {item}" for item in missing]
+    if manifest_version not in SUPPORTED_BUNDLE_MANIFEST_VERSIONS:
+        supported = ", ".join(sorted(SUPPORTED_BUNDLE_MANIFEST_VERSIONS))
+        errors.append(
+            "bundle-manifest.json uses unsupported schema_version "
+            f"{manifest_version or '<missing>'}; supported versions: {supported}."
+        )
     errors.extend(
         f"Missing node output directory: {item}" for item in missing_node_outputs
     )
     if not missing:
         errors.extend(_input_contract_errors(bundle_root, manifest))
     run_spec = _load_json(bundle_root / run_spec_path) if run_spec_path else {}
-    if run_spec_path and run_spec.get("schema_version") != "inlumen.run-spec@1":
-        errors.append(f"{run_spec_path} must use schema_version inlumen.run-spec@1.")
+    run_spec_version = str(run_spec.get("schema_version") or "").strip()
+    if run_spec_path and run_spec_version not in SUPPORTED_RUN_SPEC_VERSIONS:
+        supported = ", ".join(sorted(SUPPORTED_RUN_SPEC_VERSIONS))
+        errors.append(
+            f"{run_spec_path} uses unsupported schema_version "
+            f"{run_spec_version or '<missing>'}; supported versions: {supported}."
+        )
     elif run_spec_path:
+        manifest_artifact_contract = (
+            manifest.get("artifact_contract")
+            if isinstance(manifest.get("artifact_contract"), dict)
+            else {}
+        )
+        run_artifact_contract = (
+            run_spec.get("artifact_contract")
+            if isinstance(run_spec.get("artifact_contract"), dict)
+            else {}
+        )
+        if manifest_version == "inlumen.deployment-bundle@2":
+            if run_spec_version != "inlumen.run-spec@3":
+                errors.append(
+                    "inlumen.deployment-bundle@2 requires inlumen.run-spec@3."
+                )
+            for location, contract in (
+                ("bundle-manifest.json", manifest_artifact_contract),
+                ("run-spec.json", run_artifact_contract),
+            ):
+                if contract.get("schema_version") != "inlumen.artifact-contract@3":
+                    errors.append(
+                        f"{location} must use inlumen.artifact-contract@3 for "
+                        "inlumen.deployment-bundle@2."
+                    )
+                if contract.get("port_namespaced") is not False:
+                    errors.append(
+                        f"{location} artifact contract must set port_namespaced=false."
+                    )
         run_nodes = (
             run_spec.get("nodes") if isinstance(run_spec.get("nodes"), list) else []
         )
@@ -921,7 +969,8 @@ def repair_deployment_bundle(
         repaired["parents"] = [str(parent) for parent in repaired.get("parents") or []]
         repaired_nodes.append(repaired)
 
-    manifest["schema_version"] = "inlumen.deployment-bundle@1"
+    if not str(manifest.get("schema_version") or "").strip():
+        manifest["schema_version"] = "inlumen.deployment-bundle@1"
     manifest["targets"] = selected_targets
     manifest["node_order"] = [
         str(node.get("flow_id") or "")

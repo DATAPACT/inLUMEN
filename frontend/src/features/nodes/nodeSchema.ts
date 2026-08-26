@@ -201,6 +201,13 @@ export type GeneratedArtifact = {
     content_type?: string;
   }>;
   data_contract?: Record<string, unknown>;
+  runtime_environment?: Array<{
+    name?: string;
+    required?: boolean;
+    secret?: boolean;
+    source?: string;
+    description?: string;
+  }>;
   validation_report?: {
     status?: string;
     errors?: string[];

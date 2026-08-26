@@ -131,6 +131,7 @@ export const CustomNode: React.FC<NodeProps> = ({ id, data, selected }) => {
   const templateLabel = String(data.template_label || '').trim();
   const structuralDefaults = new Set([
     'Source',
+    'Custom',
     'Task',
     'Blank Task',
     'Sink',

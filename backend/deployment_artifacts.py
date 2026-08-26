@@ -6,11 +6,12 @@ from pathlib import PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from artifact_content import decode_artifact_content, verify_artifact_integrity
-from artifact_contract import classify_artifact
+from artifact_contract import ArtifactBinding, artifact_bindings, classify_artifact
 from filesystem_runtime import filesystem_shell_component_source
 from node_parameters import normalize_secret_param_keys
 from node_ports import normalize_node_ports
 from node_secrets import runtime_secret_name
+from runtime_environment import discover_runtime_environment, merge_runtime_environment
 from step_types import normalize_step_type
 
 try:
@@ -47,13 +48,15 @@ DAGSTER_PINNED_VERSION = "1.13.12"
 DAGSTER_LIBRARY_PINNED_VERSION = "0.29.12"
 UV_PINNED_VERSION = "0.11.32"
 ARTIFACT_CONTRACT = {
-    "schema_version": "inlumen.artifact-contract@1",
+    "schema_version": "inlumen.artifact-contract@3",
     "transport": "filesystem",
     "input_environment": "PIPELINE_INPUT_DIR",
     "output_environment": "PIPELINE_OUTPUT_DIR",
     "recursive": True,
-    "input_layout": "<input_port>/...",
-    "output_layout": "<output_port>/...",
+    "input_layout": "<artifact-relative-path>",
+    "output_layout": "<artifact-relative-path>",
+    "port_namespaced": False,
+    "run_isolation": "<run_id>",
     "source_agnostic": True,
     "connector_agnostic": True,
 }
@@ -63,6 +66,131 @@ _RESERVED_PARAMETER_ENVIRONMENT_NAMES = {
     "PIPELINE_OUTPUT_DIR",
     "PIPELINE_PARAMS_JSON",
 }
+
+_ARGO_PORT_RUNNER = r'''import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+def same_file_contents(first, second):
+    if first.stat().st_size != second.stat().st_size:
+        return False
+    with first.open("rb") as first_handle, second.open("rb") as second_handle:
+        while True:
+            first_chunk = first_handle.read(1024 * 1024)
+            second_chunk = second_handle.read(1024 * 1024)
+            if first_chunk != second_chunk:
+                return False
+            if not first_chunk:
+                return True
+
+
+def remove_path(path):
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def publish_staged_directory(staging, destination):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    previous = None
+    if destination.exists() or destination.is_symlink():
+        previous = Path(tempfile.mkdtemp(
+            prefix=f".{destination.name}.previous-",
+            dir=destination.parent,
+        ))
+        previous.rmdir()
+        os.replace(destination, previous)
+    try:
+        os.replace(staging, destination)
+    except Exception:
+        if previous is not None and (previous.exists() or previous.is_symlink()):
+            os.replace(previous, destination)
+        raise
+    else:
+        if previous is not None:
+            remove_path(previous)
+
+
+command = json.loads(sys.argv[1])
+ports = [str(value).strip() for value in json.loads(sys.argv[2]) if str(value).strip()]
+if len(ports) > 1:
+    raise RuntimeError(
+        "The flat Task workspace supports exactly one logical output set; "
+        "fan out one output to multiple consumers or add an explicit split Task."
+    )
+requirements = json.loads(sys.argv[3])
+staging_roots = [Path(value) for value in json.loads(sys.argv[4])]
+missing = [
+    item["name"] for item in requirements
+    if item.get("required") and not os.getenv(str(item.get("name") or ""))
+]
+if missing:
+    raise RuntimeError(
+        "Missing required runtime environment variable(s): " + ", ".join(sorted(missing))
+    )
+if staging_roots:
+    input_dir = Path(os.environ["PIPELINE_INPUT_DIR"])
+    input_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(
+        prefix=f".{input_dir.name}.staging-",
+        dir=input_dir.parent,
+    ))
+    owners = {}
+    try:
+        for source_root in staging_roots:
+            if not source_root.is_dir():
+                raise RuntimeError(f"Required upstream artifact is missing: {source_root}")
+            for source in sorted(source_root.rglob("*")):
+                if not source.is_file():
+                    continue
+                relative = source.relative_to(source_root)
+                destination = staging_dir / relative
+                existing = owners.get(relative)
+                if existing is not None:
+                    if same_file_contents(source, existing):
+                        continue
+                    raise RuntimeError(
+                        f"Upstream artifacts collide at {relative.as_posix()!r}; "
+                        "add a Task that merges or renames them."
+                    )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+                owners[relative] = source
+        publish_staged_directory(staging_dir, input_dir)
+    except Exception:
+        remove_path(staging_dir)
+        raise
+result = subprocess.run(command)
+if result.returncode:
+    raise SystemExit(result.returncode)
+output_dir = Path(os.environ["PIPELINE_OUTPUT_DIR"])
+output_dir.mkdir(parents=True, exist_ok=True)
+declared = set(ports)
+root_entries = [
+    path for path in sorted(output_dir.iterdir())
+    if path.name not in declared and path.name != ".gitkeep"
+]
+if root_entries:
+    if len(ports) != 1:
+        names = ", ".join(path.name for path in root_entries)
+        raise RuntimeError(
+            "Task wrote artifacts outside declared output-port directories: " + names
+        )
+    port_dir = output_dir / ports[0]
+    port_dir.mkdir(parents=True, exist_ok=True)
+    for source in root_entries:
+        destination = port_dir / source.name
+        if destination.exists():
+            raise RuntimeError(f"Output collision at {destination}")
+        shutil.move(str(source), str(destination))
+for port in ports:
+    (output_dir / port).mkdir(parents=True, exist_ok=True)
+'''
 
 
 class DeploymentArtifactValidationError(ValueError):
@@ -506,10 +634,68 @@ def extract_pipeline_edges(pipeline_graph: Optional[dict]) -> List[dict]:
     return deduped
 
 
+def _resolved_artifact_bindings(
+    steps_by_id: Dict[str, dict],
+    edges: Iterable[dict[str, Any]],
+) -> list[ArtifactBinding]:
+    """Resolve omitted handles to each node's first declared port."""
+
+    resolved_edges: list[dict[str, str]] = []
+    for edge in edges:
+        source = _clean_string(edge.get("source"))
+        target = _clean_string(edge.get("target"))
+        if source not in steps_by_id or target not in steps_by_id:
+            continue
+        source_outputs = (steps_by_id[source].get("ports") or {}).get("outputs") or []
+        target_inputs = (steps_by_id[target].get("ports") or {}).get("inputs") or []
+        source_port = _clean_string(edge.get("source_port"))
+        target_port = _clean_string(edge.get("target_port"))
+        if not source_port and source_outputs:
+            source_port = _clean_string(source_outputs[0].get("id"))
+        if not target_port and target_inputs:
+            target_port = _clean_string(target_inputs[0].get("id"))
+        resolved_edges.append(
+            {
+                "source": source,
+                "source_port": source_port or "output",
+                "target": target,
+                "target_port": target_port or "input",
+            }
+        )
+    return artifact_bindings(resolved_edges)
+
+
 def select_runtime_steps(
     steps: Sequence[dict],
 ) -> List[dict]:
     return list(steps)
+
+
+def _validate_flat_task_output_contract(steps: Sequence[dict]) -> None:
+    errors: List[str] = []
+    for step in steps:
+        if _clean_string(step.get("type")).lower() != "task":
+            continue
+        output_ports = [
+            _clean_string(port.get("id"))
+            for port in ((step.get("ports") or {}).get("outputs") or [])
+            if isinstance(port, dict) and _clean_string(port.get("id"))
+        ]
+        if len(output_ports) == 1:
+            continue
+        step_id = _clean_string(step.get("flow_id")) or "<unknown>"
+        label = _clean_string(step.get("label"))
+        description = f" ({label})" if label else ""
+        errors.append(
+            f"Task {step_id}{description} declares {len(output_ports)} output ports; "
+            "the flat Task workspace supports exactly one logical output set. "
+            "Fan out that output to multiple consumers or add an explicit split Task."
+        )
+    if errors:
+        raise DeploymentArtifactValidationError(
+            "Flat Task workspace validation failed",
+            errors,
+        )
 
 
 def _step_sort_key(flow_id: Any) -> Tuple[int, Any]:
@@ -848,6 +1034,33 @@ def _runtime_entrypoint_filename(
     return "main.py"
 
 
+def _runtime_environment_for_step(
+    dockerfiles_payload: Any,
+    flow_id: str,
+) -> list[dict[str, Any]]:
+    entrypoint = _runtime_entrypoint_filename(dockerfiles_payload, flow_id)
+    source = _deployment_file_content(dockerfiles_payload, flow_id, entrypoint)
+    node_manifest = _json_object(
+        _deployment_file_content(
+            dockerfiles_payload,
+            flow_id,
+            "node-manifest.json",
+        )
+    )
+    declared = node_manifest.get("runtime_environment")
+    runtime_artifact = _runtime_artifact_for_step(dockerfiles_payload, flow_id)
+    generated_source = (
+        []
+        if _clean_string(runtime_artifact.get("generator"))
+        == MANAGED_ADAPTER_GENERATOR
+        else discover_runtime_environment(source)
+    )
+    return merge_runtime_environment(
+        generated_source,
+        declared,
+    )
+
+
 def _topological_order(step_ids: Sequence[str], edges: Sequence[dict]) -> List[str]:
     step_id_set = set(step_ids)
     incoming = {step_id: 0 for step_id in step_ids}
@@ -982,17 +1195,17 @@ def _contract_env_name(contract: dict, key: str, default: str) -> str:
 
 def _validate_codegen_argo_shape(
     *,
-    ordered_ids: Sequence[str],
-    dependencies: Dict[str, List[str]],
+    bindings: Sequence[ArtifactBinding],
 ) -> None:
-    errors: List[str] = []
-    for step_id in ordered_ids:
-        parents = dependencies.get(step_id) or []
-        if len(parents) > 1:
-            errors.append(
-                f"Node {step_id} has multiple upstream parents; generated-script Argo "
-                "handoff currently requires an explicit merge node first."
-            )
+    counts: dict[tuple[str, str], int] = defaultdict(int)
+    for binding in bindings:
+        counts[(binding.target_node, binding.target_port)] += 1
+    errors = [
+        f"Node {node_id} input port {port_id} has multiple producers; add distinct "
+        "input ports or an explicit merge Task before Argo export."
+        for (node_id, port_id), count in sorted(counts.items())
+        if count > 1
+    ]
     if errors:
         raise DeploymentArtifactValidationError(
             "Generated-script Argo Workflow guardrail validation failed",
@@ -1005,15 +1218,16 @@ def _build_codegen_argo_workflow_object(
     steps: Sequence[dict],
     ordered_ids: Sequence[str],
     dependencies: Dict[str, List[str]],
+    bindings: Sequence[ArtifactBinding],
     dockerfiles_by_step: Dict[str, dict],
+    dockerfiles_payload: Any,
     shared_runtime: Optional[dict] = None,
 ) -> dict:
-    _validate_codegen_argo_shape(
-        ordered_ids=ordered_ids,
-        dependencies=dependencies,
-    )
-
+    _validate_codegen_argo_shape(bindings=bindings)
     steps_by_id = {step["flow_id"]: step for step in steps}
+    bindings_by_target: Dict[str, list[ArtifactBinding]] = defaultdict(list)
+    for binding in bindings:
+        bindings_by_target[binding.target_node].append(binding)
     child_lookup: Dict[str, List[str]] = {step_id: [] for step_id in ordered_ids}
     for child, parents in dependencies.items():
         for parent in parents:
@@ -1025,19 +1239,37 @@ def _build_codegen_argo_workflow_object(
         "name": "inlumen-pipeline",
         "dag": {"tasks": tasks},
     }
-    if leaf_ids:
-        entry_template["outputs"] = {
-            "artifacts": [
+    workflow_outputs = []
+    for leaf_id in leaf_ids:
+        output_ports = (steps_by_id[leaf_id].get("ports") or {}).get("outputs") or []
+        for port in output_ports:
+            port_id = _clean_string(port.get("id"))
+            if not port_id:
+                continue
+            result_name = (
+                "result"
+                if len(leaf_ids) == 1 and len(output_ports) == 1
+                else _argo_name(f"result-{leaf_id}-{port_id}")
+            )
+            workflow_outputs.append(
                 {
-                    "name": "result" if len(leaf_ids) == 1 else f"result-{_argo_name(leaf_id)}",
-                    "from": f"{{{{tasks.{_argo_name(leaf_id)}.outputs.artifacts.outputs}}}}",
+                    "name": result_name,
+                    "from": (
+                        f"{{{{tasks.{_argo_name(leaf_id)}.outputs.artifacts."
+                        f"{_argo_name(port_id)}}}}}"
+                    ),
                 }
-                for leaf_id in leaf_ids
-            ]
+            )
+    if workflow_outputs:
+        entry_template["outputs"] = {
+            "artifacts": workflow_outputs
         }
 
     templates = [entry_template]
     shared_image_parameter = "pipeline-image"
+    input_parameters = []
+    environment_parameters = []
+    seen_environment_parameters = set()
     image_parameters = (
         [
             {
@@ -1053,6 +1285,7 @@ def _build_codegen_argo_workflow_object(
     for step_id in ordered_ids:
         parent_ids = dependencies.get(step_id) or []
         step = steps_by_id[step_id]
+        incoming_bindings = bindings_by_target.get(step_id) or []
         is_database_source = (
             _clean_string(step.get("type")).lower() == "source"
             and _clean_string(step.get("template")).lower() == "database"
@@ -1061,18 +1294,33 @@ def _build_codegen_argo_workflow_object(
             "name": _argo_name(step_id),
             "template": _argo_name(step_id),
         }
-        if parent_ids:
+        if incoming_bindings:
             task["arguments"] = {
-                "artifacts": [{
-                    "name": "inputs",
-                    "from": f"{{{{tasks.{_argo_name(parent_ids[0])}.outputs.artifacts.outputs}}}}",
-                }]
+                "artifacts": [
+                    {
+                        "name": _argo_name(binding.target_port, "input"),
+                        "from": (
+                            f"{{{{tasks.{_argo_name(binding.source_node)}.outputs.artifacts."
+                            f"{_argo_name(binding.source_port, 'output')}}}}}"
+                        ),
+                    }
+                    for binding in incoming_bindings
+                ]
             }
         elif not is_database_source:
+            input_parameter = _argo_name(f"input-artifact-key-{step_id}")
+            input_parameters.append(
+                {
+                    "name": input_parameter,
+                    "value": f"inlumen/input/{_argo_name(step_id)}.tgz",
+                }
+            )
             task["arguments"] = {
                 "artifacts": [{
-                    "name": "inputs",
-                    "s3": {"key": "{{workflow.parameters.input-artifact-key}}"},
+                    "name": "run-inputs",
+                    "s3": {
+                        "key": f"{{{{workflow.parameters.{input_parameter}}}}}"
+                    },
                 }]
             }
         if parent_ids:
@@ -1081,6 +1329,7 @@ def _build_codegen_argo_workflow_object(
 
     for step_id in ordered_ids:
         step = steps_by_id[step_id]
+        incoming_bindings = bindings_by_target.get(step_id) or []
         dockerfile = dockerfiles_by_step[step_id]
         image_parameter = (
             shared_image_parameter
@@ -1104,15 +1353,26 @@ def _build_codegen_argo_workflow_object(
         if not command:
             command = ["python", "/app/main.py"]
 
-        output_artifact = {
-            "name": "outputs",
-            "path": "/inlumen/outputs",
-            "archive": {"none": {}},
-        }
-        if step_id in leaf_ids:
-            output_artifact["s3"] = {
-                "key": f"{{{{workflow.parameters.output-artifact-prefix}}}}/{_argo_name(step_id)}"
+        output_artifacts = []
+        output_port_ids = []
+        for port in (step.get("ports") or {}).get("outputs") or []:
+            port_id = _clean_string(port.get("id"))
+            if not port_id:
+                continue
+            output_port_ids.append(port_id)
+            output_artifact = {
+                "name": _argo_name(port_id, "output"),
+                "path": f"/inlumen/outputs/{port_id}",
+                "archive": {"none": {}},
             }
+            if step_id in leaf_ids:
+                output_artifact["s3"] = {
+                    "key": (
+                        f"{{{{workflow.parameters.output-artifact-prefix}}}}/"
+                        f"{_argo_name(step_id)}/{_argo_name(port_id)}"
+                    )
+                }
+            output_artifacts.append(output_artifact)
 
         env = [
             {"name": "INLUMEN_FLOW_ID", "value": step_id},
@@ -1177,6 +1437,36 @@ def _build_codegen_argo_workflow_object(
                         },
                     },
                 })
+        runtime_environment = _runtime_environment_for_step(
+            dockerfiles_payload,
+            step_id,
+        )
+        existing_env_names = {item.get("name") for item in env}
+        for requirement in runtime_environment:
+            name = _clean_string(requirement.get("name"))
+            if not name or name in existing_env_names:
+                continue
+            if requirement.get("secret"):
+                env.append({
+                    "name": name,
+                    "valueFrom": {
+                        "secretKeyRef": {
+                            "name": "inlumen-runtime-secrets",
+                            "key": _kubernetes_secret_key(step_id, name),
+                            "optional": not bool(requirement.get("required")),
+                        },
+                    },
+                })
+            else:
+                parameter_name = _argo_name(f"env-{step_id}-{name}")
+                if parameter_name not in seen_environment_parameters:
+                    seen_environment_parameters.add(parameter_name)
+                    environment_parameters.append({"name": parameter_name, "value": ""})
+                env.append({
+                    "name": name,
+                    "value": f"{{{{workflow.parameters.{parameter_name}}}}}",
+                })
+            existing_env_names.add(name)
 
         annotations = {
             "inlumen.ai/flow-id": step_id,
@@ -1196,22 +1486,44 @@ def _build_codegen_argo_workflow_object(
         template = {
                 "name": _argo_name(step_id),
                 "metadata": {"annotations": annotations},
-                "outputs": {"artifacts": [output_artifact]},
                 "container": {
                     "image": f"{{{{workflow.parameters.{image_parameter}}}}}",
                     "imagePullPolicy": "IfNotPresent",
                     "workingDir": _clean_string(shared_node.get("working_dir"))
                     or "/app",
-                    "command": command,
+                    "command": [
+                        "python",
+                        "-c",
+                        _ARGO_PORT_RUNNER,
+                        json.dumps(command),
+                        json.dumps(output_port_ids),
+                        json.dumps(runtime_environment),
+                        json.dumps([
+                            f"/inlumen/staging/{binding.target_port}"
+                            for binding in incoming_bindings
+                        ]),
+                    ],
                     "env": env,
                 },
             }
-        if not (
+        if output_artifacts:
+            template["outputs"] = {"artifacts": output_artifacts}
+        if incoming_bindings:
+            template["inputs"] = {
+                "artifacts": [
+                    {
+                        "name": _argo_name(binding.target_port, "input"),
+                        "path": f"/inlumen/staging/{binding.target_port}",
+                    }
+                    for binding in incoming_bindings
+                ]
+            }
+        elif not (
             _clean_string(step.get("type")).lower() == "source"
             and _clean_string(step.get("template")).lower() == "database"
         ):
             template["inputs"] = {
-                "artifacts": [{"name": "inputs", "path": "/inlumen/inputs"}]
+                "artifacts": [{"name": "run-inputs", "path": "/inlumen/inputs"}]
             }
         templates.append(template)
 
@@ -1233,10 +1545,8 @@ def _build_codegen_argo_workflow_object(
             },
             "arguments": {
                 "parameters": [
-                    {
-                        "name": "input-artifact-key",
-                        "value": "inlumen/input/input-artifact.tgz",
-                    },
+                    *input_parameters,
+                    *environment_parameters,
                     {
                         "name": "output-artifact-prefix",
                         "value": "inlumen/output",
@@ -1262,6 +1572,7 @@ def build_argo_workflow_object(
 
     edges = extract_pipeline_edges(pipeline_graph)
     steps = select_runtime_steps(all_steps)
+    _validate_flat_task_output_contract(steps)
     step_ids = [step["flow_id"] for step in steps]
     dockerfiles = _dockerfiles_from_payload(dockerfiles_payload)
     if not dockerfiles:
@@ -1281,6 +1592,7 @@ def build_argo_workflow_object(
     ordered_ids = _topological_order(step_ids, explicit_edges)
     steps_by_id = {step["flow_id"]: step for step in steps}
     dependencies = _dependency_lookup(step_ids, explicit_edges)
+    bindings = _resolved_artifact_bindings(steps_by_id, explicit_edges)
     dockerfiles_by_step = _dockerfile_lookup(dockerfiles)
 
     if steps and (
@@ -1291,7 +1603,9 @@ def build_argo_workflow_object(
             steps=steps,
             ordered_ids=ordered_ids,
             dependencies=dependencies,
+            bindings=bindings,
             dockerfiles_by_step=dockerfiles_by_step,
+            dockerfiles_payload=dockerfiles_payload,
             shared_runtime=shared_runtime,
         )
         validate_argo_workflow_object(workflow, step_ids)
@@ -2385,9 +2699,12 @@ The reusable component in `src/inlumen_dagster_project/components/shell_command.
 - `PIPELINE_INPUT_DIR`
 - `PIPELINE_OUTPUT_DIR`
 
-Task code reads files from the input directory and writes downstream artifacts
-to the output directory. Dagster inventories and moves those files internally;
-Task code does not read or write an output manifest.
+Task code reads upstream files directly from the input directory and writes
+downstream artifacts directly to the output directory. Port names never create
+implicit subdirectories in either public directory. Artifact-owned relative
+paths are preserved, and conflicting upstream paths fail before the Task runs.
+Dagster inventories and routes files internally; Task code does not read or
+write an output manifest.
 
 {sample_note}
 {model_note}
@@ -3198,6 +3515,7 @@ def _deployment_bundle_readme_content(
     targets: Dict[str, bool],
     has_model_requirements: bool = False,
     secret_environment_names: Sequence[str] = (),
+    runtime_environment: Sequence[dict[str, Any]] = (),
 ) -> str:
     dagster_section = ""
     if targets.get("dagster"):
@@ -3250,6 +3568,20 @@ Copy `.env.example` to `.env` and provide the listed values before local executi
 {formatted_names}
 """
 
+    runtime_environment_section = ""
+    if runtime_environment:
+        formatted_requirements = "\n".join(
+            f"- `{item['name']}` ({'required' if item.get('required') else 'optional'})"
+            for item in runtime_environment
+        )
+        runtime_environment_section = f"""
+## Task runtime environment
+
+Static analysis found these environment variables in Task code. Required values are checked before the Task process starts; optional values produce a warning when absent.
+
+{formatted_requirements}
+"""
+
     return f"""# InLumen Deployment Bundle
 
 This bundle was generated deterministically from persisted InLumen runtime artifacts.
@@ -3261,7 +3593,7 @@ This bundle was generated deterministically from persisted InLumen runtime artif
 - `outputs/`: per-node output folders used during local Dagster execution
 - `run-spec.json`: engine-neutral runtime and filesystem hand-off contract
 - `bundle-manifest.json`: machine-readable bundle index
-{dagster_section}{argo_section}{secrets_section}"""
+{dagster_section}{argo_section}{runtime_environment_section}{secrets_section}"""
 
 
 def _dagster_definitions_source() -> str:
@@ -3447,6 +3779,25 @@ def _validate_explicit_input_integrity(
         )
 
 
+def _root_input_owner(
+    file_entry: dict,
+    root_step_ids: Sequence[str],
+) -> str:
+    owner = _clean_string(file_entry.get("flow_id"))
+    if owner in root_step_ids:
+        return owner
+    if len(root_step_ids) == 1:
+        return root_step_ids[0]
+    filename = _clean_string(file_entry.get("filename")) or "<unnamed>"
+    raise DeploymentArtifactValidationError(
+        "Deployment input ownership validation failed",
+        [
+            f"Input {filename} must identify one root Source with flow_id; "
+            f"available roots are {', '.join(root_step_ids)}."
+        ],
+    )
+
+
 def _manifest_input_entry(file_entry: dict, *, path_prefix: str) -> dict:
     filename = _clean_string(file_entry.get("filename"))
     classification = classify_artifact(
@@ -3520,6 +3871,7 @@ def build_dagster_project_files(
 
     edges = extract_pipeline_edges(pipeline_graph)
     steps = select_runtime_steps(all_steps)
+    _validate_flat_task_output_contract(steps)
     step_ids = [step["flow_id"] for step in steps]
     dockerfiles = _dockerfiles_from_payload(dockerfiles_payload)
     if not dockerfiles:
@@ -3539,6 +3891,10 @@ def build_dagster_project_files(
     dependencies = _dependency_lookup(step_ids, explicit_edges)
 
     steps_by_id = {step["flow_id"]: step for step in steps}
+    bindings = _resolved_artifact_bindings(steps_by_id, explicit_edges)
+    bindings_by_target: Dict[str, list[ArtifactBinding]] = defaultdict(list)
+    for binding in bindings:
+        bindings_by_target[binding.target_node].append(binding)
     asset_names = _dagster_asset_names([steps_by_id[step_id] for step_id in ordered_ids])
     model_requirements = _model_requirements_for_dagster(
         [steps_by_id[step_id] for step_id in ordered_ids],
@@ -3563,11 +3919,15 @@ def build_dagster_project_files(
         )
     _validate_explicit_input_integrity(dockerfiles_payload, root_input_files)
     if not bundle_layout:
+        root_step_ids = [
+            step_id for step_id in ordered_ids if not dependencies.get(step_id)
+        ]
         for file_entry in root_input_files:
+            owner = _root_input_owner(file_entry, root_step_ids)
             filename = _safe_docker_source(_clean_string(file_entry.get("filename")))
             output_files.append(
                 _dagster_file(
-                    f"{project_dir}/storage/inputs/{filename}",
+                    f"{project_dir}/storage/inputs/{asset_names[owner]}/{filename}",
                     str(file_entry.get("content") or ""),
                     "dagster-input",
                     content_type=str(
@@ -3675,18 +4035,40 @@ def build_dagster_project_files(
                 )
 
         parents = dependencies.get(step_id) or []
-        # The runner copies each upstream output directory into a fresh input
-        # directory before starting this process.  No manifest or declared
-        # schema is part of the Task-facing API.
-        input_dirs = (
-            [f"../outputs/{_bundle_node_dir(steps_by_id[parent])}" for parent in parents]
-            if bundle_layout and parents
-            else [f"storage/{asset_names[parent]}" for parent in parents]
-            if parents
-            else ["../inputs"]
-            if bundle_layout
-            else ["storage/inputs"]
-        )
+        incoming_bindings = bindings_by_target.get(step_id) or []
+        input_bindings = [
+            {
+                "source_dir": (
+                    f"../outputs/{_bundle_node_dir(steps_by_id[binding.source_node])}"
+                    if bundle_layout
+                    else f"storage/{asset_names[binding.source_node]}"
+                ),
+                "source_port": binding.source_port,
+                "target_port": binding.target_port,
+                "run_scoped": True,
+                "required": True,
+            }
+            for binding in incoming_bindings
+        ]
+        if not input_bindings:
+            input_bindings = [
+                {
+                    "source_dir": (
+                        f"../inputs/{node_dir}"
+                        if bundle_layout
+                        else f"storage/inputs/{asset_name}"
+                    ),
+                    "source_port": "",
+                    "target_port": "",
+                    "run_scoped": False,
+                    "required": False,
+                }
+            ]
+        output_ports = [
+            _clean_string(port.get("id"))
+            for port in ((step.get("ports") or {}).get("outputs") or [])
+            if _clean_string(port.get("id"))
+        ]
         input_dir = (
             f"../workspaces/{node_dir}/input"
             if bundle_layout
@@ -3708,6 +4090,10 @@ def build_dagster_project_files(
             else f"src/inlumen_dagster_project/artifacts/nodes/{_sanitize_fragment(step_id, 'step')}/node-manifest.json"
         )
         secret_parameter_names = _runtime_secret_parameters(step, dockerfiles_payload)
+        runtime_environment = _runtime_environment_for_step(
+            dockerfiles_payload,
+            step_id,
+        )
         defs_yaml = _dagster_yaml(
             {
                 "type": "inlumen_dagster_project.components.shell_command.ShellCommand",
@@ -3715,9 +4101,10 @@ def build_dagster_project_files(
                     "asset_key": asset_name,
                     "script_path": script_path,
                     "upstream_assets": [asset_names[parent] for parent in parents],
-                    "input_dirs": input_dirs,
+                    "input_bindings": input_bindings,
                     "input_dir": input_dir,
                     "output_dir": output_dir,
+                    "output_ports": output_ports,
                     "arguments": [],
                     "parameters": {
                         str(key): value
@@ -3727,6 +4114,7 @@ def build_dagster_project_files(
                         key: runtime_secret_name(step_id, key)
                         for key in secret_parameter_names
                     },
+                    "runtime_environment": runtime_environment,
                 },
             }
         )
@@ -3999,6 +4387,15 @@ def build_run_spec(
 ) -> dict:
     """Build the engine-neutral execution contract consumed by every adapter."""
     steps_by_id = {step["flow_id"]: step for step in steps}
+    resolved_connections = [
+        {
+            "source": binding.source_node,
+            "source_port": binding.source_port,
+            "target": binding.target_node,
+            "target_port": binding.target_port,
+        }
+        for binding in _resolved_artifact_bindings(steps_by_id, connections)
+    ]
     nodes = []
     for step_id in ordered_ids:
         step = steps_by_id[step_id]
@@ -4039,6 +4436,10 @@ def build_run_spec(
             else {}
         )
         secret_parameter_names = _runtime_secret_parameters(step, dockerfiles_payload)
+        runtime_environment = _runtime_environment_for_step(
+            dockerfiles_payload,
+            step_id,
+        )
         node_entry = {
             "id": step_id,
             "label": step.get("label") or "",
@@ -4069,6 +4470,7 @@ def build_run_spec(
                 }
                 for key in secret_parameter_names
             ],
+            "runtime_environment": runtime_environment,
         }
         if executable_as_package:
             node_entry["package"] = {
@@ -4128,23 +4530,28 @@ def build_run_spec(
         ),
     }
     return {
-        "schema_version": "inlumen.run-spec@1",
+        "schema_version": "inlumen.run-spec@3",
         "artifact_contract": dict(ARTIFACT_CONTRACT),
         "runtime": {
-            "default_engine": "dagster",
+            "default_engine": "dagster" if targets.get("dagster") else "argo",
             "package_manager": "uv",
             "python": "3.11",
         },
         "node_order": list(ordered_ids),
         "nodes": nodes,
-        "connections": list(connections),
+        "connections": resolved_connections,
         "run_inputs": {
             "path": "inputs",
+            "layout": "inputs/<source-node>/...",
             "lifecycle": "source-owned",
             "transport": "filesystem",
             "fixture_policy": "files are attached to Source nodes",
         },
-        "outputs": {"path": "outputs", "transport": "filesystem"},
+        "outputs": {
+            "path": "outputs",
+            "layout": "outputs/<node>/<run-id>/<output-port>/...",
+            "transport": "filesystem",
+        },
         "engines": engines,
     }
 
@@ -4179,6 +4586,7 @@ def build_deployment_bundle_files(
 
     edges = extract_pipeline_edges(pipeline_graph)
     steps = select_runtime_steps(all_steps)
+    _validate_flat_task_output_contract(steps)
     step_ids = [step["flow_id"] for step in steps]
     dockerfiles = _dockerfiles_from_payload(dockerfiles_payload)
     if not dockerfiles:
@@ -4196,11 +4604,30 @@ def build_deployment_bundle_files(
     ordered_ids = _topological_order(step_ids, explicit_edges)
     dependencies = _dependency_lookup(step_ids, explicit_edges)
     steps_by_id = {step["flow_id"]: step for step in steps}
+    resolved_bindings = _resolved_artifact_bindings(steps_by_id, explicit_edges)
+    resolved_connections = [
+        {
+            "source": binding.source_node,
+            "source_port": binding.source_port,
+            "target": binding.target_node,
+            "target_port": binding.target_port,
+        }
+        for binding in resolved_bindings
+    ]
     secret_environment_names = sorted({
         runtime_secret_name(step["flow_id"], key)
         for step in steps
         for key in _runtime_secret_parameters(step, dockerfiles_payload)
     })
+    runtime_environment_by_step = {
+        step_id: _runtime_environment_for_step(dockerfiles_payload, step_id)
+        for step_id in ordered_ids
+    }
+    runtime_environment = [
+        {**requirement, "flow_id": step_id}
+        for step_id in ordered_ids
+        for requirement in runtime_environment_by_step[step_id]
+    ]
 
     bundle_files: List[dict] = []
     node_entries = []
@@ -4218,9 +4645,15 @@ def build_deployment_bundle_files(
                     step.get("type") or "task",
                 ),
                 "implementation": step.get("implementation") or {},
+                "runtime_environment": runtime_environment_by_step[step_id],
                 "path": f"nodes/{node_dir}",
                 "output_path": f"outputs/{node_dir}",
                 "parents": dependencies.get(step_id) or [],
+                "input_bindings": [
+                    connection
+                    for connection in resolved_connections
+                    if connection["target"] == step_id
+                ],
             }
         )
         for file_entry in _deployment_files_for_step(dockerfiles_payload, step_id):
@@ -4264,11 +4697,15 @@ def build_deployment_bundle_files(
             input_errors,
         )
     _validate_explicit_input_integrity(dockerfiles_payload, root_input_files)
+    root_step_ids = [
+        step_id for step_id in ordered_ids if not dependencies.get(step_id)
+    ]
     for file_entry in root_input_files:
+        owner = _root_input_owner(file_entry, root_step_ids)
         filename = _safe_docker_source(_clean_string(file_entry.get("filename")))
         bundle_files.append(
             _bundle_file(
-                f"inputs/{filename}",
+                f"inputs/{_bundle_node_dir(steps_by_id[owner])}/{filename}",
                 str(file_entry.get("content") or ""),
                 role="input",
                 flow_id=_clean_string(file_entry.get("flow_id")),
@@ -4362,17 +4799,22 @@ def build_deployment_bundle_files(
                 targets=selected_targets,
                 has_model_requirements=has_model_requirements,
                 secret_environment_names=secret_environment_names,
+                runtime_environment=runtime_environment,
             ),
             role="bundle-readme",
             content_type="text/markdown;charset=utf-8",
         )
     )
 
-    if secret_environment_names:
+    env_example_names = sorted(
+        set(secret_environment_names)
+        | {item["name"] for item in runtime_environment}
+    )
+    if env_example_names:
         bundle_files.append(
             _bundle_file(
                 ".env.example",
-                "\n".join(f"{name}=" for name in secret_environment_names) + "\n",
+                "\n".join(f"{name}=" for name in env_example_names) + "\n",
                 role="secret-environment-example",
                 content_type="text/plain;charset=utf-8",
             )
@@ -4397,14 +4839,15 @@ def build_deployment_bundle_files(
     )
 
     manifest = {
-        "schema_version": "inlumen.deployment-bundle@1",
+        "schema_version": "inlumen.deployment-bundle@2",
         "artifact_contract": dict(ARTIFACT_CONTRACT),
         "run_spec": "run-spec.json",
         "targets": selected_targets,
         "readme": "README.md",
         "node_order": ordered_ids,
         "nodes": node_entries,
-        "connections": explicit_edges,
+        "connections": resolved_connections,
+        "runtime_environment": runtime_environment,
         "inputs": {
             "path": "inputs",
             "file_count": len(root_input_files),
@@ -4462,7 +4905,7 @@ def build_deployment_bundle_files(
             "valid": True,
             "checks": [
                 "canonical deployment bundle layout generated",
-                "engine-neutral inlumen.run-spec@1 generated",
+                "engine-neutral inlumen.run-spec@3 generated",
                 "node runtime artifacts copied under nodes/<node>/",
                 "root inputs and per-node output directories declared",
                 "selected deployment targets generated deterministically",

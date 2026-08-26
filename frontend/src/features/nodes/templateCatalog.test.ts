@@ -15,7 +15,8 @@ describe("component template catalog", () => {
       "flow",
       "subpipeline",
     ]);
-    expect(COMPONENT_TEMPLATE_CATALOG.source.map(({ value }) => value)).toContain("Kafka");
+    expect(COMPONENT_TEMPLATE_CATALOG.source.map(({ value }) => value)).toContain("REST API");
+    expect(COMPONENT_TEMPLATE_CATALOG.source.map(({ value }) => value)).not.toContain("Kafka");
     expect(COMPONENT_TEMPLATE_CATALOG.task.map(({ value }) => value)).toContain("Speech-to-Text");
     expect(COMPONENT_TEMPLATE_CATALOG.task.map(({ value }) => value)).not.toContain("Preprocessing");
     expect(COMPONENT_TEMPLATE_CATALOG.task.map(({ value }) => value)).not.toContain("Document Processing");
@@ -27,7 +28,8 @@ describe("component template catalog", () => {
       "AI & machine learning",
       "Integration",
     ]));
-    expect(COMPONENT_TEMPLATE_CATALOG.destination.map(({ value }) => value)).toContain("Notification");
+    expect(COMPONENT_TEMPLATE_CATALOG.destination.map(({ value }) => value)).toContain("Object Storage");
+    expect(COMPONENT_TEMPLATE_CATALOG.destination.map(({ value }) => value)).not.toContain("Notification");
     expect(COMPONENT_TEMPLATE_CATALOG.flow.map(({ value }) => value)).toEqual([
       "Condition",
       "Parallel Map",

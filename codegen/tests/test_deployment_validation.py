@@ -199,6 +199,128 @@ class DeploymentInputContractValidationTest(unittest.TestCase):
             any("node ids do not match" in error for error in report["errors"])
         )
 
+    def test_validation_accepts_current_bundle_and_keeps_v1_v2_compatibility(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_bundle(root, kind="binary")
+            v1_report = validate_deployment_bundle(
+                root,
+                targets={"argo": False, "dagster": False},
+            )
+            run_spec_path = root / "run-spec.json"
+            run_spec = json.loads(run_spec_path.read_text(encoding="utf-8"))
+            run_spec.update({
+                "schema_version": "inlumen.run-spec@2",
+                "artifact_contract": {
+                    "schema_version": "inlumen.artifact-contract@2",
+                },
+                "run_inputs": {"path": "inputs", "transport": "filesystem"},
+                "outputs": {"path": "outputs", "transport": "filesystem"},
+                "engines": {"dagster": None, "argo": None},
+            })
+            run_spec_path.write_text(json.dumps(run_spec), encoding="utf-8")
+            v2_report = validate_deployment_bundle(
+                root,
+                targets={"argo": False, "dagster": False},
+            )
+
+            artifact_contract = {
+                "schema_version": "inlumen.artifact-contract@3",
+                "transport": "filesystem",
+                "input_environment": "PIPELINE_INPUT_DIR",
+                "output_environment": "PIPELINE_OUTPUT_DIR",
+                "recursive": True,
+                "input_layout": "<artifact-relative-path>",
+                "output_layout": "<artifact-relative-path>",
+                "port_namespaced": False,
+                "run_isolation": "<run_id>",
+                "source_agnostic": True,
+                "connector_agnostic": True,
+            }
+            run_spec.update({
+                "schema_version": "inlumen.run-spec@3",
+                "artifact_contract": artifact_contract,
+            })
+            run_spec_path.write_text(json.dumps(run_spec), encoding="utf-8")
+            manifest_path = root / "bundle-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest.update({
+                "schema_version": "inlumen.deployment-bundle@2",
+                "artifact_contract": artifact_contract,
+            })
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            v3_report = validate_deployment_bundle(
+                root,
+                targets={"argo": False, "dagster": False},
+            )
+
+        self.assertTrue(v1_report["ok"], v1_report["errors"])
+        self.assertTrue(v2_report["ok"], v2_report["errors"])
+        self.assertTrue(v3_report["ok"], v3_report["errors"])
+
+    def test_current_bundle_rejects_legacy_run_spec(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_bundle(root, kind="binary")
+            manifest_path = root / "bundle-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest.update({
+                "schema_version": "inlumen.deployment-bundle@2",
+                "artifact_contract": {
+                    "schema_version": "inlumen.artifact-contract@3",
+                    "port_namespaced": False,
+                },
+            })
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            report = validate_deployment_bundle(
+                root,
+                targets={"argo": False, "dagster": False},
+            )
+
+        self.assertFalse(report["ok"])
+        self.assertIn(
+            "inlumen.deployment-bundle@2 requires inlumen.run-spec@3.",
+            report["errors"],
+        )
+
+    def test_validation_rejects_unknown_bundle_manifest_version(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_bundle(root, kind="binary")
+            manifest_path = root / "bundle-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["schema_version"] = "inlumen.deployment-bundle@99"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            report = validate_deployment_bundle(
+                root,
+                targets={"argo": False, "dagster": False},
+            )
+
+        self.assertFalse(report["ok"])
+        self.assertTrue(any(
+            "unsupported schema_version inlumen.deployment-bundle@99" in error
+            for error in report["errors"]
+        ))
+
+    def test_validation_rejects_unknown_run_spec_version(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_bundle(root)
+            run_spec_path = root / "run-spec.json"
+            run_spec = json.loads(run_spec_path.read_text(encoding="utf-8"))
+            run_spec["schema_version"] = "inlumen.run-spec@99"
+            run_spec_path.write_text(json.dumps(run_spec), encoding="utf-8")
+            report = validate_deployment_bundle(
+                root,
+                targets={"argo": False, "dagster": False},
+            )
+
+        self.assertFalse(report["ok"])
+        self.assertTrue(any(
+            "unsupported schema_version inlumen.run-spec@99" in error
+            for error in report["errors"]
+        ))
+
     def test_validation_rejects_exported_kind_mismatch(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

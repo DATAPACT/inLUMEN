@@ -15,6 +15,7 @@ import ReactFlow, {
   addEdge,
   applyNodeChanges,
   applyEdgeChanges,
+  useNodesInitialized,
 } from 'reactflow';
 import JSZip from 'jszip';
 import 'reactflow/dist/style.css';
@@ -78,6 +79,7 @@ import {
 import { normalizeNodePorts, normalizeType } from '@/features/nodes/nodeSchema';
 import { uploadNodeFile } from '@/features/nodes/nodePersistence';
 import { remapSubpipelineParentEdges } from '@/features/flow/subpipeline';
+import { useGraphViewportFit } from '@/features/flow/viewportFit';
 import {
   Dialog,
   DialogContent,
@@ -125,7 +127,10 @@ export interface FlowCanvasRef {
     data: Record<string, unknown>,
     options?: { remapSubpipeline?: boolean },
   ) => void;
-  syncFromBackend: (graphData?: unknown) => Promise<NormalizedGraph>;
+  syncFromBackend: (
+    graphData?: unknown,
+    options?: { fitView?: boolean },
+  ) => Promise<NormalizedGraph>;
   restoreGraphLocally: (
     graphData: unknown,
     backendSyncPauseMs?: number,
@@ -483,6 +488,12 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   );
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
+  const nodesInitialized = useNodesInitialized();
+  const requestGraphViewportFit = useGraphViewportFit({
+    instance: reactFlowInstance,
+    nodesInitialized,
+    nodeCount: nodes.length,
+  });
   const lastSeenUpdatedAtRef = useRef<string | null>(null);
   const refreshCooldownUntilRef = useRef<number>(0);
   const syncBackoffUntilRef = useRef<number>(0);
@@ -754,8 +765,14 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     return applyGraph(data);
   }, [applyGraph]);
 
-  const syncFromBackend = useCallback(async (graphData?: unknown) => {
+  const syncFromBackend = useCallback(async (
+    graphData?: unknown,
+    options?: { fitView?: boolean },
+  ) => {
     try {
+      if (options?.fitView) {
+        requestGraphViewportFit();
+      }
       let graph: NormalizedGraph;
       if (graphData == null) {
         graph = await fetchGraphAndApply();
@@ -780,6 +797,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     fetchGraphAndApply,
     markSyncHealthy,
     pushHistorySnapshot,
+    requestGraphViewportFit,
     scheduleSyncRetry,
   ]);
 
@@ -800,9 +818,17 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     await rebuildBackendFromFlow(graph.nodes, graph.edges);
     selectedNodeIdRef.current = null;
     onNodeSelect(null);
+    requestGraphViewportFit();
     applyGraph(graph, graph);
     return graph;
-  }, [applyGraph, markLocalWrite, onCanvasEdited, onNodeSelect, pushHistorySnapshot]);
+  }, [
+    applyGraph,
+    markLocalWrite,
+    onCanvasEdited,
+    onNodeSelect,
+    pushHistorySnapshot,
+    requestGraphViewportFit,
+  ]);
 
   const getCurrentGraph = useCallback(() => {
     return createAgentGraphSnapshot(normalizeGraph({

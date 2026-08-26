@@ -80,18 +80,6 @@ export const COMPONENT_TEMPLATE_CATALOG: Record<StepType, ComponentTemplate[]> =
       defaultParameters: { url: "", method: "GET" },
       configurationFields: [field("url", "URL", "https://api.example.com/…"), field("method", "Method", "GET")],
     },
-    {
-      id: "source.kafka", value: "Kafka", label: "Stream/Kafka", ports: sourcePorts("messages", "Message[]"),
-      requiredParameters: ["brokers", "topic"],
-      defaultParameters: { brokers: "", topic: "" },
-      configurationFields: [field("brokers", "Brokers", "broker:9092"), field("topic", "Topic")],
-    },
-    {
-      id: "source.message-queue", value: "Message Queue", label: "Message Queue", ports: sourcePorts("messages", "Message[]"),
-      requiredParameters: ["url", "queue"],
-      defaultParameters: { url: "", queue: "" },
-      configurationFields: [field("url", "Connection URL", "", true), field("queue", "Queue")],
-    },
     { id: "source.user-upload", value: "User Upload", label: "User Upload", ports: sourcePorts("uploaded_files", "File[]") },
   ]),
   task: [
@@ -137,11 +125,6 @@ export const COMPONENT_TEMPLATE_CATALOG: Record<StepType, ComponentTemplate[]> =
       configurationFields: [field("filename", "Output filename", "output.json")],
     },
     {
-      id: "destination.database", value: "Database", label: "Database", ports: destinationPorts("rows", "Dataset"),
-      requiredParameters: ["connection_url", "table"], defaultParameters: { connection_url: "", table: "" },
-      configurationFields: [field("connection_url", "Connection URL", "postgresql://…", true), field("table", "Table")],
-    },
-    {
       id: "destination.object-storage", value: "Object Storage", label: "Object Storage", ports: destinationPorts("objects", "Object[]"),
       requiredParameters: ["bucket"], defaultParameters: { endpoint: "", bucket: "" },
       configurationFields: [field("endpoint", "Endpoint"), field("bucket", "Bucket"), field("prefix", "Object prefix"), field("object_name", "Object name")],
@@ -150,20 +133,6 @@ export const COMPONENT_TEMPLATE_CATALOG: Record<StepType, ComponentTemplate[]> =
       id: "destination.rest-api", value: "REST API", label: "REST API", ports: destinationPorts("request", "Object"),
       requiredParameters: ["url"], defaultParameters: { url: "", method: "POST" },
       configurationFields: [field("url", "URL", "https://api.example.com/…"), field("method", "Method", "POST")],
-    },
-    {
-      id: "destination.kafka", value: "Kafka", label: "Stream/Kafka", ports: destinationPorts("messages", "Message[]"),
-      requiredParameters: ["brokers", "topic"], defaultParameters: { brokers: "", topic: "" },
-      configurationFields: [field("brokers", "Brokers", "broker:9092"), field("topic", "Topic")],
-    },
-    {
-      id: "destination.report", value: "Report", label: "Report", ports: destinationPorts("report_data", "Dataset"),
-      defaultParameters: { format: "pdf" }, configurationFields: [field("format", "Format", "pdf")],
-    },
-    {
-      id: "destination.notification", value: "Notification", label: "Notification", ports: destinationPorts("notification", "Message"),
-      requiredParameters: ["channel"], defaultParameters: { channel: "" },
-      configurationFields: [field("channel", "Channel")],
     },
   ]),
   flow: [

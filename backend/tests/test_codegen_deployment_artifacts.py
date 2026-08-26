@@ -1,6 +1,8 @@
 import base64
 import hashlib
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -13,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from deployment_artifacts import (
     DeploymentArtifactValidationError,
+    _ARGO_PORT_RUNNER,
     _dagster_shell_command_component_source,
     _model_prefetch_source,
     build_argo_workflow_object,
@@ -245,7 +248,10 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             by_path["dagster_project/src/inlumen_dagster_project/defs/node_1_ingestion/defs.yaml"],
         )
         self.assertNotIn("do-not-export", "\n".join(by_path.values()))
-        self.assertIn("dagster_project/storage/inputs/vital_signs_short.csv", by_path)
+        self.assertIn(
+            "dagster_project/storage/inputs/node_1_ingestion/vital_signs_short.csv",
+            by_path,
+        )
         self.assertNotIn("dagster_project/storage/inputs/input_manifest.json", by_path)
         shell_command = by_path["dagster_project/src/inlumen_dagster_project/components/shell_command.py"]
         self.assertIn("PIPELINE_INPUT_DIR", shell_command)
@@ -307,8 +313,8 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertIn("bundle-manifest.json", by_path)
         self.assertIn("run-spec.json", by_path)
         self.assertNotIn("inputs/input_manifest.json", by_path)
-        self.assertIn("inputs/vital_signs_short.csv", by_path)
-        self.assertIn("inputs/sample.wav", by_path)
+        self.assertIn("inputs/node-1-ingestion/vital_signs_short.csv", by_path)
+        self.assertIn("inputs/node-1-ingestion/sample.wav", by_path)
         self.assertIn("nodes/node-1-ingestion/main.py", by_path)
         self.assertNotIn("nodes/node-1-ingestion/Dockerfile.1", by_path)
         self.assertIn("outputs/node-2-preprocessing/.gitkeep", by_path)
@@ -383,7 +389,9 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertIn("/workspace/dagster/.dagster_home", by_path["dagster/Dockerfile"])
         self.assertIn("script_path: \"../nodes/node-1-ingestion/main.py\"", by_path["dagster/src/inlumen_dagster_project/defs/node_1_ingestion/defs.yaml"])
         binary_file = next(
-            item for item in bundle["files"] if item["path"] == "inputs/sample.wav"
+            item
+            for item in bundle["files"]
+            if item["path"] == "inputs/node-1-ingestion/sample.wav"
         )
         self.assertEqual("base64", binary_file["content_encoding"])
         self.assertEqual(
@@ -395,10 +403,33 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertEqual("shared", bundle["manifest"]["argo"]["image_strategy"])
         self.assertIn("COPY nodes /workspace/nodes", by_path["argo/Dockerfile"])
         argo_workflow = by_path["argo/workflow.yaml"]
+        self.assertIn(
+            'from: "{{tasks.step-1.outputs.artifacts.data}}"',
+            argo_workflow,
+        )
+        self.assertIn('path: "/inlumen/staging/input"', argo_workflow)
+        self.assertIn('"/inlumen/staging/input"', argo_workflow)
         self.assertEqual(1, argo_workflow.count('name: "pipeline-image"'))
         self.assertNotIn("name: image-1", argo_workflow)
         run_spec = json.loads(by_path["run-spec.json"])
-        self.assertEqual("inlumen.run-spec@1", run_spec["schema_version"])
+        self.assertEqual(
+            "inlumen.deployment-bundle@2",
+            bundle["manifest"]["schema_version"],
+        )
+        self.assertEqual("inlumen.run-spec@3", run_spec["schema_version"])
+        self.assertEqual(
+            "inlumen.artifact-contract@3",
+            run_spec["artifact_contract"]["schema_version"],
+        )
+        self.assertEqual(
+            "<artifact-relative-path>",
+            run_spec["artifact_contract"]["input_layout"],
+        )
+        self.assertEqual(
+            "<artifact-relative-path>",
+            run_spec["artifact_contract"]["output_layout"],
+        )
+        self.assertFalse(run_spec["artifact_contract"]["port_namespaced"])
         self.assertEqual("uv", run_spec["runtime"]["package_manager"])
         self.assertEqual("dagster", run_spec["runtime"]["default_engine"])
         self.assertEqual("filesystem", run_spec["run_inputs"]["transport"])
@@ -408,6 +439,86 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertEqual("python-package", run_spec["nodes"][1]["execution"]["kind"])
         self.assertEqual("user", run_spec["nodes"][1]["execution"]["ownership"])
         self.assertIn("package", run_spec["nodes"][1])
+
+    def test_argo_runner_flattens_private_port_staging_before_user_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            left = root / "staging" / "left"
+            right = root / "staging" / "right"
+            left.mkdir(parents=True)
+            right.mkdir(parents=True)
+            (left / "cities.csv").write_text("city\nOslo\n", encoding="utf-8")
+            (right / "weather.json").write_text("{}", encoding="utf-8")
+            input_dir = root / "input"
+            input_dir.mkdir()
+            (input_dir / "partial.txt").write_text("old", encoding="utf-8")
+            output_dir = root / "output"
+            command = [
+                sys.executable,
+                "-c",
+                (
+                    "import os; from pathlib import Path; "
+                    "root = Path(os.environ['PIPELINE_INPUT_DIR']); "
+                    "assert (root / 'cities.csv').is_file(); "
+                    "assert (root / 'weather.json').is_file(); "
+                    "output = Path(os.environ['PIPELINE_OUTPUT_DIR']); "
+                    "output.mkdir(parents=True, exist_ok=True); "
+                    "(output / 'merged.json').write_text('{}')"
+                ),
+            ]
+            environment = {
+                **os.environ,
+                "PIPELINE_INPUT_DIR": str(input_dir),
+                "PIPELINE_OUTPUT_DIR": str(output_dir),
+            }
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    _ARGO_PORT_RUNNER,
+                    json.dumps(command),
+                    json.dumps(["result"]),
+                    json.dumps([]),
+                    json.dumps([str(left), str(right)]),
+                ],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue((input_dir / "cities.csv").is_file())
+            self.assertTrue((input_dir / "weather.json").is_file())
+            self.assertFalse((input_dir / "left").exists())
+            self.assertFalse((input_dir / "partial.txt").exists())
+            self.assertTrue((output_dir / "result" / "merged.json").is_file())
+
+    def test_executable_tasks_must_have_one_logical_output_set(self):
+        graph = self.graph()
+        graph["nodes"][1]["data"]["ports"] = {
+            "inputs": [{"id": "input", "name": "input"}],
+            "outputs": [
+                {"id": "left", "name": "left"},
+                {"id": "right", "name": "right"},
+            ],
+        }
+        builders = (
+            lambda: build_argo_workflow_object(graph, codegen_payload()),
+            lambda: build_dagster_project_files(graph, codegen_payload()),
+            lambda: build_deployment_bundle_files(
+                graph,
+                codegen_payload(),
+                targets={"argo": True, "dagster": True},
+            ),
+        )
+        for build in builders:
+            with self.subTest(builder=build):
+                with self.assertRaisesRegex(
+                    DeploymentArtifactValidationError,
+                    "exactly one logical output set",
+                ):
+                    build()
 
     def test_reviewed_models_are_prefetched_and_runtime_is_local_only(self):
         payload = codegen_payload()
@@ -576,8 +687,8 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         )
         by_path = {item["path"]: item for item in bundle["files"]}
 
-        self.assertIn("inputs/vital_signs_short.csv", by_path)
-        self.assertIn("inputs/sample.wav", by_path)
+        self.assertIn("inputs/node-1-ingestion/vital_signs_short.csv", by_path)
+        self.assertIn("inputs/node-1-ingestion/sample.wav", by_path)
         self.assertNotIn("nodes/node-1-ingestion/sample.wav", by_path)
         self.assertEqual(2, bundle["manifest"]["inputs"]["file_count"])
         self.assertEqual("source-owned", bundle["manifest"]["inputs"]["lifecycle"])
@@ -631,7 +742,96 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         paths = {item["path"] for item in bundle["files"]}
         self.assertNotIn("inputs/input_manifest.json", paths)
         for filename in {"vital_signs_short.csv", "sample.wav", *additional_inputs}:
-            self.assertIn(f"inputs/{filename}", paths)
+            self.assertIn(f"inputs/node-1-ingestion/{filename}", paths)
+
+    def test_runtime_environment_is_discovered_and_exported_for_both_engines(self):
+        payload = codegen_payload()
+        main_file = next(
+            item
+            for item in payload["deployment_files"]
+            if item["flow_id"] == "2" and item["filename"] == "main.py"
+        )
+        main_file["content"] = (
+            'import os\nendpoint = os.environ["API_ENDPOINT"]\n'
+            'api_key = os.getenv("API_KEY")\n'
+        )
+        bundle = build_deployment_bundle_files(
+            self.graph(),
+            payload,
+            targets={"argo": True, "dagster": True},
+        )
+        by_path = {item["path"]: item["content"] for item in bundle["files"]}
+        self.assertIn("API_ENDPOINT=", by_path[".env.example"])
+        self.assertIn("API_KEY=", by_path[".env.example"])
+        defs = by_path[
+            "dagster/src/inlumen_dagster_project/defs/node_2_preprocessing/defs.yaml"
+        ]
+        self.assertIn('name: "API_ENDPOINT"', defs)
+        self.assertIn("required: true", defs)
+        argo = by_path["argo/workflow.yaml"]
+        self.assertIn('name: "env-2-api-endpoint"', argo)
+        self.assertIn('name: "API_KEY"', argo)
+        run_spec = json.loads(by_path["run-spec.json"])
+        node = next(item for item in run_spec["nodes"] if item["id"] == "2")
+        self.assertEqual(
+            ["API_ENDPOINT", "API_KEY"],
+            [item["name"] for item in node["runtime_environment"]],
+        )
+
+    def test_multi_parent_ports_are_preserved_in_dagster_and_argo(self):
+        payload = deepcopy(codegen_payload())
+        dockerfile_three = deepcopy(payload["dockerfiles"][1])
+        dockerfile_three["flow_id"] = "3"
+        dockerfile_three["dockerfile_filename"] = "Dockerfile.3"
+        payload["dockerfiles"].append(dockerfile_three)
+        for item in list(payload["deployment_files"]):
+            if item["flow_id"] != "2":
+                continue
+            copied = deepcopy(item)
+            copied["flow_id"] = "3"
+            copied["path"] = str(copied["path"]).replace("nodes/2/", "nodes/3/")
+            payload["deployment_files"].append(copied)
+        graph = {
+            "nodes": [
+                {"id": "1", "data": {"label": "Left", "type": "source"}},
+                {"id": "2", "data": {"label": "Right", "type": "source"}},
+                {
+                    "id": "3",
+                    "data": {
+                        "label": "Merge",
+                        "type": "task",
+                        "ports": {
+                            "inputs": [
+                                {"id": "left", "name": "left"},
+                                {"id": "right", "name": "right"},
+                            ],
+                            "outputs": [{"id": "merged", "name": "merged"}],
+                        },
+                    },
+                },
+            ],
+            "edges": [
+                {"source": "1", "sourceHandle": "data", "target": "3", "targetHandle": "left"},
+                {"source": "2", "sourceHandle": "data", "target": "3", "targetHandle": "right"},
+            ],
+        }
+        bundle = build_deployment_bundle_files(
+            graph,
+            payload,
+            targets={"argo": True, "dagster": True},
+        )
+        by_path = {item["path"]: item["content"] for item in bundle["files"]}
+        merge_defs = by_path[
+            "dagster/src/inlumen_dagster_project/defs/node_3_merge/defs.yaml"
+        ]
+        self.assertIn('target_port: "left"', merge_defs)
+        self.assertIn('target_port: "right"', merge_defs)
+        argo = by_path["argo/workflow.yaml"]
+        self.assertIn('path: "/inlumen/staging/left"', argo)
+        self.assertIn('path: "/inlumen/staging/right"', argo)
+        self.assertIn('name: "left"', argo)
+        self.assertIn('from: "{{tasks.step-1.outputs.artifacts.data}}"', argo)
+        self.assertIn('from: "{{tasks.step-2.outputs.artifacts.data}}"', argo)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import sys
 
@@ -15,12 +16,54 @@ from filesystem_runtime import (  # noqa: E402
     filesystem_shell_component_source,
     parameter_environment,
     prepare_workspace,
+    normalize_single_output_port,
+    stage_input_bindings,
     stage_input_directories,
     task_environment,
 )
 
 
 class FilesystemRuntimeTest(unittest.TestCase):
+    def test_port_bindings_stage_connected_artifacts_at_input_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent = root / "parent"
+            (parent / "data").mkdir(parents=True)
+            (parent / "ignored").mkdir()
+            (parent / "data" / "cities.csv").write_text("city\nOslo\n")
+            (parent / "ignored" / "private.txt").write_text("hidden")
+            staged = stage_input_bindings(
+                [
+                    {
+                        "source_dir": str(parent),
+                        "source_port": "data",
+                        "target_port": "input",
+                    }
+                ],
+                root / "workspace" / "input",
+            )
+            self.assertTrue((staged / "cities.csv").is_file())
+            self.assertEqual(["cities.csv"], [path.name for path in staged.glob("*.csv")])
+            self.assertFalse((staged / "input").exists())
+            self.assertFalse((staged / "ignored").exists())
+
+    def test_single_output_port_normalizes_legacy_root_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "output"
+            output.mkdir()
+            (output / "enriched.csv").write_text("city,temp\nOslo,12\n")
+            moved = normalize_single_output_port(output, ["result"])
+            self.assertEqual(["enriched.csv"], moved)
+            self.assertTrue((output / "result" / "enriched.csv").is_file())
+
+    def test_multiple_output_ports_reject_ambiguous_root_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "output"
+            output.mkdir()
+            (output / "result.json").write_text("{}")
+            with self.assertRaisesRegex(RuntimeError, "exactly one logical output set"):
+                normalize_single_output_port(output, ["left", "right"])
+
     def test_workspace_contract_stages_artifacts_and_discovers_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -66,8 +109,36 @@ class FilesystemRuntimeTest(unittest.TestCase):
             second.mkdir()
             for directory in (first, second):
                 (directory / "shared.txt").write_text("same", encoding="utf-8")
-            staged = stage_input_directories([first, second], root / "input")
+            with patch.object(
+                Path,
+                "read_bytes",
+                side_effect=AssertionError("collision comparison must stream"),
+            ):
+                staged = stage_input_directories([first, second], root / "input")
             self.assertEqual("same", (staged / "shared.txt").read_text())
+
+    def test_failed_staging_preserves_the_previous_complete_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            destination = root / "input"
+            destination.mkdir()
+            (destination / "previous.txt").write_text("complete", encoding="utf-8")
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            (first / "collision.bin").write_bytes(b"first")
+            (second / "collision.bin").write_bytes(b"second")
+
+            with self.assertRaisesRegex(RuntimeError, "collide"):
+                stage_input_directories([first, second], destination)
+
+            self.assertEqual(
+                "complete",
+                (destination / "previous.txt").read_text(encoding="utf-8"),
+            )
+            self.assertFalse((destination / "collision.bin").exists())
+            self.assertEqual([], list(root.glob(".input.staging-*")))
 
     def test_exported_dagster_runner_uses_the_same_directory_contract(self):
         source = filesystem_shell_component_source().replace("import dagster as dg", "")
@@ -82,6 +153,20 @@ class FilesystemRuntimeTest(unittest.TestCase):
             staged = root / "workspace" / "input"
             namespace["_stage_inputs"]([upstream], staged)
             self.assertEqual("result", (staged / "result.txt").read_text())
+
+            port_output = root / "port-output"
+            (port_output / "data").mkdir(parents=True)
+            (port_output / "data" / "cities.csv").write_text("city\nOslo\n")
+            namespace["_stage_input_bindings"](
+                [{
+                    "source_dir": str(port_output),
+                    "source_port": "data",
+                    "target_port": "input",
+                }],
+                staged,
+            )
+            self.assertTrue((staged / "cities.csv").is_file())
+            self.assertFalse((staged / "input").exists())
 
     def test_parameters_are_available_by_their_exact_safe_names(self):
         environment = parameter_environment({"QUESTION": "When is support available?"})

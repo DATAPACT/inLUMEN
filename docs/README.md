@@ -98,15 +98,16 @@ The canonical Pipeline IR is JSON: nodes contain their structural kind, template
 implementation metadata, parameters, explicit ports, and project-file references;
 edges identify both endpoint nodes and port IDs. This JSON contract drives version
 storage, project import/export, agent context, and deployment generation. Executable
-bundles add an engine-neutral `inlumen.run-spec@1`; the Dagster project (including
+bundles add an engine-neutral `inlumen.run-spec@3`; the Dagster project (including
 Docker Compose) and optional Argo Workflow are adapters derived from that contract.
 YAML is not an internal representation and the canvas deliberately accepts
 JSON project imports only; generated YAML remains export-only.
 
-The normative V2 export schemas are published in
+The current flat runtime schemas are published in
+[`contracts/v3`](../contracts/v3/README.md); legacy schemas remain available in
 [`contracts/v2`](../contracts/v2/README.md). The architecture, format choices,
-compatibility rules, and current-surface inventory are recorded in
-[ADR 0001](./adr/0001-export-output-contracts.md).
+compatibility rules, and current-surface inventory are recorded in [ADR
+0001](./adr/0001-export-output-contracts.md).
 
 ## **Architecture**
 The picture below shows the component in the DATAPACT architecture.
@@ -331,10 +332,12 @@ is:
    replace fixtures for that execution; their filenames must match the root node
    contract.
 
-inLUMEN runs every Task in a standard workspace. Task code reads files from
-`PIPELINE_INPUT_DIR` and writes downstream artifacts to
-`PIPELINE_OUTPUT_DIR`. Source and Destination implementations are
-platform-owned adapters.
+inLUMEN runs every Task in a standard, flat workspace. Upstream files are
+staged directly in `PIPELINE_INPUT_DIR`, and Task code writes downstream
+artifacts directly to `PIPELINE_OUTPUT_DIR`. Port names are orchestration
+metadata and never create implicit subdirectories. Artifact-owned relative
+paths are preserved, and path collisions fail before execution. Source and
+Destination implementations are platform-owned adapters.
 The runtime inventories files after each process exits and moves them to the
 next workspace internally, so the same Task package works locally, in Docker,
 and in future distributed runners. Users upload only `main.py` and, when it is

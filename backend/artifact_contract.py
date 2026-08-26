@@ -1,5 +1,7 @@
+import re
+from dataclasses import asdict, dataclass
 from pathlib import PurePath
-from typing import Any
+from typing import Any, Iterable
 
 
 TABLE_FORMATS = frozenset(
@@ -40,6 +42,54 @@ CANONICAL_ARTIFACT_KINDS = frozenset(
         "binary",
     }
 )
+
+_PORT_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def normalize_port_id(value: Any, fallback: str = "artifact") -> str:
+    """Return a path-safe, stable port identifier."""
+    normalized = _PORT_ID_RE.sub("-", str(value or "").strip()).strip("-.")
+    return normalized or fallback
+
+
+@dataclass(frozen=True)
+class ArtifactBinding:
+    """A single engine-neutral output-port to input-port connection."""
+
+    source_node: str
+    source_port: str
+    target_node: str
+    target_port: str
+
+    def as_dict(self) -> dict[str, str]:
+        return asdict(self)
+
+
+def artifact_bindings(edges: Iterable[dict[str, Any]]) -> list[ArtifactBinding]:
+    """Normalize and deterministically order graph artifact bindings."""
+    bindings: set[ArtifactBinding] = set()
+    for edge in edges:
+        source_node = str(edge.get("source") or "").strip()
+        target_node = str(edge.get("target") or "").strip()
+        if not source_node or not target_node or source_node == target_node:
+            continue
+        bindings.add(
+            ArtifactBinding(
+                source_node=source_node,
+                source_port=normalize_port_id(edge.get("source_port"), "output"),
+                target_node=target_node,
+                target_port=normalize_port_id(edge.get("target_port"), "input"),
+            )
+        )
+    return sorted(
+        bindings,
+        key=lambda item: (
+            item.target_node,
+            item.target_port,
+            item.source_node,
+            item.source_port,
+        ),
+    )
 
 
 def normalize_artifact_format(filename: Any, file_format: Any = "") -> str:

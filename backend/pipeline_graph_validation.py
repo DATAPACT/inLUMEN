@@ -53,6 +53,20 @@ def _parameters(data: dict[str, Any]) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _has_python_entrypoint(data: dict[str, Any]) -> bool:
+    files = data.get("files") or data.get("file_buckets")
+    if not isinstance(files, list):
+        return False
+    return any(
+        (
+            str(item.get("filename") or item.get("name") or "")
+            if isinstance(item, dict)
+            else str(item or "")
+        ).strip().lower() == "main.py"
+        for item in files
+    )
+
+
 def _subpipeline(data: dict[str, Any]) -> dict[str, Any]:
     nested = data.get("subpipeline")
     if isinstance(nested, dict):
@@ -72,9 +86,10 @@ def _issue(
     *,
     node_id: str = "",
     edge_id: str = "",
+    severity: str = "error",
 ) -> dict[str, str]:
     issue = {
-        "severity": "error",
+        "severity": severity,
         "category": category,
         "code": code,
         "message": message,
@@ -157,6 +172,7 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
                         "missing-required-parameter",
                         "Condition requires parameter 'expression'.",
                         node_id=node_id,
+                        severity="warning",
                     ))
                 elif not FLOW_EXPRESSION_PATTERN.fullmatch(expression):
                     issues.append(_issue(
@@ -173,6 +189,7 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
                         "invalid-flow-concurrency",
                         "Parallel Map maximum concurrency must be a positive whole number.",
                         node_id=node_id,
+                        severity="warning" if concurrency is None else "error",
                     ))
                 if str(parameters.get("failure_policy") or "") not in {"stop", "continue"}:
                     issues.append(_issue(
@@ -180,6 +197,11 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
                         "invalid-flow-failure-policy",
                         "Parallel Map requires a valid item failure policy.",
                         node_id=node_id,
+                        severity=(
+                            "warning"
+                            if parameters.get("failure_policy") in (None, "")
+                            else "error"
+                        ),
                     ))
 
         if kind in {"source", "destination"}:
@@ -194,17 +216,21 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
                     "missing-required-parameter",
                     f"{template_label} {kind} requires parameter '{parameter_name}'.",
                     node_id=node_id,
+                    severity="warning",
                 ))
 
         if kind == "task":
             implementation = _implementation(data)
-            if not implementation:
+            if not implementation and not _has_python_entrypoint(data):
                 issues.append(_issue(
                     "implementation",
                     "missing-implementation",
-                    "Task implementation is not configured.",
+                    "No Task implementation is attached. Generate code or upload main.py.",
                     node_id=node_id,
+                    severity="warning",
                 ))
+                continue
+            if not implementation:
                 continue
             implementation_kind = str(implementation.get("kind") or "").strip().lower()
             implementation_kind = (
@@ -464,7 +490,10 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
     if node_by_id and visited != len(node_by_id):
         issues.append(_issue("graph", "cycle", "Pipeline connections must form an acyclic graph."))
 
-    return {"valid": not issues, "issues": issues}
+    return {
+        "valid": not any(issue.get("severity") == "error" for issue in issues),
+        "issues": issues,
+    }
 
 
 def validation_issue_messages(report: dict[str, Any], limit: int = 8) -> list[str]:
@@ -472,7 +501,11 @@ def validation_issue_messages(report: dict[str, Any], limit: int = 8) -> list[st
     if not isinstance(issues, list):
         return []
     messages = []
-    for issue in issues[:limit]:
+    errors = [
+        issue for issue in issues
+        if isinstance(issue, dict) and issue.get("severity") == "error"
+    ]
+    for issue in errors[:limit]:
         if not isinstance(issue, dict):
             continue
         node = str(issue.get("node_id") or "").strip()

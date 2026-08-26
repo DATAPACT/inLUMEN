@@ -690,10 +690,14 @@ export function PropertiesPanel({
       if (fileName) nameToIndex.set(fileName, idx);
     });
     const uploadedFiles = [...existing];
+    let latestGeneratedArtifact: GeneratedArtifact | undefined;
     let changedCount = 0;
     for (const f of picked) {
       try {
-        await uploadNodeFile(selectedNode.id, f, role);
+        const uploadResult = await uploadNodeFile(selectedNode.id, f, role);
+        if (uploadResult?.generated_artifact) {
+          latestGeneratedArtifact = uploadResult.generated_artifact as GeneratedArtifact;
+        }
         const uploadedRef = uploadedFileReference(selectedNode.id, f.name, role);
         const idx = nameToIndex.get(f.name);
         if (idx != null) {
@@ -712,7 +716,12 @@ export function PropertiesPanel({
     }
     if (changedCount > 0) {
       setFiles(uploadedFiles);
-      pushNodeUpdate({ files: uploadedFiles });
+      pushNodeUpdate({
+        files: uploadedFiles,
+        ...(latestGeneratedArtifact
+          ? { generated_artifact: latestGeneratedArtifact }
+          : {}),
+      });
     }
     e.target.value = "";
   };
@@ -722,10 +731,15 @@ export function PropertiesPanel({
     const fileToRemove = files[index];
     if (!fileToRemove) return;
     try {
-      await removeNodeFile(selectedNode.id, fileToRemove);
+      const removeResult = await removeNodeFile(selectedNode.id, fileToRemove);
       const updatedFiles = files.filter((_, i) => i !== index);
       setFiles(updatedFiles);
-      pushNodeUpdate({ files: updatedFiles });
+      pushNodeUpdate({
+        files: updatedFiles,
+        ...(removeResult?.generated_artifact
+          ? { generated_artifact: removeResult.generated_artifact as GeneratedArtifact }
+          : {}),
+      });
     } catch (err) {
       console.warn("[PropertiesPanel.tsx] File removal failed; keeping frontend state unchanged:", err);
     }
@@ -814,8 +828,12 @@ export function PropertiesPanel({
 
     try {
       const updatedFiles = [...files];
+      let updatedGeneratedArtifact: GeneratedArtifact | undefined;
       if (isBrowserFile(currentFile)) {
-        await uploadNodeFile(selectedNode.id, newFile, currentFileRole);
+        const uploadResult = await uploadNodeFile(selectedNode.id, newFile, currentFileRole);
+        if (uploadResult?.generated_artifact) {
+          updatedGeneratedArtifact = uploadResult.generated_artifact as GeneratedArtifact;
+        }
         updatedFiles[previewFileIndex] = uploadedFileReference(
           selectedNode.id,
           currentFileName,
@@ -823,7 +841,10 @@ export function PropertiesPanel({
         );
         setPreviewFile(newFile);
       } else {
-        await updateNodeTextFile(selectedNode.id, currentFile, editedContent);
+        const updateResult = await updateNodeTextFile(selectedNode.id, currentFile, editedContent);
+        if (updateResult?.generated_artifact) {
+          updatedGeneratedArtifact = updateResult.generated_artifact as GeneratedArtifact;
+        }
         updatedFiles[previewFileIndex] = {
           filename: currentFileName,
           bucket: getNodeFileBucket(currentFile, selectedNode.id),
@@ -832,7 +853,12 @@ export function PropertiesPanel({
       }
 
       setFiles(updatedFiles);
-      pushNodeUpdate({ files: updatedFiles });
+      pushNodeUpdate({
+        files: updatedFiles,
+        ...(updatedGeneratedArtifact
+          ? { generated_artifact: updatedGeneratedArtifact }
+          : {}),
+      });
       setPreviewContent(editedContent);
       setIsEditing(false);
     } catch (err) {
@@ -1083,6 +1109,13 @@ export function PropertiesPanel({
   };
 
   const validationReport = selectedNode?.data.generated_artifact?.validation_report;
+  const runtimeEnvironment = Array.isArray(
+    selectedNode?.data.generated_artifact?.runtime_environment,
+  )
+    ? selectedNode.data.generated_artifact.runtime_environment.filter((item) => (
+        item && typeof item === "object" && String(item.name || "").trim()
+      ))
+    : [];
   const designValidationIssues = selectedNode?.data.validation_issues || [];
   const visibleDesignValidationIssues = designValidationIssues.filter((issue) => (
     issue.category !== "ports" && issue.category !== "implementation"
@@ -1131,8 +1164,8 @@ export function PropertiesPanel({
     });
   };
   const renderParametersSection = ({
-    title = "Parameters",
-    description = "Optional values passed to code at runtime under the same name (for example, QUESTION).",
+    title = "Runtime parameters",
+    description = "Values you configure manually for the attached code. The pipeline assistant never fills this section.",
   }: {
     title?: string;
     description?: string;
@@ -1342,34 +1375,38 @@ export function PropertiesPanel({
               <InspectorSection
                 id="inspector-connection"
                 title="Connection"
-                description="Choose the boundary type. Describe the connection in chat; inLUMEN configures it while building the bundle."
+                description="Uses the inLUMEN-managed artifact boundary by default. No connector configuration is required for the high-level design."
                 status={sectionStatus("configuration")}
               >
-                <div className="space-y-2">
-                  <Label htmlFor="connector-type">Connector type</Label>
-                  <select
-                    id="connector-type"
-                    className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-                    value={currentTemplate}
-                    onChange={(event) => handleTemplateChange(event.target.value)}
-                  >
-                    {connectorTemplateGroups.map((group) => (
-                      <optgroup key={group.category} label={group.category}>
-                        {group.options.map((option) => (
-                          <option key={option.value} value={option.value}>{option.label}</option>
-                        ))}
-                      </optgroup>
-                    ))}
-                  </select>
+                <div className="rounded-md border border-emerald-500/25 bg-emerald-500/5 p-3 text-xs text-muted-foreground">
+                  <span className="font-medium text-foreground">Default boundary:</span>{" "}
+                  Sources expose supplied run artifacts and Destinations preserve the final artifacts.
                 </div>
                 <details className="rounded-md border border-border bg-muted/10">
                   <summary className="cursor-pointer px-3 py-2 text-xs font-medium">
-                    Advanced connection settings
+                    Advanced connector configuration
                   </summary>
-                  <div className="border-t border-border p-2">
+                  <div className="space-y-3 border-t border-border p-3">
+                    <div className="space-y-2">
+                      <Label htmlFor="connector-type">Connector type</Label>
+                      <select
+                        id="connector-type"
+                        className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                        value={currentTemplate}
+                        onChange={(event) => handleTemplateChange(event.target.value)}
+                      >
+                        {connectorTemplateGroups.map((group) => (
+                          <optgroup key={group.category} label={group.category}>
+                            {group.options.map((option) => (
+                              <option key={option.value} value={option.value}>{option.label}</option>
+                            ))}
+                          </optgroup>
+                        ))}
+                      </select>
+                    </div>
                     {renderParametersSection({
                       title: "Connection settings",
-                      description: "Optional overrides. Credentials are stored securely and are never included in the pipeline graph or bundle.",
+                      description: "Advanced overrides. Credentials are stored securely and are never included in the pipeline graph or bundle.",
                     })}
                   </div>
                 </details>
@@ -1470,6 +1507,39 @@ export function PropertiesPanel({
 
             {canManageImplementation && renderParametersSection()}
 
+            {canManageImplementation && runtimeEnvironment.length > 0 && (
+              <InspectorSection
+                id="inspector-runtime-environment"
+                title="Environment variables detected"
+                description="Read-only requirements discovered from the attached Python script. This does not create parameters or store values."
+                status={runtimeEnvironment.some((item) => item.required) ? "warning" : undefined}
+              >
+                <div className="space-y-2">
+                  {runtimeEnvironment.map((item) => (
+                    <div
+                      key={String(item.name)}
+                      className="flex items-start justify-between gap-3 rounded-md border border-amber-500/25 bg-amber-500/5 p-2"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate font-mono text-xs font-medium">{item.name}</p>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          {item.description || "Referenced by main.py at runtime."}
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 gap-1">
+                        <Badge variant="outline" className="text-[10px]">
+                          {item.required ? "Required" : "Optional"}
+                        </Badge>
+                        {item.secret && (
+                          <Badge variant="outline" className="text-[10px]">Sensitive</Badge>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </InspectorSection>
+            )}
+
             {canManageImplementation && (
               <InspectorSection
                 id="inspector-implementation"
@@ -1515,7 +1585,7 @@ export function PropertiesPanel({
                 </p>
                 <div className="rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
                   <p className="font-medium text-foreground">Task runtime contract</p>
-                  <p className="mt-1">Your code runs with a standard workspace. Read input files from <code className="rounded bg-background px-1">PIPELINE_INPUT_DIR</code> and write every result for downstream nodes to <code className="rounded bg-background px-1">PIPELINE_OUTPUT_DIR</code>.</p>
+                  <p className="mt-1">Your code runs with a flat standard workspace. Upstream files are placed directly in <code className="rounded bg-background px-1">PIPELINE_INPUT_DIR</code>; write every result directly to <code className="rounded bg-background px-1">PIPELINE_OUTPUT_DIR</code>. Port names never create implicit subdirectories.</p>
                 </div>
               </InspectorSection>
             )}

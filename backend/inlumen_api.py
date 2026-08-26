@@ -50,6 +50,7 @@ from object_client import dispatch_object_request
 from provenance_provo import build_prov_o_jsonld, provenance_prov_o_filename
 from provenance_report import build_provenance_pdf, provenance_report_filename
 from public_api import create_public_api_blueprint
+from runtime_environment import discover_runtime_environment, runtime_environment_from_files
 from runtime_config import add_cors_headers, get_service_port
 from step_types import normalize_step_type
 
@@ -104,10 +105,10 @@ PIPELINE_RUNTIME_ATTACHMENT_INSTRUCTION = f"""{PIPELINE_RUNTIME_BEHAVIOR_INSTRUC
 Create the files needed to run every pipeline node.
 For each flow_id, return main.py and requirements.txt. Leave requirements.txt empty when the script only uses the Python 3.11 standard library.
 When a node runs, the platform provides a standard workspace through
-PIPELINE_INPUT_DIR and PIPELINE_OUTPUT_DIR. Read input files recursively from
-PIPELINE_INPUT_DIR and write every downstream artifact beneath
-PIPELINE_OUTPUT_DIR. Keep connected nodes consistent about output filenames and
-formats.
+PIPELINE_INPUT_DIR and PIPELINE_OUTPUT_DIR. Read upstream files directly from
+PIPELINE_INPUT_DIR and write every downstream artifact directly beneath
+PIPELINE_OUTPUT_DIR. Port names never create implicit workspace directories.
+Keep connected nodes consistent about output filenames and formats.
 Each main.py must be a finite, non-interactive batch program: do not call input(), start a server or UI, watch for files, or loop forever. Validate required input files before loading large models or doing other slow setup, then exit when the output files are written.
 Associate each returned file with its flow_id so inLUMEN can attach it to the correct node."""
 EXTERNAL_AI_RUNTIME_RESPONSE_INSTRUCTION = f"""{PIPELINE_RUNTIME_BEHAVIOR_INSTRUCTION}
@@ -1048,6 +1049,7 @@ def _persist_codegen_artifact(
     graph: dict[str, Any],
 ) -> dict[str, Any]:
     files = artifact.get("files") if isinstance(artifact.get("files"), list) else []
+    runtime_environment = runtime_environment_from_files(files)
     new_filenames = {
         str(item.get("filename") or "").strip()
         for item in files
@@ -1153,6 +1155,7 @@ def _persist_codegen_artifact(
         or _codegen_configuration_hash(graph, node_id, artifact),
         "files": stored_files,
         "file_hashes": file_hashes,
+        "runtime_environment": runtime_environment,
         "provenance": {
             **(
                 artifact.get("provenance")
@@ -1178,8 +1181,12 @@ def _persist_codegen_artifact(
     return generated_artifact
 
 
-def _mark_codegen_artifact_user_modified(node_id: str) -> None:
-    """Best-effort ownership marker used by generation overwrite protection."""
+def _mark_codegen_artifact_user_modified(
+    node_id: str,
+    *,
+    python_source: str | None = None,
+) -> dict[str, Any] | None:
+    """Mark code as user-owned and refresh advisory env-var analysis."""
     try:
         graph_response = _proxy(
             dispatch_graph_request,
@@ -1202,10 +1209,17 @@ def _mark_codegen_artifact_user_modified(node_id: str) -> None:
         artifact = (
             deepcopy(data.get("generated_artifact"))
             if isinstance(data.get("generated_artifact"), dict)
-            else None
+            else {}
         )
-        if artifact is None:
-            return
+        if not artifact:
+            artifact = {
+                "status": "current",
+                "generator": "user-upload",
+            }
+        if python_source is not None:
+            artifact["runtime_environment"] = discover_runtime_environment(
+                python_source
+            )
         artifact["provenance"] = {
             **(
                 artifact.get("provenance")
@@ -1226,10 +1240,11 @@ def _mark_codegen_artifact_user_modified(node_id: str) -> None:
             },
         )
         update_response.raise_for_status()
+        return artifact
     except Exception:
         # File writes remain authoritative even if the ownership annotation
         # cannot be recorded because a dependency is temporarily unavailable.
-        return
+        return None
 
 
 def _persist_codegen_run_report(run_report: Any) -> dict[str, Any] | None:
@@ -2887,6 +2902,7 @@ def node_files(node_id: str):
         if file_role not in {"code", "data"}:
             file_role = ""
         uploaded_filename = str(uploaded.filename or "").strip()
+        python_source: str | None = None
         node_type, graph_error = _file_owner_node_type(node_id)
         if graph_error is not None:
             return _response_from_upstream(graph_error)
@@ -2916,6 +2932,9 @@ def node_files(node_id: str):
                     "unsupported Task runtime file",
                     "Upload main.py and, only when needed, requirements.txt.",
                 )
+            if lower_name == "main.py":
+                python_source = uploaded.stream.read().decode("utf-8", errors="replace")
+                uploaded.stream.seek(0)
         if file_role == "data" and node_type != "source":
             return _json_error(
                 422,
@@ -2982,12 +3001,21 @@ def node_files(node_id: str):
         if not graph_response.ok:
             return _response_from_upstream(graph_response)
 
+        generated_artifact = None
         if file_role == "code" or _is_codegen_runtime_file(uploaded_filename):
-            _mark_codegen_artifact_user_modified(node_id)
+            generated_artifact = _mark_codegen_artifact_user_modified(
+                node_id,
+                python_source=python_source,
+            )
 
         return jsonify({
             "file": _upstream_json(storage_response),
             "graph": _upstream_json(graph_response),
+            **(
+                {"generated_artifact": generated_artifact}
+                if generated_artifact is not None
+                else {}
+            ),
         }), 200
 
     filename = _filename_from_request()
@@ -3020,12 +3048,21 @@ def node_files(node_id: str):
     if not graph_response.ok:
         return _response_from_upstream(graph_response)
 
+    generated_artifact = None
     if _is_codegen_runtime_file(filename):
-        _mark_codegen_artifact_user_modified(node_id)
+        generated_artifact = _mark_codegen_artifact_user_modified(
+            node_id,
+            python_source="" if filename.lower() == "main.py" else None,
+        )
 
     return jsonify({
         "file": _upstream_json(storage_response),
         "graph": _upstream_json(graph_response),
+        **(
+            {"generated_artifact": generated_artifact}
+            if generated_artifact is not None
+            else {}
+        ),
     }), 200
 
 
@@ -3064,9 +3101,13 @@ def node_text_file(node_id: str):
             "content": content,
         },
     )
+    generated_artifact = None
     if storage_response.ok:
         if _is_codegen_runtime_file(filename):
-            _mark_codegen_artifact_user_modified(node_id)
+            generated_artifact = _mark_codegen_artifact_user_modified(
+                node_id,
+                python_source=content if filename.lower() == "main.py" else None,
+            )
         _proxy(
             dispatch_graph_request,
             "neo4j_record_provenance_event",
@@ -3082,7 +3123,16 @@ def node_text_file(node_id: str):
                 },
             },
         )
-    return _response_from_upstream(storage_response)
+    if not storage_response.ok:
+        return _response_from_upstream(storage_response)
+    return jsonify({
+        "file": _upstream_json(storage_response),
+        **(
+            {"generated_artifact": generated_artifact}
+            if generated_artifact is not None
+            else {}
+        ),
+    }), storage_response.status_code
 
 
 if __name__ == "__main__":

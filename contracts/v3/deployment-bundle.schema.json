@@ -1,22 +1,23 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:inlumen:schema:deployment-bundle:1",
+  "$id": "urn:inlumen:schema:deployment-bundle:2",
   "title": "inLUMEN Deployment Bundle Manifest",
   "type": "object",
   "required": ["schema_version", "artifact_contract", "run_spec", "targets", "readme", "node_order", "nodes", "connections", "inputs", "outputs"],
   "properties": {
-    "schema_version": { "const": "inlumen.deployment-bundle@1" },
+    "schema_version": { "const": "inlumen.deployment-bundle@2" },
     "artifact_contract": {
       "type": "object",
-      "required": ["schema_version", "transport", "input_environment", "output_environment", "recursive", "input_layout", "output_layout", "run_isolation", "source_agnostic", "connector_agnostic"],
+      "required": ["schema_version", "transport", "input_environment", "output_environment", "recursive", "input_layout", "output_layout", "port_namespaced", "run_isolation", "source_agnostic", "connector_agnostic"],
       "properties": {
-        "schema_version": { "const": "inlumen.artifact-contract@2" },
+        "schema_version": { "const": "inlumen.artifact-contract@3" },
         "transport": { "const": "filesystem" },
         "input_environment": { "const": "PIPELINE_INPUT_DIR" },
         "output_environment": { "const": "PIPELINE_OUTPUT_DIR" },
         "recursive": { "const": true },
-        "input_layout": { "const": "<input_port>/..." },
-        "output_layout": { "const": "<output_port>/..." },
+        "input_layout": { "const": "<artifact-relative-path>" },
+        "output_layout": { "const": "<artifact-relative-path>" },
+        "port_namespaced": { "const": false },
         "run_isolation": { "const": "<run_id>" },
         "source_agnostic": { "const": true },
         "connector_agnostic": { "const": true }
