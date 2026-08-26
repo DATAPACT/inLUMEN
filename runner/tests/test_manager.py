@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from app.artifacts import PipelineArtifactStore
 from app.manager import PipelineRunConflict, PipelineRunManager
 from app.models import CreatePipelineRunRequest
 from app.store import PipelineRunStore
@@ -26,7 +27,20 @@ class FakeDagsterExecutor:
                 "ok": False,
                 "validation_report": {
                     "errors": ["Dagster asset materialization failed."],
-                    "dagster": {"steps": [{"output": "node exploded"}]},
+                    "dagster": {
+                        "steps": [
+                            {"name": "image_build", "output": "image ready"},
+                            {
+                                "name": "materialize",
+                                "output": (
+                                    "dagster - node_1_task - STEP_START - running\n"
+                                    "dagster - node_1_task - STEP_FAILURE - failed\n"
+                                    "RuntimeError: Node script node_1_task failed with exit code 1:\\n"
+                                    "FileNotFoundError: No CSV file found directly in PIPELINE_INPUT_DIR"
+                                ),
+                            },
+                        ]
+                    },
                 },
                 "run_outputs": [],
             }
@@ -166,6 +180,31 @@ async def test_cancellation_signals_dagster_executor_and_finishes_cancelled():
 
 
 @pytest.mark.asyncio
+async def test_clear_all_cancels_active_runs_and_purges_records_and_artifacts(tmp_path):
+    executor = FakeDagsterExecutor(delay=10)
+    store = PipelineRunStore(str(tmp_path / "runs.sqlite3"))
+    manager = PipelineRunManager(
+        store,
+        adapter="dagster",
+        executor=executor,
+        artifact_store=PipelineArtifactStore(tmp_path / "artifacts"),
+    )
+    queued, _created = await manager.start(request())
+
+    result = await manager.clear_all()
+
+    assert result == {
+        "removed_runs": 1,
+        "cancelled_runs": 1,
+        "removed_artifact_roots": 1,
+    }
+    assert executor.cancelled == [queued["run_id"]]
+    assert manager.get(queued["run_id"]) is None
+    assert manager.list() == []
+    assert list(manager.artifact_store.root.iterdir()) == []
+
+
+@pytest.mark.asyncio
 async def test_dagster_failure_preserves_execution_log_and_error():
     executor = FakeDagsterExecutor(succeeds=False)
     manager = PipelineRunManager(
@@ -177,10 +216,20 @@ async def test_dagster_failure_preserves_execution_log_and_error():
     failed = manager.get(queued["run_id"])
     assert failed["status"] == "failed"
     assert failed["error"]["code"] == "dagster_execution_failed"
-    messages = [
-        event["message"] for event in manager.events(queued["run_id"])["events"]
-    ]
-    assert "node exploded" in messages
+    assert failed["error"]["message"].startswith(
+        "Task: FileNotFoundError: No CSV file found"
+    )
+    events = manager.events(queued["run_id"])["events"]
+    assert any(event["type"] == "runtime.log" for event in events)
+    assert any(
+        event["type"] == "node.failed" and event["node_id"] == "node_1_task"
+        for event in events
+    )
+    assert any(
+        "No CSV file found" in str(event["message"])
+        for event in events
+        if event["type"] == "dagster.log"
+    )
 
 
 @pytest.mark.asyncio

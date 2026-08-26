@@ -341,6 +341,7 @@ def _isolated_dagster_execution(
             prefetch_environment = {
                 **(runtime_secrets or {}),
                 "HF_HOME": "/models/huggingface",
+                "HF_HUB_CACHE": "/models/huggingface",
                 "HF_HUB_DISABLE_XET": os.getenv("HF_HUB_DISABLE_XET", "1"),
                 "HF_HUB_ETAG_TIMEOUT": os.getenv("HF_HUB_ETAG_TIMEOUT", "30"),
                 "HF_HUB_DOWNLOAD_TIMEOUT": os.getenv(
@@ -416,6 +417,7 @@ def _isolated_dagster_execution(
             **(
                 {
                     "HF_HOME": "/models/huggingface",
+                    "HF_HUB_CACHE": "/models/huggingface",
                     "HF_HUB_OFFLINE": "1",
                     "TRANSFORMERS_OFFLINE": "1",
                     "INLUMEN_MODEL_ROOT": "/models",
@@ -610,6 +612,7 @@ def validate_dagster_project(
         prefetch_env = {
             **env,
             "HF_HOME": str(model_root / "huggingface"),
+            "HF_HUB_CACHE": str(model_root / "huggingface"),
             "HF_HUB_DISABLE_XET": os.getenv("HF_HUB_DISABLE_XET", "1"),
             "HF_HUB_ETAG_TIMEOUT": os.getenv("HF_HUB_ETAG_TIMEOUT", "30"),
             "HF_HUB_DOWNLOAD_TIMEOUT": os.getenv("HF_HUB_DOWNLOAD_TIMEOUT", "600"),
@@ -639,6 +642,7 @@ def validate_dagster_project(
         env.update(
             {
                 "HF_HOME": prefetch_env["HF_HOME"],
+                "HF_HUB_CACHE": prefetch_env["HF_HUB_CACHE"],
                 "HF_HUB_OFFLINE": "1",
                 "TRANSFORMERS_OFFLINE": "1",
                 "INLUMEN_ACCELERATOR": prefetch_env["INLUMEN_ACCELERATOR"],

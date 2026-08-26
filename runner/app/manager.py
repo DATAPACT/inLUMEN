@@ -5,6 +5,7 @@ import base64
 import hashlib
 import io
 import json
+import re
 import tempfile
 import uuid
 import zipfile
@@ -19,6 +20,16 @@ from .store import PipelineRunStore
 
 TERMINAL_STATUSES = {"succeeded", "partial", "failed", "cancelled"}
 ACTIVE_STATUSES = {"queued", "preparing", "running", "cancelling"}
+NODE_EVENT_PATTERN = re.compile(
+    r"-\s+(?P<node>node_[A-Za-z0-9_]+)\s+-\s+"
+    r"STEP_(?P<outcome>START|SUCCESS|FAILURE)\b"
+)
+PYTHON_ERROR_PATTERN = re.compile(
+    r"^(?P<kind>FileNotFoundError|ModuleNotFoundError|ImportError|PermissionError|"
+    r"ConnectionError|TimeoutError|OSError|ValueError|KeyError|TypeError|RuntimeError)"
+    r":\s*(?P<message>.+)$",
+    re.MULTILINE,
+)
 
 
 class DagsterExecutor(Protocol):
@@ -281,6 +292,36 @@ class PipelineRunManager:
             self._finish_cancelled(self.store.get(run_id) or record)
         return public_run_record(self.store.get(run_id) or record)
 
+    async def clear_all(self) -> dict[str, int]:
+        """Cancel active work and purge all lifecycle records and artifacts."""
+        async with self._submission_lock:
+            records = self.store.list(limit=None)
+            active_ids = [
+                str(record.get("run_id") or "")
+                for record in records
+                if record.get("status") in ACTIVE_STATUSES
+            ]
+            if self.executor is not None:
+                for run_id in active_ids:
+                    try:
+                        await self.executor.cancel(run_id)
+                    except Exception:
+                        # Clear all is authoritative. A stale remote execution
+                        # must not preserve user-visible lifecycle metadata.
+                        pass
+            active_tasks = [self.tasks[run_id] for run_id in active_ids if run_id in self.tasks]
+            for task in active_tasks:
+                task.cancel()
+            if active_tasks:
+                await asyncio.gather(*active_tasks, return_exceptions=True)
+            removed_artifact_roots = self.artifact_store.clear()
+            removed_runs = self.store.clear()
+            return {
+                "removed_runs": removed_runs,
+                "cancelled_runs": len(active_ids),
+                "removed_artifact_roots": removed_artifact_roots,
+            }
+
     async def reconcile_interrupted(self) -> int:
         count = 0
         for record in self.store.list(limit=None):
@@ -342,7 +383,7 @@ class PipelineRunManager:
             if record is None:
                 runtime_secrets.clear()
                 return
-            self._append_dagster_logs(
+            root_failure = self._append_dagster_logs(
                 record,
                 response,
                 secret_values=[value for value in runtime_secrets.values() if value],
@@ -359,10 +400,17 @@ class PipelineRunManager:
                 errors = validation_report.get("errors") or [
                     "Dagster pipeline execution failed."
                 ]
+                message = root_failure or str(errors[0])
                 error = {
                     "code": "dagster_execution_failed",
-                    "message": str(errors[0]),
-                    "details": {"errors": errors},
+                    "message": message,
+                    "details": {
+                        "errors": (
+                            [message, *errors]
+                            if message not in errors
+                            else errors
+                        )
+                    },
                 }
                 self._finish_failed(record, error)
                 return
@@ -406,10 +454,12 @@ class PipelineRunManager:
         response: dict[str, Any],
         *,
         secret_values: list[str],
-    ) -> None:
+    ) -> str:
         validation = response.get("validation_report")
         dagster = validation.get("dagster") if isinstance(validation, dict) else None
         steps = dagster.get("steps") if isinstance(dagster, dict) else None
+        root_failure = ""
+        emitted_node_events: set[tuple[str, str]] = set()
         for index, step in enumerate(steps or [], start=1):
             if not isinstance(step, dict):
                 continue
@@ -418,8 +468,74 @@ class PipelineRunManager:
             summary = output[-12000:] if output else command or f"Dagster step {index}"
             for secret_value in secret_values:
                 summary = summary.replace(secret_value, "[REDACTED]")
-            self._append_event(record, "dagster.log", "running", summary)
+            step_name = str(step.get("name") or "").strip()
+            technical_type = (
+                "dagster.log"
+                if step_name in {"materialize", "dagster_materialize"}
+                else "runtime.log"
+            )
+            self._append_event(record, technical_type, "running", summary)
+            decoded_output = output.replace("\\n", "\n")
+            for match in NODE_EVENT_PATTERN.finditer(decoded_output):
+                node_id = match.group("node")
+                outcome = match.group("outcome").lower()
+                key = (node_id, outcome)
+                if key in emitted_node_events:
+                    continue
+                emitted_node_events.add(key)
+                event_status = (
+                    "failed" if outcome == "failure" else "succeeded"
+                    if outcome == "success" else "running"
+                )
+                action = {
+                    "start": "started",
+                    "success": "completed",
+                    "failure": "failed",
+                }[outcome]
+                self._append_event(
+                    record,
+                    f"node.{action}",
+                    event_status,
+                    f"{self._node_display_name(node_id)} {action}.",
+                    node_id=node_id,
+                )
+            failure = self._root_failure(decoded_output)
+            if failure:
+                failed_node_match = next(
+                    (
+                        match
+                        for match in NODE_EVENT_PATTERN.finditer(decoded_output)
+                        if match.group("outcome") == "FAILURE"
+                    ),
+                    None,
+                )
+                root_failure = (
+                    f"{self._node_display_name(failed_node_match.group('node'))}: {failure}"
+                    if failed_node_match
+                    else failure
+                )
         self.store.save(record)
+        return root_failure
+
+    @staticmethod
+    def _node_display_name(node_id: str) -> str:
+        name = re.sub(r"^node_\d+_?", "", node_id).replace("_", " ").strip()
+        return name.title() or node_id
+
+    @staticmethod
+    def _root_failure(output: str) -> str:
+        candidates = []
+        for match in PYTHON_ERROR_PATTERN.finditer(output):
+            kind = match.group("kind")
+            message = match.group("message").strip().strip('"')
+            if (
+                not message
+                or "Error occurred while executing op" in message
+                or message.startswith("Node script ")
+            ):
+                continue
+            candidates.append(f"{kind}: {message}")
+        return candidates[-1][:600] if candidates else ""
 
     def _bundle_files(self, record: dict[str, Any]) -> list[dict[str, Any]]:
         reference = str(record.get("_bundle_reference") or "")
@@ -512,6 +628,8 @@ class PipelineRunManager:
         event_type: str,
         status: str | None,
         message: str | None,
+        *,
+        node_id: str | None = None,
     ) -> None:
         cursor = int(record.get("event_cursor") or 0) + 1
         record["event_cursor"] = cursor
@@ -522,6 +640,6 @@ class PipelineRunManager:
                 "type": event_type,
                 "status": status,
                 "message": message,
-                "node_id": None,
+                "node_id": node_id,
             }
         )

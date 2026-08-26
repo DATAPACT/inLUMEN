@@ -74,13 +74,16 @@ class PipelineRunApiTest(unittest.TestCase):
         runner.side_effect = [
             {"runs": []},
             {"run_id": "run-1", "status": "cancelling"},
+            {"removed_runs": 1, "cancelled_runs": 0},
         ]
 
         listed = self.client.get("/api/pipeline-runs?limit=500")
         cancelled = self.client.delete("/api/pipeline-runs/run-1")
+        cleared = self.client.delete("/api/pipeline-runs")
 
         self.assertEqual(200, listed.status_code)
         self.assertEqual(200, cancelled.status_code)
+        self.assertEqual(200, cleared.status_code)
         self.assertEqual(
             ("GET", "/v1/pipeline-runs"),
             runner.call_args_list[0].args,
@@ -89,4 +92,8 @@ class PipelineRunApiTest(unittest.TestCase):
         self.assertEqual(
             ("DELETE", "/v1/pipeline-runs/run-1"),
             runner.call_args_list[1].args,
+        )
+        self.assertEqual(
+            ("DELETE", "/v1/pipeline-runs"),
+            runner.call_args_list[2].args,
         )

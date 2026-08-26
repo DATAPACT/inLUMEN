@@ -1,5 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Ban, Download, Loader2, PlayCircle, RefreshCw } from 'lucide-react';
+import {
+  AlertCircle,
+  Ban,
+  Check,
+  Circle,
+  Download,
+  FileOutput,
+  Loader2,
+  PlayCircle,
+  RefreshCw,
+  TerminalSquare,
+} from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import {
@@ -18,6 +29,7 @@ import {
 } from '@/features/runs/pipelineRuns';
 import { cn } from '@/lib/utils';
 
+type StageState = 'pending' | 'active' | 'complete' | 'error';
 
 const statusClass = (status: PipelineRunRecord['status']) => {
   if (status === 'succeeded') return 'text-emerald-400';
@@ -34,6 +46,46 @@ const mergeRun = (runs: PipelineRunRecord[], next: PipelineRunRecord) => [
 const newIdempotencyKey = () =>
   globalThis.crypto?.randomUUID?.() || `run-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
+const formatDate = (value?: string | null) => {
+  if (!value) return '';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.valueOf())
+    ? ''
+    : parsed.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+};
+
+const stageStates = (status: PipelineRunRecord['status']): StageState[] => {
+  if (status === 'queued') return ['active', 'pending', 'pending', 'pending'];
+  if (status === 'preparing') return ['complete', 'active', 'pending', 'pending'];
+  if (status === 'running' || status === 'cancelling') {
+    return ['complete', 'complete', 'active', 'pending'];
+  }
+  if (status === 'succeeded') return ['complete', 'complete', 'complete', 'complete'];
+  if (status === 'cancelled') return ['complete', 'complete', 'pending', 'pending'];
+  return ['complete', 'complete', 'error', 'pending'];
+};
+
+const failureHint = (message: string) => {
+  const normalized = message.toLowerCase();
+  if (normalized.includes('huggingface') || normalized.includes('cached files')) {
+    return 'The model was not available in the isolated runtime. Verify that the uploaded code uses a reviewed, pinned model so inLUMEN can prefetch it.';
+  }
+  if (normalized.includes('no csv') || normalized.includes('no .wav') || normalized.includes('pipeline_input_dir')) {
+    return 'Check that the source node has the expected input file and that the task reads it directly from PIPELINE_INPUT_DIR.';
+  }
+  if (normalized.includes('environment variable') || normalized.includes('keyerror')) {
+    return 'Open the task Inspector and configure the runtime environment value reported by the script.';
+  }
+  return 'Open Technical logs for the full Dagster trace. The tested snapshot is also available below for local debugging.';
+};
+
+const StageIcon = ({ state }: { state: StageState }) => {
+  if (state === 'complete') return <Check className="h-3.5 w-3.5" />;
+  if (state === 'active') return <Loader2 className="h-3.5 w-3.5 animate-spin" />;
+  if (state === 'error') return <AlertCircle className="h-3.5 w-3.5" />;
+  return <Circle className="h-3.5 w-3.5" />;
+};
+
 export const PipelineRunPanel = () => {
   const [capabilities, setCapabilities] = useState<RunnerCapabilities | null>(null);
   const [runs, setRuns] = useState<PipelineRunRecord[]>([]);
@@ -49,12 +101,12 @@ export const PipelineRunPanel = () => {
   );
   const selectedRunIdForRefresh = selectedRun?.run_id || '';
   const selectedRunStatus = selectedRun?.status;
-  const lifecycleEvents = useMemo(
-    () => events.filter((event) => event.type !== 'dagster.log'),
+  const nodeEvents = useMemo(
+    () => events.filter((event) => event.type.startsWith('node.')),
     [events],
   );
-  const dagsterLogs = useMemo(
-    () => events.filter((event) => event.type === 'dagster.log'),
+  const technicalLogs = useMemo(
+    () => events.filter((event) => event.type.endsWith('.log')),
     [events],
   );
 
@@ -139,13 +191,17 @@ export const PipelineRunPanel = () => {
     }
   };
 
+  const stages = selectedRun ? stageStates(selectedRun.status) : [];
+  const stageLabels = ['Snapshot', 'Runtime', 'Pipeline', 'Results'];
+  const outputs = selectedRun?.result?.outputs || [];
+
   return (
     <div className="min-w-0 overflow-hidden rounded-lg border border-border p-3">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex items-start justify-between gap-2">
         <div>
-          <h3 className="text-sm font-medium">Background pipeline runs</h3>
+          <h3 className="text-sm font-medium">Run pipeline</h3>
           <p className="mt-1 text-xs text-muted-foreground">
-            Runs are owned by the runner service and continue after this browser closes.
+            Test the current saved pipeline in the background with Dagster.
           </p>
         </div>
         <Button
@@ -160,14 +216,8 @@ export const PipelineRunPanel = () => {
         </Button>
       </div>
 
-      {capabilities?.message && (
-        <div className="mt-3 rounded-md border border-border bg-muted/20 p-2 text-xs text-muted-foreground">
-          {capabilities.message}
-        </div>
-      )}
-
       <Button
-        className="mt-3 h-auto min-h-10 w-full whitespace-normal px-3 py-2"
+        className="mt-3 h-10 w-full"
         onClick={() => { void handleStart(); }}
         disabled={submitting || loading || !capabilities?.execution_available}
       >
@@ -176,41 +226,65 @@ export const PipelineRunPanel = () => {
         ) : (
           <PlayCircle className="mr-2 h-4 w-4" />
         )}
-        Run saved pipeline with Dagster
+        Run current pipeline
       </Button>
+      <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+        A fixed snapshot is created at launch. You can close the browser while it runs.
+      </p>
 
-      {error && <div className="mt-3 text-xs text-red-400">{error}</div>}
+      {!capabilities?.execution_available && capabilities?.message && (
+        <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-200">
+          {capabilities.message}
+        </div>
+      )}
+      {error && (
+        <div className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-300">
+          {error}
+        </div>
+      )}
 
       {runs.length > 0 && (
-        <div className="mt-3 space-y-1">
-          {runs.slice(0, 5).map((run) => (
-            <button
-              type="button"
-              key={run.run_id}
-              onClick={() => setSelectedRunId(run.run_id)}
-              className={cn(
-                'flex w-full items-center justify-between rounded-md border px-2 py-2 text-left text-xs',
-                selectedRun?.run_id === run.run_id
-                  ? 'border-primary/50 bg-primary/10'
-                  : 'border-border bg-muted/20',
-              )}
-            >
-              <span className="font-mono">{run.run_id.slice(0, 8)}</span>
-              <span className={cn('font-medium capitalize', statusClass(run.status))}>
-                {run.status}
-              </span>
-            </button>
-          ))}
+        <div className="mt-4">
+          <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Recent runs
+          </div>
+          <div className="space-y-1">
+            {runs.slice(0, 5).map((run) => (
+              <button
+                type="button"
+                key={run.run_id}
+                onClick={() => setSelectedRunId(run.run_id)}
+                className={cn(
+                  'flex w-full items-center justify-between gap-2 rounded-md border px-2 py-2 text-left text-xs',
+                  selectedRun?.run_id === run.run_id
+                    ? 'border-primary/50 bg-primary/10'
+                    : 'border-border bg-muted/20 hover:bg-muted/40',
+                )}
+              >
+                <span className="min-w-0">
+                  <span className="block truncate font-medium">
+                    {run.snapshot.pipeline_version || 'Pipeline'} · {run.snapshot.node_count} nodes
+                  </span>
+                  <span className="block text-[10px] text-muted-foreground">
+                    {formatDate(run.created_at)} · {run.run_id.slice(0, 8)}
+                  </span>
+                </span>
+                <span className={cn('shrink-0 font-medium capitalize', statusClass(run.status))}>
+                  {run.status}
+                </span>
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
       {selectedRun && (
-        <div className="mt-3 rounded-md border border-border bg-muted/20 p-2 text-xs">
-          <div className="flex items-center justify-between gap-2">
+        <div className="mt-3 rounded-md border border-border bg-muted/20 p-2.5 text-xs">
+          <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
-              <div className="truncate font-medium">Run {selectedRun.run_id}</div>
-              <div className="mt-1 text-muted-foreground">
-                {selectedRun.snapshot.node_count} nodes · {selectedRun.engine}
+              <div className="font-medium">Run status</div>
+              <div className={cn('mt-0.5 font-medium capitalize', statusClass(selectedRun.status))}>
+                {selectedRun.status}
               </div>
             </div>
             {isActivePipelineRun(selectedRun.status) && (
@@ -226,63 +300,124 @@ export const PipelineRunPanel = () => {
               </Button>
             )}
           </div>
+
+          <div className="mt-3 grid grid-cols-4 gap-1" aria-label="Run progress">
+            {stageLabels.map((label, index) => (
+              <div key={label} className="min-w-0 text-center">
+                <div
+                  className={cn(
+                    'mx-auto flex h-7 w-7 items-center justify-center rounded-full border',
+                    stages[index] === 'complete' && 'border-emerald-500/40 bg-emerald-500/15 text-emerald-400',
+                    stages[index] === 'active' && 'border-amber-500/40 bg-amber-500/15 text-amber-300',
+                    stages[index] === 'error' && 'border-red-500/40 bg-red-500/15 text-red-400',
+                    stages[index] === 'pending' && 'border-border text-muted-foreground',
+                  )}
+                >
+                  <StageIcon state={stages[index]} />
+                </div>
+                <div className="mt-1 truncate text-[10px] text-muted-foreground">{label}</div>
+              </div>
+            ))}
+          </div>
+
           {selectedRun.error?.message && (
-            <div className="mt-2 text-red-400">{selectedRun.error.message}</div>
+            <div className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 p-2 text-red-200">
+              <div className="flex items-center gap-1.5 font-medium">
+                <AlertCircle className="h-3.5 w-3.5" />
+                What went wrong
+              </div>
+              <div className="mt-1 break-words">{selectedRun.error.message}</div>
+              <div className="mt-1.5 text-[11px] leading-relaxed text-red-200/80">
+                {failureHint(selectedRun.error.message)}
+              </div>
+            </div>
           )}
-          <Button
-            variant="outline"
-            size="sm"
-            className="mt-2 h-auto min-h-8 w-full whitespace-normal py-2 text-left"
-            onClick={() => { void downloadPipelineRunBundle(selectedRun.run_id); }}
-          >
-            <Download className="mr-1 h-3.5 w-3.5" />
-            Download tested Dagster snapshot
-          </Button>
-          {(selectedRun.result?.outputs || []).map((output, index) => {
-            const path = String(output.path || '');
-            const filename = String(output.filename || path.split('/').pop() || `output-${index + 1}`);
-            if (!path) return null;
-            return (
+
+          {nodeEvents.length > 0 && (
+            <div className="mt-3 border-t border-border pt-2">
+              <div className="font-medium">Pipeline activity</div>
+              <div className="mt-1.5 space-y-1 text-muted-foreground">
+                {nodeEvents.map((event) => (
+                  <div key={event.id} className="flex items-start gap-1.5">
+                    <span className={cn(
+                      'mt-1 h-1.5 w-1.5 shrink-0 rounded-full',
+                      event.status === 'failed' ? 'bg-red-400' : event.status === 'succeeded' ? 'bg-emerald-400' : 'bg-amber-400',
+                    )} />
+                    <span>{event.message || event.type}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {outputs.length > 0 && (
+            <div className="mt-3 border-t border-border pt-2">
+              <div className="flex items-center gap-1.5 font-medium">
+                <FileOutput className="h-3.5 w-3.5" />
+                Results
+              </div>
+              {outputs.map((output, index) => {
+                const path = String(output.path || '');
+                const filename = String(output.filename || path.split('/').pop() || `output-${index + 1}`);
+                if (!path) return null;
+                return (
+                  <Button
+                    key={path}
+                    variant="ghost"
+                    size="sm"
+                    className="mt-1 h-8 w-full justify-start"
+                    onClick={() => {
+                      void downloadPipelineRunOutput(selectedRun.run_id, path, filename);
+                    }}
+                  >
+                    <Download className="mr-1 h-3.5 w-3.5" />
+                    <span className="truncate">{filename}</span>
+                  </Button>
+                );
+              })}
+            </div>
+          )}
+
+          <details className="mt-3 rounded border border-border bg-background/40 p-2">
+            <summary className="cursor-pointer font-medium text-foreground">
+              Run details and technical logs
+            </summary>
+            <div className="mt-2 text-muted-foreground">
+              <div>Run ID: <span className="break-all font-mono">{selectedRun.run_id}</span></div>
+              <div className="mt-0.5">Snapshot: {selectedRun.snapshot.node_count} nodes · {selectedRun.engine}</div>
               <Button
-                key={path}
-                variant="ghost"
+                variant="outline"
                 size="sm"
-                className="mt-1 h-8 w-full justify-start"
-                onClick={() => {
-                  void downloadPipelineRunOutput(selectedRun.run_id, path, filename);
-                }}
+                className="mt-2 h-auto min-h-8 w-full whitespace-normal py-2"
+                onClick={() => { void downloadPipelineRunBundle(selectedRun.run_id); }}
               >
                 <Download className="mr-1 h-3.5 w-3.5" />
-                {filename}
+                Download tested snapshot
               </Button>
-            );
-          })}
-          {events.length > 0 && (
-            <div className="mt-2 space-y-1 border-t border-border pt-2 text-muted-foreground">
-              {lifecycleEvents.map((event) => (
-                <div key={event.id}>{event.message || event.type}</div>
-              ))}
-              {dagsterLogs.length > 0 && (
-                <details className="rounded border border-border bg-background/40 p-2">
-                  <summary className="cursor-pointer font-medium text-foreground">
-                    Dagster logs ({dagsterLogs.length})
-                  </summary>
-                  <div className="mt-2 max-h-64 space-y-2 overflow-auto">
-                    {dagsterLogs.map((event) => (
-                      <pre key={event.id} className="whitespace-pre-wrap break-words font-mono text-[11px]">
+              {technicalLogs.length > 0 && (
+                <div className="mt-2 border-t border-border pt-2">
+                  <div className="mb-1 flex items-center gap-1 font-medium text-foreground">
+                    <TerminalSquare className="h-3.5 w-3.5" />
+                    Technical logs
+                  </div>
+                  <div className="max-h-64 space-y-2 overflow-auto">
+                    {technicalLogs.map((event) => (
+                      <pre key={event.id} className="whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed">
                         {event.message || event.type}
                       </pre>
                     ))}
                   </div>
-                </details>
+                </div>
               )}
             </div>
-          )}
+          </details>
         </div>
       )}
 
       {!loading && runs.length === 0 && (
-        <div className="mt-3 text-xs text-muted-foreground">No background runs yet.</div>
+        <div className="mt-3 rounded-md border border-dashed border-border p-3 text-center text-xs text-muted-foreground">
+          No runs yet. Launch the current pipeline to test its code, inputs, and artifact contract.
+        </div>
       )}
     </div>
   );

@@ -106,6 +106,17 @@ class PipelineRunStore:
             ).fetchall()
         return [record for row in rows if (record := self._decode(row)) is not None]
 
+    def clear(self) -> int:
+        """Delete every persisted run record and return the removed count."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT count(*) AS run_count FROM pipeline_runs"
+            ).fetchone()
+            count = int(row["run_count"] if row is not None else 0)
+            self._connection.execute("DELETE FROM pipeline_runs")
+            self._connection.commit()
+        return count
+
     @staticmethod
     def _decode(row: sqlite3.Row | None) -> dict[str, Any] | None:
         if row is None:

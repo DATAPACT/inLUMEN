@@ -1643,6 +1643,15 @@ def _ui_api_openapi_paths(
                     **protected_responses,
                 },
             },
+            "delete": {
+                "tags": ["Pipeline Runs"],
+                "summary": "Cancel active runs and delete all run history and outputs",
+                "operationId": "clearPipelineRuns",
+                "responses": {
+                    "200": _json_response("#/components/schemas/AnyObject"),
+                    **protected_responses,
+                },
+            },
         },
         "/api/pipeline-runs/{run_id}": {
             "get": {
@@ -2623,6 +2632,7 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                 "graph": {"$ref": "#/components/schemas/ReactFlowGraph"},
                 "chat_reset": {"type": "boolean"},
                 "storage_cleanup": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+                "run_cleanup": {"type": "object", "additionalProperties": True},
             },
             "additionalProperties": True,
         },

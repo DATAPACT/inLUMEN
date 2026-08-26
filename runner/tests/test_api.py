@@ -60,10 +60,16 @@ def test_api_submits_lists_reads_events_downloads_and_cancels(monkeypatch):
         cancelled = client.delete(f"/v1/pipeline-runs/{run_id}", headers=headers)
         assert cancelled.status_code == 200
         assert cancelled.json()["status"] in {"cancelling", "cancelled"}
+        cleared = client.delete("/v1/pipeline-runs", headers=headers)
+        assert cleared.status_code == 200
+        assert cleared.json()["removed_runs"] == 1
+        assert client.get("/v1/pipeline-runs", headers=headers).json()["runs"] == []
 
 
 def test_api_requires_private_service_auth(monkeypatch):
     monkeypatch.setenv("RUNNER_SERVICE_API_KEY", "test-token")
     with TestClient(main.app) as client:
         response = client.get("/v1/pipeline-runs")
+        clear_response = client.delete("/v1/pipeline-runs")
     assert response.status_code == 401
+    assert clear_response.status_code == 401

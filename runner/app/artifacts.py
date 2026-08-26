@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import shutil
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -62,6 +63,17 @@ class PipelineArtifactStore:
 
     def read_output(self, reference: str) -> bytes:
         return self._safe_reference(reference).read_bytes()
+
+    def clear(self) -> int:
+        """Remove all run-owned payload directories from the artifact root."""
+        removed = 0
+        for child in self.root.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+            removed += 1
+        return removed
 
     def _run_root(self, run_id: str) -> Path:
         if not SAFE_RUN_ID.fullmatch(run_id):

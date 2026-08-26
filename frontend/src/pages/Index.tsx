@@ -606,7 +606,12 @@ const Index = () => {
         message: 'Applying validated agent graph changes to the canvas...',
       });
 
-      const syncedGraph = await flowCanvasRef.current.syncFromBackend(data.graph);
+      // Assistant turns can replace the whole graph and its layout. Fit only
+      // after that validated graph has rendered so the user follows the
+      // assistant's result without fighting manual pan/zoom interactions.
+      const syncedGraph = await flowCanvasRef.current.syncFromBackend(data.graph, {
+        fitView: true,
+      });
       const visibleNodeCountBefore = Array.isArray(canvasGraph?.nodes)
         ? canvasGraph.nodes.length
         : 0;
@@ -1119,7 +1124,7 @@ const Index = () => {
         });
       } else {
         toast.success("Workspace cleared", {
-          description: "Pipelines, files, chat, provenance, and generation history were deleted.",
+          description: "Pipelines, files, runs, outputs, chat, provenance, and generation history were deleted.",
         });
       }
     } catch (error) {

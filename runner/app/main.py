@@ -99,6 +99,14 @@ def list_pipeline_runs(limit: int = Query(default=20, ge=1, le=100)) -> dict:
     return {"runs": RUN_MANAGER.list(limit=limit)}
 
 
+@app.delete(
+    "/v1/pipeline-runs",
+    dependencies=SERVICE_AUTH,
+)
+async def clear_pipeline_runs() -> dict[str, int]:
+    return await RUN_MANAGER.clear_all()
+
+
 @app.get(
     "/v1/pipeline-runs/{run_id}",
     response_model=PipelineRunRecord,

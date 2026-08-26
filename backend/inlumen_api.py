@@ -2156,12 +2156,14 @@ def pipeline_run_capabilities():
         return _pipeline_runner_error_response(exc)
 
 
-@app.route("/api/pipeline-runs", methods=["GET", "POST", "OPTIONS"])
+@app.route("/api/pipeline-runs", methods=["GET", "POST", "DELETE", "OPTIONS"])
 @require_auth
 def pipeline_runs():
     if request.method == "OPTIONS":
         return _preflight_response()
     try:
+        if request.method == "DELETE":
+            return jsonify(runner_request("DELETE", "/v1/pipeline-runs")), 200
         if request.method == "GET":
             try:
                 limit = min(max(int(request.args.get("limit") or 20), 1), 100)
@@ -2384,6 +2386,16 @@ def workspace_clear_all():
         "ok": storage_response.ok,
         "result": _upstream_json(storage_response),
     }]
+    try:
+        run_cleanup = runner_request("DELETE", "/v1/pipeline-runs")
+        run_cleanup_ok = True
+    except PipelineRunnerError as exc:
+        run_cleanup = {
+            "ok": False,
+            "status": exc.status_code,
+            "error": str(exc),
+        }
+        run_cleanup_ok = False
 
     chat_reset = False
     if session_id:
@@ -2396,10 +2408,14 @@ def workspace_clear_all():
         graph_payload["storage_cleanup"] = storage_cleanup
         graph_payload["chat_reset"] = chat_reset
         graph_payload["generation_cleanup"] = generation_cleanup
+        graph_payload["run_cleanup"] = run_cleanup
         graph_payload["secrets_cleared"] = secrets_cleared
-        if not storage_response.ok:
+        if not storage_response.ok or not run_cleanup_ok:
             graph_payload["status"] = "partial"
-            graph_payload["error"] = "Neo4j was cleared, but object storage cleanup was incomplete"
+            graph_payload["error"] = (
+                "The workspace graph was cleared, but one or more runtime stores "
+                "could not be fully cleaned."
+            )
             return jsonify(graph_payload), 207
         return jsonify(graph_payload), graph_response.status_code
     return jsonify({
@@ -2407,6 +2423,7 @@ def workspace_clear_all():
         "storage_cleanup": storage_cleanup,
         "chat_reset": chat_reset,
         "generation_cleanup": generation_cleanup,
+        "run_cleanup": run_cleanup,
         "secrets_cleared": secrets_cleared,
     }), graph_response.status_code
 

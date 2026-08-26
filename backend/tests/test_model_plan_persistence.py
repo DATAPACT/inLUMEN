@@ -123,6 +123,29 @@ pipeline("sentiment-analysis", model=args.model, tokenizer=args.model)
             plan["model_revision"],
         )
 
+    def test_uploaded_transformers_pipeline_infers_reviewed_env_model_default(self):
+        plan = infer_implementation_plan_from_python_source(
+            """
+import os
+from transformers import pipeline
+
+MODEL_NAME = os.environ.get(
+    "HF_SPEECH_MODEL",
+    "openai/whisper-small",
+)
+pipeline("automatic-speech-recognition", model=MODEL_NAME)
+"""
+        )
+
+        self.assertEqual("huggingface-transformers", plan["adapter_id"])
+        self.assertEqual("automatic-speech-recognition", plan["task"])
+        self.assertEqual("openai/whisper-small", plan["model_id"])
+        self.assertEqual(
+            "973afd24965f72e36ca33b3055d56a652f456b4d",
+            plan["model_revision"],
+        )
+        self.assertEqual(["ffmpeg"], plan["required_system_packages"])
+
     def test_unpinned_uploaded_model_is_detected_for_a_runtime_warning(self):
         warnings = unresolved_model_plan_errors_from_python_source(
             """

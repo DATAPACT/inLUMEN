@@ -58,6 +58,7 @@ export type PipelineWorkspaceClearResult = {
   graph: PipelineVersionGraph;
   chat_reset?: boolean;
   storage_cleanup?: Array<Record<string, unknown>>;
+  run_cleanup?: Record<string, unknown>;
 };
 
 export type PipelineOverviewMetadata = {

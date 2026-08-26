@@ -604,6 +604,13 @@ def _reviewed_transformers_plan_for_model(model_id: str) -> dict[str, Any]:
             "domain": "sentiment-analysis",
             "adapter_id": "transformers-sst2-sentiment",
         },
+        "openai/whisper-small": {
+            "revision": "973afd24965f72e36ca33b3055d56a652f456b4d",
+            "task": "automatic-speech-recognition",
+            "domain": "speech-to-text",
+            "adapter_id": "huggingface-transformers",
+            "required_system_packages": ["ffmpeg"],
+        },
     }
     reviewed = reviewed_models.get(model_id.strip().lower())
     if reviewed is None:
@@ -618,6 +625,9 @@ def _reviewed_transformers_plan_for_model(model_id: str) -> dict[str, Any]:
             "torch>=2.5,<3",
             "huggingface-hub>=0.36,<1",
         ],
+        "required_system_packages": list(
+            reviewed.get("required_system_packages") or []
+        ),
     })
     plan["resolution"] = {
         "source": "inlumen-uploaded-python-inference",
