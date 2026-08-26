@@ -12,6 +12,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 
 from .deployment_validation import (
     cancel_deployment_execution,
+    deployment_execution_progress,
+    finish_deployment_execution,
     prepare_deployment_execution,
     validate_deployment_bundle_files,
 )
@@ -717,7 +719,7 @@ async def validate_deployment_bundle_endpoint(
     try:
         if request.execution_id:
             prepare_deployment_execution(request.execution_id)
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             validate_deployment_bundle_files,
             request.files,
             targets=request.targets,
@@ -733,8 +735,26 @@ async def validate_deployment_bundle_endpoint(
             runtime_secrets=request.runtime_secrets,
             execution_id=request.execution_id,
         )
+        finish_deployment_execution(
+            request.execution_id,
+            succeeded=bool(result.get("ok")),
+        )
+        return result
     except (TypeError, ValueError) as exc:
+        finish_deployment_execution(request.execution_id, succeeded=False)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception:
+        finish_deployment_execution(request.execution_id, succeeded=False)
+        raise
+
+
+@app.get(
+    "/v1/validate/deployment-bundle/{execution_id}/progress",
+    dependencies=SERVICE_AUTH,
+)
+def get_deployment_bundle_execution_progress(execution_id: str) -> dict[str, Any]:
+    """Observe private, bounded progress for an active background execution."""
+    return deployment_execution_progress(execution_id)
 
 
 @app.delete(

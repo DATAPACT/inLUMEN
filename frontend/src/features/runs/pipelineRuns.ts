@@ -33,6 +33,14 @@ export type PipelineRunRecord = {
   finished_at?: string | null;
   cancel_requested_at?: string | null;
   event_cursor: number;
+  progress?: {
+    phase?: string | null;
+    message?: string | null;
+    active_node_id?: string | null;
+    active_node_name?: string | null;
+    node_elapsed_seconds?: number | null;
+    heartbeat_at?: string | null;
+  } | null;
   error?: { code?: string; message?: string; details?: unknown } | null;
   result?: {
     status?: string;

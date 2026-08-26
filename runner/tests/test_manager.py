@@ -77,6 +77,19 @@ class FakeDagsterExecutor:
         self.cancelled.append(run_id)
 
 
+class ProgressDagsterExecutor(FakeDagsterExecutor):
+    async def progress(self, run_id):
+        return {
+            "execution_id": run_id,
+            "phase": "running_pipeline",
+            "message": "Dagster is executing pipeline nodes.",
+            "logs": (
+                "dagster - node_1_task - STEP_START - running\n"
+                "Node node_1_task is still running (15s elapsed)."
+            ),
+        }
+
+
 def request(*, key: str = "request-1", label: str = "Task") -> CreatePipelineRunRequest:
     return CreatePipelineRunRequest.model_validate(
         {
@@ -137,6 +150,35 @@ async def test_background_run_executes_dagster_and_persists_real_outputs(tmp_pat
         queued["run_id"], "outputs/node-1/result.csv"
     )[0].startswith(b"city,temp")
     assert manager.bundle_zip(queued["run_id"]).startswith(b"PK")
+
+
+@pytest.mark.asyncio
+async def test_background_run_persists_live_node_heartbeat_progress():
+    executor = ProgressDagsterExecutor(delay=0.08)
+    manager = PipelineRunManager(
+        PipelineRunStore(":memory:"), adapter="dagster", executor=executor
+    )
+    queued, _created = await manager.start(request(key="progress-run"))
+
+    await asyncio.sleep(0.03)
+    running = manager.get(queued["run_id"])
+    assert running["status"] == "running"
+    assert running["progress"] == {
+        "phase": "running_pipeline",
+        "message": "Task is running and reporting heartbeats.",
+        "active_node_id": "node_1_task",
+        "active_node_name": "Task",
+        "node_elapsed_seconds": 15,
+        "heartbeat_at": running["progress"]["heartbeat_at"],
+    }
+    assert running["progress"]["heartbeat_at"]
+    assert any(
+        event["type"] == "node.started"
+        for event in manager.events(queued["run_id"])["events"]
+    )
+
+    await manager.tasks[queued["run_id"]]
+    assert manager.get(queued["run_id"])["status"] == "succeeded"
 
 
 @pytest.mark.asyncio

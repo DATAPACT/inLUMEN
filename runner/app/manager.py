@@ -30,6 +30,10 @@ PYTHON_ERROR_PATTERN = re.compile(
     r":\s*(?P<message>.+)$",
     re.MULTILINE,
 )
+NODE_HEARTBEAT_PATTERN = re.compile(
+    r"Node\s+(?P<node>node_[A-Za-z0-9_]+)\s+is still running\s+"
+    r"\((?P<elapsed>\d+)s elapsed\)\."
+)
 
 
 class DagsterExecutor(Protocol):
@@ -44,6 +48,8 @@ class DagsterExecutor(Protocol):
     ) -> dict[str, Any]: ...
 
     async def cancel(self, run_id: str) -> None: ...
+
+    async def progress(self, run_id: str) -> dict[str, Any]: ...
 
 
 def utc_now_iso() -> str:
@@ -170,6 +176,14 @@ class PipelineRunManager:
             "finished_at": None,
             "cancel_requested_at": None,
             "event_cursor": 0,
+            "progress": {
+                "phase": "queued",
+                "message": "Waiting for the background runner.",
+                "active_node_id": None,
+                "active_node_name": None,
+                "node_elapsed_seconds": None,
+                "heartbeat_at": None,
+            },
             "error": None,
             "result": None,
             "_snapshot_graph": deepcopy(graph),
@@ -374,11 +388,16 @@ class PipelineRunManager:
             record = self.store.get(run_id)
             if record is None or self.executor is None:
                 return
-            response = await self.executor.execute(
-                run_id,
-                self._bundle_files(record),
-                runtime_secrets,
-            )
+            progress_task = asyncio.create_task(self._track_live_progress(run_id))
+            try:
+                response = await self.executor.execute(
+                    run_id,
+                    self._bundle_files(record),
+                    runtime_secrets,
+                )
+            finally:
+                progress_task.cancel()
+                await asyncio.gather(progress_task, return_exceptions=True)
             record = self.store.get(run_id)
             if record is None:
                 runtime_secrets.clear()
@@ -424,6 +443,14 @@ class PipelineRunManager:
             record["status"] = "succeeded"
             record["updated_at"] = now
             record["finished_at"] = now
+            record["progress"] = {
+                **(record.get("progress") or {}),
+                "phase": "completed",
+                "message": "All pipeline nodes completed successfully.",
+                "active_node_id": None,
+                "active_node_name": None,
+                "node_elapsed_seconds": None,
+            }
             record["result"] = self._terminal_result(
                 record,
                 "succeeded",
@@ -448,6 +475,106 @@ class PipelineRunManager:
                 record, {"code": "runner_error", "message": str(exc)}
             )
 
+    async def _track_live_progress(self, run_id: str) -> None:
+        if self.executor is None:
+            return
+        progress = getattr(self.executor, "progress", None)
+        if not callable(progress):
+            return
+        while True:
+            try:
+                payload = await progress(run_id)
+                if isinstance(payload, dict):
+                    self._apply_live_progress(run_id, payload)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A transient observation failure must never fail execution.
+                pass
+            await asyncio.sleep(2)
+
+    def _apply_live_progress(
+        self,
+        run_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        record = self.store.get(run_id)
+        if record is None or record.get("status") not in ACTIVE_STATUSES:
+            return
+        phase = str(payload.get("phase") or "running_pipeline").strip()
+        message = str(payload.get("message") or "Dagster is working.").strip()
+        observed_at = utc_now_iso()
+        logs = str(payload.get("logs") or "").replace("\\n", "\n")
+        emitted = {
+            tuple(str(part) for part in item[:2])
+            for item in record.get("_progress_node_events", [])
+            if isinstance(item, list) and len(item) >= 2
+        }
+        active_node_id = str(
+            (record.get("progress") or {}).get("active_node_id") or ""
+        ).strip() or None
+        events_changed = False
+        for match in NODE_EVENT_PATTERN.finditer(logs):
+            node_id = match.group("node")
+            outcome = match.group("outcome").lower()
+            key = (node_id, outcome)
+            if key not in emitted:
+                emitted.add(key)
+                action = {
+                    "start": "started",
+                    "success": "completed",
+                    "failure": "failed",
+                }[outcome]
+                event_status = (
+                    "failed" if outcome == "failure" else "succeeded"
+                    if outcome == "success" else "running"
+                )
+                self._append_event(
+                    record,
+                    f"node.{action}",
+                    event_status,
+                    f"{self._node_display_name(node_id)} {action}.",
+                    node_id=node_id,
+                )
+                events_changed = True
+            if outcome == "start":
+                active_node_id = node_id
+            elif active_node_id == node_id:
+                active_node_id = None
+
+        current_progress = record.get("progress") or {}
+        heartbeat_matches = list(NODE_HEARTBEAT_PATTERN.finditer(logs))
+        node_elapsed_seconds = current_progress.get("node_elapsed_seconds")
+        heartbeat_at = current_progress.get("heartbeat_at")
+        if heartbeat_matches:
+            heartbeat = heartbeat_matches[-1]
+            active_node_id = heartbeat.group("node")
+            latest_elapsed = int(heartbeat.group("elapsed"))
+            if latest_elapsed != node_elapsed_seconds:
+                heartbeat_at = observed_at
+            node_elapsed_seconds = latest_elapsed
+            message = (
+                f"{self._node_display_name(active_node_id)} is running and "
+                "reporting heartbeats."
+            )
+
+        next_progress = {
+            "phase": phase,
+            "message": message,
+            "active_node_id": active_node_id,
+            "active_node_name": (
+                self._node_display_name(active_node_id) if active_node_id else None
+            ),
+            "node_elapsed_seconds": node_elapsed_seconds if active_node_id else None,
+            "heartbeat_at": heartbeat_at,
+        }
+        if next_progress == current_progress and not events_changed:
+            return
+        record["progress"] = next_progress
+        record["_progress_node_events"] = [list(item) for item in sorted(emitted)]
+        record["updated_at"] = observed_at
+        self.store.save(record)
+
     def _append_dagster_logs(
         self,
         record: dict[str, Any],
@@ -459,7 +586,11 @@ class PipelineRunManager:
         dagster = validation.get("dagster") if isinstance(validation, dict) else None
         steps = dagster.get("steps") if isinstance(dagster, dict) else None
         root_failure = ""
-        emitted_node_events: set[tuple[str, str]] = set()
+        emitted_node_events = {
+            tuple(str(part) for part in item[:2])
+            for item in record.get("_progress_node_events", [])
+            if isinstance(item, list) and len(item) >= 2
+        }
         for index, step in enumerate(steps or [], start=1):
             if not isinstance(step, dict):
                 continue
@@ -514,6 +645,9 @@ class PipelineRunManager:
                     if failed_node_match
                     else failure
                 )
+        record["_progress_node_events"] = [
+            list(item) for item in sorted(emitted_node_events)
+        ]
         self.store.save(record)
         return root_failure
 
@@ -568,6 +702,14 @@ class PipelineRunManager:
         record["status"] = "cancelled"
         record["updated_at"] = now
         record["finished_at"] = now
+        record["progress"] = {
+            **(record.get("progress") or {}),
+            "phase": "cancelled",
+            "message": "Pipeline execution was cancelled.",
+            "active_node_id": None,
+            "active_node_name": None,
+            "node_elapsed_seconds": None,
+        }
         record["result"] = self._terminal_result(record, "cancelled")
         self._append_event(record, "run.cancelled", "cancelled", "Dagster run cancelled.")
         self.store.save(record)
@@ -578,6 +720,14 @@ class PipelineRunManager:
         record["updated_at"] = now
         record["finished_at"] = now
         record["error"] = deepcopy(error)
+        record["progress"] = {
+            **(record.get("progress") or {}),
+            "phase": "failed",
+            "message": str(error["message"]),
+            "active_node_id": None,
+            "active_node_name": None,
+            "node_elapsed_seconds": None,
+        }
         record["result"] = self._terminal_result(record, "failed", error=error)
         self._append_event(record, "run.failed", "failed", str(error["message"]))
         self.store.save(record)

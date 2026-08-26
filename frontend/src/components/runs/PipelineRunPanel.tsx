@@ -54,10 +54,24 @@ const formatDate = (value?: string | null) => {
     : parsed.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
 };
 
-const stageStates = (status: PipelineRunRecord['status']): StageState[] => {
+const formatDuration = (seconds: number) => {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainder = safeSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${remainder}s` : `${remainder}s`;
+};
+
+const stageStates = (
+  status: PipelineRunRecord['status'],
+  phase?: string | null,
+): StageState[] => {
   if (status === 'queued') return ['active', 'pending', 'pending', 'pending'];
   if (status === 'preparing') return ['complete', 'active', 'pending', 'pending'];
-  if (status === 'running' || status === 'cancelling') {
+  if (status === 'cancelling') return ['complete', 'complete', 'active', 'pending'];
+  if (status === 'running') {
+    if (phase && phase !== 'running_pipeline') {
+      return ['complete', 'active', 'pending', 'pending'];
+    }
     return ['complete', 'complete', 'active', 'pending'];
   }
   if (status === 'succeeded') return ['complete', 'complete', 'complete', 'complete'];
@@ -191,9 +205,18 @@ export const PipelineRunPanel = () => {
     }
   };
 
-  const stages = selectedRun ? stageStates(selectedRun.status) : [];
+  const stages = selectedRun
+    ? stageStates(selectedRun.status, selectedRun.progress?.phase)
+    : [];
   const stageLabels = ['Snapshot', 'Runtime', 'Pipeline', 'Results'];
   const outputs = selectedRun?.result?.outputs || [];
+  const elapsedSeconds = selectedRun?.started_at
+    ? Math.max(0, (Date.now() - new Date(selectedRun.started_at).valueOf()) / 1000)
+    : 0;
+  const heartbeatAgeSeconds = selectedRun?.progress?.heartbeat_at
+    ? Math.max(0, (Date.now() - new Date(selectedRun.progress.heartbeat_at).valueOf()) / 1000)
+    : null;
+  const heartbeatIsStale = heartbeatAgeSeconds !== null && heartbeatAgeSeconds > 45;
 
   return (
     <div className="min-w-0 overflow-hidden rounded-lg border border-border p-3">
@@ -248,7 +271,7 @@ export const PipelineRunPanel = () => {
           <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
             Recent runs
           </div>
-          <div className="space-y-1">
+          <div className="max-h-40 space-y-1 overflow-y-auto pr-1">
             {runs.slice(0, 5).map((run) => (
               <button
                 type="button"
@@ -319,6 +342,42 @@ export const PipelineRunPanel = () => {
               </div>
             ))}
           </div>
+
+          {isActivePipelineRun(selectedRun.status) && (
+            <div
+              className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-amber-100"
+              aria-live="polite"
+            >
+              <div className="flex items-center gap-1.5 font-medium">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                {selectedRun.progress?.active_node_name || 'Pipeline is working'}
+              </div>
+              <div className="mt-1 text-[11px] leading-relaxed text-amber-100/85">
+                {selectedRun.progress?.message
+                  || 'Dagster is executing the isolated pipeline snapshot. No failure has been reported.'}
+              </div>
+              <div className="mt-1.5 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-amber-100/70">
+                <span>Total elapsed: {formatDuration(elapsedSeconds)}</span>
+                {typeof selectedRun.progress?.node_elapsed_seconds === 'number' && (
+                  <span>Current node: {formatDuration(selectedRun.progress.node_elapsed_seconds)}</span>
+                )}
+                {heartbeatAgeSeconds !== null && (
+                  <span className={heartbeatIsStale ? 'text-red-300' : undefined}>
+                    Heartbeat: {formatDuration(heartbeatAgeSeconds)} ago
+                  </span>
+                )}
+              </div>
+              {(selectedRun.progress?.active_node_name || elapsedSeconds >= 90) && (
+                <div className="mt-1.5 text-[10px] leading-relaxed text-amber-100/65">
+                  {heartbeatIsStale
+                    ? 'No fresh heartbeat has arrived for 45 seconds. The node may be busy or stalled; check again shortly or cancel the run if it remains unchanged.'
+                    : heartbeatAgeSeconds !== null
+                      ? 'CPU model inference can take several minutes. Fresh heartbeats confirm that the run is active.'
+                      : 'CPU model inference can take several minutes; waiting for the first detailed node heartbeat.'}
+                </div>
+              )}
+            </div>
+          )}
 
           {selectedRun.error?.message && (
             <div className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 p-2 text-red-200">

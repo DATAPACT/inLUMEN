@@ -2247,6 +2247,23 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                 "finished_at": {"type": "string", "format": "date-time", "nullable": True},
                 "cancel_requested_at": {"type": "string", "format": "date-time", "nullable": True},
                 "event_cursor": {"type": "integer", "minimum": 0},
+                "progress": {
+                    "type": "object",
+                    "nullable": True,
+                    "properties": {
+                        "phase": {"type": "string", "nullable": True},
+                        "message": {"type": "string", "nullable": True},
+                        "active_node_id": {"type": "string", "nullable": True},
+                        "active_node_name": {"type": "string", "nullable": True},
+                        "node_elapsed_seconds": {
+                            "type": "integer", "minimum": 0, "nullable": True,
+                        },
+                        "heartbeat_at": {
+                            "type": "string", "format": "date-time", "nullable": True,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
                 "error": {"type": "object", "nullable": True, "additionalProperties": True},
                 "result": {"type": "object", "nullable": True, "additionalProperties": True},
             },

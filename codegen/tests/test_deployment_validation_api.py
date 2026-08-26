@@ -164,3 +164,25 @@ def test_deployment_execution_cancellation_terminates_process_and_container() ->
     assert response.json()["status"] == "cancellation_requested"
     cancel_process.assert_called_once_with("run-123")
     cancel_container.assert_called_once_with("run-123")
+
+
+def test_deployment_execution_progress_is_available_to_the_private_runner() -> None:
+    expected = {
+        "execution_id": "run-123",
+        "phase": "running_pipeline",
+        "message": "Dagster is executing pipeline nodes.",
+        "terminal": False,
+        "observed_at": "2026-08-26T15:00:00Z",
+        "logs": "Node node_2_speech_to_text is still running (30s elapsed).",
+    }
+    with patch(
+        "app.main.deployment_execution_progress",
+        return_value=expected,
+    ) as progress:
+        response = TestClient(app).get(
+            "/v1/validate/deployment-bundle/run-123/progress"
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    progress.assert_called_once_with("run-123")

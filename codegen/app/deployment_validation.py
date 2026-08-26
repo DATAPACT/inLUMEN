@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +35,104 @@ SUPPORTED_RUN_SPEC_VERSIONS = frozenset(
 
 _ACTIVE_DEPLOYMENT_PROCESSES: dict[str, subprocess.Popen[str]] = {}
 _CANCELLED_DEPLOYMENT_EXECUTIONS: set[str] = set()
+_DEPLOYMENT_EXECUTION_PROGRESS: dict[str, dict[str, Any]] = {}
 _DEPLOYMENT_PROCESS_LOCK = threading.RLock()
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _set_deployment_progress(
+    execution_id: str | None,
+    phase: str,
+    message: str,
+    *,
+    terminal: bool = False,
+) -> None:
+    if not execution_id:
+        return
+    now = _utc_now_iso()
+    with _DEPLOYMENT_PROCESS_LOCK:
+        current = _DEPLOYMENT_EXECUTION_PROGRESS.setdefault(
+            execution_id,
+            {"execution_id": execution_id, "created_at": now},
+        )
+        current.update(
+            {
+                "phase": phase,
+                "message": message,
+                "updated_at": now,
+                "terminal": terminal,
+            }
+        )
+        if len(_DEPLOYMENT_EXECUTION_PROGRESS) > 256:
+            oldest_ids = sorted(
+                _DEPLOYMENT_EXECUTION_PROGRESS,
+                key=lambda item: str(
+                    _DEPLOYMENT_EXECUTION_PROGRESS[item].get("updated_at") or ""
+                ),
+            )[:128]
+            for stale_id in oldest_ids:
+                if stale_id != execution_id:
+                    _DEPLOYMENT_EXECUTION_PROGRESS.pop(stale_id, None)
+
+
+def finish_deployment_execution(
+    execution_id: str | None,
+    *,
+    succeeded: bool,
+) -> None:
+    _set_deployment_progress(
+        execution_id,
+        "completed" if succeeded else "failed",
+        "Dagster execution completed."
+        if succeeded
+        else "Dagster execution stopped with an error.",
+        terminal=True,
+    )
+
+
+def deployment_execution_progress(execution_id: str) -> dict[str, Any]:
+    """Return private live execution state and a bounded container log tail."""
+    with _DEPLOYMENT_PROCESS_LOCK:
+        payload = dict(
+            _DEPLOYMENT_EXECUTION_PROGRESS.get(execution_id)
+            or {
+                "execution_id": execution_id,
+                "phase": "pending",
+                "message": "Execution is waiting for the isolated runtime.",
+                "terminal": False,
+            }
+        )
+    payload["observed_at"] = _utc_now_iso()
+    client = None
+    try:
+        client = docker.from_env()
+        containers = client.containers.list(
+            all=True,
+            filters={"label": f"inlumen.codegen.run_id={execution_id}"},
+        )
+        if containers:
+            container = max(
+                containers,
+                key=lambda item: (
+                    str(item.status) == "running",
+                    str(item.attrs.get("Created") or ""),
+                ),
+            )
+            payload["container_status"] = str(container.status)
+            payload["logs"] = container.logs(
+                stdout=True,
+                stderr=True,
+                tail=240,
+            ).decode("utf-8", errors="replace")[-16000:]
+    except DockerException as exc:
+        payload["observation_warning"] = str(exc)
+    finally:
+        if client is not None:
+            client.close()
+    return payload
 
 
 def prepare_deployment_execution(execution_id: str) -> None:
@@ -43,6 +141,11 @@ def prepare_deployment_execution(execution_id: str) -> None:
         return
     with _DEPLOYMENT_PROCESS_LOCK:
         _CANCELLED_DEPLOYMENT_EXECUTIONS.discard(execution_id)
+    _set_deployment_progress(
+        execution_id,
+        "accepted",
+        "Execution request accepted.",
+    )
 
 
 def cancel_deployment_execution(execution_id: str) -> None:
@@ -52,6 +155,11 @@ def cancel_deployment_execution(execution_id: str) -> None:
     with _DEPLOYMENT_PROCESS_LOCK:
         _CANCELLED_DEPLOYMENT_EXECUTIONS.add(execution_id)
         process = _ACTIVE_DEPLOYMENT_PROCESSES.get(execution_id)
+    _set_deployment_progress(
+        execution_id,
+        "cancelling",
+        "Cancellation was requested.",
+    )
     if process is None or process.poll() is not None:
         return
     process.terminate()
@@ -286,6 +394,11 @@ def _isolated_dagster_execution(
     container = None
     deadline = time.monotonic() + timeout_seconds
     try:
+        _set_deployment_progress(
+            execution_id,
+            "building_runtime",
+            "Building the isolated Dagster runtime.",
+        )
         if _deployment_execution_cancelled(execution_id):
             report["errors"] = ["Dagster execution was cancelled."]
             return report
@@ -338,6 +451,11 @@ def _isolated_dagster_execution(
         ).strip()
         has_models = model_requirements.is_file() and model_prefetch.is_file()
         if has_models:
+            _set_deployment_progress(
+                execution_id,
+                "prefetching_models",
+                "Preparing reviewed model files for offline execution.",
+            )
             prefetch_environment = {
                 **(runtime_secrets or {}),
                 "HF_HOME": "/models/huggingface",
@@ -409,6 +527,11 @@ def _isolated_dagster_execution(
             if prefetch_status != 0:
                 report["errors"] = ["Reviewed model prefetch failed."]
                 return report
+        _set_deployment_progress(
+            execution_id,
+            "starting_pipeline",
+            "Starting the Dagster pipeline inside the isolated runtime.",
+        )
         environment = {
             **(runtime_secrets or {}),
             "DAGSTER_HOME": "/tmp/dagster-home",
@@ -467,6 +590,11 @@ def _isolated_dagster_execution(
             stdout=True,
             stderr=True,
             labels={"inlumen.codegen.run_id": execution_id},
+        )
+        _set_deployment_progress(
+            execution_id,
+            "running_pipeline",
+            "Dagster is executing pipeline nodes.",
         )
         try:
             result = container.wait(timeout=max(int(deadline - time.monotonic()), 1))

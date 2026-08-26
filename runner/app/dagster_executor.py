@@ -71,11 +71,21 @@ class CodegenDagsterExecutor:
             None,
         )
 
+    async def progress(self, run_id: str) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self._request,
+            "GET",
+            f"/v1/validate/deployment-bundle/{quote(run_id, safe='')}/progress",
+            None,
+            10,
+        )
+
     def _request(
         self,
         method: str,
         path: str,
         payload: dict[str, Any] | None,
+        request_timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         if not self.configured:
             raise DagsterExecutionServiceError(
@@ -97,7 +107,10 @@ class CodegenDagsterExecutor:
             },
         )
         try:
-            with urlopen(request, timeout=self.timeout_seconds + 30) as response:
+            with urlopen(
+                request,
+                timeout=request_timeout_seconds or self.timeout_seconds + 30,
+            ) as response:
                 raw = response.read().decode("utf-8")
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
