@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:inlumen:schema:artifact-contract:2",
-  "title": "inLUMEN Artifact Directory Contract",
+  "$id": "urn:inlumen:schema:artifact-contract:3",
+  "title": "inLUMEN Flat Artifact Directory Contract",
   "type": "object",
   "required": [
     "schema_version",
@@ -11,18 +11,20 @@
     "recursive",
     "input_layout",
     "output_layout",
+    "port_namespaced",
     "run_isolation",
     "source_agnostic",
     "connector_agnostic"
   ],
   "properties": {
-    "schema_version": { "const": "inlumen.artifact-contract@2" },
+    "schema_version": { "const": "inlumen.artifact-contract@3" },
     "transport": { "const": "filesystem" },
     "input_environment": { "const": "PIPELINE_INPUT_DIR" },
     "output_environment": { "const": "PIPELINE_OUTPUT_DIR" },
     "recursive": { "const": true },
-    "input_layout": { "const": "<input_port>/..." },
-    "output_layout": { "const": "<output_port>/..." },
+    "input_layout": { "const": "<artifact-relative-path>" },
+    "output_layout": { "const": "<artifact-relative-path>" },
+    "port_namespaced": { "const": false },
     "run_isolation": { "const": "<run_id>" },
     "source_agnostic": { "const": true },
     "connector_agnostic": { "const": true }

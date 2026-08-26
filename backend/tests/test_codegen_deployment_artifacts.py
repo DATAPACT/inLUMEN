@@ -412,7 +412,15 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertEqual(1, argo_workflow.count('name: "pipeline-image"'))
         self.assertNotIn("name: image-1", argo_workflow)
         run_spec = json.loads(by_path["run-spec.json"])
-        self.assertEqual("inlumen.run-spec@2", run_spec["schema_version"])
+        self.assertEqual(
+            "inlumen.deployment-bundle@2",
+            bundle["manifest"]["schema_version"],
+        )
+        self.assertEqual("inlumen.run-spec@3", run_spec["schema_version"])
+        self.assertEqual(
+            "inlumen.artifact-contract@3",
+            run_spec["artifact_contract"]["schema_version"],
+        )
         self.assertEqual(
             "<artifact-relative-path>",
             run_spec["artifact_contract"]["input_layout"],
@@ -442,6 +450,8 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             (left / "cities.csv").write_text("city\nOslo\n", encoding="utf-8")
             (right / "weather.json").write_text("{}", encoding="utf-8")
             input_dir = root / "input"
+            input_dir.mkdir()
+            (input_dir / "partial.txt").write_text("old", encoding="utf-8")
             output_dir = root / "output"
             command = [
                 sys.executable,
@@ -481,7 +491,34 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             self.assertTrue((input_dir / "cities.csv").is_file())
             self.assertTrue((input_dir / "weather.json").is_file())
             self.assertFalse((input_dir / "left").exists())
+            self.assertFalse((input_dir / "partial.txt").exists())
             self.assertTrue((output_dir / "result" / "merged.json").is_file())
+
+    def test_executable_tasks_must_have_one_logical_output_set(self):
+        graph = self.graph()
+        graph["nodes"][1]["data"]["ports"] = {
+            "inputs": [{"id": "input", "name": "input"}],
+            "outputs": [
+                {"id": "left", "name": "left"},
+                {"id": "right", "name": "right"},
+            ],
+        }
+        builders = (
+            lambda: build_argo_workflow_object(graph, codegen_payload()),
+            lambda: build_dagster_project_files(graph, codegen_payload()),
+            lambda: build_deployment_bundle_files(
+                graph,
+                codegen_payload(),
+                targets={"argo": True, "dagster": True},
+            ),
+        )
+        for build in builders:
+            with self.subTest(builder=build):
+                with self.assertRaisesRegex(
+                    DeploymentArtifactValidationError,
+                    "exactly one logical output set",
+                ):
+                    build()
 
     def test_reviewed_models_are_prefetched_and_runtime_is_local_only(self):
         payload = codegen_payload()

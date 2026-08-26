@@ -48,7 +48,7 @@ DAGSTER_PINNED_VERSION = "1.13.12"
 DAGSTER_LIBRARY_PINNED_VERSION = "0.29.12"
 UV_PINNED_VERSION = "0.11.32"
 ARTIFACT_CONTRACT = {
-    "schema_version": "inlumen.artifact-contract@2",
+    "schema_version": "inlumen.artifact-contract@3",
     "transport": "filesystem",
     "input_environment": "PIPELINE_INPUT_DIR",
     "output_environment": "PIPELINE_OUTPUT_DIR",
@@ -72,10 +72,57 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+
+def same_file_contents(first, second):
+    if first.stat().st_size != second.stat().st_size:
+        return False
+    with first.open("rb") as first_handle, second.open("rb") as second_handle:
+        while True:
+            first_chunk = first_handle.read(1024 * 1024)
+            second_chunk = second_handle.read(1024 * 1024)
+            if first_chunk != second_chunk:
+                return False
+            if not first_chunk:
+                return True
+
+
+def remove_path(path):
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def publish_staged_directory(staging, destination):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    previous = None
+    if destination.exists() or destination.is_symlink():
+        previous = Path(tempfile.mkdtemp(
+            prefix=f".{destination.name}.previous-",
+            dir=destination.parent,
+        ))
+        previous.rmdir()
+        os.replace(destination, previous)
+    try:
+        os.replace(staging, destination)
+    except Exception:
+        if previous is not None and (previous.exists() or previous.is_symlink()):
+            os.replace(previous, destination)
+        raise
+    else:
+        if previous is not None:
+            remove_path(previous)
+
 
 command = json.loads(sys.argv[1])
 ports = [str(value).strip() for value in json.loads(sys.argv[2]) if str(value).strip()]
+if len(ports) > 1:
+    raise RuntimeError(
+        "The flat Task workspace supports exactly one logical output set; "
+        "fan out one output to multiple consumers or add an explicit split Task."
+    )
 requirements = json.loads(sys.argv[3])
 staging_roots = [Path(value) for value in json.loads(sys.argv[4])]
 missing = [
@@ -88,29 +135,36 @@ if missing:
     )
 if staging_roots:
     input_dir = Path(os.environ["PIPELINE_INPUT_DIR"])
-    if input_dir.exists():
-        shutil.rmtree(input_dir)
-    input_dir.mkdir(parents=True, exist_ok=True)
+    input_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(
+        prefix=f".{input_dir.name}.staging-",
+        dir=input_dir.parent,
+    ))
     owners = {}
-    for source_root in staging_roots:
-        if not source_root.is_dir():
-            raise RuntimeError(f"Required upstream artifact is missing: {source_root}")
-        for source in sorted(source_root.rglob("*")):
-            if not source.is_file():
-                continue
-            relative = source.relative_to(source_root)
-            destination = input_dir / relative
-            existing = owners.get(relative)
-            if existing is not None:
-                if source.read_bytes() == existing.read_bytes():
+    try:
+        for source_root in staging_roots:
+            if not source_root.is_dir():
+                raise RuntimeError(f"Required upstream artifact is missing: {source_root}")
+            for source in sorted(source_root.rglob("*")):
+                if not source.is_file():
                     continue
-                raise RuntimeError(
-                    f"Upstream artifacts collide at {relative.as_posix()!r}; "
-                    "add a Task that merges or renames them."
-                )
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-            owners[relative] = source
+                relative = source.relative_to(source_root)
+                destination = staging_dir / relative
+                existing = owners.get(relative)
+                if existing is not None:
+                    if same_file_contents(source, existing):
+                        continue
+                    raise RuntimeError(
+                        f"Upstream artifacts collide at {relative.as_posix()!r}; "
+                        "add a Task that merges or renames them."
+                    )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+                owners[relative] = source
+        publish_staged_directory(staging_dir, input_dir)
+    except Exception:
+        remove_path(staging_dir)
+        raise
 result = subprocess.run(command)
 if result.returncode:
     raise SystemExit(result.returncode)
@@ -615,6 +669,33 @@ def select_runtime_steps(
     steps: Sequence[dict],
 ) -> List[dict]:
     return list(steps)
+
+
+def _validate_flat_task_output_contract(steps: Sequence[dict]) -> None:
+    errors: List[str] = []
+    for step in steps:
+        if _clean_string(step.get("type")).lower() != "task":
+            continue
+        output_ports = [
+            _clean_string(port.get("id"))
+            for port in ((step.get("ports") or {}).get("outputs") or [])
+            if isinstance(port, dict) and _clean_string(port.get("id"))
+        ]
+        if len(output_ports) == 1:
+            continue
+        step_id = _clean_string(step.get("flow_id")) or "<unknown>"
+        label = _clean_string(step.get("label"))
+        description = f" ({label})" if label else ""
+        errors.append(
+            f"Task {step_id}{description} declares {len(output_ports)} output ports; "
+            "the flat Task workspace supports exactly one logical output set. "
+            "Fan out that output to multiple consumers or add an explicit split Task."
+        )
+    if errors:
+        raise DeploymentArtifactValidationError(
+            "Flat Task workspace validation failed",
+            errors,
+        )
 
 
 def _step_sort_key(flow_id: Any) -> Tuple[int, Any]:
@@ -1491,6 +1572,7 @@ def build_argo_workflow_object(
 
     edges = extract_pipeline_edges(pipeline_graph)
     steps = select_runtime_steps(all_steps)
+    _validate_flat_task_output_contract(steps)
     step_ids = [step["flow_id"] for step in steps]
     dockerfiles = _dockerfiles_from_payload(dockerfiles_payload)
     if not dockerfiles:
@@ -3789,6 +3871,7 @@ def build_dagster_project_files(
 
     edges = extract_pipeline_edges(pipeline_graph)
     steps = select_runtime_steps(all_steps)
+    _validate_flat_task_output_contract(steps)
     step_ids = [step["flow_id"] for step in steps]
     dockerfiles = _dockerfiles_from_payload(dockerfiles_payload)
     if not dockerfiles:
@@ -4447,7 +4530,7 @@ def build_run_spec(
         ),
     }
     return {
-        "schema_version": "inlumen.run-spec@2",
+        "schema_version": "inlumen.run-spec@3",
         "artifact_contract": dict(ARTIFACT_CONTRACT),
         "runtime": {
             "default_engine": "dagster" if targets.get("dagster") else "argo",
@@ -4503,6 +4586,7 @@ def build_deployment_bundle_files(
 
     edges = extract_pipeline_edges(pipeline_graph)
     steps = select_runtime_steps(all_steps)
+    _validate_flat_task_output_contract(steps)
     step_ids = [step["flow_id"] for step in steps]
     dockerfiles = _dockerfiles_from_payload(dockerfiles_payload)
     if not dockerfiles:
@@ -4755,7 +4839,7 @@ def build_deployment_bundle_files(
     )
 
     manifest = {
-        "schema_version": "inlumen.deployment-bundle@1",
+        "schema_version": "inlumen.deployment-bundle@2",
         "artifact_contract": dict(ARTIFACT_CONTRACT),
         "run_spec": "run-spec.json",
         "targets": selected_targets,
@@ -4821,7 +4905,7 @@ def build_deployment_bundle_files(
             "valid": True,
             "checks": [
                 "canonical deployment bundle layout generated",
-                "engine-neutral inlumen.run-spec@2 generated",
+                "engine-neutral inlumen.run-spec@3 generated",
                 "node runtime artifacts copied under nodes/<node>/",
                 "root inputs and per-node output directories declared",
                 "selected deployment targets generated deterministically",

@@ -23,7 +23,7 @@ surface, publish its schema, and consistently classify non-tabular artifacts.
 | --- | --- | --- | --- |
 | Project JSON export/import | Canvas | UI, source control, external tools | `inlumen.project@2` JSON Pipeline IR |
 | Generated node package | Codegen service | Backend, deployment builder | Native source files plus `node-manifest.json` and validation report |
-| Deployment bundle | Backend exporter | UI ZIP download, Dagster, Argo, CI | Deterministic files plus `inlumen.deployment-bundle@1` manifest and `inlumen.run-spec@2` (validators retain v1 compatibility) |
+| Deployment bundle | Backend exporter | UI ZIP download, Dagster, Argo, CI | Deterministic files plus `inlumen.deployment-bundle@2`, `inlumen.run-spec@3`, and `inlumen.artifact-contract@3` (validators retain legacy compatibility) |
 | Node output | Generated runtime | Downstream nodes, Dagster validator | Native artifact plus `inlumen.output-manifest@1` descriptor |
 | Pipeline run result | Deployment validation | UI and downloaded bundle | `inlumen.run-result@1` JSON referencing output files |
 | Public workflow/artifact API | Backend | DATAPACT integrations and SDKs | OpenAPI-described JSON and native YAML/file responses |
@@ -33,8 +33,9 @@ surface, publish its schema, and consistently classify non-tabular artifacts.
 ## Decision
 
 Use a small versioned inLUMEN control-plane envelope and keep data-plane bytes in
-established native formats. The JSON Schemas in `contracts/v2` are the normative
-V2 definitions. Runtime identifiers use `inlumen.<contract>@<major>` and fields
+established native formats. The JSON Schemas in `contracts/v2` and `contracts/v3`
+are the normative definitions for their respective contract majors. Runtime
+identifiers use `inlumen.<contract>@<major>` and fields
 use `snake_case`, matching the backend and generated runtime contracts.
 
 ### Standards decision matrix
@@ -102,6 +103,11 @@ code. The orchestrator may use private staging directories for routing, but it
 must flatten that boundary before starting the Task. Conflicting upstream paths
 fail deterministically instead of being overwritten.
 
+An executable Task publishes exactly one logical output artifact set. That set
+may fan out to any number of downstream consumers. Pipelines needing two
+independently routed result sets use an explicit split Task, keeping user code
+independent from orchestration port directories.
+
 ## Status and errors
 
 Run results use `succeeded`, `partial`, `failed`, or `cancelled`. A failed or
@@ -114,6 +120,12 @@ their documented error bodies; an event notification is not the run result.
 Consumers must reject unsupported major versions and may ignore unknown optional
 fields in a supported major. Additive optional fields are backward compatible.
 Meaning changes, removals, or newly required fields require a new major schema.
+
+The flat Task workspace therefore uses `inlumen.artifact-contract@3`,
+`inlumen.run-spec@3`, and `inlumen.deployment-bundle@2`. The earlier
+port-namespaced schemas remain published under `contracts/v2`, and validators
+continue to accept their bundle/run-spec identifiers. New exports never emit
+the legacy layout.
 
 The UI imports `inlumen.project@2` and migrates legacy unversioned/raw React Flow
 documents. It does not silently interpret an explicitly unknown schema version as

@@ -1,5 +1,8 @@
 # inLUMEN V2 contracts
 
+> Legacy compatibility schemas. New deployment exports use the flat runtime
+> contracts published in [`contracts/v3`](../v3/README.md).
+
 This directory is the machine-readable source of truth for V2 portable outputs.
 The schemas use JSON Schema Draft 2020-12 and match the contracts emitted by the
 Project JSON export, deployment builder, runtime output manifest, and Dagster run

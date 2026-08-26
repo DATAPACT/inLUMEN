@@ -98,15 +98,16 @@ The canonical Pipeline IR is JSON: nodes contain their structural kind, template
 implementation metadata, parameters, explicit ports, and project-file references;
 edges identify both endpoint nodes and port IDs. This JSON contract drives version
 storage, project import/export, agent context, and deployment generation. Executable
-bundles add an engine-neutral `inlumen.run-spec@2`; the Dagster project (including
+bundles add an engine-neutral `inlumen.run-spec@3`; the Dagster project (including
 Docker Compose) and optional Argo Workflow are adapters derived from that contract.
 YAML is not an internal representation and the canvas deliberately accepts
 JSON project imports only; generated YAML remains export-only.
 
-The normative V2 export schemas are published in
+The current flat runtime schemas are published in
+[`contracts/v3`](../contracts/v3/README.md); legacy schemas remain available in
 [`contracts/v2`](../contracts/v2/README.md). The architecture, format choices,
-compatibility rules, and current-surface inventory are recorded in
-[ADR 0001](./adr/0001-export-output-contracts.md).
+compatibility rules, and current-surface inventory are recorded in [ADR
+0001](./adr/0001-export-output-contracts.md).
 
 ## **Architecture**
 The picture below shows the component in the DATAPACT architecture.

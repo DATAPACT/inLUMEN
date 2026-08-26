@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import sys
 
@@ -60,7 +61,7 @@ class FilesystemRuntimeTest(unittest.TestCase):
             output = Path(tmp) / "output"
             output.mkdir()
             (output / "result.json").write_text("{}")
-            with self.assertRaisesRegex(RuntimeError, "outside declared"):
+            with self.assertRaisesRegex(RuntimeError, "exactly one logical output set"):
                 normalize_single_output_port(output, ["left", "right"])
 
     def test_workspace_contract_stages_artifacts_and_discovers_outputs(self):
@@ -108,8 +109,36 @@ class FilesystemRuntimeTest(unittest.TestCase):
             second.mkdir()
             for directory in (first, second):
                 (directory / "shared.txt").write_text("same", encoding="utf-8")
-            staged = stage_input_directories([first, second], root / "input")
+            with patch.object(
+                Path,
+                "read_bytes",
+                side_effect=AssertionError("collision comparison must stream"),
+            ):
+                staged = stage_input_directories([first, second], root / "input")
             self.assertEqual("same", (staged / "shared.txt").read_text())
+
+    def test_failed_staging_preserves_the_previous_complete_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            destination = root / "input"
+            destination.mkdir()
+            (destination / "previous.txt").write_text("complete", encoding="utf-8")
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            (first / "collision.bin").write_bytes(b"first")
+            (second / "collision.bin").write_bytes(b"second")
+
+            with self.assertRaisesRegex(RuntimeError, "collide"):
+                stage_input_directories([first, second], destination)
+
+            self.assertEqual(
+                "complete",
+                (destination / "previous.txt").read_text(encoding="utf-8"),
+            )
+            self.assertFalse((destination / "collision.bin").exists())
+            self.assertEqual([], list(root.glob(".input.staging-*")))
 
     def test_exported_dagster_runner_uses_the_same_directory_contract(self):
         source = filesystem_shell_component_source().replace("import dagster as dg", "")
