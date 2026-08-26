@@ -967,7 +967,9 @@ const Index = () => {
       setIsRestoringVersion(true);
       await flushActiveVersionSnapshot();
       const restored = await restorePipelineVersion(version.uid);
-      const syncedGraph = await flowCanvasRef.current.syncFromBackend(restored.graph);
+      const syncedGraph = await flowCanvasRef.current.syncFromBackend(restored.graph, {
+        fitView: true,
+      });
       updateActiveVersion(restored.version.uid, restored.version.name);
       setActivePipelineDescription(restored.version.description ?? '');
       applyActiveVersionTimestamps(restored.version);
@@ -1003,7 +1005,9 @@ const Index = () => {
       setIsSettingMainVersion(true);
       await flushActiveVersionSnapshot();
       const result = await setPipelineVersionAsMain(version.uid);
-      const syncedGraph = await flowCanvasRef.current.syncFromBackend(result.graph);
+      const syncedGraph = await flowCanvasRef.current.syncFromBackend(result.graph, {
+        fitView: true,
+      });
       updateActiveVersion(MAIN_PIPELINE_VERSION_UID, 'Main');
       setActivePipelineDescription(result.version.description ?? '');
       applyActiveVersionTimestamps(result.version);
@@ -1048,7 +1052,9 @@ const Index = () => {
         });
       }
       const restored = await restorePipelineVersion(MAIN_PIPELINE_VERSION_UID);
-      const syncedGraph = await flowCanvasRef.current.syncFromBackend(restored.graph);
+      const syncedGraph = await flowCanvasRef.current.syncFromBackend(restored.graph, {
+        fitView: true,
+      });
       updateActiveVersion(MAIN_PIPELINE_VERSION_UID, 'Main');
       setActivePipelineDescription(restored.version.description ?? '');
       applyActiveVersionTimestamps(restored.version);
@@ -1085,7 +1091,7 @@ const Index = () => {
       setIsRestoringVersion(true);
       const result = await clearPipelineWorkspace(chatSessionId || null);
       const syncedGraph = flowCanvasRef.current
-        ? await flowCanvasRef.current.syncFromBackend(result.graph)
+        ? await flowCanvasRef.current.syncFromBackend(result.graph, { fitView: true })
         : null;
 
       updateActiveVersion(MAIN_PIPELINE_VERSION_UID, 'Main');
