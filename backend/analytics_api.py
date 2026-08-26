@@ -194,6 +194,34 @@ def _pipeline_graph_from_payload_or_backend(data: dict) -> dict:
     )
 
 
+def prepare_dagster_execution_bundle(pipeline_graph: dict) -> dict:
+    """Freeze the reviewed runtime packages and inputs for an actual Dagster run."""
+    files = _file_refs_from_version_graph(pipeline_graph)
+    filenames, _buckets, ids = _dockerfile_inputs(files)
+    runtime = run_async(
+        generate_dockerfiles_with_agent(
+            filenames,
+            ids,
+            pipeline_graph=pipeline_graph,
+            file_refs=files,
+            require_attached_runtime=True,
+        )
+    )
+    runtime_payload = (
+        runtime.model_dump() if hasattr(runtime, "model_dump") else runtime.dict()
+    )
+    bundle = build_deployment_bundle_files(
+        pipeline_graph,
+        runtime_payload,
+        targets={"argo": False, "dagster": True},
+    )
+    return {
+        "files": bundle["files"],
+        "manifest": bundle["manifest"],
+        "runtime_secrets": runtime_secret_environment(pipeline_graph),
+    }
+
+
 
 
 @app.route("/agentic_generate_dockerfiles", methods=["POST", "OPTIONS"])

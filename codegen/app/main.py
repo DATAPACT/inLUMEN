@@ -10,7 +10,11 @@ from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 
-from .deployment_validation import validate_deployment_bundle_files
+from .deployment_validation import (
+    cancel_deployment_execution,
+    prepare_deployment_execution,
+    validate_deployment_bundle_files,
+)
 from .generator import generate_node_script_bundle, generate_pipeline_script_bundles
 from .job_store import PipelineJobStore
 from .llm import LLMGenerationError
@@ -711,6 +715,8 @@ async def validate_deployment_bundle_endpoint(
 ) -> dict[str, Any]:
     """Validate deployment artifacts inside the private codegen service."""
     try:
+        if request.execution_id:
+            prepare_deployment_execution(request.execution_id)
         return await asyncio.to_thread(
             validate_deployment_bundle_files,
             request.files,
@@ -725,6 +731,20 @@ async def validate_deployment_bundle_endpoint(
             argo_dry_run=request.argo_dry_run,
             timeout_seconds=request.timeout_seconds,
             runtime_secrets=request.runtime_secrets,
+            execution_id=request.execution_id,
         )
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete(
+    "/v1/validate/deployment-bundle/{execution_id}",
+    dependencies=SERVICE_AUTH,
+)
+async def cancel_deployment_bundle_execution(execution_id: str) -> dict[str, Any]:
+    """Cancel installation or Dagster materialization for a background run."""
+    await asyncio.gather(
+        asyncio.to_thread(cancel_deployment_execution, execution_id),
+        asyncio.to_thread(cancel_sandbox_run, execution_id),
+    )
+    return {"execution_id": execution_id, "status": "cancellation_requested"}

@@ -140,6 +140,8 @@ class PublicApiTest(unittest.TestCase):
         self.assertIn("/api/v1/pipelines/{pipeline_id}/artifacts/argo-workflow.yaml", schema["paths"])
         self.assertIn("/api/graph/nodes", schema["paths"])
         self.assertIn("/api/pipeline/history/restore", schema["paths"])
+        self.assertIn("/api/pipeline-runs", schema["paths"])
+        self.assertIn("/api/pipeline-runs/{run_id}/events", schema["paths"])
         self.assertIn("/api/workspace/clear-all", schema["paths"])
         self.assertIn("/api/provenance/report", schema["paths"])
         self.assertIn("/api/provenance/prov-o", schema["paths"])

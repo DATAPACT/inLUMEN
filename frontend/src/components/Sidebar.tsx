@@ -37,6 +37,7 @@ import {
 } from '@/features/nodes/registry/iconRegistry';
 import type { NodeDefinition } from '@/features/nodes/registry/types';
 import { ReusablePipelineManagerDialog } from '@/components/subpipeline/ReusablePipelineManagerDialog';
+import { PipelineRunPanel } from '@/components/runs/PipelineRunPanel';
 import { publicPortsForSubpipeline } from '@/features/flow/subpipeline';
 import {
   fetchReusablePipelines,
@@ -914,6 +915,7 @@ export function Sidebar({
 
         {activeTab === "simulate" && (
           <div className="w-full min-w-0 max-w-full space-y-4 overflow-hidden py-4">
+            <PipelineRunPanel />
             <div className="min-w-0 overflow-hidden rounded-lg border border-border p-3">
               <h3 className="text-sm font-medium mb-2">Build deployment artifacts</h3>
               <p className="text-xs text-muted-foreground mb-3">

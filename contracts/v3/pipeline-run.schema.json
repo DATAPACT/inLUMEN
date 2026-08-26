@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inlumen:schema:pipeline-run:1",
+  "title": "inLUMEN Pipeline Run Lifecycle Record",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "status",
+    "engine",
+    "execution_mode",
+    "snapshot",
+    "created_at",
+    "updated_at",
+    "event_cursor"
+  ],
+  "properties": {
+    "schema_version": { "const": "inlumen.pipeline-run@1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "status": {
+      "enum": [
+        "queued",
+        "preparing",
+        "running",
+        "cancelling",
+        "succeeded",
+        "partial",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "engine": { "type": "string", "minLength": 1 },
+    "execution_mode": { "type": "string", "minLength": 1 },
+    "snapshot": {
+      "type": "object",
+      "required": [
+        "snapshot_id",
+        "graph_sha256",
+        "bundle_sha256",
+        "node_count",
+        "edge_count"
+      ],
+      "properties": {
+        "snapshot_id": { "type": "string", "minLength": 1 },
+        "graph_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "bundle_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "pipeline_id": { "type": ["string", "null"] },
+        "pipeline_version": { "type": ["string", "null"] },
+        "active_version_uid": { "type": ["string", "null"] },
+        "node_count": { "type": "integer", "minimum": 0 },
+        "edge_count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "started_at": { "type": ["string", "null"], "format": "date-time" },
+    "finished_at": { "type": ["string", "null"], "format": "date-time" },
+    "cancel_requested_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "event_cursor": { "type": "integer", "minimum": 0 },
+    "error": {
+      "type": ["object", "null"],
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "details": {}
+      },
+      "additionalProperties": true
+    },
+    "result": {
+      "oneOf": [
+        { "$ref": "urn:inlumen:schema:run-result:1" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": ["succeeded", "partial", "failed", "cancelled"]
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "required": ["finished_at", "result"],
+        "properties": {
+          "result": { "$ref": "urn:inlumen:schema:run-result:1" }
+        }
+      }
+    }
+  ],
+  "additionalProperties": true
+}

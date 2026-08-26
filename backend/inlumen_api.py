@@ -10,6 +10,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from flask import Flask, Response, jsonify, make_response, request
@@ -24,11 +25,13 @@ from analytics_api import (
     agentic_pipeline_editor,
     agentic_pipeline_editor_cancel,
     agentic_pipeline_editor_reset,
+    prepare_dagster_execution_bundle,
 )
 from attachment_validation import attachment_input_errors, read_attachment_probe
 from auth_middleware import require_auth
 from chat_state import clear_state_from_disk
 from codegen_runs import CodegenRunStore
+from deployment_artifacts import DeploymentArtifactValidationError
 from generators.routes import create_generator_blueprint
 from graph_client import dispatch_graph_request
 from local_api_client import LocalApiResponse
@@ -47,6 +50,11 @@ from node_secrets import (
     set_node_secret,
 )
 from object_client import dispatch_object_request
+from pipeline_runner_client import (
+    PipelineRunnerError,
+    runner_raw_request,
+    runner_request,
+)
 from provenance_provo import build_prov_o_jsonld, provenance_prov_o_filename
 from provenance_report import build_provenance_pdf, provenance_report_filename
 from public_api import create_public_api_blueprint
@@ -2131,6 +2139,148 @@ def pipeline_graph():
     if request.method == "POST":
         return _proxy_response(dispatch_graph_request, "neo4j_sync_graph")
     return _proxy_response(dispatch_graph_request, "neo4j_get_graph")
+
+
+def _pipeline_runner_error_response(exc: PipelineRunnerError):
+    return _json_error(exc.status_code, str(exc), exc.details)
+
+
+@app.route("/api/pipeline-runs/capabilities", methods=["GET", "OPTIONS"])
+@require_auth
+def pipeline_run_capabilities():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    try:
+        return jsonify(runner_request("GET", "/v1/pipeline-runs/capabilities")), 200
+    except PipelineRunnerError as exc:
+        return _pipeline_runner_error_response(exc)
+
+
+@app.route("/api/pipeline-runs", methods=["GET", "POST", "OPTIONS"])
+@require_auth
+def pipeline_runs():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    try:
+        if request.method == "GET":
+            try:
+                limit = min(max(int(request.args.get("limit") or 20), 1), 100)
+            except (TypeError, ValueError):
+                limit = 20
+            return jsonify(
+                runner_request("GET", "/v1/pipeline-runs", params={"limit": limit})
+            ), 200
+
+        graph_response = _proxy(
+            dispatch_graph_request,
+            "neo4j_get_graph",
+            method="GET",
+            data=b"",
+        )
+        graph_response.raise_for_status()
+        graph = _upstream_json(graph_response)
+        graph = graph if isinstance(graph, dict) else {}
+        if not list(graph.get("nodes") or []):
+            return _json_error(422, "pipeline graph has no nodes")
+        pipeline = graph.get("pipeline") if isinstance(graph.get("pipeline"), dict) else {}
+        client_payload = _request_json()
+        executable = prepare_dagster_execution_bundle(graph)
+        runner_payload = {
+            "snapshot": {
+                "graph": graph,
+                "pipeline_id": str(pipeline.get("uid") or "").strip() or None,
+                "pipeline_version": str(pipeline.get("version") or "").strip() or None,
+                "active_version_uid": str(
+                    pipeline.get("active_version_uid") or ""
+                ).strip()
+                or None,
+                "bundle_files": executable["files"],
+                "bundle_manifest": executable["manifest"],
+            },
+            "idempotency_key": str(client_payload.get("idempotency_key") or "").strip()
+            or None,
+            "runtime_secrets": executable["runtime_secrets"],
+        }
+        return jsonify(runner_request("POST", "/v1/pipeline-runs", payload=runner_payload)), 202
+    except PipelineRunnerError as exc:
+        return _pipeline_runner_error_response(exc)
+    except DeploymentArtifactValidationError as exc:
+        return _json_error(422, str(exc), exc.errors)
+    except ValueError as exc:
+        return _json_error(422, str(exc))
+    except Exception as exc:
+        return _json_error(502, "pipeline run submission failed", str(exc))
+
+
+@app.route("/api/pipeline-runs/<run_id>", methods=["GET", "DELETE", "OPTIONS"])
+@require_auth
+def pipeline_run(run_id: str):
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    try:
+        method = "DELETE" if request.method == "DELETE" else "GET"
+        return jsonify(runner_request(method, f"/v1/pipeline-runs/{run_id}")), 200
+    except PipelineRunnerError as exc:
+        return _pipeline_runner_error_response(exc)
+
+
+@app.route("/api/pipeline-runs/<run_id>/events", methods=["GET", "OPTIONS"])
+@require_auth
+def pipeline_run_events(run_id: str):
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    try:
+        try:
+            after = max(int(request.args.get("after") or 0), 0)
+        except (TypeError, ValueError):
+            after = 0
+        return jsonify(
+            runner_request(
+                "GET",
+                f"/v1/pipeline-runs/{run_id}/events",
+                params={"after": after},
+            )
+        ), 200
+    except PipelineRunnerError as exc:
+        return _pipeline_runner_error_response(exc)
+
+
+@app.route("/api/pipeline-runs/<run_id>/bundle", methods=["GET", "OPTIONS"])
+@require_auth
+def pipeline_run_bundle(run_id: str):
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    try:
+        body, content_type, disposition = runner_raw_request(
+            "GET", f"/v1/pipeline-runs/{run_id}/bundle"
+        )
+        response = Response(body, status=200, content_type=content_type)
+        if disposition:
+            response.headers["Content-Disposition"] = disposition
+        return response
+    except PipelineRunnerError as exc:
+        return _pipeline_runner_error_response(exc)
+
+
+@app.route(
+    "/api/pipeline-runs/<run_id>/outputs/<path:output_path>",
+    methods=["GET", "OPTIONS"],
+)
+@require_auth
+def pipeline_run_output(run_id: str, output_path: str):
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    try:
+        body, content_type, disposition = runner_raw_request(
+            "GET",
+            f"/v1/pipeline-runs/{run_id}/outputs/{quote(output_path, safe='/')}",
+        )
+        response = Response(body, status=200, content_type=content_type)
+        if disposition:
+            response.headers["Content-Disposition"] = disposition
+        return response
+    except PipelineRunnerError as exc:
+        return _pipeline_runner_error_response(exc)
 
 
 @app.route("/api/pipeline/updated-at", methods=["GET", "OPTIONS"])

@@ -115,7 +115,7 @@ The picture below shows the component in the DATAPACT architecture.
 ![Component Diagram](./images/component-image.png)
 
 
-The current deployment uses a gateway architecture. Frontend and CLI/API clients call only the backend gateway API. The backend owns access to Neo4j and MinIO and brokers code generation and deployment validation through one private codegen service. Configured OpenRouter, Ollama Cloud, or custom OpenAI-compatible LLM providers remain external services reached through the backend/codegen boundary.
+The current deployment uses a gateway architecture. Frontend and CLI/API clients call only the backend gateway API. The backend owns access to Neo4j and MinIO, brokers code generation and deployment validation through one private codegen service, and submits durable background lifecycle jobs to a private runner service. Configured OpenRouter, Ollama Cloud, or custom OpenAI-compatible LLM providers remain external services reached through the backend/codegen boundary.
 
 
 ![Current inLUMEN Architecture](./images/current-architecture.png)
@@ -198,13 +198,13 @@ Step 1: Clone this repository on your computer.
 
 Step 2: Navigate to the cloned project directory.
 
-Step 3: Copy `.env.example` to `.env`, set the public backend URL, and replace the two token placeholders. Static-token authentication is enabled by default; uncomment the Keycloak block and set `AUTH_ENABLED=true` when deploying with Keycloak. The same `.env` file is used by both the development and production Compose stacks. Neo4J, MinIO, and codegen routing remain private and use Compose-owned defaults.
+Step 3: Copy `.env.example` to `.env`, set the public backend URL, and replace the three token placeholders. Static-token authentication is enabled by default; uncomment the Keycloak block and set `AUTH_ENABLED=true` when deploying with Keycloak. The same `.env` file is used by both the development and production Compose stacks. Neo4J, MinIO, codegen, and runner routing remain private and use Compose-owned defaults.
 
 The Docker setup derives frontend API URLs, Neo4J URI, and MinIO endpoint from the Compose service names, ports, and credential values, so you do not need separate `NEO4J_URI`, `MINIO_ENDPOINT`, or `VITE_*_API_URL` entries for normal local use. The backend sends permissive CORS headers by default.
 
 The sample contains the public backend URL and API tokens, with Keycloak configuration ready as a commented optional block. Shared frontend/backend ports and development-only inspection ports are also included as commented overrides. Compose provides their defaults together with memory, Neo4J and MinIO credentials, internal service URLs, storage paths, timeouts, and development watchers.
 
-The browser uses `INLUMEN_API_PUBLIC_URL`. The backend reaches codegen privately as `http://codegen:8010`, including when the Compose project runs on a VM behind Cloudflare; the frontend never calls codegen directly.
+The browser uses `INLUMEN_API_PUBLIC_URL`. The backend reaches codegen privately as `http://codegen:8010` and the runner as `http://runner:8020`, including when the Compose project runs on a VM behind Cloudflare; the frontend never calls either private service directly.
 
 Set `AUTH_ENABLED=false` for local static-token authentication or keep it `true` for Keycloak. Advanced deployments can still override any Compose variable directly; for example, a separately hosted codegen service can set `INLUMEN_CODEGEN_SERVICE_URL`.
 
@@ -240,7 +240,7 @@ curl -i -X OPTIONS "$INLUMEN_API_PUBLIC_URL/health" \
 The response should include `Access-Control-Allow-Origin: *`.
 
 Step 5: Wait for the stack to finish starting. The root compose file now:
-- starts Neo4J, MinIO, codegen, the backend gateway, and the frontend together
+- starts Neo4J, MinIO, codegen, the background runner, the backend gateway, and the frontend together
 - builds the `backend` service from the Python source under `backend/`
 - mounts the frontend and backend source folders for development
 - keeps graph and object storage logic inside the backend gateway instead of exposing adapter services
@@ -367,14 +367,25 @@ service then runs with Hugging Face and Transformers offline modes enabled, so a
 pipeline run cannot stall on a model-hub download. Set `HF_TOKEN` in the shell
 that launches `docker compose up`; it is used only by model prefetch.
 
-The Run tab uses Dagster as the primary local execution adapter. A generated
-bundle runs with `docker compose up --build` and exposes Dagster at
+The Run tab uses the durable background execution control plane described in
+[ADR 0002](adr/0002-native-background-execution.md). Each run freezes the saved
+graph, reviewed uploaded or AI-generated node packages, Source inputs, connector
+runtimes, and Run Spec, then materializes that exact snapshot through Dagster in
+a constrained one-off container. The tested snapshot and produced output files
+remain downloadable from the run. A generated Dagster bundle runs with
+`docker compose up --build` and exposes Dagster at
 `http://localhost:3000`. Runs return `inlumen.run-result@1`, and materialized
 output files are included under `outputs/` in the downloaded bundle. Argo is an
 optional Kubernetes export. Its bundle builds
 one content-addressed shared pipeline image from `argo/Dockerfile`; it does not
 require an image per step unless incompatible dependency environments are split
 explicitly in a future export.
+
+The runner's embedded SQLite lifecycle store and separate filesystem artifact
+store are durable for a single runner replica; bundle and output bytes are not
+embedded in lifecycle rows. Production configures the Dagster adapter through the private codegen
+execution service. A horizontally scaled runner must use a shared job store and
+worker queue; user execution must never be placed in the gateway process.
 
 API key handling:
 - Provider API keys are entered only in the UI, kept in browser localStorage so they survive refreshes, browser restarts, and container restarts, sent to the backend only inside the specific LLM request payload, and are not saved by the backend `/api/chatbot-configs` endpoints.
@@ -457,6 +468,7 @@ Available gateway endpoint groups:
 - `Workflows`: list available workflow metadata, associated pipeline IDs, version metadata, and temporary MinIO signed access URLs when files are available
 - `Canvas Graph`: replicate UI node and edge creation, deletion, property updates, and position changes through the gateway API
 - `Pipeline State`: fetch the current graph, overview metadata, and saved UI pipeline versions
+- `Pipeline Runs`: submit, list, inspect, cancel, and read incremental events for durable background runs
 - `Files`: upload, remove, read, and update node-attached files without exposing MinIO credentials
 - `Agentic`: call the same chat and artifact-generation operations available in the UI
 - `Settings`: save and manage LLM configurations; provider API keys are browser-local and are supplied per request

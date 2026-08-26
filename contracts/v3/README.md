@@ -8,6 +8,10 @@ inLUMEN. Contract majors evolve independently from the product release number.
 | Deployment bundle manifest | `inlumen.deployment-bundle@2` | `deployment-bundle.schema.json` |
 | Artifact directory ABI | `inlumen.artifact-contract@3` | `artifact-contract.schema.json` |
 | Engine-neutral run specification | `inlumen.run-spec@3` | `run-spec.schema.json` |
+| Pipeline run lifecycle | `inlumen.pipeline-run@1` | `pipeline-run.schema.json` |
+
+The lifecycle record references the independently versioned terminal
+`inlumen.run-result@1` schema retained in `contracts/v2`.
 
 ## Compatibility
 

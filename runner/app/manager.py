@@ -1,0 +1,527 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import io
+import json
+import tempfile
+import uuid
+import zipfile
+from copy import deepcopy
+from datetime import UTC, datetime
+from pathlib import PurePosixPath
+from typing import Any, Protocol
+
+from .artifacts import PipelineArtifactStore
+from .models import CreatePipelineRunRequest
+from .store import PipelineRunStore
+
+TERMINAL_STATUSES = {"succeeded", "partial", "failed", "cancelled"}
+ACTIVE_STATUSES = {"queued", "preparing", "running", "cancelling"}
+
+
+class DagsterExecutor(Protocol):
+    @property
+    def configured(self) -> bool: ...
+
+    async def execute(
+        self,
+        run_id: str,
+        files: list[dict[str, Any]],
+        runtime_secrets: dict[str, str],
+    ) -> dict[str, Any]: ...
+
+    async def cancel(self, run_id: str) -> None: ...
+
+
+def utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def canonical_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def public_run_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Remove bundle contents, secrets, and worker bookkeeping from API output."""
+    public = deepcopy(
+        {key: value for key, value in record.items() if not key.startswith("_")}
+    )
+    snapshot = public.get("snapshot")
+    if isinstance(snapshot, dict) and not snapshot.get("bundle_sha256"):
+        snapshot["bundle_sha256"] = snapshot.get("graph_sha256")
+    return public
+
+
+class PipelineRunConflict(ValueError):
+    pass
+
+
+class PipelineRunManager:
+    def __init__(
+        self,
+        store: PipelineRunStore,
+        *,
+        adapter: str = "disabled",
+        executor: DagsterExecutor | None = None,
+        artifact_store: PipelineArtifactStore | None = None,
+    ) -> None:
+        self.store = store
+        self.adapter = adapter
+        self.executor = executor
+        self.artifact_store = artifact_store or PipelineArtifactStore(
+            tempfile.mkdtemp(prefix="inlumen-run-artifacts-")
+        )
+        self.tasks: dict[str, asyncio.Task[None]] = {}
+        self._submission_lock = asyncio.Lock()
+
+    @property
+    def execution_available(self) -> bool:
+        return bool(
+            self.adapter == "dagster"
+            and self.executor is not None
+            and self.executor.configured
+        )
+
+    def capabilities(self) -> dict[str, Any]:
+        enabled = self.execution_available
+        return {
+            "background_runs": True,
+            "execution_available": enabled,
+            "adapter": self.adapter,
+            "execution_mode": "background" if enabled else "unavailable",
+            "message": (
+                "Runs execute the saved pipeline snapshot through Dagster and continue after the browser closes."
+                if enabled
+                else "Dagster background execution is not configured."
+            ),
+        }
+
+    async def start(
+        self, request: CreatePipelineRunRequest
+    ) -> tuple[dict[str, Any], bool]:
+        if not self.execution_available:
+            raise RuntimeError("Dagster background execution is not configured.")
+        async with self._submission_lock:
+            return self._start_locked(request)
+
+    def _start_locked(
+        self, request: CreatePipelineRunRequest
+    ) -> tuple[dict[str, Any], bool]:
+        graph = request.snapshot.graph
+        files = request.snapshot.bundle_files
+        if not list(graph.get("nodes") or []):
+            raise ValueError("Pipeline graph has no nodes.")
+        if not files:
+            raise ValueError("Executable Dagster snapshot has no files.")
+        graph_sha256 = canonical_sha256(graph)
+        bundle_sha256 = canonical_sha256(files)
+        key = str(request.idempotency_key or "").strip() or None
+        if key:
+            existing = self.store.get_by_idempotency_key(key)
+            if existing is not None:
+                if existing["snapshot"]["bundle_sha256"] != bundle_sha256:
+                    raise PipelineRunConflict(
+                        "The idempotency key was already used for a different executable snapshot."
+                    )
+                return public_run_record(existing), False
+
+        nodes = list(graph.get("nodes") or [])
+        edges = list(graph.get("edges") or [])
+        now = utc_now_iso()
+        run_id = uuid.uuid4().hex
+        record: dict[str, Any] = {
+            "schema_version": "inlumen.pipeline-run@1",
+            "run_id": run_id,
+            "status": "queued",
+            "engine": "dagster",
+            "execution_mode": "background",
+            "snapshot": {
+                "snapshot_id": bundle_sha256,
+                "graph_sha256": graph_sha256,
+                "bundle_sha256": bundle_sha256,
+                "pipeline_id": request.snapshot.pipeline_id,
+                "pipeline_version": request.snapshot.pipeline_version,
+                "active_version_uid": request.snapshot.active_version_uid,
+                "node_count": len(nodes),
+                "edge_count": len(edges),
+            },
+            "created_at": now,
+            "updated_at": now,
+            "started_at": None,
+            "finished_at": None,
+            "cancel_requested_at": None,
+            "event_cursor": 0,
+            "error": None,
+            "result": None,
+            "_snapshot_graph": deepcopy(graph),
+            "_bundle_reference": self.artifact_store.store_bundle(run_id, files),
+            "_bundle_manifest": deepcopy(request.snapshot.bundle_manifest),
+            "_runtime_secret_names": sorted(request.runtime_secrets),
+            "_output_files": [],
+            "_idempotency_key": key,
+            "_events": [],
+        }
+        self._append_event(record, "run.queued", "queued", "Dagster run queued.")
+        self.store.save(record)
+        task = asyncio.create_task(
+            self._execute_dagster(run_id, dict(request.runtime_secrets))
+        )
+        self.tasks[run_id] = task
+        task.add_done_callback(lambda _task: self.tasks.pop(run_id, None))
+        return public_run_record(record), True
+
+    def get(self, run_id: str) -> dict[str, Any] | None:
+        record = self.store.get(run_id)
+        return public_run_record(record) if record else None
+
+    def list(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        records = [
+            record
+            for record in self.store.list(limit=None)
+            if record.get("engine") != "contract-test"
+        ]
+        return [public_run_record(record) for record in records[:limit]]
+
+    def events(self, run_id: str, *, after: int = 0) -> dict[str, Any] | None:
+        record = self.store.get(run_id)
+        if record is None:
+            return None
+        events = [
+            event for event in record.get("_events", []) if int(event["id"]) > after
+        ]
+        return {
+            "run_id": run_id,
+            "events": deepcopy(events),
+            "next_cursor": int(record.get("event_cursor") or 0),
+        }
+
+    def output(self, run_id: str, path: str) -> tuple[bytes, str, str] | None:
+        record = self.store.get(run_id)
+        if record is None:
+            return None
+        for entry in record.get("_output_files", []):
+            if str(entry.get("path") or "") != path:
+                continue
+            storage_path = str(entry.get("_storage_path") or "")
+            if storage_path:
+                body = self.artifact_store.read_output(storage_path)
+            else:
+                content = str(entry.get("content") or "")
+                body = (
+                    base64.b64decode(content, validate=True)
+                    if str(entry.get("content_encoding") or "") == "base64"
+                    else content.encode("utf-8")
+                )
+            return (
+                body,
+                str(entry.get("content_type") or "application/octet-stream"),
+                str(entry.get("filename") or PurePosixPath(path).name or "output"),
+            )
+        return None
+
+    def bundle_zip(self, run_id: str) -> bytes | None:
+        record = self.store.get(run_id)
+        if record is None:
+            return None
+        files = self._bundle_files(record)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for entry in files:
+                path = str(entry.get("path") or "").strip()
+                relative = PurePosixPath(path)
+                if not path or relative.is_absolute() or ".." in relative.parts:
+                    continue
+                content = str(entry.get("content") or "")
+                body = (
+                    base64.b64decode(content, validate=True)
+                    if str(entry.get("content_encoding") or "") == "base64"
+                    else content.encode("utf-8")
+                )
+                archive.writestr(str(relative), body)
+        return buffer.getvalue()
+
+    async def cancel(self, run_id: str) -> dict[str, Any] | None:
+        record = self.store.get(run_id)
+        if record is None:
+            return None
+        if record["status"] in TERMINAL_STATUSES:
+            return public_run_record(record)
+        now = utc_now_iso()
+        record["status"] = "cancelling"
+        record["cancel_requested_at"] = record.get("cancel_requested_at") or now
+        record["updated_at"] = now
+        self._append_event(
+            record,
+            "run.cancellation_requested",
+            "cancelling",
+            "Dagster cancellation requested.",
+        )
+        self.store.save(record)
+        if self.executor is not None:
+            try:
+                await self.executor.cancel(run_id)
+            except Exception as exc:  # noqa: BLE001 - keep lifecycle cancellable.
+                latest = self.store.get(run_id) or record
+                self._append_event(
+                    latest,
+                    "run.cancellation_warning",
+                    "cancelling",
+                    f"Cancellation signal failed: {exc}",
+                )
+                self.store.save(latest)
+        if run_id not in self.tasks:
+            self._finish_cancelled(self.store.get(run_id) or record)
+        return public_run_record(self.store.get(run_id) or record)
+
+    async def reconcile_interrupted(self) -> int:
+        count = 0
+        for record in self.store.list(limit=None):
+            if record.get("status") not in ACTIVE_STATUSES:
+                continue
+            if self.executor is not None:
+                try:
+                    await self.executor.cancel(record["run_id"])
+                except Exception as exc:  # noqa: BLE001 - recovery remains authoritative.
+                    self._append_event(
+                        record,
+                        "run.recovery_warning",
+                        record.get("status"),
+                        f"Could not confirm remote cancellation during recovery: {exc}",
+                    )
+            now = utc_now_iso()
+            record["status"] = "failed"
+            record["updated_at"] = now
+            record["finished_at"] = now
+            record["error"] = {
+                "code": "runner_restarted",
+                "message": "The runner restarted while Dagster execution was active.",
+            }
+            record["result"] = self._terminal_result(
+                record, "failed", error=record["error"]
+            )
+            self._append_event(
+                record,
+                "run.failed",
+                "failed",
+                "Active Dagster execution was cancelled during runner recovery.",
+            )
+            self.store.save(record)
+            count += 1
+        return count
+
+    async def _execute_dagster(
+        self, run_id: str, runtime_secrets: dict[str, str]
+    ) -> None:
+        try:
+            record = self.store.get(run_id)
+            if record is None:
+                return
+            if record.get("status") == "cancelling":
+                runtime_secrets.clear()
+                self._finish_cancelled(record)
+                return
+            self._update_status(run_id, "preparing", "Executable snapshot accepted.")
+            self._update_status(run_id, "running", "Dagster materialization started.")
+            record = self.store.get(run_id)
+            if record is None or self.executor is None:
+                return
+            response = await self.executor.execute(
+                run_id,
+                self._bundle_files(record),
+                runtime_secrets,
+            )
+            record = self.store.get(run_id)
+            if record is None:
+                runtime_secrets.clear()
+                return
+            self._append_dagster_logs(
+                record,
+                response,
+                secret_values=[value for value in runtime_secrets.values() if value],
+            )
+            runtime_secrets.clear()
+            if record.get("status") == "cancelling":
+                self._finish_cancelled(record)
+                return
+            validation_report = response.get("validation_report")
+            validation_report = (
+                validation_report if isinstance(validation_report, dict) else {}
+            )
+            if not response.get("ok"):
+                errors = validation_report.get("errors") or [
+                    "Dagster pipeline execution failed."
+                ]
+                error = {
+                    "code": "dagster_execution_failed",
+                    "message": str(errors[0]),
+                    "details": {"errors": errors},
+                }
+                self._finish_failed(record, error)
+                return
+
+            outputs = response.get("run_outputs")
+            output_files = [item for item in outputs or [] if isinstance(item, dict)]
+            record["_output_files"] = self.artifact_store.store_outputs(
+                run_id, output_files
+            )
+            now = utc_now_iso()
+            record["status"] = "succeeded"
+            record["updated_at"] = now
+            record["finished_at"] = now
+            record["result"] = self._terminal_result(
+                record,
+                "succeeded",
+                outputs=[self._output_metadata(item) for item in output_files],
+            )
+            self._append_event(
+                record,
+                "run.succeeded",
+                "succeeded",
+                f"Dagster completed with {len(output_files)} output artifact(s).",
+            )
+            self.store.save(record)
+        except Exception as exc:  # noqa: BLE001 - adapter failures become run failures.
+            runtime_secrets.clear()
+            record = self.store.get(run_id)
+            if record is None:
+                return
+            if record.get("status") == "cancelling":
+                self._finish_cancelled(record)
+                return
+            self._finish_failed(
+                record, {"code": "runner_error", "message": str(exc)}
+            )
+
+    def _append_dagster_logs(
+        self,
+        record: dict[str, Any],
+        response: dict[str, Any],
+        *,
+        secret_values: list[str],
+    ) -> None:
+        validation = response.get("validation_report")
+        dagster = validation.get("dagster") if isinstance(validation, dict) else None
+        steps = dagster.get("steps") if isinstance(dagster, dict) else None
+        for index, step in enumerate(steps or [], start=1):
+            if not isinstance(step, dict):
+                continue
+            command = " ".join(str(part) for part in step.get("command") or [])
+            output = str(step.get("output") or "").strip()
+            summary = output[-12000:] if output else command or f"Dagster step {index}"
+            for secret_value in secret_values:
+                summary = summary.replace(secret_value, "[REDACTED]")
+            self._append_event(record, "dagster.log", "running", summary)
+        self.store.save(record)
+
+    def _bundle_files(self, record: dict[str, Any]) -> list[dict[str, Any]]:
+        reference = str(record.get("_bundle_reference") or "")
+        if reference:
+            return self.artifact_store.load_bundle(reference)
+        return [
+            deepcopy(item)
+            for item in record.get("_bundle_files", [])
+            if isinstance(item, dict)
+        ]
+
+    def _update_status(self, run_id: str, status: str, message: str) -> None:
+        record = self.store.get(run_id)
+        if (
+            record is None
+            or record.get("status") in TERMINAL_STATUSES
+            or record.get("status") == "cancelling"
+        ):
+            return
+        now = utc_now_iso()
+        record["status"] = status
+        record["updated_at"] = now
+        if status == "running" and not record.get("started_at"):
+            record["started_at"] = now
+        self._append_event(record, f"run.{status}", status, message)
+        self.store.save(record)
+
+    def _finish_cancelled(self, record: dict[str, Any]) -> None:
+        now = utc_now_iso()
+        record["status"] = "cancelled"
+        record["updated_at"] = now
+        record["finished_at"] = now
+        record["result"] = self._terminal_result(record, "cancelled")
+        self._append_event(record, "run.cancelled", "cancelled", "Dagster run cancelled.")
+        self.store.save(record)
+
+    def _finish_failed(self, record: dict[str, Any], error: dict[str, Any]) -> None:
+        now = utc_now_iso()
+        record["status"] = "failed"
+        record["updated_at"] = now
+        record["finished_at"] = now
+        record["error"] = deepcopy(error)
+        record["result"] = self._terminal_result(record, "failed", error=error)
+        self._append_event(record, "run.failed", "failed", str(error["message"]))
+        self.store.save(record)
+
+    @staticmethod
+    def _output_metadata(entry: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: entry.get(key)
+            for key in (
+                "path",
+                "filename",
+                "kind",
+                "format",
+                "content_type",
+                "size_bytes",
+                "sha256",
+            )
+            if entry.get(key) is not None
+        }
+
+    @staticmethod
+    def _terminal_result(
+        record: dict[str, Any],
+        status: str,
+        *,
+        error: dict[str, Any] | None = None,
+        outputs: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        result = {
+            "schema_version": "inlumen.run-result@1",
+            "run_id": record["run_id"],
+            "status": status,
+            "engine": record["engine"],
+            "created_at": record["created_at"],
+            "finished_at": record["finished_at"],
+            "outputs": outputs or [],
+            "execution_mode": record["execution_mode"],
+        }
+        if record.get("started_at"):
+            result["started_at"] = record["started_at"]
+        if error is not None:
+            result["error"] = deepcopy(error)
+        return result
+
+    @staticmethod
+    def _append_event(
+        record: dict[str, Any],
+        event_type: str,
+        status: str | None,
+        message: str | None,
+    ) -> None:
+        cursor = int(record.get("event_cursor") or 0) + 1
+        record["event_cursor"] = cursor
+        record.setdefault("_events", []).append(
+            {
+                "id": cursor,
+                "timestamp": utc_now_iso(),
+                "type": event_type,
+                "status": status,
+                "message": message,
+                "node_id": None,
+            }
+        )

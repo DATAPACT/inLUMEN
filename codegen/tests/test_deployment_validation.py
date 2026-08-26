@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 from app.deployment_validation import (
+    _read_run_output_files,
     repair_deployment_bundle,
     validate_dagster_project,
     validate_deployment_bundle,
@@ -69,7 +70,9 @@ class DagsterRuntimeDependencyValidationTest(unittest.TestCase):
             model_root = project_root / "model-store"
             calls = []
 
-            def fake_run(command, *, cwd, timeout_seconds, env=None):
+            def fake_run(
+                command, *, cwd, timeout_seconds, env=None, execution_id=None
+            ):
                 calls.append({"command": command, "env": dict(env or {})})
                 output = (
                     "prefetched"
@@ -180,6 +183,33 @@ class DeploymentInputContractValidationTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+
+    def test_filesystem_bundle_accepts_node_owned_root_input_inventory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_bundle(root, kind="binary")
+            node_inputs = root / "inputs/node-1-audio-ingestion"
+            node_inputs.mkdir()
+            (root / "inputs/sample.wav").replace(node_inputs / "sample.wav")
+            (root / "inputs/input_manifest.json").unlink()
+
+            report = validate_deployment_bundle(
+                root,
+                targets={"argo": False, "dagster": False},
+            )
+
+        self.assertTrue(report["ok"], report["errors"])
+
+    def test_run_outputs_hide_dagster_run_scope_directories(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            staged = root / "outputs/node-1/run-uuid/output/result.txt"
+            staged.parent.mkdir(parents=True)
+            staged.write_text("done", encoding="utf-8")
+
+            outputs = _read_run_output_files(root)
+
+        self.assertEqual("outputs/node-1/result.txt", outputs[0]["path"])
 
     def test_validation_rejects_run_spec_node_drift(self):
         with tempfile.TemporaryDirectory() as temp_dir:
