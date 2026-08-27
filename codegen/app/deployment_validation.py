@@ -484,9 +484,9 @@ def _isolated_dagster_execution(
                 cap_drop=["ALL"],
                 security_opt=["no-new-privileges"],
                 pids_limit=256,
-                mem_limit=os.getenv("CODEGEN_VALIDATION_MEMORY_LIMIT", "1g"),
+                mem_limit=os.getenv("CODEGEN_VALIDATION_MEMORY_LIMIT", "4g"),
                 nano_cpus=int(
-                    float(os.getenv("CODEGEN_VALIDATION_CPU_LIMIT", "1"))
+                    float(os.getenv("CODEGEN_VALIDATION_CPU_LIMIT", "4"))
                     * 1_000_000_000
                 ),
                 tmpfs={"/tmp": "rw,noexec,nosuid,size=256m"},
@@ -579,9 +579,9 @@ def _isolated_dagster_execution(
             cap_drop=["ALL"],
             security_opt=["no-new-privileges"],
             pids_limit=256,
-            mem_limit=os.getenv("CODEGEN_VALIDATION_MEMORY_LIMIT", "1g"),
+            mem_limit=os.getenv("CODEGEN_VALIDATION_MEMORY_LIMIT", "4g"),
             nano_cpus=int(
-                float(os.getenv("CODEGEN_VALIDATION_CPU_LIMIT", "1"))
+                float(os.getenv("CODEGEN_VALIDATION_CPU_LIMIT", "4"))
                 * 1_000_000_000
             ),
             tmpfs={"/tmp": "rw,noexec,nosuid,size=256m,mode=1777"},

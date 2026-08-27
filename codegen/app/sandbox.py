@@ -777,9 +777,9 @@ def validate_pipeline_program_with_docker(
                 "cap_drop": ["ALL"],
                 "security_opt": ["no-new-privileges"],
                 "pids_limit": 128,
-                "mem_limit": os.getenv("CODEGEN_VALIDATION_MEMORY_LIMIT", "1g"),
+                "mem_limit": os.getenv("CODEGEN_VALIDATION_MEMORY_LIMIT", "4g"),
                 "nano_cpus": int(
-                    float(os.getenv("CODEGEN_VALIDATION_CPU_LIMIT", "1"))
+                    float(os.getenv("CODEGEN_VALIDATION_CPU_LIMIT", "4"))
                     * 1_000_000_000
                 ),
                 "tmpfs": {"/tmp": "rw,noexec,nosuid,size=128m"},
@@ -1022,9 +1022,9 @@ def _cached_dependency_image(
                 "/tmp/inlumen-requirements.txt",
             ],
             labels=labels,
-            mem_limit=os.getenv("CODEGEN_VALIDATION_MEMORY_LIMIT", "1g"),
+            mem_limit=os.getenv("CODEGEN_VALIDATION_MEMORY_LIMIT", "4g"),
             nano_cpus=int(
-                float(os.getenv("CODEGEN_VALIDATION_CPU_LIMIT", "1")) * 1_000_000_000
+                float(os.getenv("CODEGEN_VALIDATION_CPU_LIMIT", "4")) * 1_000_000_000
             ),
             pids_limit=256,
             security_opt=["no-new-privileges"],
