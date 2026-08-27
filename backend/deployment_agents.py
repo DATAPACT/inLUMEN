@@ -570,6 +570,7 @@ def _deterministic_python_dockerfile(
     *,
     base_image: str = "python:3.11-slim",
     entrypoint: Optional[list[str]] = None,
+    system_packages: Optional[list[str]] = None,
 ) -> tuple[str, str]:
     """Create the transient build definition owned by the deployment exporter."""
     runtime_filenames = [
@@ -591,11 +592,19 @@ def _deterministic_python_dockerfile(
         else []
     )
     command = entrypoint or ["python", "/app/main.py"]
+    apt_lines = []
+    if system_packages:
+        apt_lines = [
+            "RUN apt-get update && apt-get install -y --no-install-recommends \\",
+            *[f"    {package} \\" for package in system_packages],
+            "    && rm -rf /var/lib/apt/lists/*",
+        ]
     content = "\n".join(
         [
             "# syntax=docker/dockerfile:1.7",
             f"FROM {base_image or 'python:3.11-slim'}",
             "ENV PYTHONUNBUFFERED=1",
+            *apt_lines,
             "WORKDIR /app",
             *copy_lines,
             *install_lines,
@@ -1648,12 +1657,32 @@ def _task_capability_contract(
             "Attached Python runtime validation failed",
             ["capabilities.dependencies.python must be a list of non-empty requirement strings."],
         )
-    if system_dependencies:
+    if not isinstance(system_dependencies, list) or not all(
+        isinstance(item, str) and item.strip() for item in system_dependencies
+    ):
+        raise DeploymentArtifactValidationError(
+            "Attached Python runtime validation failed",
+            ["capabilities.dependencies.system must be a list of package names."],
+        )
+    system_dependencies = [
+        *system_dependencies,
+        *(inferred_model_plan.get("required_system_packages") or []),
+    ]
+    supported_system_dependencies = {"ffmpeg"}
+    unsupported_system_dependencies = sorted(
+        {
+            str(item).strip()
+            for item in system_dependencies
+            if str(item).strip() not in supported_system_dependencies
+        }
+    )
+    if unsupported_system_dependencies:
         raise DeploymentArtifactValidationError(
             "Attached Python runtime validation failed",
             [
-                "System dependencies are declared but are not supported by the portable "
-                "Python runtime yet. Package them in a custom container task."
+                "Unsupported portable system dependencies: "
+                + ", ".join(unsupported_system_dependencies)
+                + ". Use a custom container task for packages outside the reviewed allowlist."
             ],
         )
 
@@ -1740,7 +1769,7 @@ def _task_capability_contract(
         "output": io_contract["output"],
         "dependencies": {
             "python": list(dict.fromkeys(item.strip() for item in python_dependencies)),
-            "system": [],
+            "system": list(dict.fromkeys(item.strip() for item in system_dependencies)),
         },
         "models": models,
         "resources": resources,
@@ -2228,6 +2257,7 @@ async def _read_attached_python_runtime(
         flow_id,
         [item["filename"] for item in runtime_files],
         entrypoint=entrypoint,
+        system_packages=task_capabilities["dependencies"]["system"],
     )
     runtime_artifact = {
         "flow_id": flow_id,

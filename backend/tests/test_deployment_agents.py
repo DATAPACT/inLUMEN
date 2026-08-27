@@ -470,6 +470,35 @@ parser.add_argument('--output')
         self.assertEqual(["requests>=2"], capabilities["dependencies"]["python"])
         self.assertEqual("owner/reviewed-model", capabilities["models"][0]["model_id"])
 
+    def test_reviewed_model_system_dependencies_are_allowlisted(self):
+        capabilities = _task_capability_contract(
+            {},
+            {
+                "execution": {"adapter": "filesystem"},
+                "input": {"delivery": "directory"},
+                "output": {"discovery": "scan", "target": "directory"},
+            },
+            {
+                "model_id": "openai/whisper-small",
+                "model_revision": "973afd24965f72e36ca33b3055d56a652f456b4d",
+                "adapter_id": "huggingface-transformers",
+                "required_system_packages": ["ffmpeg"],
+            },
+        )
+
+        self.assertEqual(["ffmpeg"], capabilities["dependencies"]["system"])
+
+        with self.assertRaises(DeploymentArtifactValidationError):
+            _task_capability_contract(
+                {"dependencies": {"system": ["curl"]}},
+                {
+                    "execution": {"adapter": "filesystem"},
+                    "input": {"delivery": "directory"},
+                    "output": {"discovery": "scan", "target": "directory"},
+                },
+                {},
+            )
+
     @unittest.skipIf(
         generate_dockerfiles_with_agent is None,
         f"deployment agent dependencies are unavailable: {IMPORT_ERROR}",

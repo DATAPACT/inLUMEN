@@ -343,6 +343,7 @@ class PipelineGenerationJobResponse(BaseModel):
 
 
 class DeploymentBundleValidationRequest(BaseModel):
+    execution_id: str | None = Field(default=None, min_length=1, max_length=160)
     files: list[dict[str, Any]]
     targets: dict[str, bool] = Field(default_factory=dict)
     mode: DeploymentValidationMode = "validate"

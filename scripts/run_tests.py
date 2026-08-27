@@ -71,6 +71,15 @@ def checks_for(component: str) -> list[Check]:
                 codegen_root,
             )
         ]
+    if component == "runner":
+        runner_root = ROOT / "runner"
+        return [
+            Check(
+                "pipeline runner service tests",
+                (project_python(runner_root), "-m", "pytest", "tests"),
+                runner_root,
+            )
+        ]
     if component == "compose":
         docker = executable("docker")
         return [
@@ -92,6 +101,7 @@ def checks_for(component: str) -> list[Check]:
                 ROOT,
                 environment={
                     "INLUMEN_CODEGEN_SERVICE_API_KEY": "compose-validation-token",
+                    "INLUMEN_RUNNER_SERVICE_API_KEY": "runner-validation-token",
                 },
             ),
         ]
@@ -103,7 +113,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--component",
         action="append",
-        choices=("backend", "codegen", "frontend", "compose"),
+        choices=("backend", "codegen", "runner", "frontend", "compose"),
         help="Run only this component. Repeat the option to select more than one.",
     )
     return parser.parse_args()
@@ -114,6 +124,7 @@ def main() -> int:
     components = args.component or [
         "backend",
         "codegen",
+        "runner",
         "frontend",
         "compose",
     ]

@@ -30,6 +30,7 @@ class ExportContractSchemaTest(unittest.TestCase):
             self.load("deployment-bundle.schema.json", version=3),
             self.load("artifact-contract.schema.json", version=3),
             self.load("run-spec.schema.json", version=3),
+            self.load("pipeline-run.schema.json", version=3),
         ]
 
         self.assertTrue(
@@ -46,6 +47,7 @@ class ExportContractSchemaTest(unittest.TestCase):
                 "inlumen.artifact-contract@2",
                 "inlumen.run-spec@2",
                 "inlumen.run-result@1",
+                "inlumen.pipeline-run@1",
                 "inlumen.output-manifest@1",
                 "inlumen.deployment-bundle@2",
                 "inlumen.artifact-contract@3",

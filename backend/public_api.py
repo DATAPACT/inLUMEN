@@ -1490,6 +1490,7 @@ def build_openapi_schema() -> dict[str, Any]:
     schema["tags"].extend([
         {"name": "Canvas Graph", "description": "Node and edge operations used by the inLUMEN canvas."},
         {"name": "Pipeline State", "description": "Current graph, overview metadata, and saved design versions."},
+        {"name": "Pipeline Runs", "description": "Durable background pipeline execution lifecycle."},
         {"name": "Files", "description": "Node file upload, deletion, reading, and text updates."},
         {"name": "Agentic", "description": "Agent-assisted chat and deployment artifact generation used by the UI."},
         {"name": "Settings", "description": "LLM configuration metadata used by the UI."},
@@ -1602,6 +1603,137 @@ def _ui_api_openapi_paths(
                 "responses": {
                     "200": _json_response("#/components/schemas/ReactFlowGraph", "Current pipeline graph."),
                     **protected_responses,
+                },
+            },
+        },
+        "/api/pipeline-runs/capabilities": {
+            "get": {
+                "tags": ["Pipeline Runs"],
+                "summary": "Inspect the configured background execution adapter",
+                "operationId": "getPipelineRunCapabilities",
+                "responses": {
+                    "200": _json_response("#/components/schemas/RunnerCapabilities"),
+                    **protected_responses,
+                },
+            },
+        },
+        "/api/pipeline-runs": {
+            "get": {
+                "tags": ["Pipeline Runs"],
+                "summary": "List recent background pipeline runs",
+                "operationId": "listPipelineRuns",
+                "parameters": [{
+                    "name": "limit",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                }],
+                "responses": {
+                    "200": _json_response("#/components/schemas/PipelineRunListResponse"),
+                    **protected_responses,
+                },
+            },
+            "post": {
+                "tags": ["Pipeline Runs"],
+                "summary": "Submit the current pipeline as a durable background run",
+                "operationId": "createPipelineRun",
+                "requestBody": _json_request("#/components/schemas/PipelineRunStartRequest", required=False),
+                "responses": {
+                    "202": _json_response("#/components/schemas/PipelineRunRecord", "Background run accepted."),
+                    "429": _json_response(
+                        "#/components/schemas/ErrorResponse",
+                        "The bounded background-run capacity is full.",
+                    ),
+                    **protected_responses,
+                },
+            },
+            "delete": {
+                "tags": ["Pipeline Runs"],
+                "summary": "Cancel active runs and delete all run history and outputs",
+                "operationId": "clearPipelineRuns",
+                "responses": {
+                    "200": _json_response("#/components/schemas/AnyObject"),
+                    **protected_responses,
+                },
+            },
+        },
+        "/api/pipeline-runs/{run_id}": {
+            "get": {
+                "tags": ["Pipeline Runs"],
+                "summary": "Fetch current background run state",
+                "operationId": "getPipelineRun",
+                "parameters": [{"$ref": "#/components/parameters/RunId"}],
+                "responses": {
+                    "200": _json_response("#/components/schemas/PipelineRunRecord"),
+                    **not_found_responses,
+                },
+            },
+            "delete": {
+                "tags": ["Pipeline Runs"],
+                "summary": "Idempotently request background run cancellation",
+                "operationId": "cancelPipelineRun",
+                "parameters": [{"$ref": "#/components/parameters/RunId"}],
+                "responses": {
+                    "200": _json_response("#/components/schemas/PipelineRunRecord"),
+                    **not_found_responses,
+                },
+            },
+        },
+        "/api/pipeline-runs/{run_id}/events": {
+            "get": {
+                "tags": ["Pipeline Runs"],
+                "summary": "Fetch incremental background run events",
+                "operationId": "getPipelineRunEvents",
+                "parameters": [
+                    {"$ref": "#/components/parameters/RunId"},
+                    {
+                        "name": "after",
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "integer", "minimum": 0, "default": 0},
+                    },
+                ],
+                "responses": {
+                    "200": _json_response("#/components/schemas/PipelineRunEventsResponse"),
+                    **not_found_responses,
+                },
+            },
+        },
+        "/api/pipeline-runs/{run_id}/bundle": {
+            "get": {
+                "tags": ["Pipeline Runs"],
+                "summary": "Download the exact Dagster snapshot used by a run",
+                "operationId": "downloadPipelineRunBundle",
+                "parameters": [{"$ref": "#/components/parameters/RunId"}],
+                "responses": {
+                    "200": {
+                        "description": "Tested Dagster bundle ZIP.",
+                        "content": {"application/zip": {"schema": {"type": "string", "format": "binary"}}},
+                    },
+                    **not_found_responses,
+                },
+            },
+        },
+        "/api/pipeline-runs/{run_id}/outputs/{output_path}": {
+            "get": {
+                "tags": ["Pipeline Runs"],
+                "summary": "Download a produced pipeline artifact",
+                "operationId": "downloadPipelineRunOutput",
+                "parameters": [
+                    {"$ref": "#/components/parameters/RunId"},
+                    {
+                        "name": "output_path",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string", "minLength": 1},
+                    },
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Pipeline output artifact.",
+                        "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}},
+                    },
+                    **not_found_responses,
                 },
             },
         },
@@ -2042,6 +2174,12 @@ def _ui_api_openapi_parameters() -> dict[str, Any]:
             "required": True,
             "schema": {"type": "string", "minLength": 1, "maxLength": 160},
         },
+        "RunId": {
+            "name": "run_id",
+            "in": "path",
+            "required": True,
+            "schema": {"type": "string", "minLength": 1, "maxLength": 160},
+        },
         "ContainerId": {
             "name": "container_id",
             "in": "query",
@@ -2067,6 +2205,143 @@ def _ui_api_openapi_parameters() -> dict[str, Any]:
 def _ui_api_openapi_schemas() -> dict[str, Any]:
     return {
         "AnyObject": {"type": "object", "additionalProperties": True},
+        "PipelineRunStartRequest": {
+            "type": "object",
+            "properties": {"idempotency_key": {"type": "string", "maxLength": 200}},
+            "additionalProperties": False,
+        },
+        "PipelineRunSnapshot": {
+            "type": "object",
+            "required": [
+                "snapshot_id", "graph_sha256", "bundle_sha256", "node_count", "edge_count",
+            ],
+            "properties": {
+                "snapshot_id": {"type": "string"},
+                "graph_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+                "bundle_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+                "pipeline_id": {"type": "string", "nullable": True},
+                "pipeline_version": {"type": "string", "nullable": True},
+                "active_version_uid": {"type": "string", "nullable": True},
+                "node_count": {"type": "integer", "minimum": 0},
+                "edge_count": {"type": "integer", "minimum": 0},
+            },
+        },
+        "PipelineRunRecord": {
+            "type": "object",
+            "required": [
+                "schema_version", "run_id", "status", "engine", "execution_mode",
+                "snapshot", "created_at", "updated_at", "event_cursor",
+            ],
+            "properties": {
+                "schema_version": {"type": "string", "enum": ["inlumen.pipeline-run@1"]},
+                "run_id": {"type": "string"},
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "queued", "preparing", "running", "cancelling",
+                        "succeeded", "partial", "failed", "cancelled",
+                    ],
+                },
+                "engine": {"type": "string"},
+                "execution_mode": {"type": "string"},
+                "snapshot": {"$ref": "#/components/schemas/PipelineRunSnapshot"},
+                "created_at": {"type": "string", "format": "date-time"},
+                "updated_at": {"type": "string", "format": "date-time"},
+                "started_at": {"type": "string", "format": "date-time", "nullable": True},
+                "finished_at": {"type": "string", "format": "date-time", "nullable": True},
+                "cancel_requested_at": {"type": "string", "format": "date-time", "nullable": True},
+                "event_cursor": {"type": "integer", "minimum": 0},
+                "progress": {
+                    "type": "object",
+                    "nullable": True,
+                    "properties": {
+                        "phase": {"type": "string", "nullable": True},
+                        "message": {"type": "string", "nullable": True},
+                        "active_node_id": {"type": "string", "nullable": True},
+                        "active_node_name": {"type": "string", "nullable": True},
+                        "node_elapsed_seconds": {
+                            "type": "integer", "minimum": 0, "nullable": True,
+                        },
+                        "heartbeat_at": {
+                            "type": "string", "format": "date-time", "nullable": True,
+                        },
+                        "resource_profile": {"type": "string", "nullable": True},
+                        "resource_cpu": {
+                            "type": "integer", "minimum": 1, "nullable": True,
+                        },
+                        "resource_memory_bytes": {
+                            "type": "integer", "minimum": 1, "nullable": True,
+                        },
+                        "resource_reason": {"type": "string", "nullable": True},
+                        "queue_position": {
+                            "type": "integer", "minimum": 1, "nullable": True,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+                "error": {"type": "object", "nullable": True, "additionalProperties": True},
+                "result": {"type": "object", "nullable": True, "additionalProperties": True},
+            },
+            "additionalProperties": True,
+        },
+        "PipelineRunListResponse": {
+            "type": "object",
+            "required": ["runs"],
+            "properties": {
+                "runs": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/PipelineRunRecord"},
+                },
+            },
+        },
+        "PipelineRunEvent": {
+            "type": "object",
+            "required": ["id", "timestamp", "type"],
+            "properties": {
+                "id": {"type": "integer", "minimum": 1},
+                "timestamp": {"type": "string", "format": "date-time"},
+                "type": {"type": "string"},
+                "status": {"type": "string", "nullable": True},
+                "message": {"type": "string", "nullable": True},
+                "node_id": {"type": "string", "nullable": True},
+            },
+        },
+        "PipelineRunEventsResponse": {
+            "type": "object",
+            "required": ["run_id", "events", "next_cursor"],
+            "properties": {
+                "run_id": {"type": "string"},
+                "events": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/PipelineRunEvent"},
+                },
+                "next_cursor": {"type": "integer", "minimum": 0},
+            },
+        },
+        "RunnerCapabilities": {
+            "type": "object",
+            "required": [
+                "background_runs",
+                "execution_available",
+                "adapter",
+                "execution_mode",
+                "max_outstanding_runs",
+                "outstanding_run_count",
+                "available_run_slots",
+                "summary_persistence",
+            ],
+            "properties": {
+                "background_runs": {"type": "boolean"},
+                "execution_available": {"type": "boolean"},
+                "adapter": {"type": "string"},
+                "execution_mode": {"type": "string"},
+                "max_outstanding_runs": {"type": "integer", "minimum": 1},
+                "outstanding_run_count": {"type": "integer", "minimum": 0},
+                "available_run_slots": {"type": "integer", "minimum": 0},
+                "summary_persistence": {"type": "boolean"},
+                "message": {"type": "string", "nullable": True},
+            },
+        },
         "LLMConfig": {
             "type": "object",
             "required": ["provider", "model", "base_url", "api_key"],
@@ -2402,6 +2677,7 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                 "graph": {"$ref": "#/components/schemas/ReactFlowGraph"},
                 "chat_reset": {"type": "boolean"},
                 "storage_cleanup": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+                "run_cleanup": {"type": "object", "additionalProperties": True},
             },
             "additionalProperties": True,
         },

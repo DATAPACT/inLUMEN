@@ -78,7 +78,8 @@ def test_deployment_validation_endpoint_forwards_every_option() -> None:
                 "skip_install": False,
                 "argo_lint": True,
                 "argo_dry_run": True,
-                "timeout_seconds": 120,
+            "timeout_seconds": 120,
+            "execution_id": "run-1",
             },
         )
 
@@ -96,8 +97,9 @@ def test_deployment_validation_endpoint_forwards_every_option() -> None:
         argo_lint=True,
             argo_dry_run=True,
             timeout_seconds=120,
-            runtime_secrets={},
-        )
+        runtime_secrets={},
+        execution_id="run-1",
+    )
 
 
 def test_uploaded_bundle_is_validated_without_a_shared_filesystem() -> None:
@@ -147,3 +149,40 @@ def test_uploaded_bundle_rejects_path_traversal() -> None:
 
     assert response.status_code == 422
     assert "Unsafe bundle file path" in response.json()["detail"]
+
+
+def test_deployment_execution_cancellation_terminates_process_and_container() -> None:
+    with (
+        patch("app.main.cancel_deployment_execution") as cancel_process,
+        patch("app.main.cancel_sandbox_run") as cancel_container,
+    ):
+        response = TestClient(app).delete(
+            "/v1/validate/deployment-bundle/run-123"
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancellation_requested"
+    cancel_process.assert_called_once_with("run-123")
+    cancel_container.assert_called_once_with("run-123")
+
+
+def test_deployment_execution_progress_is_available_to_the_private_runner() -> None:
+    expected = {
+        "execution_id": "run-123",
+        "phase": "running_pipeline",
+        "message": "Dagster is executing pipeline nodes.",
+        "terminal": False,
+        "observed_at": "2026-08-26T15:00:00Z",
+        "logs": "Node node_2_speech_to_text is still running (30s elapsed).",
+    }
+    with patch(
+        "app.main.deployment_execution_progress",
+        return_value=expected,
+    ) as progress:
+        response = TestClient(app).get(
+            "/v1/validate/deployment-bundle/run-123/progress"
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    progress.assert_called_once_with("run-123")

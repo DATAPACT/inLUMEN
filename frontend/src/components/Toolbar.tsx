@@ -182,6 +182,7 @@ export function Toolbar({
                     <li>empty the Main pipeline canvas,</li>
                     <li>delete every saved and reusable pipeline version,</li>
                     <li>remove all pipeline files and generated packages,</li>
+                    <li>cancel active runs and delete all run history and outputs,</li>
                     <li>clear the current chat session, and</li>
                     <li>delete all Neo4j graph data and provenance.</li>
                   </ul>

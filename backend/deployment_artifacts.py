@@ -2796,6 +2796,7 @@ def _model_requirements_for_dagster(
         adapter_id: str,
         model_id: str,
         model_revision: str,
+        resource_class: str = "",
         model_variants: dict | None = None,
         runtime_selection: dict | None = None,
         artifact_policy: dict | None = None,
@@ -2811,6 +2812,7 @@ def _model_requirements_for_dagster(
                 "adapter_id": adapter_id,
                 "model_id": model_id,
                 "model_revision": model_revision,
+                "resource_class": resource_class or "heavy_cpu_or_gpu",
                 "model_variants": variants,
                 "runtime_selection": runtime_selection or {},
                 "profile_env": (
@@ -2848,6 +2850,10 @@ def _model_requirements_for_dagster(
                         adapter_id=_clean_string(declared.get("adapter_id")) or "user-declared-model",
                         model_id=model_id,
                         model_revision=model_revision,
+                        resource_class=(
+                            _clean_string(declared.get("resource_class"))
+                            or "heavy_cpu_or_gpu"
+                        ),
                         model_variants=(
                             declared.get("model_variants")
                             if isinstance(declared.get("model_variants"), dict)
@@ -2903,6 +2909,10 @@ def _model_requirements_for_dagster(
             adapter_id=adapter_id,
             model_id=model_id,
             model_revision=model_revision,
+            resource_class=(
+                _clean_string(plan.get("resource_class"))
+                or "heavy_cpu_or_gpu"
+            ),
             model_variants=variants,
             runtime_selection=runtime_selection,
             artifact_policy=artifact_policy,
@@ -2911,6 +2921,47 @@ def _model_requirements_for_dagster(
         "schema_version": "inlumen.model-requirements@1",
         "models": models,
     }
+
+
+def _system_requirements_for_dagster(
+    steps: Sequence[dict],
+    dockerfiles_payload: Any,
+) -> list[str]:
+    """Collect reviewed OS packages declared by canonical node manifests."""
+    allowed = {"ffmpeg"}
+    packages: list[str] = []
+    for step in steps:
+        flow_id = _clean_string(step.get("flow_id"))
+        manifest = _json_object(
+            _deployment_file_content(
+                dockerfiles_payload,
+                flow_id,
+                "node-manifest.json",
+            )
+        )
+        capabilities = (
+            manifest.get("capabilities")
+            if isinstance(manifest.get("capabilities"), dict)
+            else {}
+        )
+        dependencies = (
+            capabilities.get("dependencies")
+            if isinstance(capabilities.get("dependencies"), dict)
+            else {}
+        )
+        for package in dependencies.get("system") or []:
+            normalized = _clean_string(package).lower()
+            if normalized and normalized not in allowed:
+                raise DeploymentArtifactValidationError(
+                    "Dagster deployment dependency validation failed",
+                    [
+                        f"Node {flow_id} requests unsupported system package "
+                        f"{normalized!r}."
+                    ],
+                )
+            if normalized and normalized not in packages:
+                packages.append(normalized)
+    return packages
 
 
 def _model_prefetch_source() -> str:
@@ -3157,12 +3208,25 @@ def _dagster_workspace_content() -> str:
 """
 
 
-def _dagster_dockerfile_content(*, bundle_layout: bool = False) -> str:
+def _dagster_dockerfile_content(
+    *,
+    bundle_layout: bool = False,
+    system_packages: Sequence[str] = (),
+) -> str:
+    system_install = ""
+    if system_packages:
+        package_lines = " \\\n    ".join(system_packages)
+        system_install = (
+            "RUN apt-get update && apt-get install -y --no-install-recommends \\\n    "
+            + package_lines
+            + " \\\n    && rm -rf /var/lib/apt/lists/*\n"
+        )
     if bundle_layout:
         return f"""# syntax=docker/dockerfile:1.7
 FROM python:3.11-slim
 COPY --from=ghcr.io/astral-sh/uv:{UV_PINNED_VERSION} /uv /uvx /bin/
 ENV PYTHONUNBUFFERED=1
+{system_install}\
 ARG INLUMEN_ACCELERATOR=cpu
 ARG INLUMEN_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
 WORKDIR /workspace
@@ -3186,6 +3250,7 @@ CMD ["dagster", "dev", "-m", "inlumen_dagster_project.definitions", "-h", "0.0.0
 FROM python:3.11-slim
 COPY --from=ghcr.io/astral-sh/uv:{UV_PINNED_VERSION} /uv /uvx /bin/
 ENV PYTHONUNBUFFERED=1
+{system_install}\
 ARG INLUMEN_ACCELERATOR=cpu
 ARG INLUMEN_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
 WORKDIR /app
@@ -3291,6 +3356,7 @@ def _dagster_compose_content(
     restart: "no"
     environment:
       HF_HOME: /models/huggingface
+      HF_HUB_CACHE: /models/huggingface
       HF_TOKEN: "${{HF_TOKEN:-}}"
       HF_HUB_ETAG_TIMEOUT: "${{HF_HUB_ETAG_TIMEOUT:-30}}"
       HF_HUB_DOWNLOAD_TIMEOUT: "${{HF_HUB_DOWNLOAD_TIMEOUT:-600}}"
@@ -3329,6 +3395,8 @@ x-dagster-environment: &dagster-environment
   # Reviewed adapters still load their prefetched snapshots directly from
   # INLUMEN_MODEL_ROOT, but do not impose an offline-only policy on user code.
   HF_HUB_OFFLINE: "${{HF_HUB_OFFLINE:-0}}"
+  HF_HOME: /models/huggingface
+  HF_HUB_CACHE: /models/huggingface
   TRANSFORMERS_OFFLINE: "${{TRANSFORMERS_OFFLINE:-0}}"
   INLUMEN_ACCELERATOR: "${{INLUMEN_ACCELERATOR:-cpu}}"
   INLUMEN_MODEL_ROOT: /models
@@ -3901,6 +3969,10 @@ def build_dagster_project_files(
         dockerfiles_payload,
     )
     has_model_requirements = bool(model_requirements["models"])
+    system_requirements = _system_requirements_for_dagster(
+        [steps_by_id[step_id] for step_id in ordered_ids],
+        dockerfiles_payload,
+    )
     output_files: List[dict] = []
     aggregate_requirements: List[str] = []
     project_dir = _sanitize_fragment(project_dir, "dagster_project")
@@ -4135,7 +4207,10 @@ def build_dagster_project_files(
             ),
             _dagster_file(
                 f"{project_dir}/Dockerfile",
-                _dagster_dockerfile_content(bundle_layout=bundle_layout),
+                _dagster_dockerfile_content(
+                    bundle_layout=bundle_layout,
+                    system_packages=system_requirements,
+                ),
                 "dagster-project",
             ),
             _dagster_file(

@@ -26,6 +26,7 @@ from docker.errors import DockerException, ImageNotFound
 from packaging.requirements import InvalidRequirement, Requirement
 from requests.exceptions import ReadTimeout
 
+from .resource_policy import RESOURCE_PROFILES
 from .schemas import (
     ExpectedArtifact,
     FileDescriptor,
@@ -46,6 +47,7 @@ SANDBOX_RUN_LABEL = "inlumen.codegen.run_id"
 _ACTIVE_SANDBOX_CONTAINERS: dict[str, set[str]] = {}
 _CANCELLED_SANDBOX_RUNS: set[str] = set()
 _SANDBOX_LOCK = threading.RLock()
+_STANDARD_SANDBOX_PROFILE = RESOURCE_PROFILES["standard"]
 
 
 class SandboxUnavailable(RuntimeError):
@@ -777,10 +779,9 @@ def validate_pipeline_program_with_docker(
                 "cap_drop": ["ALL"],
                 "security_opt": ["no-new-privileges"],
                 "pids_limit": 128,
-                "mem_limit": os.getenv("CODEGEN_VALIDATION_MEMORY_LIMIT", "1g"),
+                "mem_limit": _STANDARD_SANDBOX_PROFILE.memory_bytes,
                 "nano_cpus": int(
-                    float(os.getenv("CODEGEN_VALIDATION_CPU_LIMIT", "1"))
-                    * 1_000_000_000
+                    _STANDARD_SANDBOX_PROFILE.cpu * 1_000_000_000
                 ),
                 "tmpfs": {"/tmp": "rw,noexec,nosuid,size=128m"},
                 "environment": {
@@ -1022,9 +1023,9 @@ def _cached_dependency_image(
                 "/tmp/inlumen-requirements.txt",
             ],
             labels=labels,
-            mem_limit=os.getenv("CODEGEN_VALIDATION_MEMORY_LIMIT", "1g"),
+            mem_limit=_STANDARD_SANDBOX_PROFILE.memory_bytes,
             nano_cpus=int(
-                float(os.getenv("CODEGEN_VALIDATION_CPU_LIMIT", "1")) * 1_000_000_000
+                _STANDARD_SANDBOX_PROFILE.cpu * 1_000_000_000
             ),
             pids_limit=256,
             security_opt=["no-new-privileges"],

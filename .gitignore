@@ -71,3 +71,4 @@ frontend/.env
 *.egg-info/
 codegen/secrets/
 codegen/state/
+runner/state/

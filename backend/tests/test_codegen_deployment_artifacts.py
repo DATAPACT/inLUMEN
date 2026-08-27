@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from deployment_artifacts import (
     DeploymentArtifactValidationError,
     _ARGO_PORT_RUNNER,
+    _dagster_dockerfile_content,
     _dagster_shell_command_component_source,
     _model_prefetch_source,
     build_argo_workflow_object,
@@ -153,6 +154,15 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             ],
             "edges": [{"source": "1", "target": "2"}],
         }
+
+    def test_dagster_image_installs_reviewed_system_dependencies(self):
+        dockerfile = _dagster_dockerfile_content(
+            bundle_layout=True,
+            system_packages=["ffmpeg"],
+        )
+
+        self.assertIn("apt-get install -y --no-install-recommends", dockerfile)
+        self.assertIn("    ffmpeg \\", dockerfile)
 
     def test_dagster_runtime_stages_files_without_requiring_a_manifest(self):
         component_source = _dagster_shell_command_component_source().replace(
@@ -545,7 +555,7 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertIn("inlumen_model_store:/models", compose)
         self.assertIn("inlumen_model_store:/models:ro", compose)
         self.assertIn('HF_HUB_DISABLE_XET: "${HF_HUB_DISABLE_XET:-1}"', compose)
-        self.assertNotIn("HF_HUB_CACHE: /models/huggingface", compose)
+        self.assertIn("HF_HUB_CACHE: /models/huggingface", compose)
         self.assertIn('HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-0}"', compose)
         self.assertIn("runtime-egress:", compose)
         self.assertIn('HF_TOKEN: "${HF_TOKEN:-}"', compose)
@@ -555,6 +565,7 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         requirements = json.loads(by_path["dagster/model-requirements.json"])
         self.assertEqual("inlumen.model-requirements@1", requirements["schema_version"])
         self.assertEqual("faster-whisper", requirements["models"][0]["adapter_id"])
+        self.assertEqual("gpu_preferred", requirements["models"][0]["resource_class"])
         namespace = {}
         exec(
             compile(by_path["dagster/model_prefetch.py"], "model_prefetch.py", "exec"),

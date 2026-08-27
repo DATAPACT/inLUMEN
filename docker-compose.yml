@@ -7,6 +7,7 @@ networks:
 volumes:
   frontend_node_modules:
   codegen_state:
+  runner_state:
   inlumen_model_store:
     name: ${INLUMEN_MODEL_STORE_VOLUME:-inlumen_model_store}
 
@@ -83,6 +84,8 @@ services:
         condition: service_started
       codegen:
         condition: service_healthy
+      runner:
+        condition: service_healthy
     working_dir: /usr/inlumen
     ports:
       - "${INLUMEN_API_PORT:-5000}:${INLUMEN_API_PORT:-5000}"
@@ -106,6 +109,9 @@ services:
       INLUMEN_CODEGEN_PIPELINE_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_CODEGEN_PIPELINE_REQUEST_TIMEOUT_SECONDS:-1200}
       INLUMEN_CODEGEN_RUN_DB_PATH: ${INLUMEN_CODEGEN_RUN_DB_PATH:-/usr/inlumen/state/codegen-runs.sqlite3}
       INLUMEN_CODEGEN_DEPLOYMENT_TIMEOUT_SECONDS: ${INLUMEN_CODEGEN_DEPLOYMENT_TIMEOUT_SECONDS:-1800}
+      INLUMEN_RUNNER_SERVICE_URL: ${INLUMEN_RUNNER_SERVICE_URL:-http://runner:8020}
+      INLUMEN_RUNNER_SERVICE_API_KEY: ${INLUMEN_RUNNER_SERVICE_API_KEY:-inlumen-local-runner-token}
+      INLUMEN_RUNNER_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_RUNNER_REQUEST_TIMEOUT_SECONDS:-10}
       WATCH_INTERVAL_SECONDS: ${WATCH_INTERVAL_SECONDS:-1.0}
     command:
       - python
@@ -121,6 +127,46 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
+    networks:
+      - datapact_network
+
+  runner:
+    build:
+      context: ./runner
+    image: inlumen-runner-service:local
+    container_name: inlumen_runner
+    hostname: runner
+    restart: unless-stopped
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    expose:
+      - "8020"
+    volumes:
+      - ./runner/app:/app/app
+      - runner_state:/app/state
+    environment:
+      PYTHONUNBUFFERED: "1"
+      RUNNER_SERVICE_API_KEY: ${INLUMEN_RUNNER_SERVICE_API_KEY:-inlumen-local-runner-token}
+      RUNNER_JOB_DB_PATH: ${RUNNER_JOB_DB_PATH:-/app/state/pipeline-runs.sqlite3}
+      RUNNER_ARTIFACT_ROOT: ${RUNNER_ARTIFACT_ROOT:-/app/state/artifacts}
+      RUNNER_ADAPTER: ${RUNNER_ADAPTER:-dagster}
+      INLUMEN_CODEGEN_SERVICE_URL: ${INLUMEN_CODEGEN_SERVICE_URL:-http://codegen:8010}
+      INLUMEN_CODEGEN_SERVICE_API_KEY: ${INLUMEN_CODEGEN_SERVICE_API_KEY:-inlumen-local-codegen-token}
+      RUNNER_DAGSTER_TIMEOUT_SECONDS: ${RUNNER_DAGSTER_TIMEOUT_SECONDS:-1800}
+      NEO4J_URI: ${NEO4J_URI:-bolt://datapact-neo4j-db:7687}
+      NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/password}
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8020 --reload
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8020/ready', timeout=5)"
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
     networks:
       - datapact_network
 
@@ -145,13 +191,12 @@ services:
       CODEGEN_JOB_DB_PATH: ${CODEGEN_JOB_DB_PATH:-/app/state/codegen-jobs.sqlite3}
       CODEGEN_DOCKER_VALIDATION_ENABLED: ${CODEGEN_DOCKER_VALIDATION_ENABLED:-true}
       CODEGEN_VALIDATION_WORKDIR: ${CODEGEN_VALIDATION_WORKDIR:-/tmp/inlumen-codegen-workspaces}
-      CODEGEN_VALIDATION_MEMORY_LIMIT: ${CODEGEN_VALIDATION_MEMORY_LIMIT:-1g}
-      CODEGEN_VALIDATION_CPU_LIMIT: ${CODEGEN_VALIDATION_CPU_LIMIT:-1}
       CODEGEN_PIPELINE_CACHE_TTL_SECONDS: ${CODEGEN_PIPELINE_CACHE_TTL_SECONDS:-3600}
       CODEGEN_PIPELINE_CACHE_MAX_ENTRIES: ${CODEGEN_PIPELINE_CACHE_MAX_ENTRIES:-32}
       CODEGEN_ALLOW_DETERMINISTIC_FALLBACK: "false"
       CODEGEN_DEPENDENCY_INSTALL_TIMEOUT_SECONDS: ${CODEGEN_DEPENDENCY_INSTALL_TIMEOUT_SECONDS:-600}
       INLUMEN_MODEL_ROOT: /models
+      INLUMEN_MODEL_STORE_VOLUME: ${INLUMEN_MODEL_STORE_VOLUME:-inlumen_model_store}
       CODEGEN_INPUT_FILE_BASE_URL: ${CODEGEN_INPUT_FILE_BASE_URL:-http://backend:${INLUMEN_API_PORT:-5000}/api/files/content}
       CODEGEN_INPUT_FILE_ALLOW_INSECURE_HTTP: ${CODEGEN_INPUT_FILE_ALLOW_INSECURE_HTTP:-true}
       CODEGEN_INPUT_FILE_MAX_BYTES: ${CODEGEN_INPUT_FILE_MAX_BYTES:-52428800}

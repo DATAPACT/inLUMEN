@@ -10,8 +10,22 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import docker
+from docker.errors import DockerException
+from requests.exceptions import ReadTimeout
+
+from .resource_policy import (
+    RESOURCE_ADMISSION,
+    host_allocatable_resources,
+    profile_allocation,
+    select_resource_profile,
+)
 
 try:
     import yaml
@@ -25,6 +39,151 @@ SUPPORTED_BUNDLE_MANIFEST_VERSIONS = frozenset(
 SUPPORTED_RUN_SPEC_VERSIONS = frozenset(
     {"inlumen.run-spec@1", "inlumen.run-spec@2", "inlumen.run-spec@3"}
 )
+
+_ACTIVE_DEPLOYMENT_PROCESSES: dict[str, subprocess.Popen[str]] = {}
+_CANCELLED_DEPLOYMENT_EXECUTIONS: set[str] = set()
+_DEPLOYMENT_EXECUTION_PROGRESS: dict[str, dict[str, Any]] = {}
+_DEPLOYMENT_PROCESS_LOCK = threading.RLock()
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _set_deployment_progress(
+    execution_id: str | None,
+    phase: str,
+    message: str,
+    *,
+    terminal: bool = False,
+    **details: Any,
+) -> None:
+    if not execution_id:
+        return
+    now = _utc_now_iso()
+    with _DEPLOYMENT_PROCESS_LOCK:
+        current = _DEPLOYMENT_EXECUTION_PROGRESS.setdefault(
+            execution_id,
+            {"execution_id": execution_id, "created_at": now},
+        )
+        current.update(
+            {
+                "phase": phase,
+                "message": message,
+                "updated_at": now,
+                "terminal": terminal,
+                **details,
+            }
+        )
+        if len(_DEPLOYMENT_EXECUTION_PROGRESS) > 256:
+            oldest_ids = sorted(
+                _DEPLOYMENT_EXECUTION_PROGRESS,
+                key=lambda item: str(
+                    _DEPLOYMENT_EXECUTION_PROGRESS[item].get("updated_at") or ""
+                ),
+            )[:128]
+            for stale_id in oldest_ids:
+                if stale_id != execution_id:
+                    _DEPLOYMENT_EXECUTION_PROGRESS.pop(stale_id, None)
+
+
+def finish_deployment_execution(
+    execution_id: str | None,
+    *,
+    succeeded: bool,
+) -> None:
+    _set_deployment_progress(
+        execution_id,
+        "completed" if succeeded else "failed",
+        "Dagster execution completed."
+        if succeeded
+        else "Dagster execution stopped with an error.",
+        terminal=True,
+    )
+
+
+def deployment_execution_progress(execution_id: str) -> dict[str, Any]:
+    """Return private live execution state and a bounded container log tail."""
+    with _DEPLOYMENT_PROCESS_LOCK:
+        payload = dict(
+            _DEPLOYMENT_EXECUTION_PROGRESS.get(execution_id)
+            or {
+                "execution_id": execution_id,
+                "phase": "pending",
+                "message": "Execution is waiting for the isolated runtime.",
+                "terminal": False,
+            }
+        )
+    payload["observed_at"] = _utc_now_iso()
+    client = None
+    try:
+        client = docker.from_env()
+        containers = client.containers.list(
+            all=True,
+            filters={"label": f"inlumen.codegen.run_id={execution_id}"},
+        )
+        if containers:
+            container = max(
+                containers,
+                key=lambda item: (
+                    str(item.status) == "running",
+                    str(item.attrs.get("Created") or ""),
+                ),
+            )
+            payload["container_status"] = str(container.status)
+            payload["logs"] = container.logs(
+                stdout=True,
+                stderr=True,
+                tail=240,
+            ).decode("utf-8", errors="replace")[-16000:]
+    except DockerException as exc:
+        payload["observation_warning"] = str(exc)
+    finally:
+        if client is not None:
+            client.close()
+    return payload
+
+
+def prepare_deployment_execution(execution_id: str) -> None:
+    """Register a fresh execution id before dispatching validation work."""
+    if not execution_id:
+        return
+    with _DEPLOYMENT_PROCESS_LOCK:
+        _CANCELLED_DEPLOYMENT_EXECUTIONS.discard(execution_id)
+    _set_deployment_progress(
+        execution_id,
+        "accepted",
+        "Execution request accepted.",
+    )
+
+
+def cancel_deployment_execution(execution_id: str) -> None:
+    """Cancel the active Dagster/install subprocess for an execution."""
+    if not execution_id:
+        return
+    with _DEPLOYMENT_PROCESS_LOCK:
+        _CANCELLED_DEPLOYMENT_EXECUTIONS.add(execution_id)
+        process = _ACTIVE_DEPLOYMENT_PROCESSES.get(execution_id)
+    _set_deployment_progress(
+        execution_id,
+        "cancelling",
+        "Cancellation was requested.",
+    )
+    if process is None or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _deployment_execution_cancelled(execution_id: str | None) -> bool:
+    if not execution_id:
+        return False
+    with _DEPLOYMENT_PROCESS_LOCK:
+        return execution_id in _CANCELLED_DEPLOYMENT_EXECUTIONS
 
 
 def _dagster_project_root(path: Path) -> Path:
@@ -72,35 +231,70 @@ def _run(
     cwd: Path,
     timeout_seconds: int,
     env: dict[str, str] | None = None,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
+    if _deployment_execution_cancelled(execution_id):
+        return {
+            "command": command,
+            "returncode": None,
+            "output": "Execution cancelled before command launch.",
+            "ok": False,
+            "cancelled": True,
+        }
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
             cwd=str(cwd),
             env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=timeout_seconds,
-            check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        if execution_id:
+            with _DEPLOYMENT_PROCESS_LOCK:
+                if execution_id in _CANCELLED_DEPLOYMENT_EXECUTIONS:
+                    process.terminate()
+                _ACTIVE_DEPLOYMENT_PROCESSES[execution_id] = process
+        try:
+            output, _stderr = process.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            output, _stderr = process.communicate()
+            return {
+                "command": command,
+                "returncode": None,
+                "output": f"Command timed out after {timeout_seconds}s.\n{output}",
+                "ok": False,
+            }
+        cancelled = _deployment_execution_cancelled(execution_id)
+        return {
+            "command": command,
+            "returncode": process.returncode,
+            "output": output,
+            "ok": process.returncode == 0 and not cancelled,
+            **({"cancelled": True} if cancelled else {}),
+        }
+    except OSError as exc:
         return {
             "command": command,
             "returncode": None,
             "output": str(exc),
             "ok": False,
         }
-    return {
-        "command": command,
-        "returncode": completed.returncode,
-        "output": completed.stdout,
-        "ok": completed.returncode == 0,
-    }
+    finally:
+        if execution_id:
+            with _DEPLOYMENT_PROCESS_LOCK:
+                active = _ACTIVE_DEPLOYMENT_PROCESSES.get(execution_id)
+                if active is locals().get("process"):
+                    _ACTIVE_DEPLOYMENT_PROCESSES.pop(execution_id, None)
 
 
 def _ensure_venv(
-    project_root: Path, *, reinstall: bool, timeout_seconds: int
+    project_root: Path,
+    *,
+    reinstall: bool,
+    timeout_seconds: int,
+    execution_id: str | None = None,
 ) -> tuple[Path, list[dict[str, Any]]]:
     venv_dir = project_root / ".inlumen_dagster_validation_venv"
     steps: list[dict[str, Any]] = []
@@ -114,7 +308,12 @@ def _ensure_venv(
             else [sys.executable, "-m", "venv", str(venv_dir)]
         )
         steps.append(
-            _run(create_command, cwd=project_root, timeout_seconds=timeout_seconds)
+            _run(
+                create_command,
+                cwd=project_root,
+                timeout_seconds=timeout_seconds,
+                execution_id=execution_id,
+            )
         )
         if not steps[-1]["ok"]:
             return venv_dir, steps
@@ -126,7 +325,12 @@ def _ensure_venv(
         else [str(python), "-m", "pip", "install", "-e", "."]
     )
     steps.append(
-        _run(install_command, cwd=project_root, timeout_seconds=timeout_seconds)
+        _run(
+            install_command,
+            cwd=project_root,
+            timeout_seconds=timeout_seconds,
+            execution_id=execution_id,
+        )
     )
     return venv_dir, steps
 
@@ -159,6 +363,354 @@ if not result.success:
 """
 
 
+def _isolated_dagster_execution(
+    project_root: Path,
+    *,
+    execution_id: str,
+    timeout_seconds: int,
+    runtime_secrets: dict[str, str] | None,
+) -> dict[str, Any]:
+    """Build and materialize the generated project outside the control plane."""
+    bundle_root = _bundle_root(project_root)
+    dockerfile = project_root / "Dockerfile"
+    execution_dockerfile = project_root / "Dockerfile.inlumen-run"
+    # BuildKit cache mounts only optimize the exported image build. The Docker
+    # SDK can use the legacy builder, so native execution derives an equivalent
+    # no-cache Dockerfile without changing dependencies or runtime source.
+    execution_dockerfile.write_text(
+        dockerfile.read_text(encoding="utf-8").replace(
+            "RUN --mount=type=cache,target=/root/.cache/uv ", "RUN "
+        ),
+        encoding="utf-8",
+    )
+    dockerfile_relative = execution_dockerfile.relative_to(bundle_root).as_posix()
+    workspace_dir = bundle_root / "workspaces"
+    output_dir = bundle_root / "outputs"
+    input_dir = bundle_root / "inputs"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    input_dir.mkdir(parents=True, exist_ok=True)
+    workspace_dir.chmod(0o777)
+    output_dir.chmod(0o777)
+    report: dict[str, Any] = {
+        "project_root": str(project_root),
+        "package_manager": "container-image",
+        "execution_isolation": "docker",
+        "ok": False,
+        "steps": [],
+    }
+    client = None
+    container = None
+    allocation: dict[str, Any] | None = None
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        _set_deployment_progress(
+            execution_id,
+            "selecting_resources",
+            "Selecting an execution resource profile.",
+        )
+        if _deployment_execution_cancelled(execution_id):
+            report["errors"] = ["Dagster execution was cancelled."]
+            return report
+        client = docker.from_env()
+        profile, profile_reason = select_resource_profile(project_root)
+        capacity = host_allocatable_resources(client.info())
+        requested_allocation = profile_allocation(
+            profile,
+            capacity,
+            reason=profile_reason,
+        )
+
+        def report_capacity_wait(available: dict[str, int]) -> None:
+            _set_deployment_progress(
+                execution_id,
+                "waiting_for_capacity",
+                "Waiting for execution-worker capacity.",
+                resource_profile=profile.name,
+                resource_cpu=requested_allocation["cpu"],
+                resource_memory_bytes=requested_allocation["memory_bytes"],
+                resource_reason=profile_reason,
+                queue_position=available["queue_position"],
+            )
+
+        allocation = RESOURCE_ADMISSION.acquire(
+            execution_id,
+            requested_allocation,
+            deadline=deadline,
+            cancelled=lambda: _deployment_execution_cancelled(execution_id),
+            on_wait=report_capacity_wait,
+        )
+        if allocation is None:
+            report["errors"] = [
+                "Dagster execution was cancelled while waiting for capacity."
+                if _deployment_execution_cancelled(execution_id)
+                else "Dagster execution timed out while waiting for worker capacity."
+            ]
+            return report
+        report["resource_profile"] = {
+            key: allocation[key]
+            for key in (
+                "profile",
+                "description",
+                "reason",
+                "cpu",
+                "memory_bytes",
+                "host_cpu",
+                "host_memory_bytes",
+                "reserved_cpu",
+                "reserved_memory_bytes",
+            )
+        }
+        _set_deployment_progress(
+            execution_id,
+            "building_runtime",
+            "Building the isolated Dagster runtime.",
+            resource_profile=allocation["profile"],
+            resource_cpu=allocation["cpu"],
+            resource_memory_bytes=allocation["memory_bytes"],
+            resource_reason=allocation["reason"],
+            queue_position=None,
+        )
+        snapshot_digest = hashlib.sha256()
+        for snapshot_file in sorted(
+            item for item in bundle_root.rglob("*") if item.is_file()
+        ):
+            relative = snapshot_file.relative_to(bundle_root)
+            if relative.parts[0] in {"outputs", "workspaces"}:
+                continue
+            if snapshot_file == execution_dockerfile:
+                continue
+            snapshot_digest.update(relative.as_posix().encode("utf-8"))
+            snapshot_digest.update(b"\0")
+            snapshot_digest.update(snapshot_file.read_bytes())
+            snapshot_digest.update(b"\0")
+        snapshot_hash = snapshot_digest.hexdigest()[:20]
+        image_tag = f"inlumen-dagster-run:{snapshot_hash}"
+        image, build_logs = client.images.build(
+            path=str(bundle_root),
+            dockerfile=dockerfile_relative,
+            tag=image_tag,
+            rm=True,
+            forcerm=True,
+            labels={"inlumen.pipeline.snapshot": snapshot_hash},
+        )
+        build_output = "\n".join(
+            str(item.get("stream") or item.get("error") or "").rstrip()
+            for item in build_logs
+            if isinstance(item, dict)
+            and str(item.get("stream") or item.get("error") or "").strip()
+        )
+        report["steps"].append(
+            {
+                "name": "image_build",
+                "command": ["docker", "build", "-f", dockerfile_relative, "."],
+                "returncode": 0,
+                "output": build_output[-12000:],
+                "ok": True,
+            }
+        )
+        if _deployment_execution_cancelled(execution_id):
+            report["errors"] = ["Dagster execution was cancelled."]
+            return report
+        model_requirements = project_root / "model-requirements.json"
+        model_prefetch = project_root / "model_prefetch.py"
+        model_volume = os.getenv(
+            "INLUMEN_MODEL_STORE_VOLUME", "inlumen_model_store"
+        ).strip()
+        has_models = model_requirements.is_file() and model_prefetch.is_file()
+        if has_models:
+            _set_deployment_progress(
+                execution_id,
+                "prefetching_models",
+                "Preparing reviewed model files for offline execution.",
+            )
+            prefetch_environment = {
+                **(runtime_secrets or {}),
+                "HF_HOME": "/models/huggingface",
+                "HF_HUB_CACHE": "/models/huggingface",
+                "HF_HUB_DISABLE_XET": os.getenv("HF_HUB_DISABLE_XET", "1"),
+                "HF_HUB_ETAG_TIMEOUT": os.getenv("HF_HUB_ETAG_TIMEOUT", "30"),
+                "HF_HUB_DOWNLOAD_TIMEOUT": os.getenv(
+                    "HF_HUB_DOWNLOAD_TIMEOUT", "600"
+                ),
+                "HF_HUB_OFFLINE": "0",
+                "TRANSFORMERS_OFFLINE": "0",
+                "INLUMEN_MODEL_ROOT": "/models",
+                "INLUMEN_MODEL_REQUIREMENTS": (
+                    "/workspace/dagster/model-requirements.json"
+                ),
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONUNBUFFERED": "1",
+            }
+            container = client.containers.run(
+                image.id,
+                command=["python", "/workspace/dagster/model_prefetch.py"],
+                working_dir="/workspace/dagster",
+                detach=True,
+                remove=False,
+                read_only=True,
+                cap_drop=["ALL"],
+                security_opt=["no-new-privileges"],
+                pids_limit=256,
+                mem_limit=int(allocation["memory_bytes"]),
+                nano_cpus=int(allocation["cpu"]) * 1_000_000_000,
+                tmpfs={"/tmp": "rw,noexec,nosuid,size=256m"},
+                environment=prefetch_environment,
+                volumes={
+                    model_volume: {"bind": "/models", "mode": "rw"},
+                },
+                stdout=True,
+                stderr=True,
+                labels={"inlumen.codegen.run_id": execution_id},
+            )
+            try:
+                prefetch_result = container.wait(
+                    timeout=max(int(deadline - time.monotonic()), 1)
+                )
+            except ReadTimeout:
+                container.kill()
+                report["errors"] = ["Reviewed model prefetch timed out."]
+                return report
+            prefetch_logs = container.logs(stdout=True, stderr=True).decode(
+                "utf-8", errors="replace"
+            )
+            prefetch_status = int(prefetch_result.get("StatusCode", 1))
+            report["steps"].append(
+                {
+                    "name": "model_prefetch",
+                    "command": [
+                        "python",
+                        "/workspace/dagster/model_prefetch.py",
+                    ],
+                    "returncode": prefetch_status,
+                    "output": prefetch_logs[-12000:],
+                    "ok": prefetch_status == 0,
+                }
+            )
+            container.remove(force=True)
+            container = None
+            if prefetch_status != 0:
+                report["errors"] = ["Reviewed model prefetch failed."]
+                return report
+        _set_deployment_progress(
+            execution_id,
+            "starting_pipeline",
+            "Starting the Dagster pipeline inside the isolated runtime.",
+        )
+        environment = {
+            **(runtime_secrets or {}),
+            "DAGSTER_HOME": "/tmp/dagster-home",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONUNBUFFERED": "1",
+            **(
+                {
+                    "HF_HOME": "/models/huggingface",
+                    "HF_HUB_CACHE": "/models/huggingface",
+                    "HF_HUB_OFFLINE": "1",
+                    "TRANSFORMERS_OFFLINE": "1",
+                    "INLUMEN_MODEL_ROOT": "/models",
+                }
+                if has_models
+                else {}
+            ),
+        }
+        execution_volumes = {
+            str(input_dir.resolve()): {
+                "bind": "/workspace/inputs",
+                "mode": "ro",
+            },
+            str(output_dir.resolve()): {
+                "bind": "/workspace/outputs",
+                "mode": "rw",
+            },
+            str(workspace_dir.resolve()): {
+                "bind": "/workspace/workspaces",
+                "mode": "rw",
+            },
+            **(
+                {model_volume: {"bind": "/models", "mode": "ro"}}
+                if has_models
+                else {}
+            ),
+        }
+        container = client.containers.run(
+            image.id,
+            command=["python", "-c", _materialize_script()],
+            working_dir="/workspace/dagster",
+            user="65532:65532",
+            detach=True,
+            remove=False,
+            read_only=True,
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges"],
+            pids_limit=256,
+            mem_limit=int(allocation["memory_bytes"]),
+            nano_cpus=int(allocation["cpu"]) * 1_000_000_000,
+            tmpfs={"/tmp": "rw,noexec,nosuid,size=256m,mode=1777"},
+            environment=environment,
+            volumes=execution_volumes,
+            stdout=True,
+            stderr=True,
+            labels={"inlumen.codegen.run_id": execution_id},
+        )
+        _set_deployment_progress(
+            execution_id,
+            "running_pipeline",
+            "Dagster is executing pipeline nodes.",
+        )
+        try:
+            result = container.wait(timeout=max(int(deadline - time.monotonic()), 1))
+        except ReadTimeout:
+            container.kill()
+            report["steps"].append(
+                {
+                    "name": "dagster_materialize",
+                    "command": ["python", "-c", "<dagster materialize>"],
+                    "returncode": None,
+                    "output": f"Dagster execution timed out after {timeout_seconds}s.",
+                    "ok": False,
+                }
+            )
+            report["errors"] = ["Dagster asset materialization timed out."]
+            return report
+        logs = container.logs(stdout=True, stderr=True).decode(
+            "utf-8", errors="replace"
+        )
+        status_code = int(result.get("StatusCode", 1))
+        cancelled = _deployment_execution_cancelled(execution_id)
+        report["steps"].append(
+            {
+                "name": "dagster_materialize",
+                "command": ["python", "-c", "<dagster materialize>"],
+                "returncode": status_code,
+                "output": logs[-12000:],
+                "ok": status_code == 0 and not cancelled,
+                **({"cancelled": True} if cancelled else {}),
+            }
+        )
+        if cancelled:
+            report["errors"] = ["Dagster execution was cancelled."]
+            return report
+        if status_code != 0:
+            report["errors"] = ["Dagster asset materialization failed."]
+            return report
+        report["ok"] = True
+        return report
+    except (DockerException, OSError, ValueError) as exc:
+        report["errors"] = [f"Isolated Dagster execution failed: {exc}"]
+        return report
+    finally:
+        if container is not None:
+            try:
+                container.remove(force=True)
+            except DockerException:
+                pass
+        if client is not None:
+            client.close()
+        if allocation is not None:
+            RESOURCE_ADMISSION.release(execution_id)
+
+
 def validate_dagster_project(
     path: Path,
     *,
@@ -167,8 +719,16 @@ def validate_dagster_project(
     skip_install: bool = False,
     timeout_seconds: int = 900,
     runtime_secrets: dict[str, str] | None = None,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
     project_root = _dagster_project_root(path)
+    if execution_id:
+        return _isolated_dagster_execution(
+            project_root,
+            execution_id=execution_id,
+            timeout_seconds=timeout_seconds,
+            runtime_secrets=runtime_secrets,
+        )
     report: dict[str, Any] = {
         "project_root": str(project_root),
         "package_manager": "uv" if shutil.which("uv") else "pip-fallback",
@@ -218,6 +778,7 @@ def validate_dagster_project(
             project_root,
             reinstall=reinstall,
             timeout_seconds=timeout_seconds,
+            execution_id=execution_id,
         )
         report["steps"].extend(install_steps)
         if any(not step["ok"] for step in install_steps):
@@ -243,6 +804,7 @@ def validate_dagster_project(
         prefetch_env = {
             **env,
             "HF_HOME": str(model_root / "huggingface"),
+            "HF_HUB_CACHE": str(model_root / "huggingface"),
             "HF_HUB_DISABLE_XET": os.getenv("HF_HUB_DISABLE_XET", "1"),
             "HF_HUB_ETAG_TIMEOUT": os.getenv("HF_HUB_ETAG_TIMEOUT", "30"),
             "HF_HUB_DOWNLOAD_TIMEOUT": os.getenv("HF_HUB_DOWNLOAD_TIMEOUT", "600"),
@@ -262,6 +824,7 @@ def validate_dagster_project(
             cwd=project_root,
             timeout_seconds=timeout_seconds,
             env=prefetch_env,
+            execution_id=execution_id,
         )
         prefetch_step["name"] = "model_prefetch"
         report["steps"].append(prefetch_step)
@@ -271,6 +834,7 @@ def validate_dagster_project(
         env.update(
             {
                 "HF_HOME": prefetch_env["HF_HOME"],
+                "HF_HUB_CACHE": prefetch_env["HF_HUB_CACHE"],
                 "HF_HUB_OFFLINE": "1",
                 "TRANSFORMERS_OFFLINE": "1",
                 "INLUMEN_ACCELERATOR": prefetch_env["INLUMEN_ACCELERATOR"],
@@ -285,6 +849,7 @@ def validate_dagster_project(
         cwd=project_root,
         timeout_seconds=timeout_seconds,
         env=env,
+        execution_id=execution_id,
     )
     report["steps"].append(load_step)
     if not load_step["ok"]:
@@ -302,6 +867,7 @@ def validate_dagster_project(
             cwd=project_root,
             timeout_seconds=timeout_seconds,
             env=env,
+            execution_id=execution_id,
         )
         report["steps"].append(materialize_step)
         if not materialize_step["ok"]:
@@ -450,10 +1016,11 @@ def _input_contract_errors(
             for path in (bundle_root / "inputs").rglob("*")
             if path.is_file()
         }
+        available_filenames = {Path(path).name for path in available}
         return [
             f"Root node input {filename} is missing from inputs/."
             for filename in sorted(descriptors)
-            if filename not in available
+            if filename not in available_filenames
         ]
     input_manifest = _load_json(manifest_path)
     raw_inputs = input_manifest.get("inputs")
@@ -1038,6 +1605,7 @@ def validate_and_repair_deployment_bundle(
     argo_dry_run: bool = False,
     timeout_seconds: int = 900,
     runtime_secrets: dict[str, str] | None = None,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
     repair_report = repair_deployment_bundle(path, targets=targets)
     validation_report = validate_deployment_bundle(
@@ -1052,6 +1620,7 @@ def validate_and_repair_deployment_bundle(
         argo_dry_run=argo_dry_run,
         timeout_seconds=timeout_seconds,
         runtime_secrets=runtime_secrets,
+        execution_id=execution_id,
     )
     return {
         "ok": bool(repair_report.get("ok") and validation_report.get("ok")),
@@ -1310,6 +1879,7 @@ def validate_deployment_bundle(
     argo_dry_run: bool = False,
     timeout_seconds: int = 900,
     runtime_secrets: dict[str, str] | None = None,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
     bundle_root = _bundle_root(path)
     manifest = _load_json(bundle_root / "bundle-manifest.json")
@@ -1374,6 +1944,7 @@ def validate_deployment_bundle(
             skip_install=skip_install,
             timeout_seconds=timeout_seconds,
             runtime_secrets=runtime_secrets,
+            execution_id=execution_id,
         )
         report["dagster"] = dagster_report
         if not dagster_report.get("ok"):
@@ -1578,11 +2149,21 @@ def _read_run_output_files(bundle_root: Path) -> list[dict[str, Any]]:
     output_root = bundle_root / "outputs"
     if not output_root.is_dir():
         return []
-    return [
-        _artifact_file_entry(path, bundle_root, role="run-output")
-        for path in sorted(item for item in output_root.rglob("*") if item.is_file())
-        if path.name != ".gitkeep"
-    ]
+    entries = []
+    for path in sorted(item for item in output_root.rglob("*") if item.is_file()):
+        if path.name == ".gitkeep":
+            continue
+        entry = _artifact_file_entry(path, bundle_root, role="run-output")
+        relative = path.relative_to(output_root)
+        # Dagster uses outputs/<node>/<run-id>/output/<filename> internally.
+        # A run already scopes its own artifact collection, so engine-private
+        # staging directories must not leak into the public artifact contract.
+        if len(relative.parts) >= 4 and relative.parts[2] == "output":
+            entry["path"] = Path(
+                "outputs", relative.parts[0], *relative.parts[3:]
+            ).as_posix()
+        entries.append(entry)
+    return entries
 
 
 def validate_deployment_bundle_files(
@@ -1599,6 +2180,7 @@ def validate_deployment_bundle_files(
     argo_dry_run: bool = False,
     timeout_seconds: int = 900,
     runtime_secrets: dict[str, str] | None = None,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
     """Materialize, validate, and optionally repair an uploaded bundle.
 
@@ -1610,7 +2192,10 @@ def validate_deployment_bundle_files(
     if normalized_mode not in {"fast", "validate", "repair", "validate-and-repair"}:
         raise ValueError(f"Unsupported deployment validation mode: {normalized_mode}")
 
-    workspace_parent = os.getenv("CODEGEN_DEPLOYMENT_VALIDATION_WORKDIR", "").strip()
+    workspace_parent = (
+        os.getenv("CODEGEN_DEPLOYMENT_VALIDATION_WORKDIR", "").strip()
+        or os.getenv("CODEGEN_VALIDATION_WORKDIR", "").strip()
+    )
     if workspace_parent:
         Path(workspace_parent).mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
@@ -1634,6 +2219,7 @@ def validate_deployment_bundle_files(
                 argo_dry_run=argo_dry_run,
                 timeout_seconds=timeout_seconds,
                 runtime_secrets=runtime_secrets,
+                execution_id=execution_id,
             )
             repair_report = service_report.get("repair_report")
             validation_report = service_report.get("validation_report")
@@ -1652,6 +2238,7 @@ def validate_deployment_bundle_files(
                 argo_dry_run=argo_dry_run,
                 timeout_seconds=timeout_seconds,
                 runtime_secrets=runtime_secrets,
+                execution_id=execution_id,
             )
 
         ok = bool(validation_report.get("ok"))
