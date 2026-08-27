@@ -13,7 +13,7 @@ In DATAPACT, the **intent** translates to the pipeline goal: both in terms of st
 
 The user remains in control of the design, however supported by dedidated agents whose role is to make these visions come to life. inLUMEN materializes their intents by generating the pipeline steps as a directed graph, and gives recommandations on compliance-strengthening design choices.
 
-Additionally, it generates deployment artifacts such as containers and workflow blueprints for external execution targets. inLUMEN designs, validates, and exports pipelines; it does not execute them. Provenance is given via tracking reports on decisions taken by the user and agents during the design process.
+Additionally, it generates deployment artifacts such as containers and workflow blueprints for external execution targets. Saved pipelines can be tested through durable background Dagster execution directly from the Run workspace, and the exact tested snapshot remains available as a downloadable Dagster bundle. Provenance is given via tracking reports on decisions taken by the user and agents during design and execution.
 
 ## **Related Compliance aspects**
 - Compliance by design
@@ -22,6 +22,7 @@ Additionally, it generates deployment artifacts such as containers and workflow 
 ## **Main Goal/Functionalities**
 - Co-design Intelligent Pipeline Design Editor (GUI with chat dialog window)
 - Deployment Artifact Generation (Dockerfiles, YAML)
+- Durable background pipeline testing through Dagster
 - Agentic AI Backend (agents assist with compliance-strenghtening design refinements)
 
 ## **Pipeline component model**
@@ -155,7 +156,8 @@ inLUMEN's core functionality is provided by LLM-powered agents that serve as hel
 
 The consolidated regression suite covers backend units and gateway APIs,
 deployment bundle validation, frontend graph and configuration behavior,
-frontend lint/type/build checks, and both Docker Compose configurations.
+runner lifecycle and artifact handling, frontend lint/type/build checks, and both
+Docker Compose configurations.
 
 Install the test dependencies from the repository root:
 
@@ -176,6 +178,7 @@ During development, run a smaller part of the suite by selecting a component:
 ```bash
 python scripts/run_tests.py --component backend
 python scripts/run_tests.py --component codegen
+python scripts/run_tests.py --component runner
 python scripts/run_tests.py --component frontend
 python scripts/run_tests.py --component compose
 ```
@@ -192,7 +195,7 @@ Software Requirements:
 1. [Docker Desktop](https://www.docker.com/%20products/docker-desktop/) installed. 
 2. Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
 
-The custom version for DATAPACT is still under development. To try the current stable version, follow the installation steps below:
+The custom version for DATAPACT is still under development. To try the current prerelease, follow the installation steps below:
 
 Step 1: Clone this repository on your computer. 
 
