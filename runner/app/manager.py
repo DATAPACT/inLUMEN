@@ -5,6 +5,7 @@ import base64
 import hashlib
 import io
 import json
+import logging
 import re
 import tempfile
 import uuid
@@ -17,6 +18,8 @@ from typing import Any, Protocol
 from .artifacts import PipelineArtifactStore
 from .models import CreatePipelineRunRequest
 from .store import PipelineRunStore
+
+logger = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = {"succeeded", "partial", "failed", "cancelled"}
 ACTIVE_STATUSES = {"queued", "preparing", "running", "cancelling"}
@@ -183,6 +186,11 @@ class PipelineRunManager:
                 "active_node_name": None,
                 "node_elapsed_seconds": None,
                 "heartbeat_at": None,
+                "resource_profile": None,
+                "resource_cpu": None,
+                "resource_memory_bytes": None,
+                "resource_reason": None,
+                "queue_position": None,
             },
             "error": None,
             "result": None,
@@ -322,7 +330,11 @@ class PipelineRunManager:
                     except Exception:
                         # Clear all is authoritative. A stale remote execution
                         # must not preserve user-visible lifecycle metadata.
-                        pass
+                        logger.warning(
+                            "Failed to cancel execution %s during run purge.",
+                            run_id,
+                            exc_info=True,
+                        )
             active_tasks = [self.tasks[run_id] for run_id in active_ids if run_id in self.tasks]
             for task in active_tasks:
                 task.cancel()
@@ -490,7 +502,11 @@ class PipelineRunManager:
                 raise
             except Exception:
                 # A transient observation failure must never fail execution.
-                pass
+                logger.debug(
+                    "Could not observe live progress for run %s.",
+                    run_id,
+                    exc_info=True,
+                )
             await asyncio.sleep(2)
 
     def _apply_live_progress(
@@ -567,6 +583,25 @@ class PipelineRunManager:
             ),
             "node_elapsed_seconds": node_elapsed_seconds if active_node_id else None,
             "heartbeat_at": heartbeat_at,
+            "resource_profile": (
+                payload.get("resource_profile")
+                or current_progress.get("resource_profile")
+            ),
+            "resource_cpu": (
+                payload.get("resource_cpu")
+                if payload.get("resource_cpu") is not None
+                else current_progress.get("resource_cpu")
+            ),
+            "resource_memory_bytes": (
+                payload.get("resource_memory_bytes")
+                if payload.get("resource_memory_bytes") is not None
+                else current_progress.get("resource_memory_bytes")
+            ),
+            "resource_reason": (
+                payload.get("resource_reason")
+                or current_progress.get("resource_reason")
+            ),
+            "queue_position": payload.get("queue_position"),
         }
         if next_progress == current_progress and not events_changed:
             return

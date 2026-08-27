@@ -48,6 +48,21 @@ workspace and output mounts, resource limits, dropped Linux capabilities, and
 no Docker socket.
 The returned logs and output artifacts come from that real materialization.
 
+Resource allocation is owned by the execution platform rather than exposed as
+pipeline parameters or deployment environment tuning. The execution service
+selects a reviewed `lightweight`, `standard`, or `ml_cpu` profile from bundle
+model metadata and dependency evidence, then clamps that profile to the
+resources available on the Docker host. It reserves host capacity for the
+operating system and control-plane services and admits runs through a FIFO queue
+so concurrent workloads cannot collectively overcommit the host. The selected
+profile, effective CPU and memory allocation, and queue position are published
+as run progress.
+
+Admission is intentionally process-local while the execution service is a
+single replica. A horizontally scaled execution service must replace it with a
+shared scheduler or cluster-native resource admission; independently scheduling
+each replica would lose the host-wide capacity guarantee.
+
 ## API boundary
 
 - `POST /api/pipeline-runs` returns `202` and a stable `run_id`.

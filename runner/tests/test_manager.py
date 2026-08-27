@@ -3,7 +3,6 @@ import base64
 import json
 
 import pytest
-
 from app.artifacts import PipelineArtifactStore
 from app.manager import PipelineRunConflict, PipelineRunManager
 from app.models import CreatePipelineRunRequest
@@ -170,6 +169,11 @@ async def test_background_run_persists_live_node_heartbeat_progress():
         "active_node_name": "Task",
         "node_elapsed_seconds": 15,
         "heartbeat_at": running["progress"]["heartbeat_at"],
+        "resource_profile": None,
+        "resource_cpu": None,
+        "resource_memory_bytes": None,
+        "resource_reason": None,
+        "queue_position": None,
     }
     assert running["progress"]["heartbeat_at"]
     assert any(

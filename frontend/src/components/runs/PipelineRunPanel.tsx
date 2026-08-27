@@ -61,6 +61,11 @@ const formatDuration = (seconds: number) => {
   return minutes > 0 ? `${minutes}m ${remainder}s` : `${remainder}s`;
 };
 
+const formatMemory = (bytes: number) => {
+  const gibibytes = bytes / (1024 ** 3);
+  return `${Number.isInteger(gibibytes) ? gibibytes : gibibytes.toFixed(1)} GiB`;
+};
+
 const stageStates = (
   status: PipelineRunRecord['status'],
   phase?: string | null,
@@ -358,6 +363,20 @@ export const PipelineRunPanel = () => {
               </div>
               <div className="mt-1.5 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-amber-100/70">
                 <span>Total elapsed: {formatDuration(elapsedSeconds)}</span>
+                {selectedRun.progress?.resource_profile && (
+                  <span className="capitalize">
+                    Profile: {selectedRun.progress.resource_profile.replace('_', ' ')}
+                  </span>
+                )}
+                {typeof selectedRun.progress?.resource_cpu === 'number'
+                  && typeof selectedRun.progress?.resource_memory_bytes === 'number' && (
+                  <span>
+                    {selectedRun.progress.resource_cpu} CPU · {formatMemory(selectedRun.progress.resource_memory_bytes)}
+                  </span>
+                )}
+                {typeof selectedRun.progress?.queue_position === 'number' && (
+                  <span>Queue position: {selectedRun.progress.queue_position}</span>
+                )}
                 {typeof selectedRun.progress?.node_elapsed_seconds === 'number' && (
                   <span>Current node: {formatDuration(selectedRun.progress.node_elapsed_seconds)}</span>
                 )}

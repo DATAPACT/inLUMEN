@@ -20,6 +20,13 @@ import docker
 from docker.errors import DockerException
 from requests.exceptions import ReadTimeout
 
+from .resource_policy import (
+    RESOURCE_ADMISSION,
+    host_allocatable_resources,
+    profile_allocation,
+    select_resource_profile,
+)
+
 try:
     import yaml
 except ImportError:  # pragma: no cover - service image installs PyYAML.
@@ -49,6 +56,7 @@ def _set_deployment_progress(
     message: str,
     *,
     terminal: bool = False,
+    **details: Any,
 ) -> None:
     if not execution_id:
         return
@@ -64,6 +72,7 @@ def _set_deployment_progress(
                 "message": message,
                 "updated_at": now,
                 "terminal": terminal,
+                **details,
             }
         )
         if len(_DEPLOYMENT_EXECUTION_PROGRESS) > 256:
@@ -392,17 +401,76 @@ def _isolated_dagster_execution(
     }
     client = None
     container = None
+    allocation: dict[str, Any] | None = None
     deadline = time.monotonic() + timeout_seconds
     try:
         _set_deployment_progress(
             execution_id,
-            "building_runtime",
-            "Building the isolated Dagster runtime.",
+            "selecting_resources",
+            "Selecting an execution resource profile.",
         )
         if _deployment_execution_cancelled(execution_id):
             report["errors"] = ["Dagster execution was cancelled."]
             return report
         client = docker.from_env()
+        profile, profile_reason = select_resource_profile(project_root)
+        capacity = host_allocatable_resources(client.info())
+        requested_allocation = profile_allocation(
+            profile,
+            capacity,
+            reason=profile_reason,
+        )
+
+        def report_capacity_wait(available: dict[str, int]) -> None:
+            _set_deployment_progress(
+                execution_id,
+                "waiting_for_capacity",
+                "Waiting for execution-worker capacity.",
+                resource_profile=profile.name,
+                resource_cpu=requested_allocation["cpu"],
+                resource_memory_bytes=requested_allocation["memory_bytes"],
+                resource_reason=profile_reason,
+                queue_position=available["queue_position"],
+            )
+
+        allocation = RESOURCE_ADMISSION.acquire(
+            execution_id,
+            requested_allocation,
+            deadline=deadline,
+            cancelled=lambda: _deployment_execution_cancelled(execution_id),
+            on_wait=report_capacity_wait,
+        )
+        if allocation is None:
+            report["errors"] = [
+                "Dagster execution was cancelled while waiting for capacity."
+                if _deployment_execution_cancelled(execution_id)
+                else "Dagster execution timed out while waiting for worker capacity."
+            ]
+            return report
+        report["resource_profile"] = {
+            key: allocation[key]
+            for key in (
+                "profile",
+                "description",
+                "reason",
+                "cpu",
+                "memory_bytes",
+                "host_cpu",
+                "host_memory_bytes",
+                "reserved_cpu",
+                "reserved_memory_bytes",
+            )
+        }
+        _set_deployment_progress(
+            execution_id,
+            "building_runtime",
+            "Building the isolated Dagster runtime.",
+            resource_profile=allocation["profile"],
+            resource_cpu=allocation["cpu"],
+            resource_memory_bytes=allocation["memory_bytes"],
+            resource_reason=allocation["reason"],
+            queue_position=None,
+        )
         snapshot_digest = hashlib.sha256()
         for snapshot_file in sorted(
             item for item in bundle_root.rglob("*") if item.is_file()
@@ -484,11 +552,8 @@ def _isolated_dagster_execution(
                 cap_drop=["ALL"],
                 security_opt=["no-new-privileges"],
                 pids_limit=256,
-                mem_limit=os.getenv("CODEGEN_VALIDATION_MEMORY_LIMIT", "4g"),
-                nano_cpus=int(
-                    float(os.getenv("CODEGEN_VALIDATION_CPU_LIMIT", "4"))
-                    * 1_000_000_000
-                ),
+                mem_limit=int(allocation["memory_bytes"]),
+                nano_cpus=int(allocation["cpu"]) * 1_000_000_000,
                 tmpfs={"/tmp": "rw,noexec,nosuid,size=256m"},
                 environment=prefetch_environment,
                 volumes={
@@ -579,11 +644,8 @@ def _isolated_dagster_execution(
             cap_drop=["ALL"],
             security_opt=["no-new-privileges"],
             pids_limit=256,
-            mem_limit=os.getenv("CODEGEN_VALIDATION_MEMORY_LIMIT", "4g"),
-            nano_cpus=int(
-                float(os.getenv("CODEGEN_VALIDATION_CPU_LIMIT", "4"))
-                * 1_000_000_000
-            ),
+            mem_limit=int(allocation["memory_bytes"]),
+            nano_cpus=int(allocation["cpu"]) * 1_000_000_000,
             tmpfs={"/tmp": "rw,noexec,nosuid,size=256m,mode=1777"},
             environment=environment,
             volumes=execution_volumes,
@@ -645,6 +707,8 @@ def _isolated_dagster_execution(
                 pass
         if client is not None:
             client.close()
+        if allocation is not None:
+            RESOURCE_ADMISSION.release(execution_id)
 
 
 def validate_dagster_project(

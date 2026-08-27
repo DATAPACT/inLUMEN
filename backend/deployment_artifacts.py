@@ -2796,6 +2796,7 @@ def _model_requirements_for_dagster(
         adapter_id: str,
         model_id: str,
         model_revision: str,
+        resource_class: str = "",
         model_variants: dict | None = None,
         runtime_selection: dict | None = None,
         artifact_policy: dict | None = None,
@@ -2811,6 +2812,7 @@ def _model_requirements_for_dagster(
                 "adapter_id": adapter_id,
                 "model_id": model_id,
                 "model_revision": model_revision,
+                "resource_class": resource_class or "heavy_cpu_or_gpu",
                 "model_variants": variants,
                 "runtime_selection": runtime_selection or {},
                 "profile_env": (
@@ -2848,6 +2850,10 @@ def _model_requirements_for_dagster(
                         adapter_id=_clean_string(declared.get("adapter_id")) or "user-declared-model",
                         model_id=model_id,
                         model_revision=model_revision,
+                        resource_class=(
+                            _clean_string(declared.get("resource_class"))
+                            or "heavy_cpu_or_gpu"
+                        ),
                         model_variants=(
                             declared.get("model_variants")
                             if isinstance(declared.get("model_variants"), dict)
@@ -2903,6 +2909,10 @@ def _model_requirements_for_dagster(
             adapter_id=adapter_id,
             model_id=model_id,
             model_revision=model_revision,
+            resource_class=(
+                _clean_string(plan.get("resource_class"))
+                or "heavy_cpu_or_gpu"
+            ),
             model_variants=variants,
             runtime_selection=runtime_selection,
             artifact_policy=artifact_policy,

@@ -2261,6 +2261,17 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                         "heartbeat_at": {
                             "type": "string", "format": "date-time", "nullable": True,
                         },
+                        "resource_profile": {"type": "string", "nullable": True},
+                        "resource_cpu": {
+                            "type": "integer", "minimum": 1, "nullable": True,
+                        },
+                        "resource_memory_bytes": {
+                            "type": "integer", "minimum": 1, "nullable": True,
+                        },
+                        "resource_reason": {"type": "string", "nullable": True},
+                        "queue_position": {
+                            "type": "integer", "minimum": 1, "nullable": True,
+                        },
                     },
                     "additionalProperties": False,
                 },

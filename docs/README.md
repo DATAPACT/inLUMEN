@@ -381,6 +381,14 @@ one content-addressed shared pipeline image from `argo/Dockerfile`; it does not
 require an image per step unless incompatible dependency environments are split
 explicitly in a future export.
 
+Native runs use platform-managed resource profiles instead of user-facing CPU
+or memory settings. Bundle metadata and implementation dependencies select a
+`lightweight`, `standard`, or `ml_cpu` profile. The effective allocation is
+bounded by host capacity, reserves room for inLUMEN and the operating system,
+and is admitted through a FIFO queue. The Run tab displays the selected profile,
+CPU, memory, and queue position while waiting, so a capacity wait is distinct
+from a stalled pipeline.
+
 The runner's embedded SQLite lifecycle store and separate filesystem artifact
 store are durable for a single runner replica; bundle and output bytes are not
 embedded in lifecycle rows. Production configures the Dagster adapter through the private codegen

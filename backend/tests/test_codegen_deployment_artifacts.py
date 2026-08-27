@@ -565,6 +565,7 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         requirements = json.loads(by_path["dagster/model-requirements.json"])
         self.assertEqual("inlumen.model-requirements@1", requirements["schema_version"])
         self.assertEqual("faster-whisper", requirements["models"][0]["adapter_id"])
+        self.assertEqual("gpu_preferred", requirements["models"][0]["resource_class"])
         namespace = {}
         exec(
             compile(by_path["dagster/model_prefetch.py"], "model_prefetch.py", "exec"),

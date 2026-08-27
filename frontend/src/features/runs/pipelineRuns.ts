@@ -40,6 +40,11 @@ export type PipelineRunRecord = {
     active_node_name?: string | null;
     node_elapsed_seconds?: number | null;
     heartbeat_at?: string | null;
+    resource_profile?: string | null;
+    resource_cpu?: number | null;
+    resource_memory_bytes?: number | null;
+    resource_reason?: string | null;
+    queue_position?: number | null;
   } | null;
   error?: { code?: string; message?: string; details?: unknown } | null;
   result?: {
