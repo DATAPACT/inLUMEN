@@ -1,10 +1,9 @@
 import asyncio
 
-from fastapi.testclient import TestClient
-
 from app import main
 from app.manager import PipelineRunManager
 from app.store import PipelineRunStore
+from fastapi.testclient import TestClient
 
 
 class BlockingExecutor:
@@ -73,3 +72,42 @@ def test_api_requires_private_service_auth(monkeypatch):
         clear_response = client.delete("/v1/pipeline-runs")
     assert response.status_code == 401
     assert clear_response.status_code == 401
+
+
+def test_api_reports_bounded_run_capacity(monkeypatch):
+    monkeypatch.setenv("RUNNER_SERVICE_API_KEY", "test-token")
+    manager = PipelineRunManager(
+        PipelineRunStore(":memory:"),
+        adapter="dagster",
+        executor=BlockingExecutor(),
+        max_outstanding_runs=1,
+    )
+    monkeypatch.setattr(main, "RUN_MANAGER", manager)
+    headers = {"Authorization": "Bearer test-token"}
+    with TestClient(main.app) as client:
+        first = client.post(
+            "/v1/pipeline-runs", headers=headers, json=request_payload()
+        )
+        second_payload = request_payload()
+        second_payload["idempotency_key"] = "api-test-2"
+        rejected = client.post(
+            "/v1/pipeline-runs", headers=headers, json=second_payload
+        )
+
+        assert first.status_code == 202
+        assert rejected.status_code == 429
+        assert rejected.headers["Retry-After"] == "5"
+        assert rejected.json()["detail"] == {
+            "message": (
+                "Run capacity is full (1/1). Wait for a run to finish or "
+                "cancel an active run before launching another."
+            ),
+            "code": "pipeline_run_capacity_full",
+            "limit": 1,
+            "outstanding": 1,
+        }
+        capabilities = client.get(
+            "/v1/pipeline-runs/capabilities", headers=headers
+        ).json()
+        assert capabilities["available_run_slots"] == 0
+        client.delete("/v1/pipeline-runs", headers=headers)

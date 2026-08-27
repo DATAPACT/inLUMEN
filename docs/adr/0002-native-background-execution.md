@@ -41,6 +41,15 @@ deployments move those payloads to object storage. Neo4j stores concise
 pipeline/run summaries and durable references, not event streams or artifact
 bytes.
 
+Every terminal run is represented by one idempotent `PIPELINE_RUN_SUMMARY` node
+linked to its pipeline and captured pipeline version. It contains identity,
+status, timestamps, duration, output count, bounded error text, snapshot
+digests, and the effective resource profile. The pipeline keeps denormalized
+latest-run properties for inexpensive UI reads. Logs, events, secrets, bundle
+contents, and output bytes remain outside Neo4j. A failed summary write does not
+change the authoritative terminal result and is retried during runner restart
+reconciliation.
+
 The Dagster adapter delegates materialization to the private execution service.
 That service builds a content-addressed image and runs it as a constrained
 one-off unprivileged container with read-only code and Source inputs, writable
@@ -62,6 +71,14 @@ Admission is intentionally process-local while the execution service is a
 single replica. A horizontally scaled execution service must replace it with a
 shared scheduler or cluster-native resource admission; independently scheduling
 each replica would lose the host-wide capacity guarantee.
+
+The single-host runner accepts at most four non-terminal runs. This is a
+platform-owned safety limit rather than a pipeline parameter. Idempotent retries
+return the previously accepted run and do not consume another slot. A new
+submission at capacity receives `429 Too Many Requests` with `Retry-After`, while
+the Run UI disables launch and explains whether the user should wait or cancel
+an active run. Resource admission continues to decide which accepted runs may
+consume CPU and memory concurrently.
 
 ## API boundary
 

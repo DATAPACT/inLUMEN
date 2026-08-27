@@ -1,10 +1,16 @@
 import asyncio
 import base64
+import io
 import json
+import zipfile
 
 import pytest
 from app.artifacts import PipelineArtifactStore
-from app.manager import PipelineRunConflict, PipelineRunManager
+from app.manager import (
+    PipelineRunCapacityError,
+    PipelineRunConflict,
+    PipelineRunManager,
+)
 from app.models import CreatePipelineRunRequest
 from app.store import PipelineRunStore
 
@@ -17,9 +23,11 @@ class FakeDagsterExecutor:
         self.succeeds = succeeds
         self.cancelled: list[str] = []
         self.secrets_seen: dict[str, str] = {}
+        self.files_seen: list[dict] = []
 
     async def execute(self, run_id, files, runtime_secrets):
         self.secrets_seen = dict(runtime_secrets)
+        self.files_seen = [dict(item) for item in files]
         await asyncio.sleep(self.delay)
         if not self.succeeds:
             return {
@@ -89,6 +97,44 @@ class ProgressDagsterExecutor(FakeDagsterExecutor):
         }
 
 
+class SecretFailureExecutor(FakeDagsterExecutor):
+    async def execute(self, run_id, files, runtime_secrets):
+        secret = runtime_secrets["INLUMEN_SECRET_NODE_1_API_KEY"]
+        return {
+            "ok": False,
+            "validation_report": {
+                "errors": ["Dagster pipeline execution failed."],
+                "dagster": {
+                    "steps": [
+                        {
+                            "name": "dagster_materialize",
+                            "output": f"RuntimeError: remote rejected credential {secret}",
+                        }
+                    ]
+                },
+            },
+            "run_outputs": [],
+        }
+
+
+class FakeRunSummaryStore:
+    configured = True
+
+    def __init__(self, *, failures: int = 0):
+        self.failures = failures
+        self.published: list[dict] = []
+
+    def publish(self, summary):
+        self.published.append(dict(summary))
+        if self.failures > 0:
+            self.failures -= 1
+            raise RuntimeError("Neo4j unavailable")
+        return True
+
+    def close(self):
+        return None
+
+
 def request(*, key: str = "request-1", label: str = "Task") -> CreatePipelineRunRequest:
     return CreatePipelineRunRequest.model_validate(
         {
@@ -152,6 +198,59 @@ async def test_background_run_executes_dagster_and_persists_real_outputs(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_terminal_summary_is_concise_and_retried_after_storage_failure(tmp_path):
+    path = tmp_path / "runs.sqlite3"
+    summary_store = FakeRunSummaryStore(failures=1)
+    manager = PipelineRunManager(
+        PipelineRunStore(str(path)),
+        adapter="dagster",
+        executor=FakeDagsterExecutor(),
+        summary_store=summary_store,
+    )
+    queued, _created = await manager.start(request(key="summary-run"))
+    await manager.tasks[queued["run_id"]]
+
+    stored = manager.store.get(queued["run_id"])
+    assert stored["_summary_publish_error"] == "Neo4j unavailable"
+    assert "secret" not in json.dumps(summary_store.published[0])
+    assert summary_store.published[0]["pipeline_id"] == "pipeline-1"
+    assert summary_store.published[0]["status"] == "succeeded"
+    assert summary_store.published[0]["output_count"] == 1
+
+    restarted = PipelineRunManager(
+        PipelineRunStore(str(path)),
+        adapter="dagster",
+        executor=FakeDagsterExecutor(),
+        summary_store=summary_store,
+    )
+    assert await restarted.reconcile_interrupted() == 0
+    retried = restarted.store.get(queued["run_id"])
+    assert retried["_summary_published_at"]
+    assert "_summary_published_at" not in restarted.get(queued["run_id"])
+    assert len(summary_store.published) == 2
+
+
+@pytest.mark.asyncio
+async def test_execution_and_download_use_the_same_frozen_bundle_snapshot():
+    executor = FakeDagsterExecutor(delay=0.02)
+    manager = PipelineRunManager(
+        PipelineRunStore(":memory:"), adapter="dagster", executor=executor
+    )
+    submission = request(key="snapshot-equivalence")
+    queued, _created = await manager.start(submission)
+    submission.snapshot.bundle_files[0]["content"] = '{"mutated":true}'
+
+    with zipfile.ZipFile(io.BytesIO(manager.bundle_zip(queued["run_id"]))) as archive:
+        assert archive.read("run-spec.json") == b"{}"
+    await manager.tasks[queued["run_id"]]
+
+    assert executor.files_seen[0]["content"] == "{}"
+    assert manager.get(queued["run_id"])["snapshot"]["bundle_sha256"] == queued[
+        "snapshot"
+    ]["bundle_sha256"]
+
+
+@pytest.mark.asyncio
 async def test_background_run_persists_live_node_heartbeat_progress():
     executor = ProgressDagsterExecutor(delay=0.08)
     manager = PipelineRunManager(
@@ -202,6 +301,35 @@ async def test_idempotency_is_bound_to_executable_bundle_snapshot():
     with pytest.raises(PipelineRunConflict):
         await manager.start(changed)
     manager.tasks[first["run_id"]].cancel()
+
+
+@pytest.mark.asyncio
+async def test_outstanding_run_capacity_is_bounded_without_rejecting_retries():
+    executor = FakeDagsterExecutor(delay=0.05)
+    manager = PipelineRunManager(
+        PipelineRunStore(":memory:"),
+        adapter="dagster",
+        executor=executor,
+        max_outstanding_runs=2,
+    )
+    first, _created = await manager.start(request(key="capacity-1"))
+    second, _created = await manager.start(request(key="capacity-2"))
+
+    assert manager.capabilities()["available_run_slots"] == 0
+    replay, replay_created = await manager.start(request(key="capacity-1"))
+    assert replay_created is False
+    assert replay["run_id"] == first["run_id"]
+    with pytest.raises(PipelineRunCapacityError) as rejected:
+        await manager.start(request(key="capacity-3"))
+    assert rejected.value.limit == 2
+    assert rejected.value.outstanding == 2
+
+    await manager.cancel(first["run_id"])
+    await manager.tasks[first["run_id"]]
+    third, third_created = await manager.start(request(key="capacity-3"))
+    assert third_created is True
+    assert third["run_id"] not in {first["run_id"], second["run_id"]}
+    await asyncio.gather(*manager.tasks.values())
 
 
 @pytest.mark.asyncio
@@ -276,6 +404,25 @@ async def test_dagster_failure_preserves_execution_log_and_error():
         for event in events
         if event["type"] == "dagster.log"
     )
+
+
+@pytest.mark.asyncio
+async def test_failure_error_and_neo4j_summary_redact_runtime_secrets():
+    summary_store = FakeRunSummaryStore()
+    manager = PipelineRunManager(
+        PipelineRunStore(":memory:"),
+        adapter="dagster",
+        executor=SecretFailureExecutor(),
+        summary_store=summary_store,
+    )
+    queued, _created = await manager.start(request(key="secret-failure"))
+    await manager.tasks[queued["run_id"]]
+
+    failed = manager.get(queued["run_id"])
+    assert failed["status"] == "failed"
+    assert "secret" not in failed["error"]["message"]
+    assert "[REDACTED]" in failed["error"]["message"]
+    assert "secret" not in json.dumps(summary_store.published)
 
 
 @pytest.mark.asyncio

@@ -17,12 +17,14 @@ from typing import Any, Protocol
 
 from .artifacts import PipelineArtifactStore
 from .models import CreatePipelineRunRequest
+from .run_summaries import RunSummaryStore
 from .store import PipelineRunStore
 
 logger = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = {"succeeded", "partial", "failed", "cancelled"}
 ACTIVE_STATUSES = {"queued", "preparing", "running", "cancelling"}
+DEFAULT_MAX_OUTSTANDING_RUNS = 4
 NODE_EVENT_PATTERN = re.compile(
     r"-\s+(?P<node>node_[A-Za-z0-9_]+)\s+-\s+"
     r"STEP_(?P<outcome>START|SUCCESS|FAILURE)\b"
@@ -84,6 +86,16 @@ class PipelineRunConflict(ValueError):
     pass
 
 
+class PipelineRunCapacityError(RuntimeError):
+    def __init__(self, *, limit: int, outstanding: int) -> None:
+        self.limit = limit
+        self.outstanding = outstanding
+        super().__init__(
+            f"Run capacity is full ({outstanding}/{limit}). "
+            "Wait for a run to finish or cancel an active run before launching another."
+        )
+
+
 class PipelineRunManager:
     def __init__(
         self,
@@ -92,6 +104,8 @@ class PipelineRunManager:
         adapter: str = "disabled",
         executor: DagsterExecutor | None = None,
         artifact_store: PipelineArtifactStore | None = None,
+        max_outstanding_runs: int = DEFAULT_MAX_OUTSTANDING_RUNS,
+        summary_store: RunSummaryStore | None = None,
     ) -> None:
         self.store = store
         self.adapter = adapter
@@ -101,6 +115,8 @@ class PipelineRunManager:
         )
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self._submission_lock = asyncio.Lock()
+        self.max_outstanding_runs = max(int(max_outstanding_runs), 1)
+        self.summary_store = summary_store
 
     @property
     def execution_available(self) -> bool:
@@ -112,11 +128,18 @@ class PipelineRunManager:
 
     def capabilities(self) -> dict[str, Any]:
         enabled = self.execution_available
+        outstanding = self._outstanding_run_count()
         return {
             "background_runs": True,
             "execution_available": enabled,
             "adapter": self.adapter,
             "execution_mode": "background" if enabled else "unavailable",
+            "max_outstanding_runs": self.max_outstanding_runs,
+            "outstanding_run_count": outstanding,
+            "available_run_slots": max(self.max_outstanding_runs - outstanding, 0),
+            "summary_persistence": bool(
+                self.summary_store is not None and self.summary_store.configured
+            ),
             "message": (
                 "Runs execute the saved pipeline snapshot through Dagster and continue after the browser closes."
                 if enabled
@@ -152,6 +175,13 @@ class PipelineRunManager:
                         "The idempotency key was already used for a different executable snapshot."
                     )
                 return public_run_record(existing), False
+
+        outstanding = self._outstanding_run_count()
+        if outstanding >= self.max_outstanding_runs:
+            raise PipelineRunCapacityError(
+                limit=self.max_outstanding_runs,
+                outstanding=outstanding,
+            )
 
         nodes = list(graph.get("nodes") or [])
         edges = list(graph.get("edges") or [])
@@ -210,6 +240,9 @@ class PipelineRunManager:
         self.tasks[run_id] = task
         task.add_done_callback(lambda _task: self.tasks.pop(run_id, None))
         return public_run_record(record), True
+
+    def _outstanding_run_count(self) -> int:
+        return self.store.count_statuses(ACTIVE_STATUSES)
 
     def get(self, run_id: str) -> dict[str, Any] | None:
         record = self.store.get(run_id)
@@ -380,8 +413,14 @@ class PipelineRunManager:
                 "failed",
                 "Active Dagster execution was cancelled during runner recovery.",
             )
-            self.store.save(record)
+            self._save_terminal_record(record)
             count += 1
+        for record in self.store.list(limit=None):
+            if (
+                record.get("status") in TERMINAL_STATUSES
+                and not record.get("_summary_published_at")
+            ):
+                self._publish_terminal_summary(record)
         return count
 
     async def _execute_dagster(
@@ -474,7 +513,7 @@ class PipelineRunManager:
                 "succeeded",
                 f"Dagster completed with {len(output_files)} output artifact(s).",
             )
-            self.store.save(record)
+            self._save_terminal_record(record)
         except Exception as exc:  # noqa: BLE001 - adapter failures become run failures.
             runtime_secrets.clear()
             record = self.store.get(run_id)
@@ -631,9 +670,14 @@ class PipelineRunManager:
                 continue
             command = " ".join(str(part) for part in step.get("command") or [])
             output = str(step.get("output") or "").strip()
-            summary = output[-12000:] if output else command or f"Dagster step {index}"
+            redacted_output = output
             for secret_value in secret_values:
-                summary = summary.replace(secret_value, "[REDACTED]")
+                redacted_output = redacted_output.replace(secret_value, "[REDACTED]")
+            summary = (
+                redacted_output[-12000:]
+                if redacted_output
+                else command or f"Dagster step {index}"
+            )
             step_name = str(step.get("name") or "").strip()
             technical_type = (
                 "dagster.log"
@@ -641,7 +685,7 @@ class PipelineRunManager:
                 else "runtime.log"
             )
             self._append_event(record, technical_type, "running", summary)
-            decoded_output = output.replace("\\n", "\n")
+            decoded_output = redacted_output.replace("\\n", "\n")
             for match in NODE_EVENT_PATTERN.finditer(decoded_output):
                 node_id = match.group("node")
                 outcome = match.group("outcome").lower()
@@ -685,6 +729,77 @@ class PipelineRunManager:
         ]
         self.store.save(record)
         return root_failure
+
+    def _save_terminal_record(self, record: dict[str, Any]) -> None:
+        self.store.save(record)
+        self._publish_terminal_summary(record)
+
+    def _publish_terminal_summary(self, record: dict[str, Any]) -> None:
+        if (
+            self.summary_store is None
+            or not self.summary_store.configured
+            or record.get("_summary_published_at")
+            or not str((record.get("snapshot") or {}).get("pipeline_id") or "").strip()
+        ):
+            return
+        try:
+            published = self.summary_store.publish(self._summary_payload(record))
+            if not published:
+                record["_summary_publish_error"] = (
+                    "The captured pipeline was not found in summary storage."
+                )
+            else:
+                record["_summary_published_at"] = utc_now_iso()
+                record.pop("_summary_publish_error", None)
+        except Exception as exc:
+            record["_summary_publish_error"] = str(exc)[:600]
+            logger.warning(
+                "Could not persist terminal summary for run %s.",
+                record.get("run_id"),
+                exc_info=True,
+            )
+        self.store.save(record)
+
+    @staticmethod
+    def _summary_payload(record: dict[str, Any]) -> dict[str, Any]:
+        snapshot = record.get("snapshot") or {}
+        result = record.get("result") or {}
+        error = record.get("error") or result.get("error") or {}
+        progress = record.get("progress") or {}
+        started_at = record.get("started_at")
+        finished_at = record.get("finished_at")
+        duration_ms = None
+        if started_at and finished_at:
+            try:
+                started = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+                finished = datetime.fromisoformat(
+                    str(finished_at).replace("Z", "+00:00")
+                )
+                duration_ms = max(int((finished - started).total_seconds() * 1000), 0)
+            except ValueError:
+                duration_ms = None
+        return {
+            "run_id": str(record.get("run_id") or ""),
+            "pipeline_id": str(snapshot.get("pipeline_id") or ""),
+            "active_version_uid": str(
+                snapshot.get("active_version_uid") or "main"
+            ),
+            "snapshot_sha256": str(snapshot.get("graph_sha256") or ""),
+            "bundle_sha256": str(snapshot.get("bundle_sha256") or ""),
+            "status": str(record.get("status") or "failed"),
+            "engine": str(record.get("engine") or "dagster"),
+            "execution_mode": str(record.get("execution_mode") or "background"),
+            "created_at": str(record.get("created_at") or finished_at),
+            "started_at": str(started_at) if started_at else None,
+            "finished_at": str(finished_at or record.get("updated_at")),
+            "duration_ms": duration_ms,
+            "output_count": len(result.get("outputs") or []),
+            "error_code": str(error.get("code") or "") or None,
+            "error_message": str(error.get("message") or "")[:600] or None,
+            "resource_profile": str(progress.get("resource_profile") or "") or None,
+            "resource_cpu": progress.get("resource_cpu"),
+            "resource_memory_bytes": progress.get("resource_memory_bytes"),
+        }
 
     @staticmethod
     def _node_display_name(node_id: str) -> str:
@@ -747,7 +862,7 @@ class PipelineRunManager:
         }
         record["result"] = self._terminal_result(record, "cancelled")
         self._append_event(record, "run.cancelled", "cancelled", "Dagster run cancelled.")
-        self.store.save(record)
+        self._save_terminal_record(record)
 
     def _finish_failed(self, record: dict[str, Any], error: dict[str, Any]) -> None:
         now = utc_now_iso()
@@ -765,7 +880,7 @@ class PipelineRunManager:
         }
         record["result"] = self._terminal_result(record, "failed", error=error)
         self._append_event(record, "run.failed", "failed", str(error["message"]))
-        self.store.save(record)
+        self._save_terminal_record(record)
 
     @staticmethod
     def _output_metadata(entry: dict[str, Any]) -> dict[str, Any]:

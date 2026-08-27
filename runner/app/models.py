@@ -95,4 +95,8 @@ class RunnerCapabilities(BaseModel):
     execution_available: bool
     adapter: str
     execution_mode: str
+    max_outstanding_runs: int = Field(ge=1)
+    outstanding_run_count: int = Field(ge=0)
+    available_run_slots: int = Field(ge=0)
+    summary_persistence: bool
     message: str | None = None

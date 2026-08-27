@@ -1,7 +1,6 @@
 import base64
 
 import pytest
-
 from app.artifacts import PipelineArtifactStore
 
 

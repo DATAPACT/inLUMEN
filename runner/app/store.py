@@ -42,6 +42,12 @@ class PipelineRunStore:
                 ON pipeline_runs(updated_at DESC)
                 """
             )
+            self._connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS pipeline_runs_status_idx
+                ON pipeline_runs(status)
+                """
+            )
             self._connection.commit()
 
     def save(self, record: dict[str, Any]) -> None:
@@ -88,6 +94,19 @@ class PipelineRunStore:
                 (key,),
             ).fetchone()
         return self._decode(row)
+
+    def count_statuses(self, statuses: set[str]) -> int:
+        if not statuses:
+            return 0
+        ordered = tuple(sorted(statuses))
+        placeholders = ",".join("?" for _status in ordered)
+        with self._lock:
+            row = self._connection.execute(
+                f"SELECT count(*) AS run_count FROM pipeline_runs "
+                f"WHERE status IN ({placeholders})",
+                ordered,
+            ).fetchone()
+        return int(row["run_count"] if row is not None else 0)
 
     def list(self, *, limit: int | None = 20) -> list[dict[str, Any]]:
         parameters: tuple[int, ...] = ()

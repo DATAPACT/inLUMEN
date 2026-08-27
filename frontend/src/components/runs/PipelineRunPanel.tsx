@@ -128,6 +128,12 @@ export const PipelineRunPanel = () => {
     () => events.filter((event) => event.type.endsWith('.log')),
     [events],
   );
+  const outstandingRunCount = useMemo(
+    () => runs.filter((run) => isActivePipelineRun(run.status)).length,
+    [runs],
+  );
+  const capacityLimit = capabilities?.max_outstanding_runs || 0;
+  const runCapacityFull = capacityLimit > 0 && outstandingRunCount >= capacityLimit;
 
   const loadInitial = useCallback(async () => {
     setLoading(true);
@@ -247,7 +253,12 @@ export const PipelineRunPanel = () => {
       <Button
         className="mt-3 h-10 w-full"
         onClick={() => { void handleStart(); }}
-        disabled={submitting || loading || !capabilities?.execution_available}
+        disabled={
+          submitting
+          || loading
+          || !capabilities?.execution_available
+          || runCapacityFull
+        }
       >
         {submitting ? (
           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -259,6 +270,12 @@ export const PipelineRunPanel = () => {
       <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
         A fixed snapshot is created at launch. You can close the browser while it runs.
       </p>
+
+      {runCapacityFull && (
+        <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-200">
+          Run capacity is full ({outstandingRunCount}/{capacityLimit}). Wait for a run to finish or cancel an active run before launching another.
+        </div>
+      )}
 
       {!capabilities?.execution_available && capabilities?.message && (
         <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-200">

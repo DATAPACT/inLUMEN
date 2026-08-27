@@ -67,6 +67,10 @@ export type RunnerCapabilities = {
   execution_available: boolean;
   adapter: string;
   execution_mode: string;
+  max_outstanding_runs: number;
+  outstanding_run_count: number;
+  available_run_slots: number;
+  summary_persistence: boolean;
   message?: string | null;
 };
 

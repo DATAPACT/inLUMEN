@@ -389,6 +389,17 @@ and is admitted through a FIFO queue. The Run tab displays the selected profile,
 CPU, memory, and queue position while waiting, so a capacity wait is distinct
 from a stalled pipeline.
 
+The local runner accepts four outstanding runs. Further submissions receive a
+structured `429 Too Many Requests` response until a run reaches a terminal
+state; retrying the same idempotency key still returns the original run. This
+bounds durable queue growth independently from the CPU/memory scheduler.
+
+Terminal outcomes are persisted in Neo4j as concise, idempotent
+`PIPELINE_RUN_SUMMARY` records linked to the captured pipeline and version. The
+current pipeline also exposes its latest run status, duration, output count, and
+snapshot digest. Full logs, events, secrets, bundles, and outputs remain in the
+runner lifecycle and artifact stores.
+
 The runner's embedded SQLite lifecycle store and separate filesystem artifact
 store are durable for a single runner replica; bundle and output bytes are not
 embedded in lifecycle rows. Production configures the Dagster adapter through the private codegen

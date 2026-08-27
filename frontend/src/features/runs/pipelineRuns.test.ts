@@ -60,5 +60,15 @@ describe('pipeline run API', () => {
     expect(isActivePipelineRun('succeeded')).toBe(false);
     expect(isActivePipelineRun('failed')).toBe(false);
   });
-});
 
+  it('shows the bounded-capacity message returned by the gateway', async () => {
+    mockedFetch.mockResolvedValue(new Response(JSON.stringify({
+      error: 'Run capacity is full (4/4). Wait for a run to finish or cancel an active run.',
+      details: { code: 'pipeline_run_capacity_full', limit: 4 },
+    }), { status: 429, headers: { 'Content-Type': 'application/json' } }));
+
+    await expect(startPipelineRun('capacity-test')).rejects.toThrow(
+      'Run capacity is full (4/4).',
+    );
+  });
+});

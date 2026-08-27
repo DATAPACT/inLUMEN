@@ -1640,6 +1640,10 @@ def _ui_api_openapi_paths(
                 "requestBody": _json_request("#/components/schemas/PipelineRunStartRequest", required=False),
                 "responses": {
                     "202": _json_response("#/components/schemas/PipelineRunRecord", "Background run accepted."),
+                    "429": _json_response(
+                        "#/components/schemas/ErrorResponse",
+                        "The bounded background-run capacity is full.",
+                    ),
                     **protected_responses,
                 },
             },
@@ -2316,12 +2320,25 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
         },
         "RunnerCapabilities": {
             "type": "object",
-            "required": ["background_runs", "execution_available", "adapter", "execution_mode"],
+            "required": [
+                "background_runs",
+                "execution_available",
+                "adapter",
+                "execution_mode",
+                "max_outstanding_runs",
+                "outstanding_run_count",
+                "available_run_slots",
+                "summary_persistence",
+            ],
             "properties": {
                 "background_runs": {"type": "boolean"},
                 "execution_available": {"type": "boolean"},
                 "adapter": {"type": "string"},
                 "execution_mode": {"type": "string"},
+                "max_outstanding_runs": {"type": "integer", "minimum": 1},
+                "outstanding_run_count": {"type": "integer", "minimum": 0},
+                "available_run_slots": {"type": "integer", "minimum": 0},
+                "summary_persistence": {"type": "boolean"},
                 "message": {"type": "string", "nullable": True},
             },
         },

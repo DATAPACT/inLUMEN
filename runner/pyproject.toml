@@ -5,6 +5,7 @@ description = "Durable background pipeline-run control service for inLUMEN."
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115.0",
+  "neo4j>=5.25.0,<6",
   "pydantic>=2.7.0",
   "uvicorn[standard]>=0.30.0",
 ]
@@ -19,6 +20,10 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["state*"]
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -8,7 +8,11 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
 
 from .artifacts import PipelineArtifactStore
 from .dagster_executor import CodegenDagsterExecutor
-from .manager import PipelineRunConflict, PipelineRunManager
+from .manager import (
+    PipelineRunCapacityError,
+    PipelineRunConflict,
+    PipelineRunManager,
+)
 from .models import (
     CreatePipelineRunRequest,
     PipelineRunEventsResponse,
@@ -16,6 +20,7 @@ from .models import (
     PipelineRunRecord,
     RunnerCapabilities,
 )
+from .run_summaries import Neo4jRunSummaryStore
 from .security import configured_key, require_service_api_key
 from .store import PipelineRunStore
 
@@ -26,11 +31,13 @@ RUN_STORE = PipelineRunStore(os.getenv("RUNNER_JOB_DB_PATH", str(DEFAULT_RUNNER_
 RUN_ARTIFACT_STORE = PipelineArtifactStore(
     os.getenv("RUNNER_ARTIFACT_ROOT", str(DEFAULT_RUNNER_STATE.parent / "artifacts"))
 )
+RUN_SUMMARY_STORE = Neo4jRunSummaryStore()
 RUN_MANAGER = PipelineRunManager(
     RUN_STORE,
     adapter=os.getenv("RUNNER_ADAPTER", "disabled").strip().lower(),
     executor=CodegenDagsterExecutor(),
     artifact_store=RUN_ARTIFACT_STORE,
+    summary_store=RUN_SUMMARY_STORE,
 )
 SERVICE_AUTH = [Depends(require_service_api_key)]
 
@@ -39,6 +46,7 @@ SERVICE_AUTH = [Depends(require_service_api_key)]
 async def lifespan(_app: FastAPI):
     await RUN_MANAGER.reconcile_interrupted()
     yield
+    RUN_SUMMARY_STORE.close()
 
 
 app = FastAPI(
@@ -84,6 +92,17 @@ async def create_pipeline_run(request: CreatePipelineRunRequest) -> dict:
         return record
     except PipelineRunConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PipelineRunCapacityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "message": str(exc),
+                "code": "pipeline_run_capacity_full",
+                "limit": exc.limit,
+                "outstanding": exc.outstanding,
+            },
+            headers={"Retry-After": "5"},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:

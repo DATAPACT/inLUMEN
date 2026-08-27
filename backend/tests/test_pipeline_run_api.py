@@ -97,3 +97,30 @@ class PipelineRunApiTest(unittest.TestCase):
             ("DELETE", "/v1/pipeline-runs"),
             runner.call_args_list[2].args,
         )
+
+    @patch("inlumen_api.runner_request")
+    @patch(
+        "inlumen_api.prepare_dagster_execution_bundle",
+        return_value={
+            "files": [{"path": "run-spec.json", "content": "{}"}],
+            "manifest": {"targets": {"dagster": True}},
+            "runtime_secrets": {},
+        },
+    )
+    @patch("inlumen_api._proxy", return_value=graph_response())
+    def test_submission_preserves_runner_capacity_error(
+        self, _proxy, _prepare, runner
+    ):
+        runner.side_effect = inlumen_api.PipelineRunnerError(
+            429,
+            "Run capacity is full (4/4).",
+            {"code": "pipeline_run_capacity_full", "limit": 4},
+        )
+
+        response = self.client.post("/api/pipeline-runs", json={})
+
+        self.assertEqual(429, response.status_code)
+        self.assertEqual("Run capacity is full (4/4).", response.json["error"])
+        self.assertEqual(
+            "pipeline_run_capacity_full", response.json["details"]["code"]
+        )

@@ -3062,6 +3062,15 @@ def neo4j_get_graph():
         .active_version_uid,
         .settings_json,
         .status,
+        .last_run_id,
+        .last_run_status,
+        .last_run_engine,
+        .last_run_snapshot_sha256,
+        last_run_started_at: toString(p.last_run_started_at),
+        last_run_finished_at: toString(p.last_run_finished_at),
+        .last_run_duration_ms,
+        .last_run_output_count,
+        .last_run_error,
         created_at: toString(p.created_at),
         updated_at: toString(p.updated_at)
       } AS pipeline,
@@ -3110,6 +3119,20 @@ def neo4j_get_graph():
                         settings = {}
                 pipeline["design_pipeline_count"] = record["design_pipeline_count"]
                 pipeline["step_count"] = record["pipeline_step_count"]
+                if pipeline.get("last_run_id"):
+                    pipeline["last_run"] = {
+                        "run_id": pipeline.get("last_run_id"),
+                        "status": pipeline.get("last_run_status"),
+                        "engine": pipeline.get("last_run_engine"),
+                        "snapshot_sha256": pipeline.get(
+                            "last_run_snapshot_sha256"
+                        ),
+                        "started_at": pipeline.get("last_run_started_at"),
+                        "finished_at": pipeline.get("last_run_finished_at"),
+                        "duration_ms": pipeline.get("last_run_duration_ms"),
+                        "output_count": pipeline.get("last_run_output_count"),
+                        "error": pipeline.get("last_run_error"),
+                    }
                 active_version_uid = pipeline.get("active_version_uid")
                 if isinstance(active_version_uid, str) and active_version_uid.strip():
                     active_version_record = session.run("""
