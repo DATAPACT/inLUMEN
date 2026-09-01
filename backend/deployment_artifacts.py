@@ -3081,7 +3081,7 @@ def _selected_specs(requirements: dict) -> list[dict]:
         if isinstance(variants, dict) and variants:
             profile_env = str(requirement.get("profile_env") or "")
             requested_profile = str(
-                os.getenv(profile_env) if profile_env else ""
+                (os.getenv(profile_env) or "") if profile_env else ""
             ).strip().lower()
             runtime_selection = requirement.get("runtime_selection") or {}
             if not requested_profile:
@@ -3090,7 +3090,9 @@ def _selected_specs(requirements: dict) -> list[dict]:
                 ).lower()
             if requested_profile == "auto":
                 device_env = str(requirement.get("device_env") or "")
-                device = str(os.getenv(device_env) if device_env else "").lower()
+                device = str(
+                    (os.getenv(device_env) or "") if device_env else ""
+                ).lower()
                 if not device or device == "auto":
                     device = "cuda" if accelerator == "gpu" else "cpu"
                 requested_profile = str(
