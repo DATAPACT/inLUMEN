@@ -19,7 +19,7 @@ from pipeline_agent.contract import (
     require_agent_step_type,
     validate_insertion_kind,
 )
-from pipeline_graph_validation import validate_pipeline_graph
+from pipeline_graph_validation import FLOW_EXPRESSION_PATTERN, validate_pipeline_graph
 from subpipeline_reference import (
     derive_subpipeline_interface,
     normalize_reusable_pipeline_graph,
@@ -497,7 +497,7 @@ def build_pipeline_editor_tools(
         }
 
     async def create_step(params: str) -> str:
-        """Creates new STEP and connects it after the last STEP, if present.
+        """Creates a STEP and connects it after an explicit or unambiguous tail.
 
         params JSON:
         {
@@ -505,6 +505,9 @@ def build_pipeline_editor_tools(
           "label": "step label",
           "description": "step description",
           "template": "optional high-level semantic for Task or Flow only",
+          "after_flow_id": "optional explicit predecessor flow_id",
+          "source_port": "required when the explicit predecessor has multiple outputs",
+          "allow_fan_out": false,
           "reusable_pipeline_name": "required for Subpipeline unless uid is supplied",
           "reusable_pipeline_uid": "optional saved reusable pipeline uid",
           "reusable_version_uid": "optional immutable version uid",
@@ -513,6 +516,10 @@ def build_pipeline_editor_tools(
         Do not provide parameters, credentials, secret names, model choices, or
         implementation metadata. Source and Destination always use the default
         managed boundary; connector selection is an advanced user configuration.
+        Without after_flow_id, the graph must have exactly one topological tail.
+        Use after_flow_id plus source_port to create every explicit branch target,
+        including a second terminal Destination from Condition.when_false. A Flow
+        may fan out by design; a non-Flow predecessor requires allow_fan_out:true.
         Use task descriptions for domain operations and Flow for execution
         control. Creating a subpipeline
         atomically resolves and pins a saved reusable pipeline version and returns
@@ -570,6 +577,44 @@ def build_pipeline_editor_tools(
                 if resolved_subpipeline
                 else default_input_port_id(step_type, resolved_template)
             ).replace("'", "\\'")
+            raw_after_flow_id = data.get("after_flow_id")
+            after_flow_id = str(raw_after_flow_id or "").strip()
+            allow_fan_out = data.get("allow_fan_out") is True
+            resolved_source_port = ""
+            if after_flow_id:
+                if not all(
+                    character.isalnum() or character in "_.-"
+                    for character in after_flow_id
+                ):
+                    raise ValueError("create_step received an invalid after_flow_id")
+                predecessor_result = await run_query(f"""
+                MATCH (p:PIPELINE {{status:'design'}})-[:HAS_STEP]->(source:STEP {{flow_id:'{_cypher_string(after_flow_id)}'}})
+                RETURN {{
+                  flow_id: source.flow_id,
+                  type: source.type,
+                  template_label: source.template_label,
+                  ports_json: source.ports_json,
+                  primary_output_port: source.primary_output_port
+                }} AS predecessor;
+                """, "resolve_step_predecessor")
+                predecessors = [
+                    row.get("predecessor")
+                    for row in _decoded_rows(predecessor_result)
+                    if isinstance(row.get("predecessor"), dict)
+                ]
+                if not predecessors:
+                    raise ValueError(
+                        "create_step predecessor does not exist; call overview and use "
+                        "an exact flow_id"
+                    )
+                predecessor = predecessors[0]
+                resolved_source_port = _resolve_connection_port(
+                    data.get("source_port"),
+                    _available_connection_ports(predecessor, "outputs"),
+                    flow_id=after_flow_id,
+                    direction="outputs",
+                    primary_port=predecessor.get("primary_output_port"),
+                )
             subpipeline_return = ""
             if resolved_subpipeline:
                 reference = resolved_subpipeline["reference"]
@@ -580,7 +625,54 @@ def build_pipeline_editor_tools(
             referenced_version_name: '{_cypher_string(reference['version_name'])}',
             public_inputs: {json.dumps(resolved_subpipeline['input_ids'])},
             public_outputs: {json.dumps(resolved_subpipeline['output_ids'])}"""
-            query = f"""
+            if after_flow_id:
+                escaped_after_flow_id = _cypher_string(after_flow_id)
+                escaped_source_port = _cypher_string(resolved_source_port)
+                query = f"""
+                MATCH (p:PIPELINE {{status:'design'}})-[:HAS_STEP]->(prev:STEP {{flow_id:'{escaped_after_flow_id}'}})
+                OPTIONAL MATCH (p)-[:HAS_STEP]->(sAll:STEP)
+                WHERE sAll.flow_id IS NOT NULL AND toString(sAll.flow_id) =~ '^[0-9]+$'
+                WITH p, prev, coalesce(max(toInteger(sAll.flow_id)), 0) + 1 AS nextFlowId
+                OPTIONAL MATCH (prev)-[:FLOWS_TO]->(existingTarget:STEP)
+                WITH p, prev, nextFlowId, collect(DISTINCT existingTarget) AS existingTargets,
+                    coalesce(prev.x, 0.0) AS prevX,
+                    coalesce(prev.y, 0.0) AS prevY
+                WHERE prev.type <> 'destination'
+                  AND (prev.type = 'flow' OR {str(allow_fan_out).lower()} OR size(existingTargets) = 0)
+                CREATE (s:STEP {{
+                uid: randomUUID(),
+                {props_str},
+                flow_id: toString(nextFlowId),
+                x: prevX + 300.0,
+                y: CASE
+                    WHEN toLower(coalesce(prev.template_label, '')) = 'condition'
+                         AND '{escaped_source_port}' = 'when_true' THEN prevY - 180.0
+                    WHEN toLower(coalesce(prev.template_label, '')) = 'condition'
+                         AND '{escaped_source_port}' = 'when_false' THEN prevY + 180.0
+                    ELSE prevY
+                   END
+                }})
+                MERGE (p)-[:HAS_STEP]->(s)
+                MERGE (prev)-[flow:FLOWS_TO]->(s)
+                SET flow.source_port = '{escaped_source_port}',
+                    flow.target_port = '{target_port}',
+                    p.updated_at = datetime()
+                RETURN {{
+                flow_id: s.flow_id,
+                uid: s.uid,
+                type: s.type,
+                label: s.label,
+                description: s.description,
+                x: s.x,
+                y: s.y,
+                after_flow_id: prev.flow_id,
+                source_port: flow.source_port,
+                target_port: flow.target_port,
+                pipeline_updated_at: toString(p.updated_at){subpipeline_return}
+                }} AS step;
+                """
+            else:
+                query = f"""
             OPTIONAL MATCH (candidate:PIPELINE {{status:'design'}})
             OPTIONAL MATCH (candidate)-[:HAS_STEP]->(candidateStep:STEP)
             WITH candidate, count(candidateStep) AS step_count
@@ -609,15 +701,17 @@ def build_pipeline_editor_tools(
             }}
             SET p.updated_at = datetime()
             WITH p
-            OPTIONAL MATCH (sAll:STEP)
+            OPTIONAL MATCH (p)-[:HAS_STEP]->(sAll:STEP)
             WHERE sAll.flow_id IS NOT NULL AND toString(sAll.flow_id) =~ '^[0-9]+$'
             WITH p, coalesce(max(toInteger(sAll.flow_id)), 0) + 1 AS nextFlowId
 
-            OPTIONAL MATCH (p)-[:HAS_STEP]->(prev:STEP)
-            WHERE prev.flow_id IS NOT NULL AND toString(prev.flow_id) =~ '^[0-9]+$'
-            WITH p, nextFlowId, prev
-            ORDER BY toInteger(prev.flow_id) DESC
-            WITH p, nextFlowId, head(collect(prev)) AS prev
+            OPTIONAL MATCH (p)-[:HAS_STEP]->(candidateTail:STEP)
+            WITH p, nextFlowId, collect(candidateTail) AS candidateTails
+            WITH p, nextFlowId,
+                [candidate IN candidateTails WHERE NOT (candidate)-[:FLOWS_TO]->()] AS tails
+            WITH p, nextFlowId, tails,
+                CASE WHEN size(tails) = 1 THEN head(tails) ELSE NULL END AS prev
+            WHERE size(tails) <= 1
 
             WITH p, nextFlowId, prev,
                 coalesce(prev.x, 0.0) AS prevX,
@@ -628,7 +722,11 @@ def build_pipeline_editor_tools(
             {props_str},
             flow_id: toString(nextFlowId),
             x: CASE WHEN prev IS NULL THEN 0.0 ELSE prevX + 300.0 END,
-            y: CASE WHEN prev IS NULL THEN 0.0 ELSE prevY END
+            y: CASE
+                WHEN prev IS NULL THEN 0.0
+                WHEN toLower(coalesce(prev.template_label, '')) = 'condition' THEN prevY - 180.0
+                ELSE prevY
+               END
             }})
             MERGE (p)-[:HAS_STEP]->(s)
             FOREACH (_ IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |
@@ -656,9 +754,10 @@ def build_pipeline_editor_tools(
             result = await run_query(query, query_type)
             if _agent_query_returned_no_rows(result):
                 raise ValueError(
-                    "Step append rejected: Source must be the first component and a "
-                    "Destination must remain terminal. Use insert_step or connect_steps "
-                    "to place the component at a valid location."
+                    "Step creation rejected: the graph has no unambiguous appendable "
+                    "tail, the predecessor is terminal, or non-Flow fan-out was not "
+                    "authorized. Use after_flow_id and an exact source_port to create "
+                    "an explicit branch target."
                 )
             return repr(result)
         except Exception as exc:
@@ -876,7 +975,8 @@ def build_pipeline_editor_tools(
         params JSON for a condition:
         {
           "flow_id": "existing Flow step flow_id",
-          "behavior": "Condition"
+          "behavior": "Condition",
+          "expression": "value.is_valid == true"
         }
 
         params JSON for a parallel map:
@@ -904,6 +1004,20 @@ def build_pipeline_editor_tools(
                     "Pipeline design does not accept Flow runtime parameters; "
                     "configure them after the high-level design phase."
                 )
+            expression = str(data.get("expression") or "").strip()
+            if behavior == "Condition":
+                if not expression:
+                    raise ValueError(
+                        "Condition configuration requires an expression such as "
+                        "value.is_valid == true"
+                    )
+                if not FLOW_EXPRESSION_PATTERN.fullmatch(expression):
+                    raise ValueError(
+                        "Condition expressions must compare value or value.field "
+                        "with a literal"
+                    )
+            flow_parameters = {"expression": expression} if expression else {}
+            escaped_parameters = _cypher_string(json.dumps(flow_parameters, sort_keys=True))
             serialized_ports = ports_json_for_template(None, "flow", behavior)
             escaped_ports = serialized_ports.replace("\\", "\\\\").replace("'", "\\'")
             input_port = default_input_port_id("flow", behavior)
@@ -912,8 +1026,11 @@ def build_pipeline_editor_tools(
             MATCH (p:PIPELINE {{status:'design'}})-[:HAS_STEP]->(flowStep:STEP {{flow_id:'{flow_id}'}})
             WHERE flowStep.type = 'flow'
             SET flowStep.template_label = '{behavior}',
-                flowStep.param_json = '{{}}',
-                flowStep.configuration_status = 'unconfigured',
+                flowStep.param_json = '{escaped_parameters}',
+                flowStep.configuration_status = CASE
+                    WHEN '{behavior}' = 'Condition' THEN 'configured'
+                    ELSE 'unconfigured'
+                END,
                 flowStep.ports_json = '{escaped_ports}',
                 p.updated_at = datetime()
             WITH p, flowStep

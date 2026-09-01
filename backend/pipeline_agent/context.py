@@ -64,12 +64,62 @@ def _looks_like_internal_agent_message(message: object) -> bool:
     return any(pattern.search(text) for pattern in INTERNAL_AGENT_MESSAGE_PATTERNS)
 
 
+def _graph_summary_message(graph: dict | None) -> str:
+    """Build safe deterministic prose from user-visible persisted graph fields."""
+    cleaned = _clean_client_graph(graph) if isinstance(graph, dict) else None
+    if not cleaned:
+        return SAFE_INTERNAL_OUTPUT_MESSAGE
+    nodes = cleaned.get("nodes") if isinstance(cleaned.get("nodes"), list) else []
+    edges = cleaned.get("edges") if isinstance(cleaned.get("edges"), list) else []
+    if not nodes:
+        return "The pipeline design is empty."
+
+    pipeline = graph.get("pipeline") if isinstance(graph.get("pipeline"), dict) else {}
+    pipeline_label = _clip_text(
+        pipeline.get("label") or pipeline.get("name") or "Pipeline",
+        160,
+    )
+    labels = {
+        str(node.get("id") or ""): _clip_text(node.get("label") or node.get("id"), 120)
+        for node in nodes
+        if str(node.get("id") or "")
+    }
+    node_by_id = {
+        str(node.get("id") or ""): node
+        for node in nodes
+        if str(node.get("id") or "")
+    }
+    branches = []
+    for edge in edges:
+        source_port = str(edge.get("source_port") or "")
+        if source_port not in {"when_true", "when_false"}:
+            continue
+        source_id = str(edge.get("source") or "")
+        target_id = str(edge.get("target") or "")
+        source = node_by_id.get(source_id, {})
+        if str(source.get("type") or "").lower() != "flow":
+            continue
+        branches.append(
+            f"{labels.get(source_id, source_id)} {source_port} -> "
+            f"{labels.get(target_id, target_id)}"
+        )
+    component_word = "component" if len(nodes) == 1 else "components"
+    connection_word = "connection" if len(edges) == 1 else "connections"
+    summary = (
+        f"Pipeline design updated: {pipeline_label} contains {len(nodes)} "
+        f"{component_word} and {len(edges)} {connection_word}."
+    )
+    if branches:
+        summary += " Condition branches: " + "; ".join(branches[:8]) + "."
+    return summary
+
+
 def _safe_assistant_message(message: object, graph: dict | None = None) -> str:
-    """Return model prose or a neutral notice; never expose protocol payloads."""
+    """Return model prose or a graph-derived notice; never expose protocol data."""
     text = str(message or "").strip()
     if text and not _looks_like_internal_agent_message(text):
         return text
-    return SAFE_INTERNAL_OUTPUT_MESSAGE
+    return _graph_summary_message(graph)
 
 
 def _graph_counts(graph: dict | None) -> tuple[int, int]:

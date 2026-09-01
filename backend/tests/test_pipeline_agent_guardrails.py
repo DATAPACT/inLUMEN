@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pipeline_agent.context import (
-    SAFE_INTERNAL_OUTPUT_MESSAGE,
     _assistant_message_from_result,
     _clean_client_graph,
     _graph_for_agent_context,
@@ -376,7 +375,10 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertTrue(_looks_like_internal_agent_message(leaked))
         safe = _safe_assistant_message(leaked, graph)
 
-        self.assertEqual(SAFE_INTERNAL_OUTPUT_MESSAGE, safe)
+        self.assertEqual(
+            "Pipeline design updated: Safe Pipeline contains 2 components and 1 connection.",
+            safe,
+        )
         self.assertNotIn("delete_step", safe)
         self.assertNotIn("secret-step", safe)
         self.assertNotIn("ports_json", safe)
@@ -493,6 +495,100 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertTrue(sync["guardrail_passed"])
         self.assertTrue(sync["graph_safe_to_apply"])
 
+    def test_guardrail_rejects_missing_explicit_outlier_branch(self):
+        before = {"nodes": [], "edges": []}
+        after = {
+            "nodes": [
+                node(1, "source", "Input"),
+                node(2, "task", "Validate Rows", GENERATED_CODE),
+                flow_node(3, "Condition", {}),
+                node(4, "task", "Relative Features", GENERATED_CODE),
+                node(5, "destination", "Clean CSV"),
+            ],
+            "edges": [
+                edge(1, 2, "data", "input"),
+                edge(2, 3, "output", "value"),
+                edge(3, 4, "when_true", "input"),
+                edge(4, 5, "output", "data"),
+            ],
+        }
+
+        sync = _build_graph_sync_guardrail(
+            before,
+            after,
+            "Split into two branches: a clean-data branch saved to CSV and an "
+            "outlier branch saved to a separate CSV.",
+        )
+
+        self.assertFalse(sync["guardrail_passed"])
+        self.assertTrue(any(
+            "when_true and when_false" in message
+            for message in sync["validation_errors"]
+        ))
+
+    def test_guardrail_accepts_two_distinct_requested_destinations(self):
+        before = {"nodes": [], "edges": []}
+        after = {
+            "nodes": [
+                node(1, "source", "Input"),
+                node(2, "task", "Validate Rows", GENERATED_CODE),
+                flow_node(3, "Condition", {}),
+                node(4, "task", "Relative Features", GENERATED_CODE),
+                node(5, "destination", "Clean CSV"),
+                node(6, "destination", "Outlier CSV"),
+            ],
+            "edges": [
+                edge(1, 2, "data", "input"),
+                edge(2, 3, "output", "value"),
+                edge(3, 4, "when_true", "input"),
+                edge(4, 5, "output", "data"),
+                edge(3, 6, "when_false", "data"),
+            ],
+        }
+
+        sync = _build_graph_sync_guardrail(
+            before,
+            after,
+            "Split into two branches: a clean-data branch saved to CSV and an "
+            "outlier branch saved to a separate CSV.",
+        )
+
+        self.assertTrue(sync["guardrail_passed"])
+
+    def test_guardrail_rejects_upstream_bypass_into_branch_target(self):
+        before = {"nodes": [], "edges": []}
+        after = {
+            "nodes": [
+                node(1, "source", "Input"),
+                node(2, "task", "Validate Rows", GENERATED_CODE),
+                flow_node(3, "Condition", {}),
+                node(4, "task", "Relative Features", GENERATED_CODE),
+                node(5, "destination", "Clean CSV"),
+                node(6, "destination", "Outlier CSV"),
+            ],
+            "edges": [
+                edge(1, 2, "data", "input"),
+                edge(2, 3, "output", "value"),
+                edge(2, 4, "output", "input"),
+                edge(3, 4, "when_true", "input"),
+                edge(4, 5, "output", "data"),
+                edge(3, 6, "when_false", "data"),
+            ],
+        }
+
+        sync = _build_graph_sync_guardrail(
+            before,
+            after,
+            "Split into two branches: a clean-data branch saved to CSV and an "
+            "outlier branch saved to a separate CSV.",
+        )
+
+        self.assertFalse(sync["guardrail_passed"])
+        self.assertTrue(any(
+            "upstream bypass" in message
+            for message in sync["validation_errors"]
+        ))
+
     @patch("pipeline_agent.team.RoundRobinGroupChat")
     @patch("pipeline_agent.team.AssistantAgent")
     @patch("pipeline_agent.team.select_model_client")
@@ -526,7 +622,8 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         system_message = assistant_agent.call_args.kwargs["system_message"]
         self.assertIn("never `source.data`", system_message)
         self.assertIn("source_port `when_false`", system_message)
-        self.assertIn("do not translate it into an expression parameter", system_message)
+        self.assertIn("configure its executable expression", system_message)
+        self.assertIn("value.is_valid == true", system_message)
         self.assertIn("Complaint has exactly one outgoing edge", system_message)
         self.assertIn("owns iteration", system_message)
         self.assertIn("another distinct saved PIPELINE", system_message)
@@ -726,12 +823,76 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("template_label:'Parallel Map'", query)
         self.assertIn("definition_id:'core.flow'", query)
         self.assertIn("definition_version:1", query)
-        self.assertIn("OPTIONAL MATCH (p)-[:HAS_STEP]->(prev:STEP)", query)
+        self.assertIn("OPTIONAL MATCH (p)-[:HAS_STEP]->(candidateTail:STEP)", query)
+        self.assertIn("WHERE NOT (candidate)-[:FLOWS_TO]->()", query)
+        self.assertIn("CASE WHEN size(tails) = 1 THEN head(tails)", query)
         self.assertIn("configuration_status:'unconfigured'", query)
         self.assertIn("param_json: '{}'", query)
         self.assertNotIn("max_concurrency", query)
         self.assertNotIn("failure_policy", query)
         self.assertIn("flow.target_port = 'items'", query)
+
+    @patch("pipeline_agent.team.RoundRobinGroupChat")
+    @patch("pipeline_agent.team.AssistantAgent")
+    @patch("pipeline_agent.team.select_model_client")
+    @patch("pipeline_agent.tools.run_neo4j_query", new_callable=AsyncMock)
+    def test_create_step_can_atomically_create_false_branch_destination(
+        self,
+        run_query,
+        select_model_client,
+        assistant_agent,
+        _round_robin,
+    ):
+        config = LLMConfig(
+            provider="openrouter",
+            model="test/model",
+            base_url="https://example.test/v1",
+            api_key="secret",
+        )
+        select_model_client.return_value = MagicMock()
+        run_query.side_effect = [
+            [{
+                "predecessor": {
+                    "flow_id": "3",
+                    "type": "flow",
+                    "template_label": "Condition",
+                    "ports_json": json.dumps({
+                        "inputs": [{"id": "value"}],
+                        "outputs": [
+                            {"id": "when_true"},
+                            {"id": "when_false"},
+                        ],
+                    }),
+                    "primary_output_port": "when_true",
+                },
+            }],
+            [{"step": {"flow_id": "7", "label": "Save Outlier CSV"}}],
+        ]
+
+        build_pipeline_editing_team(config)
+        create_step = next(
+            tool
+            for tool in assistant_agent.call_args.kwargs["tools"]
+            if tool.__name__ == "create_step"
+        )
+        asyncio.run(create_step(json.dumps({
+            "type": "destination",
+            "label": "Save Outlier CSV",
+            "description": "Write flagged rows and rejection reasons.",
+            "after_flow_id": "3",
+            "source_port": "when_false",
+        })))
+
+        self.assertEqual(
+            "resolve_step_predecessor",
+            run_query.await_args_list[0].args[1],
+        )
+        query = run_query.await_args_list[1].args[0]
+        self.assertIn("MATCH (p:PIPELINE {status:'design'})", query)
+        self.assertIn("prev.type = 'flow'", query)
+        self.assertIn("flow.source_port = 'when_false'", query)
+        self.assertIn("flow.target_port = 'data'", query)
+        self.assertIn("THEN prevY + 180.0", query)
 
     @patch("pipeline_agent.team.RoundRobinGroupChat")
     @patch("pipeline_agent.team.AssistantAgent")
@@ -1130,6 +1291,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         asyncio.run(configure_flow_step(json.dumps({
             "flow_id": "4",
             "behavior": "Condition",
+            "expression": "value.is_valid == true",
         })))
 
         query = run_query.await_args.args[0]
@@ -1137,7 +1299,11 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("connection.target_port = 'value'", query)
         self.assertIn("['when_true', 'when_false']", query)
         self.assertIn("'when_true'", query)
-        self.assertIn("flowStep.param_json = '{}'", query)
+        self.assertIn(
+            'flowStep.param_json = \'{"expression": "value.is_valid == true"}\'',
+            query,
+        )
+        self.assertIn("THEN 'configured'", query)
         self.assertEqual("configure_flow_step", run_query.await_args.args[1])
 
     @patch("pipeline_agent.team.RoundRobinGroupChat")

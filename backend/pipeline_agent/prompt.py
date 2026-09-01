@@ -47,10 +47,12 @@ COMPONENT MODEL
   storage/retrieval adapters as tasks when downstream processing consumes them.
 
 GRAPH MUTATION RULES
-- create_step appends to the current execution tail. Create new graphs from
-  ingress to terminal delivery; reverse creation order produces a wrong graph.
-  It also creates the ordinary linear connection from the previous tail. Do not
-  call connect_steps again for that same source/target pair.
+- create_step without after_flow_id appends only when there is one unambiguous
+  topological tail. Create new graphs from ingress to terminal delivery. For a
+  branch, call create_step with after_flow_id and the exact source_port; this
+  atomically creates and connects the branch target even when another branch
+  already ends in a Destination. Do not call connect_steps again for the same
+  source/target pair.
 - insert_step is placement-safe: an initial insertion must be a Source; a
   between-step insertion must be a Task, Flow, or configured Subpipeline. Append
   a terminal Destination with create_step. Never put a Source in the middle or a
@@ -73,20 +75,24 @@ FLOW BEHAVIOR
 - Flow is executable control logic, never a decorative label. Never leave the
   legacy generic Flow template in a completed graph.
 - Condition uses value -> when_true/when_false. Capture the business decision in
-  its label and description; do not translate it into an expression parameter.
+  its label and description and configure its executable expression. When the
+  request identifies a validity flag, prefer `value.is_valid == true`.
+- Create every requested Condition branch explicitly. Use create_step with the
+  Condition flow_id as after_flow_id and source_port `when_true` or `when_false`.
+  Never finish a request for two branches with only one connected output.
 - Parallel Map uses items -> item. Capture the intended parallel behavior in its
   description; do not choose concurrency or failure-policy parameters. The Flow
   owns iteration, so never duplicate a task once per item.
-- When repairing a legacy Flow, use configure_flow_step and then connect_steps to
-  make all requested branches explicit.
+- When repairing a legacy Flow, use configure_flow_step with the required
+  Condition expression, then make all requested branches explicit.
 
 Canonical condition example: for "if sentiment is negative, create a complaint
 and update stats; otherwise update stats", build Input -> Condition with that
-business rule in its description. Connect the Condition with source_port
-`when_true` to Complaint target_port `input`, and source_port `when_false` to
-Update Stats target_port `input`. Connect Complaint source_port `output` to
-Update Stats target_port `input`, then Update Stats source_port `output` to
-Delivery target_port `data`. Complaint has exactly one outgoing edge.
+business rule in its description. Create Complaint with after_flow_id set to the
+Condition and source_port `when_true`; create Update Stats from the Condition
+with source_port `when_false`. Use connect_steps only for later merges or repairs
+between steps that already exist. Connect the final result to Delivery.
+Complaint has exactly one outgoing edge.
 
 Canonical parallel example: Upload -> Parallel Map -> Resize Image -> Export,
 using source_port `data` to target_port `items`, then source_port `item` to
@@ -119,8 +125,9 @@ DESIGN-ONLY BOUNDARY
   connections. Source and Destination stay on their default boundary.
 - Never choose or persist implementation.kind, source code, packages, models,
   model plans, endpoints, credentials, secret names, environment-variable names,
-  or runtime parameters. This remains true even when the user includes such
-  details in the request; describe the intended behavior without configuring it.
+  or runtime parameters other than the structural Condition expression. This
+  remains true even when the user includes such details in the request; describe
+  the intended behavior without configuring it.
 - AI code generation or user upload happens after pipeline design. Once a Python
   package exists, a separate analyzer discovers its environment-variable needs
   and the UI/runtime can warn the user. Do not anticipate or duplicate that work.
