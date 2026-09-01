@@ -573,6 +573,13 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         )
         with patch.dict(
             "os.environ",
+            {"INLUMEN_ACCELERATOR": "cpu"},
+            clear=True,
+        ):
+            selected = namespace["_selected_specs"](requirements)
+        self.assertEqual("Systran/faster-whisper-medium", selected[0]["model_id"])
+        with patch.dict(
+            "os.environ",
             {
                 "INLUMEN_ACCELERATOR": "cpu",
                 "INLUMEN_ASR_DEVICE": "auto",
