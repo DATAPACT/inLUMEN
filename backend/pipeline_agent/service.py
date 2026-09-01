@@ -111,7 +111,11 @@ async def _run_pipeline_editor_turn(
         after_error,
     )
 
-    if sync["graph_changed"] and not sync["guardrail_passed"] and not after_error:
+    if (
+        not sync["guardrail_passed"]
+        and sync.get("status") == "invalid"
+        and not after_error
+    ):
         repair_result = await team.run(
             task=_guardrail_repair_task(
                 user_message,
@@ -132,26 +136,29 @@ async def _run_pipeline_editor_turn(
             repaired=True,
         )
 
-    if sync["graph_changed"] and not sync["guardrail_passed"]:
+    if not sync["guardrail_passed"] and sync.get("status") == "invalid":
         failure_messages = list(sync.get("validation_errors") or [])
         rollback_error = None
-        try:
-            if not isinstance(visible_before_graph, dict):
-                raise RuntimeError("No pre-turn graph snapshot is available.")
-            await sync_backend_to_canvas_graph(
-                visible_before_graph,
-                active_version_uid,
-                active_version_name,
-                authorization=authorization,
-            )
-            after_graph, rollback_fetch_error = await _fetch_graph_safely(authorization)
-            if rollback_fetch_error or not isinstance(after_graph, dict):
-                raise RuntimeError(
-                    rollback_fetch_error or "Rollback graph could not be read."
+        if sync["graph_changed"]:
+            try:
+                if not isinstance(visible_before_graph, dict):
+                    raise RuntimeError("No pre-turn graph snapshot is available.")
+                await sync_backend_to_canvas_graph(
+                    visible_before_graph,
+                    active_version_uid,
+                    active_version_name,
+                    authorization=authorization,
                 )
-        except Exception as exc:
-            rollback_error = str(exc)
-            print("[pipeline_agent.service] Failed to roll back agent graph:", exc)
+                after_graph, rollback_fetch_error = await _fetch_graph_safely(
+                    authorization
+                )
+                if rollback_fetch_error or not isinstance(after_graph, dict):
+                    raise RuntimeError(
+                        rollback_fetch_error or "Rollback graph could not be read."
+                    )
+            except Exception as exc:
+                rollback_error = str(exc)
+                print("[pipeline_agent.service] Failed to roll back agent graph:", exc)
 
         rollback_nodes, rollback_edges = _graph_counts(after_graph)
         reason = "; ".join(failure_messages) or sync.get("message") or (

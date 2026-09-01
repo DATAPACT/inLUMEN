@@ -106,7 +106,7 @@ def _graph_summary_message(graph: dict | None) -> str:
     component_word = "component" if len(nodes) == 1 else "components"
     connection_word = "connection" if len(edges) == 1 else "connections"
     summary = (
-        f"Pipeline design updated: {pipeline_label} contains {len(nodes)} "
+        f"Current pipeline design: {pipeline_label} contains {len(nodes)} "
         f"{component_word} and {len(edges)} {connection_word}."
     )
     if branches:

@@ -27,11 +27,14 @@ def _requested_branch_contract(user_message: str) -> dict[str, bool]:
         ("clean-data branch" in text or "clean data branch" in text)
         and "outlier branch" in text
     )
+    explicit_condition_branches = (
+        ("when_true" in text and "when_false" in text)
+        or clean_and_outlier
+    )
     two_branches = (
         "two branches" in text
         or "two branch" in text
-        or ("when_true" in text and "when_false" in text)
-        or clean_and_outlier
+        or explicit_condition_branches
     )
     separate_outputs = (
         "separate csv" in text
@@ -39,7 +42,8 @@ def _requested_branch_contract(user_message: str) -> dict[str, bool]:
         or (clean_and_outlier and ("save" in text or "write" in text))
     )
     return {
-        "two_condition_branches": two_branches,
+        "two_branches": two_branches,
+        "two_condition_branches": explicit_condition_branches,
         "distinct_destinations": two_branches and separate_outputs,
     }
 
@@ -110,6 +114,22 @@ def _requested_topology_errors(graph: dict | None, user_message: str) -> list[st
         )
         return errors
 
+    generic_branches = [
+        (source_id, branch_edges)
+        for source_id, branch_edges in outgoing.items()
+        if len({edge["target"] for edge in branch_edges}) >= 2
+    ]
+    if (
+        contract["two_branches"]
+        and not contract["two_condition_branches"]
+        and not generic_branches
+    ):
+        errors.append(
+            "The request explicitly requires two downstream branches, but no "
+            "component has two connected branch targets."
+        )
+        return errors
+
     def reachable_destinations(start: str) -> set[str]:
         found: set[str] = set()
         visited: set[str] = set()
@@ -124,7 +144,7 @@ def _requested_topology_errors(graph: dict | None, user_message: str) -> list[st
             queue.extend(edge["target"] for edge in outgoing[node_id])
         return found
 
-    topology_satisfied = False
+    condition_topology_satisfied = False
     bypass_labels: set[str] = set()
     for condition_id, true_edges, false_edges in candidates:
         true_destinations = set().union(*(
@@ -141,7 +161,7 @@ def _requested_topology_errors(graph: dict | None, user_message: str) -> list[st
                 and true_destinations.isdisjoint(false_destinations)
             )
         ):
-            topology_satisfied = True
+            condition_topology_satisfied = True
 
         ancestors: set[str] = set()
         queue = deque(edge["source"] for edge in incoming[condition_id])
@@ -161,6 +181,28 @@ def _requested_topology_errors(graph: dict | None, user_message: str) -> list[st
                     str(nodes[target_id].get("label") or target_id).strip()
                 )
 
+    generic_topology_satisfied = False
+    if not contract["two_condition_branches"]:
+        for _source_id, branch_edges in generic_branches:
+            destinations_by_branch = [
+                reachable_destinations(edge["target"])
+                for edge in branch_edges
+            ]
+            if any(
+                left
+                and right
+                and left.isdisjoint(right)
+                for index, left in enumerate(destinations_by_branch)
+                for right in destinations_by_branch[index + 1:]
+            ):
+                generic_topology_satisfied = True
+                break
+
+    topology_satisfied = (
+        condition_topology_satisfied
+        if contract["two_condition_branches"]
+        else generic_topology_satisfied
+    )
     if contract["distinct_destinations"] and not topology_satisfied:
         errors.append(
             "The requested branches do not reach two distinct terminal Destinations."
@@ -190,7 +232,7 @@ def _build_graph_sync_guardrail(
     validation_errors = validation_issue_messages(validation)
     topology_errors = (
         _requested_topology_errors(after_graph, user_message)
-        if graph_changed and not fetch_error
+        if not fetch_error
         else []
     )
     validation_errors.extend(topology_errors)
@@ -209,18 +251,23 @@ def _build_graph_sync_guardrail(
             "validation_errors": validation_errors,
         }
 
-    if graph_changed and (not validation["valid"] or topology_errors):
+    if (graph_changed and not validation["valid"]) or topology_errors:
         return {
             "status": "invalid",
             "guardrail_passed": False,
             "graph_safe_to_apply": False,
-            "graph_changed": True,
+            "graph_changed": graph_changed,
             "node_count": after_nodes,
             "edge_count": after_edges,
             "updated_at": updated_at,
             "message": (
-                "The agent changed the graph, but the persisted result failed pipeline "
-                "validation: " + "; ".join(validation_errors)
+                (
+                    "The agent changed the graph, but the persisted result failed "
+                    "pipeline validation: "
+                    if graph_changed
+                    else "The agent did not complete the requested pipeline topology: "
+                )
+                + "; ".join(validation_errors)
             ),
             "repaired": repaired,
             "validation_errors": validation_errors,

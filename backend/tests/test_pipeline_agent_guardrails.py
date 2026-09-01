@@ -376,7 +376,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         safe = _safe_assistant_message(leaked, graph)
 
         self.assertEqual(
-            "Pipeline design updated: Safe Pipeline contains 2 components and 1 connection.",
+            "Current pipeline design: Safe Pipeline contains 2 components and 1 connection.",
             safe,
         )
         self.assertNotIn("delete_step", safe)
@@ -525,6 +525,55 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
             "when_true and when_false" in message
             for message in sync["validation_errors"]
         ))
+
+    def test_guardrail_rejects_unchanged_missing_explicit_outlier_branch(self):
+        graph = {
+            "nodes": [
+                node(1, "source", "Input"),
+                flow_node(2, "Condition", {"expression": "value.is_valid == true"}),
+                node(3, "destination", "Clean CSV"),
+            ],
+            "edges": [
+                edge(1, 2, "data", "value"),
+                edge(2, 3, "when_true", "data"),
+            ],
+        }
+
+        sync = _build_graph_sync_guardrail(
+            graph,
+            graph,
+            "Split into two branches: a clean-data branch saved to CSV and an "
+            "outlier branch saved to a separate CSV.",
+        )
+
+        self.assertEqual("invalid", sync["status"])
+        self.assertFalse(sync["graph_changed"])
+        self.assertFalse(sync["guardrail_passed"])
+
+    def test_guardrail_accepts_generic_parallel_two_branch_destinations(self):
+        before = {"nodes": [], "edges": []}
+        after = {
+            "nodes": [
+                node(1, "source", "Telemetry"),
+                node(2, "task", "Route Telemetry", GENERATED_CODE),
+                node(3, "destination", "Storage"),
+                node(4, "destination", "Monitoring"),
+            ],
+            "edges": [
+                edge(1, 2, "data", "input"),
+                edge(2, 3, "output", "data"),
+                edge(2, 4, "output", "data"),
+            ],
+        }
+
+        sync = _build_graph_sync_guardrail(
+            before,
+            after,
+            "Fan out telemetry into two branches and save each to a separate output.",
+        )
+
+        self.assertEqual("synced", sync["status"])
+        self.assertTrue(sync["guardrail_passed"])
 
     def test_guardrail_accepts_two_distinct_requested_destinations(self):
         before = {"nodes": [], "edges": []}
