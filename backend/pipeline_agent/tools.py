@@ -588,8 +588,14 @@ def build_pipeline_editor_tools(
                 ):
                     raise ValueError("create_step received an invalid after_flow_id")
                 predecessor_result = await run_query(f"""
-                MATCH (p:PIPELINE {{status:'design'}})-[:HAS_STEP]->(source:STEP {{flow_id:'{_cypher_string(after_flow_id)}'}})
+                OPTIONAL MATCH (candidate:PIPELINE {{status:'design'}})
+                OPTIONAL MATCH (candidate)-[:HAS_STEP]->(candidateStep:STEP)
+                WITH candidate, count(candidateStep) AS step_count
+                ORDER BY step_count DESC, candidate.updated_at DESC
+                WITH collect(candidate)[0] AS p
+                MATCH (p)-[:HAS_STEP]->(source:STEP {{flow_id:'{_cypher_string(after_flow_id)}'}})
                 RETURN {{
+                  pipeline_uid: p.uid,
                   flow_id: source.flow_id,
                   type: source.type,
                   template_label: source.template_label,
@@ -608,6 +614,14 @@ def build_pipeline_editor_tools(
                         "an exact flow_id"
                     )
                 predecessor = predecessors[0]
+                predecessor_pipeline_uid = str(
+                    predecessor.get("pipeline_uid") or ""
+                ).strip()
+                if not predecessor_pipeline_uid:
+                    raise ValueError(
+                        "create_step predecessor is not associated with an active "
+                        "design pipeline"
+                    )
                 resolved_source_port = _resolve_connection_port(
                     data.get("source_port"),
                     _available_connection_ports(predecessor, "outputs"),
@@ -627,9 +641,10 @@ def build_pipeline_editor_tools(
             public_outputs: {json.dumps(resolved_subpipeline['output_ids'])}"""
             if after_flow_id:
                 escaped_after_flow_id = _cypher_string(after_flow_id)
+                escaped_pipeline_uid = _cypher_string(predecessor_pipeline_uid)
                 escaped_source_port = _cypher_string(resolved_source_port)
                 query = f"""
-                MATCH (p:PIPELINE {{status:'design'}})-[:HAS_STEP]->(prev:STEP {{flow_id:'{escaped_after_flow_id}'}})
+                MATCH (p:PIPELINE {{uid:'{escaped_pipeline_uid}', status:'design'}})-[:HAS_STEP]->(prev:STEP {{flow_id:'{escaped_after_flow_id}'}})
                 OPTIONAL MATCH (p)-[:HAS_STEP]->(sAll:STEP)
                 WHERE sAll.flow_id IS NOT NULL AND toString(sAll.flow_id) =~ '^[0-9]+$'
                 WITH p, prev, coalesce(max(toInteger(sAll.flow_id)), 0) + 1 AS nextFlowId

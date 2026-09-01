@@ -575,6 +575,24 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertEqual("synced", sync["status"])
         self.assertTrue(sync["guardrail_passed"])
 
+    def test_guardrail_does_not_treat_branch_advice_as_a_mutation_contract(self):
+        graph = {
+            "nodes": [
+                node(1, "source", "Telemetry"),
+                node(2, "destination", "Storage"),
+            ],
+            "edges": [edge(1, 2, "data", "data")],
+        }
+
+        sync = _build_graph_sync_guardrail(
+            graph,
+            graph,
+            "Do I need two branches here, or is the current single output better?",
+        )
+
+        self.assertEqual("unchanged", sync["status"])
+        self.assertTrue(sync["guardrail_passed"])
+
     def test_guardrail_accepts_two_distinct_requested_destinations(self):
         before = {"nodes": [], "edges": []}
         after = {
@@ -902,6 +920,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         run_query.side_effect = [
             [{
                 "predecessor": {
+                    "pipeline_uid": "active-design-pipeline",
                     "flow_id": "3",
                     "type": "flow",
                     "template_label": "Condition",
@@ -936,8 +955,14 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
             "resolve_step_predecessor",
             run_query.await_args_list[0].args[1],
         )
+        predecessor_query = run_query.await_args_list[0].args[0]
+        self.assertIn("WITH collect(candidate)[0] AS p", predecessor_query)
+        self.assertIn("pipeline_uid: p.uid", predecessor_query)
         query = run_query.await_args_list[1].args[0]
-        self.assertIn("MATCH (p:PIPELINE {status:'design'})", query)
+        self.assertIn(
+            "MATCH (p:PIPELINE {uid:'active-design-pipeline', status:'design'})",
+            query,
+        )
         self.assertIn("prev.type = 'flow'", query)
         self.assertIn("flow.source_port = 'when_false'", query)
         self.assertIn("flow.target_port = 'data'", query)

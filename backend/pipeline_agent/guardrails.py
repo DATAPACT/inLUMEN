@@ -1,5 +1,6 @@
 """Validation and repair policy for pipeline-agent graph mutations."""
 
+import re
 from collections import defaultdict, deque
 
 from pipeline_agent.context import (
@@ -23,6 +24,16 @@ def _node_data(node: object) -> dict:
 def _requested_branch_contract(user_message: str) -> dict[str, bool]:
     """Extract only explicit, high-confidence branch requirements from prose."""
     text = " ".join(str(user_message or "").lower().split())
+    change_action = bool(re.search(
+        r"\b(?:create|build|add|split|route|connect|make|send|write|save|"
+        r"use|want|need|keep)\b|\bfan[ -]?out\b",
+        text,
+    ))
+    consultative = bool(re.match(
+        r"^(?:do|does|did|should|is|are|was|were|what|which|why|how)\b",
+        text,
+    ))
+    topology_change_requested = change_action and not consultative
     clean_and_outlier = (
         ("clean-data branch" in text or "clean data branch" in text)
         and "outlier branch" in text
@@ -32,9 +43,15 @@ def _requested_branch_contract(user_message: str) -> dict[str, bool]:
         or clean_and_outlier
     )
     two_branches = (
-        "two branches" in text
-        or "two branch" in text
-        or explicit_condition_branches
+        topology_change_requested
+        and (
+            "two branches" in text
+            or "two branch" in text
+            or explicit_condition_branches
+        )
+    )
+    explicit_condition_branches = (
+        topology_change_requested and explicit_condition_branches
     )
     separate_outputs = (
         "separate csv" in text
