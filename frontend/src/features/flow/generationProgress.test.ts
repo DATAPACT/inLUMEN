@@ -1,23 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  estimateGenerationTiming,
+  generationElapsedMs,
   generationCurrentStage,
+  generationLiveProgress,
   generationProgressPercent,
 } from "@/features/flow/generationProgress";
 import type { PipelineGenerationJob } from "@/features/flow/flowPersistence";
-
-const completedRun = (runId: string, durationMs: number): PipelineGenerationJob => ({
-  run_id: runId,
-  status: "valid",
-  target_flow_ids: ["1", "2"],
-  generation_run: {
-    run_id: runId,
-    status: "valid",
-    mode: "pipeline_first_single_script",
-    stage_timings_ms: { pipeline_generation: durationMs },
-  },
-});
 
 describe("generation progress", () => {
   it("uses the reported live stage instead of waiting for node completion", () => {
@@ -33,43 +22,40 @@ describe("generation progress", () => {
     expect(generationProgressPercent(job)).toBe(56);
   });
 
-  it("withholds ETA until two comparable completed runs exist", () => {
+  it("reports measurable progress from the current run only", () => {
     const job: PipelineGenerationJob = {
       run_id: "active",
       status: "running",
       created_at: "2026-08-14T10:00:00Z",
-      target_flow_ids: ["1", "2"],
-      generation_run: { mode: "pipeline_first_single_script" },
+      target_flow_ids: ["1", "2", "3"],
+      generation_run: {
+        mode: "pipeline_first_single_script",
+        steps: [
+          { flow_id: "1", status: "valid", attempts: 1 },
+          { flow_id: "2", status: "running", attempts: 2 },
+        ],
+      },
     };
 
-    const estimate = estimateGenerationTiming(
-      job,
-      [completedRun("one", 60_000)],
-      Date.parse("2026-08-14T10:00:10Z"),
-    );
-
-    expect(estimate.confidence).toBe("learning");
-    expect(estimate.remainingMs).toBeNull();
+    expect(generationLiveProgress(job)).toEqual({
+      completedSteps: 1,
+      activeSteps: 1,
+      totalSteps: 3,
+      attempt: 2,
+    });
+    expect(generationElapsedMs(job, Date.parse("2026-08-14T10:00:10Z"))).toBe(10_000);
   });
 
-  it("uses the median of comparable history and reports a range", () => {
+  it("uses the target count rather than emitted steps as the completion denominator", () => {
     const job: PipelineGenerationJob = {
-      run_id: "active",
       status: "running",
-      created_at: "2026-08-14T10:00:00Z",
-      target_flow_ids: ["1", "2"],
-      generation_run: { mode: "pipeline_first_single_script" },
+      target_flow_ids: ["1", "2", "3", "4"],
+      generation_run: {
+        current_stage: "generating",
+        steps: [{ flow_id: "1", status: "valid" }],
+      },
     };
 
-    const estimate = estimateGenerationTiming(
-      job,
-      [completedRun("one", 50_000), completedRun("two", 70_000)],
-      Date.parse("2026-08-14T10:00:10Z"),
-    );
-
-    expect(estimate.remainingMs).toBe(50_000);
-    expect(estimate.lowerRemainingMs).toBe(32_500);
-    expect(estimate.upperRemainingMs).toBe(67_500);
-    expect(estimate.confidence).toBe("medium");
+    expect(generationProgressPercent(job)).toBe(24);
   });
 });

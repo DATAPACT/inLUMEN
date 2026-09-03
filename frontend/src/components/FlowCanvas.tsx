@@ -66,9 +66,10 @@ import {
   isRestorableGenerationRun,
 } from '@/features/flow/generationState';
 import {
-  estimateGenerationTiming,
   formatGenerationDuration,
+  generationElapsedMs,
   generationCurrentStage,
+  generationLiveProgress,
   generationProgressPercent,
 } from '@/features/flow/generationProgress';
 import {
@@ -118,6 +119,7 @@ interface FlowCanvasProps {
   onActiveVersionNameChange?: (versionName: string) => void;
   onPipelineDescriptionChange?: (description: string) => void;
   onDisplayModeChange?: (advanced: boolean) => void;
+  followAssistantDrawing?: boolean;
   workspaceResetKey?: number;
 }
 
@@ -473,6 +475,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   onActiveVersionNameChange,
   onPipelineDescriptionChange,
   onDisplayModeChange,
+  followAssistantDrawing = false,
   workspaceResetKey = 0,
 }, ref) => {
   const [nodes, setNodes] = useState<Node[]>(() => {
@@ -770,9 +773,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     options?: { fitView?: boolean },
   ) => {
     try {
-      if (options?.fitView) {
-        requestGraphViewportFit();
-      }
       let graph: NormalizedGraph;
       if (graphData == null) {
         graph = await fetchGraphAndApply();
@@ -784,6 +784,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           pushHistorySnapshot(currentSnapshot);
         }
         graph = applyGraph(graphData, normalizedGraph);
+      }
+      if (options?.fitView) {
+        requestGraphViewportFit();
       }
       markSyncHealthy();
       return graph;
@@ -867,6 +870,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         }
         if (updatedAt && updatedAt !== lastSeenUpdatedAtRef.current) {
           await fetchGraphAndApply();
+          if (followAssistantDrawing) requestGraphViewportFit();
         }
       } catch (e) {
         scheduleSyncRetry("Backend poll tick failed", e);
@@ -880,7 +884,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [fetchGraphAndApply, markSyncHealthy, scheduleSyncRetry]);
+  }, [
+    fetchGraphAndApply,
+    followAssistantDrawing,
+    markSyncHealthy,
+    requestGraphViewportFit,
+    scheduleSyncRetry,
+  ]);
 
   useEffect(() => {
     let disposed = false;
@@ -1907,11 +1917,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const generationProgress = generationProgressPercent(generationJob);
   const generationStage = generationCurrentStage(generationJob);
   const generationStatus = effectiveGenerationStatus(generationJob);
-  const generationTiming = estimateGenerationTiming(
-    generationJob,
-    recentGenerationRuns,
-    generationClockMs,
-  );
+  const generationElapsed = generationElapsedMs(generationJob, generationClockMs);
+  const generationLive = generationLiveProgress(generationJob);
   const generationProgressUpdatedAt = generationJob?.generation_run?.progress_updated_at;
   const generationProgressUpdatedAtMs = generationProgressUpdatedAt
     ? Date.parse(generationProgressUpdatedAt)
@@ -2465,26 +2472,27 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
                           {generationProgress}% · {generationStageLabel(generationStage)}
                         </span>
                         <span className="text-muted-foreground">
-                          Elapsed {formatGenerationDuration(generationTiming.elapsedMs)}
+                          Elapsed {formatGenerationDuration(generationElapsed)}
                         </span>
                       </div>
                       <div className="grid gap-2 sm:grid-cols-2">
                         <div className="flex items-start gap-2 rounded-md bg-background/60 p-2.5 text-xs">
                           <Clock3 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
                           <div>
-                            <p className="font-medium text-foreground">Estimated completion</p>
-                            {generationTiming.remainingMs == null ? (
+                            <p className="font-medium text-foreground">Current run progress</p>
+                            {generationLive.totalSteps > 0 ? (
                               <p className="text-muted-foreground">
-                                Learning from recent comparable runs; an ETA appears after two complete runs.
+                                {generationLive.completedSteps} of {generationLive.totalSteps} packages complete
+                                {generationLive.attempt > 1 ? ` · repair attempt ${generationLive.attempt}` : ''}
                               </p>
-                            ) : generationTiming.remainingMs === 0 ? (
-                              <p className="text-muted-foreground">Finishing now</p>
                             ) : (
                               <p className="text-muted-foreground">
-                                {formatGenerationDuration(generationTiming.lowerRemainingMs || 0)}–{formatGenerationDuration(generationTiming.upperRemainingMs || generationTiming.remainingMs)} remaining
-                                {` · ${generationTiming.sampleCount} comparable run${generationTiming.sampleCount === 1 ? "" : "s"}`}
+                                Waiting for the first measurable worker milestone…
                               </p>
                             )}
+                            <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground/80">
+                              Live stages and completed packages only; no past-run ETA.
+                            </p>
                           </div>
                         </div>
                         <div className="flex items-start gap-2 rounded-md bg-background/60 p-2.5 text-xs">
@@ -2696,6 +2704,7 @@ export const WrappedFlowCanvas = ({
   onActiveVersionNameChange,
   onPipelineDescriptionChange,
   onDisplayModeChange,
+  followAssistantDrawing,
   workspaceResetKey,
   flowCanvasRef,
 }: WrappedFlowCanvasProps) => (
@@ -2715,6 +2724,7 @@ export const WrappedFlowCanvas = ({
       onActiveVersionNameChange={onActiveVersionNameChange}
       onPipelineDescriptionChange={onPipelineDescriptionChange}
       onDisplayModeChange={onDisplayModeChange}
+      followAssistantDrawing={followAssistantDrawing}
       workspaceResetKey={workspaceResetKey}
     />
   </ReactFlowProvider>

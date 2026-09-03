@@ -606,9 +606,9 @@ const Index = () => {
         message: 'Applying validated agent graph changes to the canvas...',
       });
 
-      // Assistant turns can replace the whole graph and its layout. Fit only
-      // after that validated graph has rendered so the user follows the
-      // assistant's result without fighting manual pan/zoom interactions.
+      // Assistant turns can replace the whole graph and its layout. The canvas
+      // follows intermediate tool updates while the turn is active, then fits
+      // the final validated graph once more here.
       const syncedGraph = await flowCanvasRef.current.syncFromBackend(data.graph, {
         fitView: true,
       });
@@ -1221,29 +1221,50 @@ const Index = () => {
       />
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        {isLibraryOpen && (
-          <Sidebar
-            className="w-[17rem] shrink-0 bg-card/95"
-            onDragStart={onDragStart}
-            activeTab={activeTab}
-            onTabChange={handleTabChange}
-            onBlankPipeline={handleBlankPipeline}
-            onSavePipeline={handleSavePipeline}
-            pipelineOverview={pipelineOverview}
-            activeVersionUid={activeVersionUid}
-            onOverviewUpdated={handleOverviewUpdated}
-            activeChatbotConfig={activeConfig}
-            workspaceResetKey={workspaceResetKey}
-            getCurrentPipelineGraph={() => flowCanvasRef.current?.getCurrentGraph() || { nodes: [], edges: [] }}
-            replaceCurrentPipelineGraph={(graph) => flowCanvasRef.current?.replaceCurrentGraph(graph)}
-            currentPipelineName={activeVersionName}
-            currentPipelineDescription={activePipelineDescription}
-          />
-        )}
-
         {showFlowLayout ? (
-          <ResizablePanelGroup direction="horizontal" className="min-w-0 flex-1">
-            <ResizablePanel id="canvas-panel" order={1} defaultSize={rightPanel ? 72 : 100} minSize={45}>
+          <ResizablePanelGroup
+            direction="horizontal"
+            className="min-w-0 flex-1"
+            autoSaveId="inlumen-workspace-panels"
+          >
+            {isLibraryOpen && (
+              <>
+                <ResizablePanel
+                  id="library-panel"
+                  order={1}
+                  defaultSize={rightPanel ? 20 : 22}
+                  minSize={18}
+                  maxSize={30}
+                  className="min-w-[320px] max-w-[420px]"
+                >
+                  <Sidebar
+                    className="h-full w-full bg-card/95"
+                    onDragStart={onDragStart}
+                    activeTab={activeTab}
+                    onTabChange={handleTabChange}
+                    onBlankPipeline={handleBlankPipeline}
+                    onSavePipeline={handleSavePipeline}
+                    pipelineOverview={pipelineOverview}
+                    activeVersionUid={activeVersionUid}
+                    onOverviewUpdated={handleOverviewUpdated}
+                    activeChatbotConfig={activeConfig}
+                    workspaceResetKey={workspaceResetKey}
+                    getCurrentPipelineGraph={() => flowCanvasRef.current?.getCurrentGraph() || { nodes: [], edges: [] }}
+                    replaceCurrentPipelineGraph={(graph) => flowCanvasRef.current?.replaceCurrentGraph(graph)}
+                    currentPipelineName={activeVersionName}
+                    currentPipelineDescription={activePipelineDescription}
+                  />
+                </ResizablePanel>
+                <ResizableHandle id="library-panel-handle" withHandle />
+              </>
+            )}
+
+            <ResizablePanel
+              id="canvas-panel"
+              order={2}
+              defaultSize={isLibraryOpen ? (rightPanel ? 54 : 78) : (rightPanel ? 72 : 100)}
+              minSize={isLibraryOpen ? 38 : 45}
+            >
               <div className="h-full bg-background">
                 <WrappedFlowCanvas
                   onNodeSelect={onNodeSelect}
@@ -1258,6 +1279,7 @@ const Index = () => {
                   onActiveVersionChange={updateActiveVersion}
                   onActiveVersionNameChange={handleActiveVersionNameChange}
                   onPipelineDescriptionChange={setActivePipelineDescription}
+                  followAssistantDrawing={isProcessing}
                   workspaceResetKey={workspaceResetKey}
                   flowCanvasRef={flowCanvasRef}
                 />
@@ -1269,8 +1291,8 @@ const Index = () => {
                 <ResizableHandle id="right-panel-handle" withHandle />
                 <ResizablePanel
                   id="right-panel"
-                  order={2}
-                  defaultSize={28}
+                  order={3}
+                  defaultSize={isLibraryOpen ? 26 : 28}
                   minSize={24}
                   maxSize={42}
                   className="min-w-[320px]"

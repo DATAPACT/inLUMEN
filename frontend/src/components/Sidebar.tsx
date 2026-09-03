@@ -171,6 +171,12 @@ type PipelineOverviewResponse = {
 const errorToMessage = (error: unknown, fallback: string) =>
   error instanceof Error ? error.message : fallback;
 
+const formatOverviewTimestamp = (value?: string) => {
+  if (!value) return 'Never';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.valueOf()) ? value : parsed.toLocaleString();
+};
+
 const deploymentFailureMessage = (
   payload: Record<string, unknown>,
   fallback: string,
@@ -877,36 +883,40 @@ export function Sidebar({
                   />
                 </div>
 
-                <div className="p-3 rounded-lg border border-border bg-muted/30">
-                  <div className="flex items-center gap-2 text-muted-foreground mb-1">
-                    <Calendar className="w-3.5 h-3.5" />
-                    <span className="text-xs font-medium">Last Update</span>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="min-w-0 rounded-lg border border-border bg-muted/30 p-3">
+                    <div className="mb-1 flex items-center gap-2 text-muted-foreground">
+                      <LayoutGrid className="h-3.5 w-3.5" />
+                      <span className="truncate text-xs font-medium">Steps</span>
+                    </div>
+                    <p className="text-lg font-semibold">{overview?.stepCount ?? 0}</p>
                   </div>
-                  <p className="text-sm font-semibold">{overview?.lastUpdate || 'Never'}</p>
+                  <div className="min-w-0 rounded-lg border border-border bg-muted/30 p-3">
+                    <div className="mb-1 flex items-center gap-2 text-muted-foreground">
+                      <Paperclip className="h-3.5 w-3.5" />
+                      <span className="truncate text-xs font-medium">Files</span>
+                    </div>
+                    <p className="text-lg font-semibold">{overview?.fileCount ?? 0}</p>
+                  </div>
                 </div>
 
-                <div className="p-3 rounded-lg border border-border bg-muted/30">
-                  <div className="flex items-center gap-2 text-muted-foreground mb-1">
-                    <Calendar className="w-3.5 h-3.5" />
-                    <span className="text-xs font-medium">Created At</span>
+                <div className="rounded-lg border border-border bg-muted/30 p-3">
+                  <div className="grid gap-2 text-xs sm:grid-cols-2">
+                    <div className="min-w-0">
+                      <div className="mb-1 flex items-center gap-1.5 text-muted-foreground">
+                        <Calendar className="h-3.5 w-3.5 shrink-0" />
+                        <span>Updated</span>
+                      </div>
+                      <p className="break-words font-medium">{formatOverviewTimestamp(overview?.lastUpdate)}</p>
+                    </div>
+                    <div className="min-w-0">
+                      <div className="mb-1 flex items-center gap-1.5 text-muted-foreground">
+                        <Calendar className="h-3.5 w-3.5 shrink-0" />
+                        <span>Created</span>
+                      </div>
+                      <p className="break-words font-medium">{formatOverviewTimestamp(overview?.createdAt)}</p>
+                    </div>
                   </div>
-                  <p className="text-sm font-semibold">{overview?.createdAt || 'Never'}</p>
-                </div>
-
-                <div className="p-3 rounded-lg border border-border bg-muted/30">
-                  <div className="flex items-center gap-2 text-muted-foreground mb-1">
-                    <LayoutGrid className="w-3.5 h-3.5" />
-                    <span className="text-xs font-medium">Number of Steps</span>
-                  </div>
-                  <p className="text-sm font-semibold">{overview?.stepCount ?? 0}</p>
-                </div>
-
-                <div className="p-3 rounded-lg border border-border bg-muted/30">
-                  <div className="flex items-center gap-2 text-muted-foreground mb-1">
-                    <Paperclip className="w-3.5 h-3.5" />
-                    <span className="text-xs font-medium">Number of Files</span>
-                  </div>
-                  <p className="text-sm font-semibold">{overview?.fileCount ?? 0}</p>
                 </div>
               </div>
             </div>

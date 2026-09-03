@@ -84,4 +84,27 @@ describe("version graph viewport fitting", () => {
     expect(instance.fitView).not.toHaveBeenCalled();
     await act(async () => root.unmount());
   });
+
+  it("refits after each requested assistant graph update", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const instance = {
+      fitView: vi.fn(() => true),
+      setViewport: vi.fn(),
+    };
+
+    await act(async () => {
+      root.render(<Harness instance={instance} nodesInitialized nodeCount={2} />);
+    });
+    await act(async () => {
+      container.querySelector("button")?.click();
+    });
+    await act(async () => {
+      root.render(<Harness instance={instance} nodesInitialized nodeCount={4} />);
+      container.querySelector("button")?.click();
+    });
+
+    expect(instance.fitView).toHaveBeenCalledTimes(2);
+    await act(async () => root.unmount());
+  });
 });
