@@ -48,8 +48,9 @@ describe("PropertiesPanel", () => {
     expect(container.textContent).toContain("Input Files");
     expect(container.textContent).not.toContain("Sample Inputs");
     expect(container.textContent).toContain("Connection");
-    expect(container.textContent).toContain("Default boundary");
-    expect(container.textContent).toContain("Advanced connector configuration");
+    expect(container.textContent).toContain("No setup is needed for most pipelines");
+    expect(container.textContent).toContain("Advanced settings");
+    expect(container.textContent).not.toContain("Default boundary");
     expect(container.textContent).toContain("language");
     expect(container.textContent).not.toContain("Implementation");
     expect(container.textContent).not.toContain("main.py");
