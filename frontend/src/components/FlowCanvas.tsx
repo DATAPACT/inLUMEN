@@ -80,7 +80,11 @@ import {
 import { normalizeNodePorts, normalizeType } from '@/features/nodes/nodeSchema';
 import { uploadNodeFile } from '@/features/nodes/nodePersistence';
 import { remapSubpipelineParentEdges } from '@/features/flow/subpipeline';
-import { useGraphViewportFit } from '@/features/flow/viewportFit';
+import {
+  GRAPH_FIT_VIEW_OPTIONS,
+  GRAPH_MIN_ZOOM,
+  useGraphViewportFit,
+} from '@/features/flow/viewportFit';
 import {
   Dialog,
   DialogContent,
@@ -2097,8 +2101,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           },
         }}
         connectionLineType={ConnectionLineType.SmoothStep}
+        minZoom={GRAPH_MIN_ZOOM}
         fitView
-        fitViewOptions={{ padding: 0.28 }}
+        fitViewOptions={GRAPH_FIT_VIEW_OPTIONS}
         className={cn(
           "flow-canvas transition-colors duration-300",
           isLightMode ? "bg-stone-50" : "bg-[#0F1C0F]"

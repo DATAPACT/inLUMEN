@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   EMPTY_GRAPH_VIEWPORT,
   GRAPH_FIT_VIEW_OPTIONS,
+  GRAPH_MIN_ZOOM,
   useGraphViewportFit,
 } from "@/features/flow/viewportFit";
 
@@ -29,6 +30,15 @@ const Harness = ({
 };
 
 describe("version graph viewport fitting", () => {
+  it("allows assistant updates to zoom out enough to keep the full graph visible", () => {
+    expect(GRAPH_MIN_ZOOM).toBe(0.15);
+    expect(GRAPH_FIT_VIEW_OPTIONS).toMatchObject({
+      padding: 0.35,
+      minZoom: 0.15,
+      maxZoom: 0.9,
+    });
+  });
+
   it("waits for newly loaded nodes before fitting their bounds", async () => {
     const container = document.createElement("div");
     const root = createRoot(container);

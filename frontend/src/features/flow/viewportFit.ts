@@ -4,9 +4,13 @@ import type { ReactFlowInstance } from "reactflow";
 type ViewportController = Pick<ReactFlowInstance, "fitView" | "setViewport">;
 
 export const GRAPH_FIT_VIEW_OPTIONS = {
-  padding: 0.28,
-  duration: 200,
+  padding: 0.35,
+  duration: 250,
+  minZoom: 0.15,
+  maxZoom: 0.9,
 } as const;
+
+export const GRAPH_MIN_ZOOM = GRAPH_FIT_VIEW_OPTIONS.minZoom;
 
 export const EMPTY_GRAPH_VIEWPORT = {
   x: 0,
