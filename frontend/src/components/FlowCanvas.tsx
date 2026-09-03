@@ -81,8 +81,10 @@ import { normalizeNodePorts, normalizeType } from '@/features/nodes/nodeSchema';
 import { uploadNodeFile } from '@/features/nodes/nodePersistence';
 import { remapSubpipelineParentEdges } from '@/features/flow/subpipeline';
 import {
+  ASSISTANT_GRAPH_FIT_DURATION,
   GRAPH_FIT_VIEW_OPTIONS,
   GRAPH_MIN_ZOOM,
+  RESIZE_GRAPH_FIT_DURATION,
   useGraphViewportFit,
 } from '@/features/flow/viewportFit';
 import {
@@ -183,6 +185,11 @@ const hasUploadedSampleData = (nodes: Node[]) =>
       return Boolean(filename && !isCodegenRuntimeFile(filename));
     }),
   );
+
+const graphLayoutSignature = (graphNodes: Node[]) => graphNodes
+  .map((node) => `${node.id}:${Math.round(node.position.x)}:${Math.round(node.position.y)}`)
+  .sort()
+  .join("|");
 
 const taskPackageName = (value: unknown) => String(value || "")
   .toLowerCase()
@@ -513,6 +520,38 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     nodesInitialized,
     nodeCount: nodes.length,
   });
+  const canvasResizeFitTimeoutRef = useRef<number | null>(null);
+  const lastAssistantFitSignatureRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const element = reactFlowWrapper.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+
+    let previousWidth = element.clientWidth;
+    let previousHeight = element.clientHeight;
+    const observer = new ResizeObserver(([entry]) => {
+      const width = Math.round(entry.contentRect.width);
+      const height = Math.round(entry.contentRect.height);
+      if (!width || !height || (width === previousWidth && height === previousHeight)) return;
+      previousWidth = width;
+      previousHeight = height;
+      if (canvasResizeFitTimeoutRef.current !== null) {
+        window.clearTimeout(canvasResizeFitTimeoutRef.current);
+      }
+      canvasResizeFitTimeoutRef.current = window.setTimeout(() => {
+        requestGraphViewportFit({ duration: RESIZE_GRAPH_FIT_DURATION });
+        canvasResizeFitTimeoutRef.current = null;
+      }, 120);
+    });
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+      if (canvasResizeFitTimeoutRef.current !== null) {
+        window.clearTimeout(canvasResizeFitTimeoutRef.current);
+        canvasResizeFitTimeoutRef.current = null;
+      }
+    };
+  }, [requestGraphViewportFit]);
   const lastSeenUpdatedAtRef = useRef<string | null>(null);
   const refreshCooldownUntilRef = useRef<number>(0);
   const syncBackoffUntilRef = useRef<number>(0);
@@ -886,8 +925,14 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           return;
         }
         if (updatedAt && updatedAt !== lastSeenUpdatedAtRef.current) {
-          await fetchGraphAndApply();
-          if (followAssistantDrawing) requestGraphViewportFit();
+          const graph = await fetchGraphAndApply();
+          if (followAssistantDrawing) {
+            const layoutSignature = graphLayoutSignature(graph.nodes);
+            if (layoutSignature !== lastAssistantFitSignatureRef.current) {
+              lastAssistantFitSignatureRef.current = layoutSignature;
+              requestGraphViewportFit({ duration: ASSISTANT_GRAPH_FIT_DURATION });
+            }
+          }
         }
       } catch (e) {
         scheduleSyncRetry("Backend poll tick failed", e);
@@ -908,6 +953,10 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     requestGraphViewportFit,
     scheduleSyncRetry,
   ]);
+
+  useEffect(() => {
+    if (!followAssistantDrawing) lastAssistantFitSignatureRef.current = null;
+  }, [followAssistantDrawing]);
 
   useEffect(() => {
     let disposed = false;

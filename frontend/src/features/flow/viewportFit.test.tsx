@@ -4,6 +4,7 @@ import type { ReactFlowInstance } from "reactflow";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  ASSISTANT_GRAPH_FIT_DURATION,
   EMPTY_GRAPH_VIEWPORT,
   GRAPH_FIT_VIEW_OPTIONS,
   GRAPH_MIN_ZOOM,
@@ -16,17 +17,19 @@ const Harness = ({
   instance,
   nodesInitialized,
   nodeCount,
+  duration,
 }: {
   instance: Pick<ReactFlowInstance, "fitView" | "setViewport">;
   nodesInitialized: boolean;
   nodeCount: number;
+  duration?: number;
 }) => {
   const requestFit = useGraphViewportFit({
     instance,
     nodesInitialized,
     nodeCount,
   });
-  return <button onClick={requestFit}>Fit loaded graph</button>;
+  return <button onClick={() => requestFit(duration == null ? undefined : { duration })}>Fit loaded graph</button>;
 };
 
 describe("version graph viewport fitting", () => {
@@ -115,6 +118,35 @@ describe("version graph viewport fitting", () => {
     });
 
     expect(instance.fitView).toHaveBeenCalledTimes(2);
+    await act(async () => root.unmount());
+  });
+
+  it("uses a short fit transition for streamed assistant updates", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const instance = {
+      fitView: vi.fn(() => true),
+      setViewport: vi.fn(),
+    };
+
+    await act(async () => {
+      root.render(
+        <Harness
+          instance={instance}
+          nodesInitialized
+          nodeCount={4}
+          duration={ASSISTANT_GRAPH_FIT_DURATION}
+        />,
+      );
+    });
+    await act(async () => {
+      container.querySelector("button")?.click();
+    });
+
+    expect(instance.fitView).toHaveBeenCalledWith({
+      ...GRAPH_FIT_VIEW_OPTIONS,
+      duration: ASSISTANT_GRAPH_FIT_DURATION,
+    });
     await act(async () => root.unmount());
   });
 });

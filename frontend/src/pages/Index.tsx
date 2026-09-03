@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import { apiFetch } from '@/utils/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
 import { cn } from '@/lib/utils';
@@ -40,6 +40,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
+import type { ImperativePanelHandle } from 'react-resizable-panels';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -223,6 +224,8 @@ const Index = () => {
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const flowCanvasRef = useRef<FlowCanvasRef>(null);
+  const libraryPanelRef = useRef<ImperativePanelHandle>(null);
+  const rightPanelRef = useRef<ImperativePanelHandle>(null);
   const activeChatTurnRef = useRef<{
     turnId: string;
     controller: AbortController;
@@ -257,6 +260,20 @@ const Index = () => {
   const defaultConfig = React.useMemo(() => getDefaultChatbotConfig(), []);
   const isLibraryOpen = panelPreferences.libraryOpen;
   const rightPanel = panelPreferences.rightPanel;
+
+  useLayoutEffect(() => {
+    const panel = libraryPanelRef.current;
+    if (!panel) return;
+    if (isLibraryOpen && panel.isCollapsed()) panel.expand(25);
+    if (!isLibraryOpen && panel.isExpanded()) panel.collapse();
+  }, [isLibraryOpen]);
+
+  useLayoutEffect(() => {
+    const panel = rightPanelRef.current;
+    if (!panel) return;
+    if (rightPanel && panel.isCollapsed()) panel.expand(25);
+    if (!rightPanel && panel.isExpanded()) panel.collapse();
+  }, [rightPanel]);
 
   // Backend session id
   const [chatSessionId, setChatSessionId] = useState<string>(() => {
@@ -1195,7 +1212,6 @@ const Index = () => {
   };
 
   const showFlowLayout = activeTab === 'lab' || activeTab === 'overview' || activeTab === 'simulate';
-  const workspacePanelLayout = `${isLibraryOpen ? 'library' : 'no-library'}-${rightPanel ? 'right' : 'no-right'}`;
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden animate-fade-in bg-background text-foreground transition-colors">
@@ -1224,49 +1240,53 @@ const Index = () => {
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {showFlowLayout ? (
           <ResizablePanelGroup
-            key={workspacePanelLayout}
             direction="horizontal"
             className="min-w-0 flex-1"
-            autoSaveId={`inlumen-workspace-panels-v2-${workspacePanelLayout}`}
+            autoSaveId="inlumen-workspace-panels-v3"
           >
-            {isLibraryOpen && (
-              <>
-                <ResizablePanel
-                  id="library-panel"
-                  order={1}
-                  defaultSize={25}
-                  minSize={18}
-                  maxSize={32}
-                >
-                  <Sidebar
-                    className="h-full w-full bg-card/95"
-                    onDragStart={onDragStart}
-                    activeTab={activeTab}
-                    onTabChange={handleTabChange}
-                    onBlankPipeline={handleBlankPipeline}
-                    onSavePipeline={handleSavePipeline}
-                    pipelineOverview={pipelineOverview}
-                    activeVersionUid={activeVersionUid}
-                    onOverviewUpdated={handleOverviewUpdated}
-                    activeChatbotConfig={activeConfig}
-                    workspaceResetKey={workspaceResetKey}
-                    getCurrentPipelineGraph={() => flowCanvasRef.current?.getCurrentGraph() || { nodes: [], edges: [] }}
-                    replaceCurrentPipelineGraph={(graph) => flowCanvasRef.current?.replaceCurrentGraph(graph)}
-                    currentPipelineName={activeVersionName}
-                    currentPipelineDescription={activePipelineDescription}
-                    onGenerateRuntimeCode={() => flowCanvasRef.current?.openCodeGeneration()}
-                    onImportRuntimePackages={() => flowCanvasRef.current?.openTaskPackageImport()}
-                  />
-                </ResizablePanel>
-                <ResizableHandle id="library-panel-handle" withHandle />
-              </>
-            )}
+            <ResizablePanel
+              ref={libraryPanelRef}
+              id="library-panel"
+              order={1}
+              defaultSize={isLibraryOpen ? 25 : 0}
+              minSize={18}
+              maxSize={32}
+              collapsible
+              collapsedSize={0}
+            >
+              {isLibraryOpen ? (
+                <Sidebar
+                  className="h-full w-full bg-card/95"
+                  onDragStart={onDragStart}
+                  activeTab={activeTab}
+                  onTabChange={handleTabChange}
+                  onBlankPipeline={handleBlankPipeline}
+                  onSavePipeline={handleSavePipeline}
+                  pipelineOverview={pipelineOverview}
+                  activeVersionUid={activeVersionUid}
+                  onOverviewUpdated={handleOverviewUpdated}
+                  activeChatbotConfig={activeConfig}
+                  workspaceResetKey={workspaceResetKey}
+                  getCurrentPipelineGraph={() => flowCanvasRef.current?.getCurrentGraph() || { nodes: [], edges: [] }}
+                  replaceCurrentPipelineGraph={(graph) => flowCanvasRef.current?.replaceCurrentGraph(graph)}
+                  currentPipelineName={activeVersionName}
+                  currentPipelineDescription={activePipelineDescription}
+                  onGenerateRuntimeCode={() => flowCanvasRef.current?.openCodeGeneration()}
+                  onImportRuntimePackages={() => flowCanvasRef.current?.openTaskPackageImport()}
+                />
+              ) : null}
+            </ResizablePanel>
+            <ResizableHandle
+              id="library-panel-handle"
+              className={cn(!isLibraryOpen && "hidden")}
+              withHandle
+            />
 
             <ResizablePanel
               id="canvas-panel"
               order={2}
               defaultSize={isLibraryOpen ? (rightPanel ? 50 : 75) : (rightPanel ? 75 : 100)}
-              minSize={isLibraryOpen && rightPanel ? 35 : 45}
+              minSize={35}
             >
               <div className="h-full bg-background">
                 <WrappedFlowCanvas
@@ -1289,17 +1309,23 @@ const Index = () => {
               </div>
             </ResizablePanel>
 
-            {rightPanel && (
-              <>
-                <ResizableHandle id="right-panel-handle" withHandle />
-                <ResizablePanel
-                  id="right-panel"
-                  order={3}
-                  defaultSize={25}
-                  minSize={20}
-                  maxSize={38}
-                >
-                  {rightPanel === 'inspector' ? (
+            <ResizableHandle
+              id="right-panel-handle"
+              className={cn(!rightPanel && "hidden")}
+              withHandle
+            />
+            <ResizablePanel
+              ref={rightPanelRef}
+              id="right-panel"
+              order={3}
+              defaultSize={rightPanel ? 25 : 0}
+              minSize={20}
+              maxSize={38}
+              collapsible
+              collapsedSize={0}
+            >
+              {rightPanel ? (
+                rightPanel === 'inspector' ? (
                     <PropertiesPanel
                       className="bg-card/95"
                       selectedNode={selectedNode}
@@ -1338,10 +1364,9 @@ const Index = () => {
                       onSetMainVersion={(version) => { void handleSetMainVersion(version); }}
                       onVersionDeleted={handleVersionDeleted}
                     />
-                  )}
-                </ResizablePanel>
-              </>
-            )}
+                  )
+              ) : null}
+            </ResizablePanel>
           </ResizablePanelGroup>
         ) : (
           <div className="flex-1 flex items-center justify-center text-muted-foreground">
