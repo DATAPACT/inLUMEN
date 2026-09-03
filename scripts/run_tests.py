@@ -102,6 +102,17 @@ def checks_for(component: str) -> list[Check]:
                 environment={
                     "INLUMEN_CODEGEN_SERVICE_API_KEY": "compose-validation-token",
                     "INLUMEN_RUNNER_SERVICE_API_KEY": "runner-validation-token",
+                    "POSTGRES_PASSWORD": "compose-postgres-password",
+                    "NEO4J_AUTH": "neo4j/compose-password",
+                    "MINIO_ROOT_USER": "compose-minio",
+                    "MINIO_ROOT_PASSWORD": "compose-minio-password",
+                    "KEYCLOAK_JWKS_URL": "https://identity.example/realms/inlumen/certs",
+                    "KEYCLOAK_ISSUER": "https://identity.example/realms/inlumen",
+                    "KEYCLOAK_AUDIENCE": "inlumen-frontend",
+                    "VITE_KEYCLOAK_URL": "https://identity.example",
+                    "INLUMEN_PUBLIC_URL": "https://inlumen.example",
+                    "INLUMEN_SECRET_ENCRYPTION_KEY": "test-only-compose-value",
+                    "CLOUDFLARE_TUNNEL_TOKEN": "compose-tunnel-token",
                 },
             ),
         ]

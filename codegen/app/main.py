@@ -39,11 +39,13 @@ from .security import (
     SecurityHeadersMiddleware,
     require_service_api_key,
     service_auth_configuration_error,
+    workspace_context,
 )
 from .validation import validate_generated_files
 
 PIPELINE_JOB_STORE = PipelineJobStore(
-    os.getenv("CODEGEN_JOB_DB_PATH", "state/codegen-jobs.sqlite3")
+    os.getenv("DATABASE_URL")
+    or os.getenv("CODEGEN_JOB_DB_PATH", "state/codegen-jobs.sqlite3")
 )
 PIPELINE_GENERATION_JOBS: dict[str, dict[str, Any]] = PIPELINE_JOB_STORE.load_all()
 PIPELINE_GENERATION_TASKS: dict[str, asyncio.Task[None]] = {}
@@ -120,6 +122,19 @@ def update_pipeline_job(run_id: str, **updates: Any) -> None:
     PIPELINE_JOB_STORE.save(job)
 
 
+def pipeline_job_for_workspace(run_id: str, workspace_id: str) -> dict[str, Any] | None:
+    job = PIPELINE_GENERATION_JOBS.get(run_id)
+    if job is None:
+        job = PIPELINE_JOB_STORE.get(run_id, workspace_id)
+        if job is not None:
+            PIPELINE_GENERATION_JOBS[run_id] = job
+    if job is None:
+        return None
+    if str(job.get("workspace_id") or "local-workspace") != workspace_id:
+        return None
+    return job
+
+
 def clear_pipeline_job_llm_key(run_id: str) -> None:
     """Drop the ephemeral provider credential as soon as a worker is terminal."""
     job = PIPELINE_GENERATION_JOBS.get(run_id)
@@ -145,10 +160,14 @@ def clear_pipeline_job_state(*, preserve_purged_run_ids: bool = False) -> None:
         PIPELINE_GENERATION_PURGED_RUN_IDS.clear()
 
 
-def pipeline_cache_key(request: GeneratePipelineScriptsRequest) -> str:
+def pipeline_cache_key(
+    request: GeneratePipelineScriptsRequest,
+    workspace_id: str = "local-workspace",
+) -> str:
     canonical = json.dumps(
         {
             "cache_schema": PIPELINE_CACHE_SCHEMA_VERSION,
+            "workspace_id": workspace_id,
             "request": request.model_dump(mode="json"),
         },
         sort_keys=True,
@@ -305,6 +324,7 @@ async def run_pipeline_generation_job(
     run_id: str,
     request: GeneratePipelineScriptsRequest,
     *,
+    workspace_id: str = "local-workspace",
     resumed_from_run_id: str | None = None,
     resume_from_flow_id: str | None = None,
     seed_response: GeneratePipelineScriptsResponse | None = None,
@@ -317,7 +337,7 @@ async def run_pipeline_generation_job(
         )
 
     update_pipeline_job(run_id, status="running")
-    cache_key = pipeline_cache_key(request)
+    cache_key = pipeline_cache_key(request, workspace_id)
     try:
         response = (
             cached_pipeline_response(cache_key, run_id)
@@ -386,6 +406,7 @@ def ready() -> dict[str, str]:
 )
 async def generate_node_script(
     request: GenerateNodeScriptRequest,
+    _workspace_id: Annotated[str, Depends(workspace_context)],
     x_llm_api_key: Annotated[str | None, Header(alias="X-LLM-API-Key")] = None,
 ) -> GenerateNodeScriptResponse:
     """Generate a validated script bundle for one pipeline node."""
@@ -414,6 +435,7 @@ async def generate_node_script(
 )
 async def generate_pipeline_scripts(
     request: GeneratePipelineScriptsRequest,
+    _workspace_id: Annotated[str, Depends(workspace_context)],
     x_llm_api_key: Annotated[str | None, Header(alias="X-LLM-API-Key")] = None,
 ) -> GeneratePipelineScriptsResponse:
     """Generate validated script bundles for executable nodes in graph order."""
@@ -443,6 +465,7 @@ async def generate_pipeline_scripts(
 )
 async def start_pipeline_generation_run(
     request: GeneratePipelineScriptsRequest,
+    workspace_id: Annotated[str, Depends(workspace_context)],
     x_llm_api_key: Annotated[str | None, Header(alias="X-LLM-API-Key")] = None,
 ) -> PipelineGenerationJobResponse:
     """Start an async pipeline script generation job with per-node progress."""
@@ -463,8 +486,11 @@ async def start_pipeline_generation_run(
         run_id,
         status="queued",
         request=request,
+        workspace_id=workspace_id,
     )
-    task = asyncio.create_task(run_pipeline_generation_job(run_id, request))
+    task = asyncio.create_task(
+        run_pipeline_generation_job(run_id, request, workspace_id=workspace_id)
+    )
     track_pipeline_task(run_id, task)
     return PipelineGenerationJobResponse.model_validate(
         PIPELINE_GENERATION_JOBS[run_id]
@@ -477,6 +503,7 @@ async def start_pipeline_generation_run(
     dependencies=SERVICE_AUTH,
 )
 def list_pipeline_generation_runs(
+    workspace_id: Annotated[str, Depends(workspace_context)],
     limit: int = 20,
     status: str | None = None,
     include_result: bool = False,
@@ -487,7 +514,11 @@ def list_pipeline_generation_runs(
         if status
         else None
     )
-    jobs = PIPELINE_JOB_STORE.list(limit=min(max(limit, 1), 100), statuses=statuses)
+    jobs = PIPELINE_JOB_STORE.list(
+        limit=min(max(limit, 1), 100),
+        statuses=statuses,
+        workspace_id=workspace_id,
+    )
     for job in jobs:
         run_id = str(job.get("run_id") or "")
         if run_id:
@@ -504,9 +535,15 @@ def list_pipeline_generation_runs(
     "/v1/generate/pipeline-scripts/runs",
     dependencies=SERVICE_AUTH,
 )
-async def clear_pipeline_generation_runs() -> dict[str, int | str]:
+async def clear_pipeline_generation_runs(
+    workspace_id: Annotated[str, Depends(workspace_context)],
+) -> dict[str, int | str]:
     """Cancel active work and remove all durable generation history."""
-    run_ids = list(PIPELINE_GENERATION_JOBS)
+    run_ids = [
+        run_id
+        for run_id, job in PIPELINE_GENERATION_JOBS.items()
+        if str(job.get("workspace_id") or "local-workspace") == workspace_id
+    ]
     active_run_ids = [
         run_id
         for run_id in run_ids
@@ -535,9 +572,12 @@ async def clear_pipeline_generation_runs() -> dict[str, int | str]:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-    PIPELINE_GENERATION_TASKS.clear()
-    clear_pipeline_job_state(preserve_purged_run_ids=True)
-    PIPELINE_GENERATION_CACHE.clear()
+    for run_id in run_ids:
+        PIPELINE_GENERATION_TASKS.pop(run_id, None)
+        PIPELINE_GENERATION_JOBS.pop(run_id, None)
+    PIPELINE_JOB_STORE.clear(workspace_id)
+    # Cached generation results are hashed with workspace_id and expire by TTL;
+    # clearing one workspace must not flush another workspace's hot entries.
     return {"status": "cleared", "deleted_count": len(run_ids)}
 
 
@@ -550,10 +590,11 @@ async def clear_pipeline_generation_runs() -> dict[str, int | str]:
 async def resume_pipeline_generation_run(
     run_id: str,
     request: ResumePipelineGenerationRunRequest,
+    workspace_id: Annotated[str, Depends(workspace_context)],
     x_llm_api_key: Annotated[str | None, Header(alias="X-LLM-API-Key")] = None,
 ) -> PipelineGenerationJobResponse:
     """Start a new async run from a failed node, reusing upstream artifacts."""
-    source_job = PIPELINE_GENERATION_JOBS.get(run_id)
+    source_job = pipeline_job_for_workspace(run_id, workspace_id)
     if source_job is None:
         raise HTTPException(status_code=404, detail="pipeline generation run not found")
     original_request = source_job.get("request")
@@ -617,6 +658,7 @@ async def resume_pipeline_generation_run(
         new_run_id,
         status="queued",
         request=resume_request,
+        workspace_id=workspace_id,
         resumed_from_run_id=run_id,
         resume_from_flow_id=resume_from_flow_id,
     )
@@ -624,6 +666,7 @@ async def resume_pipeline_generation_run(
         run_pipeline_generation_job(
             new_run_id,
             resume_request,
+            workspace_id=workspace_id,
             resumed_from_run_id=run_id,
             resume_from_flow_id=resume_from_flow_id,
             seed_response=source_response,
@@ -640,9 +683,12 @@ async def resume_pipeline_generation_run(
     response_model=PipelineGenerationJobResponse,
     dependencies=SERVICE_AUTH,
 )
-def get_pipeline_generation_run(run_id: str) -> PipelineGenerationJobResponse:
+def get_pipeline_generation_run(
+    run_id: str,
+    workspace_id: Annotated[str, Depends(workspace_context)],
+) -> PipelineGenerationJobResponse:
     """Fetch async pipeline script generation progress or final result."""
-    job = PIPELINE_GENERATION_JOBS.get(run_id)
+    job = pipeline_job_for_workspace(run_id, workspace_id)
     if job is None:
         raise HTTPException(status_code=404, detail="pipeline generation run not found")
     return PipelineGenerationJobResponse.model_validate(job)
@@ -655,9 +701,10 @@ def get_pipeline_generation_run(run_id: str) -> PipelineGenerationJobResponse:
 )
 async def cancel_pipeline_generation_run(
     run_id: str,
+    workspace_id: Annotated[str, Depends(workspace_context)],
 ) -> PipelineGenerationJobResponse:
     """Cancel an active async pipeline generation job."""
-    job = PIPELINE_GENERATION_JOBS.get(run_id)
+    job = pipeline_job_for_workspace(run_id, workspace_id)
     if job is None:
         raise HTTPException(status_code=404, detail="pipeline generation run not found")
     terminal_status = job.get("status")

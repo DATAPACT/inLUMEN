@@ -1,4 +1,5 @@
 state/
+.venv/
 downloads/
 __pycache__/
 **/__pycache__/

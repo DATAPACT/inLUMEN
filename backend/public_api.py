@@ -9,7 +9,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from flask import Blueprint, jsonify, make_response, request
+from flask import Blueprint, g, jsonify, make_response, request
 
 from auth_middleware import is_auth_enabled, validate_keycloak_bearer_token
 from async_runtime import run_async
@@ -26,6 +26,14 @@ from graph_client import (
 )
 from minio_gateway import get_minio_client
 from object_client import check_object_health
+from workspace_storage import node_bucket_name
+from workspace_store import (
+    WORKSPACE_HEADER,
+    WorkspaceAccessDenied,
+    WorkspaceStoreError,
+    local_principal,
+    resolve_principal,
+)
 
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -336,13 +344,27 @@ def api_auth_required(route_handler):
             return route_handler(*args, **kwargs)
 
         if is_auth_enabled():
-            _claims, error = validate_keycloak_bearer_token()
+            claims, error = validate_keycloak_bearer_token()
             if error is not None:
                 return _error_response(
                     error.status_code,
                     _keycloak_public_error_code(error.error, error.status_code),
                     error.detail,
                     error.details,
+                )
+            try:
+                g.inlumen_principal = resolve_principal(
+                    claims or {}, request.headers.get(WORKSPACE_HEADER)
+                )
+            except WorkspaceAccessDenied:
+                return _error_response(404, "not_found", "Workspace was not found")
+            except WorkspaceStoreError as exc:
+                return _error_response(503, "workspace_unavailable", str(exc))
+            except Exception:
+                return _error_response(
+                    503,
+                    "workspace_unavailable",
+                    "The workspace database could not be queried",
                 )
             return route_handler(*args, **kwargs)
 
@@ -363,6 +385,7 @@ def api_auth_required(route_handler):
         if not hmac.compare_digest(provided_token.strip(), configured_token):
             return _error_response(403, "forbidden", "Invalid Bearer token")
 
+        g.inlumen_principal = local_principal()
         return route_handler(*args, **kwargs)
 
     return decorated
@@ -863,7 +886,7 @@ def _file_refs_from_graph(graph: dict[str, Any]) -> list[dict[str, str]]:
         if not step_id:
             continue
 
-        default_bucket = f"files-step-id-{step_id}".lower()
+        default_bucket = node_bucket_name(step_id)
         raw_files = data.get("file_buckets") if isinstance(data.get("file_buckets"), list) else data.get("files")
         if not isinstance(raw_files, list):
             continue

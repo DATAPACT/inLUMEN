@@ -1,6 +1,10 @@
 import asyncio
 
+from flask import has_request_context
+
+from auth_middleware import current_workspace_id
 from local_api_client import LocalApiResponse, dispatch_flask_request
+from workspace_store import WORKSPACE_HEADER
 
 
 async def _await_uncancellable_executor(future):
@@ -18,15 +22,27 @@ async def _await_uncancellable_executor(future):
         raise cancellation
 
 
-def _auth_headers(authorization: str | None = None) -> dict:
+def _request_workspace_id() -> str | None:
+    return current_workspace_id() if has_request_context() else None
+
+
+def _auth_headers(
+    authorization: str | None = None,
+    workspace_id: str | None = None,
+) -> dict:
     headers = {}
     if authorization:
         headers["Authorization"] = authorization
+    if workspace_id:
+        headers[WORKSPACE_HEADER] = workspace_id
     return headers
 
 
-def _json_headers(authorization: str | None = None) -> dict:
-    headers = _auth_headers(authorization)
+def _json_headers(
+    authorization: str | None = None,
+    workspace_id: str | None = None,
+) -> dict:
+    headers = _auth_headers(authorization, workspace_id)
     headers["Content-Type"] = "application/json"
     return headers
 
@@ -70,11 +86,12 @@ def update_pipeline_overview(
     payload: dict,
     authorization: str | None = None,
 ) -> LocalApiResponse:
+    workspace_id = _request_workspace_id()
     return dispatch_graph_request(
         "neo4j_update_pipeline_overview",
         method="POST",
         json_payload=payload,
-        headers=_json_headers(authorization),
+        headers=_json_headers(authorization, workspace_id),
     )
 
 
@@ -85,12 +102,13 @@ async def fetch_pipeline_graph(
     """Fetch the current pipeline nodes, files and flows from Neo4j."""
     api_name = "in-process Neo4j adapter"
     try:
+        workspace_id = _request_workspace_id()
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
             None,
             lambda: dispatch_graph_request(
                 "neo4j_get_graph",
-                headers=_auth_headers(authorization),
+                headers=_auth_headers(authorization, workspace_id),
             ),
         )
         response.raise_for_status()
@@ -110,13 +128,14 @@ async def fetch_pipeline_versions(
     params = {"include_graph": "true"} if include_graph else None
     api_name = "in-process Neo4j adapter"
     try:
+        workspace_id = _request_workspace_id()
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
             None,
             lambda: dispatch_graph_request(
                 "neo4j_list_pipeline_versions",
                 params=params,
-                headers=_auth_headers(authorization),
+                headers=_auth_headers(authorization, workspace_id),
             ),
         )
         response.raise_for_status()
@@ -143,6 +162,7 @@ async def sync_backend_to_canvas_graph(
         payload["version_name"] = active_version_name
     api_name = "in-process Neo4j adapter"
     try:
+        workspace_id = _request_workspace_id()
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
             None,
@@ -150,7 +170,7 @@ async def sync_backend_to_canvas_graph(
                 "neo4j_sync_graph",
                 method="POST",
                 json_payload=payload,
-                headers=_json_headers(authorization),
+                headers=_json_headers(authorization, workspace_id),
             ),
         )
         response.raise_for_status()
@@ -175,6 +195,7 @@ async def save_active_pipeline_version(
     }
     api_name = "in-process Neo4j adapter"
     try:
+        workspace_id = _request_workspace_id()
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
             None,
@@ -182,7 +203,7 @@ async def save_active_pipeline_version(
                 "neo4j_save_pipeline_active_version",
                 method="POST",
                 json_payload=payload,
-                headers=_json_headers(authorization),
+                headers=_json_headers(authorization, workspace_id),
             ),
         )
         response.raise_for_status()
@@ -205,7 +226,7 @@ async def run_neo4j_query(
         payload = {"query": query, "query_type": query_type}
         if provenance_context:
             payload["provenance_context"] = provenance_context
-        headers = _json_headers(authorization)
+        headers = _json_headers(authorization, _request_workspace_id())
         loop = asyncio.get_event_loop()
         response = await _await_uncancellable_executor(loop.run_in_executor(
             None,

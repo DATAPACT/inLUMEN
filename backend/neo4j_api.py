@@ -1,9 +1,11 @@
 from flask import Flask, request, jsonify
 from neo4j import GraphDatabase
-from auth_middleware import require_auth
+from auth_middleware import current_workspace_id, is_auth_enabled, require_auth
 import uuid
 import json
 import os
+import hashlib
+import re
 import tempfile
 from datetime import datetime, timezone
 from typing import Any
@@ -35,6 +37,7 @@ from subpipeline_reference import (
     plan_subpipeline_port_migration,
     public_ports_for_interface,
 )
+from workspace_storage import node_bucket_name, version_snapshot_bucket
 
 NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD = get_neo4j_settings()
 
@@ -43,13 +46,175 @@ graph_data = []
 
 app = Flask(__name__)
 
-driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
+_base_driver = GraphDatabase.driver(
+    NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD)
+)
+
+_WORKSPACE_OWNED_LABELS = (
+    "PROVENANCE_EVENT",
+    "PIPELINE_VERSION",
+    "PIPELINE",
+    "STEP",
+    "FILE",
+)
+
+
+def _workspace_label(workspace_id: str) -> str:
+    digest = hashlib.sha256(workspace_id.encode("utf-8")).hexdigest()[:24]
+    return f"INLUMEN_WS_{digest}"
+
+
+def _scope_cypher(query: str, workspace_id: str) -> str:
+    """Add an unforgeable workspace label to every workspace-owned node pattern.
+
+    Neo4j Community has no row-level security. A label selected exclusively
+    from the server-verified workspace context gives all existing graph
+    operations a mandatory namespace without accepting Cypher identifiers from
+    the client. The base labels remain for schema readability and migrations.
+    """
+    scoped = str(query)
+    scope_label = _workspace_label(workspace_id)
+    for label in _WORKSPACE_OWNED_LABELS:
+        scoped = re.sub(
+            rf":{label}\b(?!:{scope_label}\b)",
+            f":{label}:{scope_label}",
+            scoped,
+        )
+    # Deep workspace cleanup intentionally uses a generic entity match. Keep
+    # that operation inside the same workspace label as well.
+    scoped = re.sub(
+        r"\bMATCH\s*\(entity\)",
+        f"MATCH (entity:{scope_label})",
+        scoped,
+        flags=re.IGNORECASE,
+    )
+    return scoped
+
+
+def _validate_workspace_cypher(query: str) -> None:
+    """Reject raw Cypher that can address nodes outside an owned label.
+
+    The LLM query endpoint is the only caller that accepts Cypher text from a
+    request. Variables may be reused without a label after they were bound to
+    a workspace-owned label, but every independently introduced node must use
+    one of the platform labels that `_scope_cypher` namespaces.
+    """
+    owned = "|".join(re.escape(label) for label in _WORKSPACE_OWNED_LABELS)
+    declared = {
+        value.lower()
+        for value in re.findall(
+            rf"\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:[^)]*\b(?:{owned})\b",
+            query,
+            flags=re.IGNORECASE,
+        )
+    }
+    for match in re.finditer(r"\(([^)]*)\)", query):
+        opening_index = match.start()
+        prefix = query[:opening_index].rstrip()
+        previous = prefix[-1:] if prefix else ""
+        previous_word = re.search(r"([A-Za-z_][A-Za-z0-9_]*)$", prefix)
+        introduced_by_keyword = bool(
+            previous_word
+            and previous_word.group(1).upper() in {"MATCH", "MERGE", "CREATE"}
+        )
+        introduced_by_path = not prefix or previous in {",", "-", ">", "<", "="}
+        if not introduced_by_keyword and not introduced_by_path:
+            # Function calls and parenthesized expressions are not graph nodes.
+            continue
+        pattern = match.group(1).strip()
+        if not pattern:
+            raise ValueError("Anonymous node patterns are not workspace-safe.")
+        variable_match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)", pattern)
+        variable = variable_match.group(1) if variable_match else ""
+        labels = {
+            value.upper()
+            for value in re.findall(r":\s*([A-Za-z_][A-Za-z0-9_]*)", pattern)
+        }
+        if labels.intersection(_WORKSPACE_OWNED_LABELS) or variable.lower() in declared:
+            continue
+        raise ValueError(
+            "Every Cypher node must be bound through a workspace-owned label."
+        )
+
+
+class _WorkspaceQueryRunner:
+    def __init__(self, runner, workspace_id: str):
+        self._runner = runner
+        self._workspace_id = workspace_id
+
+    def run(self, query, *args, **kwargs):
+        return self._runner.run(
+            _scope_cypher(str(query), self._workspace_id), *args, **kwargs
+        )
+
+    def __getattr__(self, name):
+        return getattr(self._runner, name)
+
+
+class _WorkspaceSession(_WorkspaceQueryRunner):
+    def __enter__(self):
+        self._runner.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return self._runner.__exit__(exc_type, exc_value, traceback)
+
+    def execute_write(self, work, *args, **kwargs):
+        def scoped_work(transaction, *work_args, **work_kwargs):
+            return work(
+                _WorkspaceQueryRunner(transaction, self._workspace_id),
+                *work_args,
+                **work_kwargs,
+            )
+
+        return self._runner.execute_write(scoped_work, *args, **kwargs)
+
+    def execute_read(self, work, *args, **kwargs):
+        def scoped_work(transaction, *work_args, **work_kwargs):
+            return work(
+                _WorkspaceQueryRunner(transaction, self._workspace_id),
+                *work_args,
+                **work_kwargs,
+            )
+
+        return self._runner.execute_read(scoped_work, *args, **kwargs)
+
+
+class _WorkspaceDriver:
+    def session(self, *args, **kwargs):
+        _adopt_legacy_local_graph()
+        return _WorkspaceSession(
+            _base_driver.session(*args, **kwargs), current_workspace_id()
+        )
+
+    def __getattr__(self, name):
+        return getattr(_base_driver, name)
+
+
+driver = _WorkspaceDriver()
+
+_legacy_graph_adopted = False
+
+
+def _adopt_legacy_local_graph() -> None:
+    """Attach pre-workspace development data to the fixed local workspace."""
+    global _legacy_graph_adopted
+    if _legacy_graph_adopted or is_auth_enabled():
+        return
+    scope_label = _workspace_label(current_workspace_id())
+    query = f"""
+    MATCH (node)
+    WHERE (node:PIPELINE OR node:PIPELINE_VERSION OR node:STEP OR
+           node:FILE OR node:PROVENANCE_EVENT)
+      AND NOT node:{scope_label}
+    SET node:{scope_label}
+    """
+    with _base_driver.session() as session:
+        session.run(query).consume()
+    _legacy_graph_adopted = True
 
 MAIN_VERSION_UID = "main"
 MAIN_VERSION_NAME = "Main"
-VERSION_FILE_SNAPSHOT_BUCKET = "pipeline-version-file-snapshots"
-
-
 @app.route('/health', methods=['GET'])
 def health():
     try:
@@ -124,7 +289,7 @@ def _file_refs_from_graph_node(flow_id: str, data: dict) -> list[dict]:
 
     refs = []
     seen = set()
-    default_bucket = f"files-step-id-{flow_id}".lower()
+    default_bucket = node_bucket_name(flow_id)
     for item in raw_files:
         filename = ""
         bucket = default_bucket
@@ -567,14 +732,14 @@ def _delete_version_file_snapshots(version_uid: str) -> None:
     prefix = f"{quote(str(version_uid), safe='')}/"
     try:
         objects = list_objects(
-            bucket_name=VERSION_FILE_SNAPSHOT_BUCKET,
+            bucket_name=version_snapshot_bucket(),
             prefix=prefix,
             recursive=True,
         )
         for obj in list(objects or []):
             object_name = getattr(obj, "object_name", None)
             if object_name:
-                remove_object(VERSION_FILE_SNAPSHOT_BUCKET, object_name)
+                remove_object(version_snapshot_bucket(), object_name)
     except Exception as exc:
         print("[neo4j_api.py] Could not clear version file snapshots:", exc)
 
@@ -597,7 +762,7 @@ def _iter_graph_file_entries(graph: dict):
         if file_list is None:
             continue
 
-        default_bucket = f"files-step-id-{flow_id}".lower()
+        default_bucket = node_bucket_name(flow_id)
         for index, item in enumerate(file_list):
             filename = ""
             bucket = default_bucket
@@ -642,7 +807,7 @@ def _set_file_entry_snapshot(file_list: list, index: int, item, file_ref: dict, 
     snapshot_fields = {
         "filename": file_ref["filename"],
         "bucket": file_ref["bucket"],
-        "snapshot_bucket": VERSION_FILE_SNAPSHOT_BUCKET,
+        "snapshot_bucket": version_snapshot_bucket(),
         "snapshot_object": snapshot_object,
     }
     if isinstance(item, dict):
@@ -659,14 +824,14 @@ def _snapshot_version_files(version_uid: str, graph: dict) -> list[dict]:
         snapshot = {
             "filename": file_ref["filename"],
             "bucket": file_ref["bucket"],
-            "snapshot_bucket": VERSION_FILE_SNAPSHOT_BUCKET,
+            "snapshot_bucket": version_snapshot_bucket(),
             "snapshot_object": snapshot_object,
         }
         try:
             _copy_minio_object(
                 file_ref["bucket"],
                 file_ref["filename"],
-                VERSION_FILE_SNAPSHOT_BUCKET,
+                version_snapshot_bucket(),
                 snapshot_object,
             )
             _set_file_entry_snapshot(file_list, index, item, file_ref, snapshot_object)
@@ -1233,13 +1398,14 @@ def neo4j_add_file():
     role = str(properties.get("role") or "").strip().lower()
     if role not in {"code", "data"}:
         role = ""
+    bucket = node_bucket_name(flow_id)
     query = """
     MATCH (n:STEP {flow_id: $flow_id})
     OPTIONAL MATCH (p:PIPELINE)-[:HAS_STEP]->(n)
     SET p.updated_at = datetime()
     MERGE (f:FILE {
       filename: $filename,
-      bucket: "files-step-id-" + $flow_id
+      bucket: $bucket
     })
     SET f.added_at = datetime()
     SET f.uid = randomUUID()
@@ -1249,7 +1415,7 @@ def neo4j_add_file():
     """
     try:
         with driver.session() as session:
-            result = session.run(query, {"flow_id": flow_id, "filename": filename, "role": role})
+            result = session.run(query, {"flow_id": flow_id, "filename": filename, "role": role, "bucket": bucket})
             record = result.single()
             if record:
                 _record_provenance_event(
@@ -1276,10 +1442,11 @@ def neo4j_delete_file():
     # TODO: Use uid instead of flow_id
     flow_id = str(properties.get("flow_id"))
     filename = str(properties.get("filename"))
+    bucket = node_bucket_name(flow_id)
     query = """
     MATCH (n:STEP {flow_id: $flow_id})
     MATCH (n)-[:HAS_FILE]->(f:FILE {filename: $filename})
-    WHERE f.bucket = "files-step-id-" + $flow_id
+    WHERE f.bucket = $bucket
     WITH n, f
     ORDER BY f.added_at DESC
     LIMIT 1
@@ -1290,7 +1457,7 @@ def neo4j_delete_file():
     """
     try:
         with driver.session() as session:
-            result = session.run(query, {"flow_id": flow_id, "filename": filename})
+            result = session.run(query, {"flow_id": flow_id, "filename": filename, "bucket": bucket})
             record = result.single()
             if record:
                 _record_provenance_event(
@@ -2886,6 +3053,10 @@ def neo4j_run_query():
     data = request.json
     query = data['query']
     query_type = data.get("query_type")
+    try:
+        _validate_workspace_cypher(str(query))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     print("[neo4j_api.py] Received query to execute in Neo4J:", query)
     with driver.session() as session:
         session_result = session.run(query)

@@ -105,6 +105,7 @@ class PipelineRunManager:
         executor: DagsterExecutor | None = None,
         artifact_store: PipelineArtifactStore | None = None,
         max_outstanding_runs: int = DEFAULT_MAX_OUTSTANDING_RUNS,
+        max_global_outstanding_runs: int | None = None,
         summary_store: RunSummaryStore | None = None,
     ) -> None:
         self.store = store
@@ -116,6 +117,9 @@ class PipelineRunManager:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self._submission_lock = asyncio.Lock()
         self.max_outstanding_runs = max(int(max_outstanding_runs), 1)
+        self.max_global_outstanding_runs = max(
+            int(max_global_outstanding_runs or self.max_outstanding_runs), 1
+        )
         self.summary_store = summary_store
 
     @property
@@ -126,9 +130,9 @@ class PipelineRunManager:
             and self.executor.configured
         )
 
-    def capabilities(self) -> dict[str, Any]:
+    def capabilities(self, workspace_id: str | None = None) -> dict[str, Any]:
         enabled = self.execution_available
-        outstanding = self._outstanding_run_count()
+        outstanding = self._outstanding_run_count(workspace_id)
         return {
             "background_runs": True,
             "execution_available": enabled,
@@ -168,7 +172,7 @@ class PipelineRunManager:
         bundle_sha256 = canonical_sha256(files)
         key = str(request.idempotency_key or "").strip() or None
         if key:
-            existing = self.store.get_by_idempotency_key(key)
+            existing = self.store.get_by_idempotency_key(key, request.workspace_id)
             if existing is not None:
                 if existing["snapshot"]["bundle_sha256"] != bundle_sha256:
                     raise PipelineRunConflict(
@@ -176,11 +180,17 @@ class PipelineRunManager:
                     )
                 return public_run_record(existing), False
 
-        outstanding = self._outstanding_run_count()
+        outstanding = self._outstanding_run_count(request.workspace_id)
         if outstanding >= self.max_outstanding_runs:
             raise PipelineRunCapacityError(
                 limit=self.max_outstanding_runs,
                 outstanding=outstanding,
+            )
+        global_outstanding = self._outstanding_run_count()
+        if global_outstanding >= self.max_global_outstanding_runs:
+            raise PipelineRunCapacityError(
+                limit=self.max_global_outstanding_runs,
+                outstanding=global_outstanding,
             )
 
         nodes = list(graph.get("nodes") or [])
@@ -190,6 +200,8 @@ class PipelineRunManager:
         record: dict[str, Any] = {
             "schema_version": "inlumen.pipeline-run@1",
             "run_id": run_id,
+            "workspace_id": request.workspace_id,
+            "requested_by": request.requested_by,
             "status": "queued",
             "engine": "dagster",
             "execution_mode": "background",
@@ -225,7 +237,9 @@ class PipelineRunManager:
             "error": None,
             "result": None,
             "_snapshot_graph": deepcopy(graph),
-            "_bundle_reference": self.artifact_store.store_bundle(run_id, files),
+            "_bundle_reference": self.artifact_store.store_bundle(
+                run_id, files, request.workspace_id
+            ),
             "_bundle_manifest": deepcopy(request.snapshot.bundle_manifest),
             "_runtime_secret_names": sorted(request.runtime_secrets),
             "_output_files": [],
@@ -241,23 +255,29 @@ class PipelineRunManager:
         task.add_done_callback(lambda _task: self.tasks.pop(run_id, None))
         return public_run_record(record), True
 
-    def _outstanding_run_count(self) -> int:
-        return self.store.count_statuses(ACTIVE_STATUSES)
+    def _outstanding_run_count(self, workspace_id: str | None = None) -> int:
+        return self.store.count_statuses(ACTIVE_STATUSES, workspace_id)
 
-    def get(self, run_id: str) -> dict[str, Any] | None:
-        record = self.store.get(run_id)
+    def get(
+        self, run_id: str, workspace_id: str | None = None
+    ) -> dict[str, Any] | None:
+        record = self.store.get(run_id, workspace_id)
         return public_run_record(record) if record else None
 
-    def list(self, *, limit: int = 20) -> list[dict[str, Any]]:
+    def list(
+        self, *, limit: int = 20, workspace_id: str | None = None
+    ) -> list[dict[str, Any]]:
         records = [
             record
-            for record in self.store.list(limit=None)
+            for record in self.store.list(limit=None, workspace_id=workspace_id)
             if record.get("engine") != "contract-test"
         ]
         return [public_run_record(record) for record in records[:limit]]
 
-    def events(self, run_id: str, *, after: int = 0) -> dict[str, Any] | None:
-        record = self.store.get(run_id)
+    def events(
+        self, run_id: str, *, after: int = 0, workspace_id: str | None = None
+    ) -> dict[str, Any] | None:
+        record = self.store.get(run_id, workspace_id)
         if record is None:
             return None
         events = [
@@ -269,8 +289,10 @@ class PipelineRunManager:
             "next_cursor": int(record.get("event_cursor") or 0),
         }
 
-    def output(self, run_id: str, path: str) -> tuple[bytes, str, str] | None:
-        record = self.store.get(run_id)
+    def output(
+        self, run_id: str, path: str, workspace_id: str | None = None
+    ) -> tuple[bytes, str, str] | None:
+        record = self.store.get(run_id, workspace_id)
         if record is None:
             return None
         for entry in record.get("_output_files", []):
@@ -293,8 +315,8 @@ class PipelineRunManager:
             )
         return None
 
-    def bundle_zip(self, run_id: str) -> bytes | None:
-        record = self.store.get(run_id)
+    def bundle_zip(self, run_id: str, workspace_id: str | None = None) -> bytes | None:
+        record = self.store.get(run_id, workspace_id)
         if record is None:
             return None
         files = self._bundle_files(record)
@@ -314,8 +336,10 @@ class PipelineRunManager:
                 archive.writestr(str(relative), body)
         return buffer.getvalue()
 
-    async def cancel(self, run_id: str) -> dict[str, Any] | None:
-        record = self.store.get(run_id)
+    async def cancel(
+        self, run_id: str, workspace_id: str | None = None
+    ) -> dict[str, Any] | None:
+        record = self.store.get(run_id, workspace_id)
         if record is None:
             return None
         if record["status"] in TERMINAL_STATUSES:
@@ -347,10 +371,10 @@ class PipelineRunManager:
             self._finish_cancelled(self.store.get(run_id) or record)
         return public_run_record(self.store.get(run_id) or record)
 
-    async def clear_all(self) -> dict[str, int]:
+    async def clear_all(self, workspace_id: str | None = None) -> dict[str, int]:
         """Cancel active work and purge all lifecycle records and artifacts."""
         async with self._submission_lock:
-            records = self.store.list(limit=None)
+            records = self.store.list(limit=None, workspace_id=workspace_id)
             active_ids = [
                 str(record.get("run_id") or "")
                 for record in records
@@ -368,13 +392,15 @@ class PipelineRunManager:
                             run_id,
                             exc_info=True,
                         )
-            active_tasks = [self.tasks[run_id] for run_id in active_ids if run_id in self.tasks]
+            active_tasks = [
+                self.tasks[run_id] for run_id in active_ids if run_id in self.tasks
+            ]
             for task in active_tasks:
                 task.cancel()
             if active_tasks:
                 await asyncio.gather(*active_tasks, return_exceptions=True)
-            removed_artifact_roots = self.artifact_store.clear()
-            removed_runs = self.store.clear()
+            removed_artifact_roots = self.artifact_store.clear(workspace_id)
+            removed_runs = self.store.clear(workspace_id)
             return {
                 "removed_runs": removed_runs,
                 "cancelled_runs": len(active_ids),
@@ -416,9 +442,8 @@ class PipelineRunManager:
             self._save_terminal_record(record)
             count += 1
         for record in self.store.list(limit=None):
-            if (
-                record.get("status") in TERMINAL_STATUSES
-                and not record.get("_summary_published_at")
+            if record.get("status") in TERMINAL_STATUSES and not record.get(
+                "_summary_published_at"
             ):
                 self._publish_terminal_summary(record)
         return count
@@ -476,9 +501,7 @@ class PipelineRunManager:
                     "message": message,
                     "details": {
                         "errors": (
-                            [message, *errors]
-                            if message not in errors
-                            else errors
+                            [message, *errors] if message not in errors else errors
                         )
                     },
                 }
@@ -488,7 +511,9 @@ class PipelineRunManager:
             outputs = response.get("run_outputs")
             output_files = [item for item in outputs or [] if isinstance(item, dict)]
             record["_output_files"] = self.artifact_store.store_outputs(
-                run_id, output_files
+                run_id,
+                output_files,
+                str(record.get("workspace_id") or "local-workspace"),
             )
             now = utc_now_iso()
             record["status"] = "succeeded"
@@ -522,9 +547,7 @@ class PipelineRunManager:
             if record.get("status") == "cancelling":
                 self._finish_cancelled(record)
                 return
-            self._finish_failed(
-                record, {"code": "runner_error", "message": str(exc)}
-            )
+            self._finish_failed(record, {"code": "runner_error", "message": str(exc)})
 
     async def _track_live_progress(self, run_id: str) -> None:
         if self.executor is None:
@@ -565,9 +588,10 @@ class PipelineRunManager:
             for item in record.get("_progress_node_events", [])
             if isinstance(item, list) and len(item) >= 2
         }
-        active_node_id = str(
-            (record.get("progress") or {}).get("active_node_id") or ""
-        ).strip() or None
+        active_node_id = (
+            str((record.get("progress") or {}).get("active_node_id") or "").strip()
+            or None
+        )
         events_changed = False
         for match in NODE_EVENT_PATTERN.finditer(logs):
             node_id = match.group("node")
@@ -581,8 +605,11 @@ class PipelineRunManager:
                     "failure": "failed",
                 }[outcome]
                 event_status = (
-                    "failed" if outcome == "failure" else "succeeded"
-                    if outcome == "success" else "running"
+                    "failed"
+                    if outcome == "failure"
+                    else "succeeded"
+                    if outcome == "success"
+                    else "running"
                 )
                 self._append_event(
                     record,
@@ -694,8 +721,11 @@ class PipelineRunManager:
                     continue
                 emitted_node_events.add(key)
                 event_status = (
-                    "failed" if outcome == "failure" else "succeeded"
-                    if outcome == "success" else "running"
+                    "failed"
+                    if outcome == "failure"
+                    else "succeeded"
+                    if outcome == "success"
+                    else "running"
                 )
                 action = {
                     "start": "started",
@@ -781,9 +811,7 @@ class PipelineRunManager:
         return {
             "run_id": str(record.get("run_id") or ""),
             "pipeline_id": str(snapshot.get("pipeline_id") or ""),
-            "active_version_uid": str(
-                snapshot.get("active_version_uid") or "main"
-            ),
+            "active_version_uid": str(snapshot.get("active_version_uid") or "main"),
             "snapshot_sha256": str(snapshot.get("graph_sha256") or ""),
             "bundle_sha256": str(snapshot.get("bundle_sha256") or ""),
             "status": str(record.get("status") or "failed"),
@@ -861,7 +889,9 @@ class PipelineRunManager:
             "node_elapsed_seconds": None,
         }
         record["result"] = self._terminal_result(record, "cancelled")
-        self._append_event(record, "run.cancelled", "cancelled", "Dagster run cancelled.")
+        self._append_event(
+            record, "run.cancelled", "cancelled", "Dagster run cancelled."
+        )
         self._save_terminal_record(record)
 
     def _finish_failed(self, record: dict[str, Any], error: dict[str, Any]) -> None:

@@ -7,7 +7,8 @@ import {
   KEYCLOAK_URL,
   TOOLBOX_ORIGIN,
 } from '@/config/auth';
-import { setAuthToken } from '@/utils/apiFetch';
+import { INLUMEN_API_URL } from '@/config/api';
+import { apiFetch, setActiveWorkspaceId, setAuthToken } from '@/utils/apiFetch';
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [ready, setReady] = useState(!AUTH_ENABLED);
@@ -23,14 +24,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (mounted) setReady(true);
     };
 
+    const bootstrapSession = async (token: string) => {
+      setAuthToken(token);
+      setActiveWorkspaceId(null);
+      const response = await apiFetch(`${INLUMEN_API_URL}/api/session`);
+      if (!response.ok) {
+        throw new Error(`Workspace bootstrap failed (${response.status}).`);
+      }
+      const payload = await response.json();
+      const workspaceId = String(payload?.active_workspace_id || '').trim();
+      if (!workspaceId) {
+        throw new Error('Workspace bootstrap returned no active workspace.');
+      }
+      setActiveWorkspaceId(workspaceId);
+    };
+
     if (window.self !== window.top) {
       const handleMessage = (event: MessageEvent) => {
         if (event.source !== window.parent) return;
         if (TOOLBOX_ORIGIN !== '*' && event.origin !== TOOLBOX_ORIGIN) return;
         const data = event.data;
         if (data?.type === 'SSO_TOKEN' && typeof data.token === 'string') {
-          setAuthToken(data.token);
-          markReady();
+          void bootstrapSession(data.token)
+            .then(markReady)
+            .catch((err) => {
+              console.error('Workspace initialization failed', err);
+              if (mounted) setError('Signed in, but the workspace could not be initialized.');
+            });
         }
       };
 
@@ -51,11 +71,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       clientId: KEYCLOAK_CLIENT_ID,
     });
 
-    const syncToken = () => setAuthToken(keycloak.token ?? null);
+    const syncToken = async () => {
+      if (!keycloak.token) {
+        setAuthToken(null);
+        setActiveWorkspaceId(null);
+        return;
+      }
+      await bootstrapSession(keycloak.token);
+    };
     const refreshToken = async () => {
       try {
         await keycloak.updateToken(60);
-        syncToken();
+        await syncToken();
       } catch {
         setAuthToken(null);
         await keycloak.login();
@@ -76,12 +103,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         pkceMethod: 'S256',
         checkLoginIframe: false,
       })
-      .then((authenticated) => {
+      .then(async (authenticated) => {
         if (!mounted) return;
         if (!authenticated) {
           return keycloak.login();
         }
-        syncToken();
+        await syncToken();
         refreshTimer = window.setInterval(() => {
           void refreshToken();
         }, 30000);
@@ -98,6 +125,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       mounted = false;
       if (refreshTimer !== undefined) window.clearInterval(refreshTimer);
       setAuthToken(null);
+      setActiveWorkspaceId(null);
     };
   }, []);
 

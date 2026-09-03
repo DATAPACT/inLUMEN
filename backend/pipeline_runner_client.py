@@ -7,6 +7,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from auth_middleware import current_principal
+from workspace_store import WORKSPACE_HEADER
+
 RUNNER_SERVICE_URL = os.getenv(
     "INLUMEN_RUNNER_SERVICE_URL",
     "http://127.0.0.1:8020",
@@ -42,6 +45,7 @@ def runner_request(
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {RUNNER_SERVICE_API_KEY}",
+        WORKSPACE_HEADER: current_principal().workspace_id,
     }
     if payload is not None:
         encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -85,6 +89,7 @@ def runner_raw_request(method: str, path: str) -> tuple[bytes, str, str | None]:
         headers={
             "Accept": "*/*",
             "Authorization": f"Bearer {RUNNER_SERVICE_API_KEY}",
+            WORKSPACE_HEADER: current_principal().workspace_id,
         },
         method=method,
     )

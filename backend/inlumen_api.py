@@ -28,8 +28,9 @@ from analytics_api import (
     prepare_dagster_execution_bundle,
 )
 from attachment_validation import attachment_input_errors, read_attachment_probe
-from auth_middleware import require_auth
+from auth_middleware import current_principal, require_auth, validate_production_auth_configuration
 from chat_state import clear_state_from_disk
+from chatbot_config_store import load_chatbot_configs, save_chatbot_configs
 from codegen_runs import CodegenRunStore
 from deployment_artifacts import DeploymentArtifactValidationError
 from generators.routes import create_generator_blueprint
@@ -61,6 +62,14 @@ from public_api import create_public_api_blueprint
 from runtime_environment import discover_runtime_environment, runtime_environment_from_files
 from runtime_config import add_cors_headers, get_service_port
 from step_types import normalize_step_type
+from workspace_store import (
+    LOCAL_TENANT_ID,
+    LOCAL_WORKSPACE_ID,
+    WORKSPACE_HEADER,
+    create_workspace,
+    list_workspaces,
+)
+from workspace_storage import node_bucket_name
 
 
 INLUMEN_API_PORT = get_service_port("INLUMEN_API_PORT", 5000)
@@ -79,7 +88,8 @@ CODEGEN_SAMPLE_BINARY_MAX_BYTES = int(
     os.getenv("INLUMEN_CODEGEN_SAMPLE_BINARY_MAX_BYTES", str(16 * 1024 * 1024))
 )
 CODEGEN_RUN_STORE = CodegenRunStore(
-    os.getenv("INLUMEN_CODEGEN_RUN_DB_PATH", "state/codegen-runs.sqlite3")
+    os.getenv("DATABASE_URL")
+    or os.getenv("INLUMEN_CODEGEN_RUN_DB_PATH", "state/codegen-runs.sqlite3")
 )
 DEFAULT_CODEGEN_ALLOWED_PACKAGES = [
     "pandas",
@@ -142,6 +152,7 @@ CHATBOT_CONFIGS_PATH = Path(
 )
 
 app = Flask(__name__)
+validate_production_auth_configuration()
 app.register_blueprint(create_public_api_blueprint())
 app.register_blueprint(create_node_definitions_blueprint())
 app.register_blueprint(create_generator_blueprint())
@@ -227,12 +238,67 @@ def _forward_headers(include_content_type: bool = True) -> dict[str, str]:
     authorization = request.headers.get("Authorization")
     if authorization:
         headers["Authorization"] = authorization
+    headers[WORKSPACE_HEADER] = current_principal().workspace_id
     accept = request.headers.get("Accept")
     if accept:
         headers["Accept"] = accept
     if include_content_type and request.content_type:
         headers["Content-Type"] = request.content_type
     return headers
+
+
+@app.route("/api/session", methods=["GET", "OPTIONS"])
+@require_auth
+def application_session():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    principal = current_principal()
+    if principal.is_local:
+        workspaces = [{
+            "id": LOCAL_WORKSPACE_ID,
+            "tenant_id": LOCAL_TENANT_ID,
+            "name": "Local workspace",
+            "revision": 0,
+            "role": "owner",
+        }]
+    else:
+        workspaces = list_workspaces(principal.user_id)
+    return jsonify({
+        "user": {
+            "id": principal.user_id,
+            "subject": principal.subject,
+            "display_name": principal.display_name,
+        },
+        "active_workspace_id": principal.workspace_id,
+        "workspaces": workspaces,
+    }), 200
+
+
+@app.route("/api/workspaces", methods=["GET", "POST", "OPTIONS"])
+@require_auth
+def application_workspaces():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    principal = current_principal()
+    if principal.is_local:
+        if request.method == "POST":
+            return _json_error(409, "Local mode supports its default workspace only")
+        return jsonify({"workspaces": [{
+            "id": LOCAL_WORKSPACE_ID,
+            "tenant_id": LOCAL_TENANT_ID,
+            "name": "Local workspace",
+            "revision": 0,
+            "role": "owner",
+        }]}), 200
+    if request.method == "POST":
+        try:
+            workspace = create_workspace(
+                principal.user_id, str(_request_json().get("name") or "")
+            )
+        except ValueError as exc:
+            return _json_error(400, str(exc))
+        return jsonify({"workspace": workspace}), 201
+    return jsonify({"workspaces": list_workspaces(principal.user_id)}), 200
 
 
 def _response_from_upstream(upstream: LocalApiResponse) -> Response:
@@ -517,7 +583,7 @@ def _node_file_entries(
     if not isinstance(raw_files, list):
         return []
     flow_id = str(node.get("id") or data.get("flow_id") or data.get("id") or "").strip()
-    default_bucket = f"files-step-id-{flow_id}".lower()
+    default_bucket = node_bucket_name(flow_id)
     entries = []
     for item in raw_files:
         if isinstance(item, str):
@@ -563,13 +629,12 @@ def _sample_file_descriptor(
 ) -> dict[str, Any]:
     kind = descriptor.get("kind")
     file_format = descriptor.get("format")
-    bucket_id = bucket.removeprefix("files-step-id-")
     try:
         response = _proxy(
             dispatch_object_request,
             "minio_read_file",
             method="GET",
-            params={"bucket_id": bucket_id, "filename": filename},
+            params={"bucket_name": bucket, "filename": filename},
             data=b"",
         )
         response.raise_for_status()
@@ -989,6 +1054,7 @@ def _codegen_request_headers(
     llm_api_key: str = "",
 ) -> dict[str, str]:
     headers = {"Accept": "application/json"}
+    headers[WORKSPACE_HEADER] = current_principal().workspace_id
     if include_content_type:
         headers["Content-Type"] = "application/json"
 
@@ -1088,7 +1154,7 @@ def _persist_codegen_artifact(
     }
     stored_files = []
     file_hashes: dict[str, str] = {}
-    bucket = f"files-step-id-{node_id}".lower()
+    bucket = node_bucket_name(node_id)
     for file_item in files:
         if not isinstance(file_item, dict):
             continue
@@ -1263,7 +1329,7 @@ def _persist_codegen_run_report(run_report: Any) -> dict[str, Any] | None:
         return run_report
     filename = f"{run_id}.json"
     bucket_id = "pipeline-codegen-runs"
-    bucket = f"files-step-id-{bucket_id}".lower()
+    bucket = node_bucket_name(bucket_id)
     report = {
         **run_report,
         "object_storage": {
@@ -1596,15 +1662,14 @@ def _hydrate_reusable_codegen_node(
         if not isinstance(content, str):
             bucket = str(
                 file_item.get("bucket")
-                or f"files-step-id-{_node_flow_id(node)}"
+                or node_bucket_name(_node_flow_id(node))
             ).strip().lower()
-            bucket_id = bucket.removeprefix("files-step-id-")
             try:
                 response = _proxy(
                     dispatch_object_request,
                     "minio_read_file",
                     method="GET",
-                    params={"bucket_id": bucket_id, "filename": filename},
+                    params={"bucket_name": bucket, "filename": filename},
                     data=b"",
                 )
                 response.raise_for_status()
@@ -1859,22 +1924,11 @@ def _finalize_pipeline_codegen_response(
 
 
 def _load_chatbot_configs() -> list[dict[str, Any]]:
-    try:
-        payload = json.loads(CHATBOT_CONFIGS_PATH.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return []
-    except json.JSONDecodeError:
-        return []
-    configs = payload.get("configs") if isinstance(payload, dict) else payload
-    return configs if isinstance(configs, list) else []
+    return load_chatbot_configs(CHATBOT_CONFIGS_PATH)
 
 
 def _save_chatbot_configs(configs: list[dict[str, Any]]) -> None:
-    CHATBOT_CONFIGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CHATBOT_CONFIGS_PATH.write_text(
-        json.dumps({"configs": configs}, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    save_chatbot_configs(CHATBOT_CONFIGS_PATH, configs)
 
 
 def _chatbot_config_response(config: dict[str, Any]) -> dict[str, Any]:
@@ -2188,6 +2242,8 @@ def pipeline_runs():
         client_payload = _request_json()
         executable = prepare_dagster_execution_bundle(graph)
         runner_payload = {
+            "workspace_id": current_principal().workspace_id,
+            "requested_by": current_principal().user_id,
             "snapshot": {
                 "graph": graph,
                 "pipeline_id": str(pipeline.get("uid") or "").strip() or None,

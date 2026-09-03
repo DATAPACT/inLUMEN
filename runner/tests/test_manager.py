@@ -5,6 +5,7 @@ import json
 import zipfile
 
 import pytest
+
 from app.artifacts import PipelineArtifactStore
 from app.manager import (
     PipelineRunCapacityError,
@@ -161,6 +162,33 @@ def request(*, key: str = "request-1", label: str = "Task") -> CreatePipelineRun
 
 
 @pytest.mark.asyncio
+async def test_runs_are_isolated_by_workspace_even_with_same_idempotency_key():
+    executor = FakeDagsterExecutor(delay=0.01)
+    manager = PipelineRunManager(
+        PipelineRunStore(":memory:"), adapter="dagster", executor=executor
+    )
+    first_request = request(key="shared-key").model_copy(
+        update={"workspace_id": "workspace-a", "requested_by": "user-a"}
+    )
+    second_request = request(key="shared-key").model_copy(
+        update={"workspace_id": "workspace-b", "requested_by": "user-b"}
+    )
+
+    first, first_created = await manager.start(first_request)
+    second, second_created = await manager.start(second_request)
+
+    assert first_created is True
+    assert second_created is True
+    assert first["run_id"] != second["run_id"]
+    assert manager.get(first["run_id"], "workspace-b") is None
+    assert manager.get(second["run_id"], "workspace-a") is None
+    assert [run["run_id"] for run in manager.list(workspace_id="workspace-a")] == [
+        first["run_id"]
+    ]
+    await asyncio.gather(*manager.tasks.values())
+
+
+@pytest.mark.asyncio
 async def test_background_run_executes_dagster_and_persists_real_outputs(tmp_path):
     path = tmp_path / "runs.sqlite3"
     executor = FakeDagsterExecutor()
@@ -191,9 +219,9 @@ async def test_background_run_executes_dagster_and_persists_real_outputs(tmp_pat
     event_text = json.dumps(manager.events(queued["run_id"])["events"])
     assert "secret" not in event_text
     assert "[REDACTED]" in event_text
-    assert manager.output(
-        queued["run_id"], "outputs/node-1/result.csv"
-    )[0].startswith(b"city,temp")
+    assert manager.output(queued["run_id"], "outputs/node-1/result.csv")[0].startswith(
+        b"city,temp"
+    )
     assert manager.bundle_zip(queued["run_id"]).startswith(b"PK")
 
 
@@ -245,9 +273,10 @@ async def test_execution_and_download_use_the_same_frozen_bundle_snapshot():
     await manager.tasks[queued["run_id"]]
 
     assert executor.files_seen[0]["content"] == "{}"
-    assert manager.get(queued["run_id"])["snapshot"]["bundle_sha256"] == queued[
-        "snapshot"
-    ]["bundle_sha256"]
+    assert (
+        manager.get(queued["run_id"])["snapshot"]["bundle_sha256"]
+        == queued["snapshot"]["bundle_sha256"]
+    )
 
 
 @pytest.mark.asyncio

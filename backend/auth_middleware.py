@@ -2,10 +2,19 @@ import os
 import functools
 from dataclasses import dataclass
 from typing import Any, Optional
-from flask import request, jsonify
+from flask import g, has_request_context, jsonify, request
 import jwt
 from jwt import PyJWKClient
 from jwt.exceptions import PyJWKClientConnectionError, PyJWKClientError
+
+from workspace_store import (
+    Principal,
+    WorkspaceAccessDenied,
+    WorkspaceStoreError,
+    WORKSPACE_HEADER,
+    local_principal,
+    resolve_principal,
+)
 
 _jwks_client: Optional[PyJWKClient] = None
 _jwks_client_url: str = ""
@@ -21,6 +30,45 @@ class AuthValidationError:
 
 def is_auth_enabled() -> bool:
     return os.getenv("AUTH_ENABLED", "false").lower() == "true"
+
+
+def validate_production_auth_configuration() -> None:
+    if os.getenv("APP_ENV", "development").strip().lower() != "production":
+        return
+    if not is_auth_enabled():
+        raise RuntimeError("AUTH_ENABLED must be true when APP_ENV=production.")
+    missing = [
+        name
+        for name, value in (
+            ("KEYCLOAK_JWKS_URL", _keycloak_jwks_url()),
+            ("KEYCLOAK_ISSUER", _keycloak_issuer()),
+            ("KEYCLOAK_AUDIENCE", _keycloak_audience()),
+            ("DATABASE_URL", os.getenv("DATABASE_URL", "").strip()),
+        )
+        if not value
+    ]
+    if missing:
+        raise RuntimeError(
+            "Production authentication is missing: " + ", ".join(missing)
+        )
+
+
+def current_principal() -> Principal:
+    if not has_request_context():
+        return local_principal()
+    principal = getattr(g, "inlumen_principal", None)
+    if principal is None:
+        principal = local_principal()
+        g.inlumen_principal = principal
+    return principal
+
+
+def current_workspace_id() -> str:
+    return current_principal().workspace_id
+
+
+def current_user_id() -> str:
+    return current_principal().user_id
 
 
 def _keycloak_jwks_url() -> str:
@@ -132,15 +180,33 @@ def require_auth(f):
     """
     @functools.wraps(f)
     def decorated(*args, **kwargs):
-        if not is_auth_enabled() or request.method == "OPTIONS":
+        if request.method == "OPTIONS":
             return f(*args, **kwargs)
 
-        _claims, error = validate_keycloak_bearer_token()
+        if not is_auth_enabled():
+            g.inlumen_principal = local_principal()
+            return f(*args, **kwargs)
+
+        claims, error = validate_keycloak_bearer_token()
         if error is not None:
             payload = {"error": error.error, "detail": error.detail}
             if error.details is not None:
                 payload.update(error.details)
             return jsonify(payload), error.status_code
+
+        try:
+            g.inlumen_principal = resolve_principal(
+                claims or {}, request.headers.get(WORKSPACE_HEADER)
+            )
+        except WorkspaceAccessDenied:
+            return jsonify({"error": "Not found", "detail": "Workspace was not found"}), 404
+        except WorkspaceStoreError as exc:
+            return jsonify({"error": "Workspace unavailable", "detail": str(exc)}), 503
+        except Exception:
+            return jsonify({
+                "error": "Workspace unavailable",
+                "detail": "The workspace database could not be queried.",
+            }), 503
 
         return f(*args, **kwargs)
 

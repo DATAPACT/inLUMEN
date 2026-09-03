@@ -28,7 +28,7 @@ class RuntimeConfigCorsTest(unittest.TestCase):
             response.headers["Access-Control-Allow-Methods"],
         )
         self.assertEqual(
-            "Content-Type, Authorization",
+            "Content-Type, Authorization, X-InLumen-Workspace-Id, If-Match",
             response.headers["Access-Control-Allow-Headers"],
         )
         self.assertEqual("Origin", response.headers["Vary"])

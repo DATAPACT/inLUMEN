@@ -45,9 +45,19 @@ def env_bool_or_config(
 
 
 def add_cors_headers(response, request_origin: str | None = None):
-    response.headers["Access-Control-Allow-Origin"] = "*"
+    configured_origins = {
+        item.strip()
+        for item in os.getenv("CORS_ALLOWED_ORIGINS", "*").split(",")
+        if item.strip()
+    }
+    if "*" in configured_origins:
+        response.headers["Access-Control-Allow-Origin"] = "*"
+    elif request_origin and request_origin in configured_origins:
+        response.headers["Access-Control-Allow-Origin"] = request_origin
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    response.headers["Access-Control-Allow-Headers"] = (
+        "Content-Type, Authorization, X-InLumen-Workspace-Id, If-Match"
+    )
     response.headers.add("Vary", "Origin")
     return response
 

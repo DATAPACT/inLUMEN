@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
 
@@ -21,13 +22,16 @@ from .models import (
     RunnerCapabilities,
 )
 from .run_summaries import Neo4jRunSummaryStore
-from .security import configured_key, require_service_api_key
+from .security import configured_key, require_service_api_key, workspace_context
 from .store import PipelineRunStore
 
 DEFAULT_RUNNER_STATE = (
     Path(__file__).resolve().parents[1] / "state" / "pipeline-runs.sqlite3"
 )
-RUN_STORE = PipelineRunStore(os.getenv("RUNNER_JOB_DB_PATH", str(DEFAULT_RUNNER_STATE)))
+RUN_STORE = PipelineRunStore(
+    os.getenv("DATABASE_URL")
+    or os.getenv("RUNNER_JOB_DB_PATH", str(DEFAULT_RUNNER_STATE))
+)
 RUN_ARTIFACT_STORE = PipelineArtifactStore(
     os.getenv("RUNNER_ARTIFACT_ROOT", str(DEFAULT_RUNNER_STATE.parent / "artifacts"))
 )
@@ -37,6 +41,10 @@ RUN_MANAGER = PipelineRunManager(
     adapter=os.getenv("RUNNER_ADAPTER", "disabled").strip().lower(),
     executor=CodegenDagsterExecutor(),
     artifact_store=RUN_ARTIFACT_STORE,
+    max_outstanding_runs=int(os.getenv("RUNNER_MAX_OUTSTANDING_RUNS", "4")),
+    max_global_outstanding_runs=int(
+        os.getenv("RUNNER_MAX_GLOBAL_OUTSTANDING_RUNS", "20")
+    ),
     summary_store=RUN_SUMMARY_STORE,
 )
 SERVICE_AUTH = [Depends(require_service_api_key)]
@@ -76,8 +84,10 @@ def ready() -> dict[str, str]:
     response_model=RunnerCapabilities,
     dependencies=SERVICE_AUTH,
 )
-def capabilities() -> dict:
-    return RUN_MANAGER.capabilities()
+def capabilities(
+    workspace_id: Annotated[str, Depends(workspace_context)],
+) -> dict:
+    return RUN_MANAGER.capabilities(workspace_id)
 
 
 @app.post(
@@ -86,8 +96,16 @@ def capabilities() -> dict:
     status_code=status.HTTP_202_ACCEPTED,
     dependencies=SERVICE_AUTH,
 )
-async def create_pipeline_run(request: CreatePipelineRunRequest) -> dict:
+async def create_pipeline_run(
+    request: CreatePipelineRunRequest,
+    workspace_id: Annotated[str, Depends(workspace_context)],
+) -> dict:
     try:
+        if request.workspace_id != workspace_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Run workspace does not match the authenticated service context.",
+            )
         record, _created = await RUN_MANAGER.start(request)
         return record
     except PipelineRunConflict as exc:
@@ -114,16 +132,21 @@ async def create_pipeline_run(request: CreatePipelineRunRequest) -> dict:
     response_model=PipelineRunListResponse,
     dependencies=SERVICE_AUTH,
 )
-def list_pipeline_runs(limit: int = Query(default=20, ge=1, le=100)) -> dict:
-    return {"runs": RUN_MANAGER.list(limit=limit)}
+def list_pipeline_runs(
+    workspace_id: Annotated[str, Depends(workspace_context)],
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict:
+    return {"runs": RUN_MANAGER.list(limit=limit, workspace_id=workspace_id)}
 
 
 @app.delete(
     "/v1/pipeline-runs",
     dependencies=SERVICE_AUTH,
 )
-async def clear_pipeline_runs() -> dict[str, int]:
-    return await RUN_MANAGER.clear_all()
+async def clear_pipeline_runs(
+    workspace_id: Annotated[str, Depends(workspace_context)],
+) -> dict[str, int]:
+    return await RUN_MANAGER.clear_all(workspace_id)
 
 
 @app.get(
@@ -131,8 +154,11 @@ async def clear_pipeline_runs() -> dict[str, int]:
     response_model=PipelineRunRecord,
     dependencies=SERVICE_AUTH,
 )
-def get_pipeline_run(run_id: str) -> dict:
-    record = RUN_MANAGER.get(run_id)
+def get_pipeline_run(
+    run_id: str,
+    workspace_id: Annotated[str, Depends(workspace_context)],
+) -> dict:
+    record = RUN_MANAGER.get(run_id, workspace_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Pipeline run was not found.")
     return record
@@ -145,9 +171,10 @@ def get_pipeline_run(run_id: str) -> dict:
 )
 def get_pipeline_run_events(
     run_id: str,
+    workspace_id: Annotated[str, Depends(workspace_context)],
     after: int = Query(default=0, ge=0),
 ) -> dict:
-    payload = RUN_MANAGER.events(run_id, after=after)
+    payload = RUN_MANAGER.events(run_id, after=after, workspace_id=workspace_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="Pipeline run was not found.")
     return payload
@@ -158,8 +185,11 @@ def get_pipeline_run_events(
     response_model=PipelineRunRecord,
     dependencies=SERVICE_AUTH,
 )
-async def cancel_pipeline_run(run_id: str) -> dict:
-    record = await RUN_MANAGER.cancel(run_id)
+async def cancel_pipeline_run(
+    run_id: str,
+    workspace_id: Annotated[str, Depends(workspace_context)],
+) -> dict:
+    record = await RUN_MANAGER.cancel(run_id, workspace_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Pipeline run was not found.")
     return record
@@ -169,8 +199,12 @@ async def cancel_pipeline_run(run_id: str) -> dict:
     "/v1/pipeline-runs/{run_id}/outputs/{output_path:path}",
     dependencies=SERVICE_AUTH,
 )
-def download_pipeline_run_output(run_id: str, output_path: str) -> Response:
-    payload = RUN_MANAGER.output(run_id, output_path)
+def download_pipeline_run_output(
+    run_id: str,
+    output_path: str,
+    workspace_id: Annotated[str, Depends(workspace_context)],
+) -> Response:
+    payload = RUN_MANAGER.output(run_id, output_path, workspace_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="Pipeline output was not found.")
     body, content_type, filename = payload
@@ -185,8 +219,11 @@ def download_pipeline_run_output(run_id: str, output_path: str) -> Response:
     "/v1/pipeline-runs/{run_id}/bundle",
     dependencies=SERVICE_AUTH,
 )
-def download_pipeline_run_bundle(run_id: str) -> Response:
-    body = RUN_MANAGER.bundle_zip(run_id)
+def download_pipeline_run_bundle(
+    run_id: str,
+    workspace_id: Annotated[str, Depends(workspace_context)],
+) -> Response:
+    body = RUN_MANAGER.bundle_zip(run_id, workspace_id)
     if body is None:
         raise HTTPException(status_code=404, detail="Pipeline run was not found.")
     return Response(

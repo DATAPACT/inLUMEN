@@ -6,11 +6,13 @@ from typing import Callable
 from flask import Blueprint, jsonify, make_response, request
 
 from async_runtime import run_async
-from auth_middleware import require_auth
+from auth_middleware import current_workspace_id, require_auth
 from deployment_artifacts import extract_pipeline_steps
 from graph_client import dispatch_graph_request, fetch_pipeline_graph
 from minio_gateway import get_minio_client
 from runtime_environment import runtime_environment_from_files
+from workspace_store import WORKSPACE_HEADER
+from workspace_storage import node_bucket_name
 
 from .base import GeneratedRuntimeArtifacts
 from .registry import generate_runtime_artifacts
@@ -22,7 +24,10 @@ ArtifactPersister = Callable[[GeneratedRuntimeArtifacts], dict]
 
 def _authorization_headers() -> dict[str, str]:
     authorization = request.headers.get("Authorization")
-    return {"Authorization": authorization} if authorization else {}
+    headers = {WORKSPACE_HEADER: current_workspace_id()}
+    if authorization:
+        headers["Authorization"] = authorization
+    return headers
 
 
 def _load_graph() -> dict:
@@ -35,7 +40,7 @@ def _load_graph() -> dict:
 
 def _persist_artifacts(bundle: GeneratedRuntimeArtifacts) -> dict:
     client = get_minio_client()
-    bucket = f"files-step-id-{bundle.flow_id}".lower()
+    bucket = node_bucket_name(bundle.flow_id)
     if not client.bucket_exists(bucket):
         client.make_bucket(bucket)
 

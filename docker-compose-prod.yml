@@ -5,113 +5,90 @@ networks:
     name: datapact_network
 
 volumes:
-  frontend_node_modules:
-  codegen_state:
-  runner_state:
+  postgres_data:
+  neo4j_data:
+  neo4j_logs:
+  minio_data:
+  runner_artifacts:
   inlumen_model_store:
     name: ${INLUMEN_MODEL_STORE_VOLUME:-inlumen_model_store}
 
 services:
-  neo4j:
-    image: neo4j:5-community
-    container_name: inlumen_neo4j
-    hostname: datapact-neo4j-db
-    mem_limit: ${NEO4J_MEM_LIMIT:-2G}
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
     restart: unless-stopped
-    volumes:
-      - ./neo4j_data_volume:/data
-      - ./neo4j_logs_volume:/logs
-      - ./neo4j_import_volume:/import
-      - ./neo4j_plugins_volume:/plugins
     environment:
-      NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/password}
+      POSTGRES_DB: ${POSTGRES_DB:-inlumen}
+      POSTGRES_USER: ${POSTGRES_USER:-inlumen}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - datapact_network
+
+  neo4j:
+    image: ${NEO4J_IMAGE:-neo4j:5-community}
+    restart: unless-stopped
+    mem_limit: ${NEO4J_MEM_LIMIT:-2G}
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    environment:
+      NEO4J_AUTH: ${NEO4J_AUTH:?NEO4J_AUTH is required}
       NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP_INITIAL_SIZE:-512m}
       NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_MAX_SIZE:-512m}
       NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE_SIZE:-512m}
     healthcheck:
-      test:
-        - CMD-SHELL
-        - 'AUTH_USER="$${NEO4J_AUTH%%/*}"; AUTH_PASS="$${NEO4J_AUTH#*/}"; cypher-shell -u "$$AUTH_USER" -p "$$AUTH_PASS" "RETURN 1;"'
-      interval: 5s
+      test: ["CMD", "wget", "--quiet", "--spider", "--timeout=3", "http://127.0.0.1:7474/"]
+      interval: 10s
       timeout: 5s
       retries: 24
+      start_period: 60s
     networks:
       datapact_network:
         aliases:
           - datapact-neo4j-db
 
   minio:
-    image: minio/minio:latest
-    container_name: inlumen_minio
-    hostname: datapact-minio-db
+    image: ${MINIO_IMAGE:-minio/minio:latest}
     command: server --address 0.0.0.0:9000 --console-address ":9099" /data
     restart: unless-stopped
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio-datapact}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio-datapact}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
     volumes:
-      - ./minio_data:/data
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
     networks:
       datapact_network:
         aliases:
           - datapact-minio-db
 
-  backend:
+  migrate:
     build:
       context: ./backend
-    container_name: inlumen_backend
-    hostname: inlumen-backend
-    restart: unless-stopped
+    image: ${INLUMEN_BACKEND_IMAGE:-inlumen-backend:local}
+    restart: "no"
     depends_on:
-      neo4j:
+      postgres:
         condition: service_healthy
-      minio:
-        condition: service_started
-      codegen:
-        condition: service_healthy
-      runner:
-        condition: service_healthy
-    working_dir: /usr/inlumen
-    ports:
-      - "${INLUMEN_API_PORT:-5000}:${INLUMEN_API_PORT:-5000}"
-    volumes:
-      - ./backend:/usr/inlumen
     environment:
-      PYTHONUNBUFFERED: "1"
-      FRONTEND_PORT: ${FRONTEND_PORT:-8080}
-      INLUMEN_API_PORT: ${INLUMEN_API_PORT:-5000}
-      NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/password}
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio-datapact}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio-datapact}
-      API_AUTH_TOKEN: ${API_AUTH_TOKEN:-}
-      AUTH_ENABLED: ${AUTH_ENABLED:-false}
-      KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-}
-      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-}
-      KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:-}
-      INLUMEN_CODEGEN_SERVICE_URL: ${INLUMEN_CODEGEN_SERVICE_URL:-http://codegen:8010}
-      INLUMEN_CODEGEN_SERVICE_API_KEY: ${INLUMEN_CODEGEN_SERVICE_API_KEY:?INLUMEN_CODEGEN_SERVICE_API_KEY is required}
-      INLUMEN_CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS:-300}
-      INLUMEN_CODEGEN_PIPELINE_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_CODEGEN_PIPELINE_REQUEST_TIMEOUT_SECONDS:-1200}
-      INLUMEN_CODEGEN_DEPLOYMENT_TIMEOUT_SECONDS: ${INLUMEN_CODEGEN_DEPLOYMENT_TIMEOUT_SECONDS:-1800}
-      INLUMEN_CODEGEN_RUN_DB_PATH: ${INLUMEN_CODEGEN_RUN_DB_PATH:-/usr/inlumen/state/codegen-runs.sqlite3}
-      INLUMEN_RUNNER_SERVICE_URL: ${INLUMEN_RUNNER_SERVICE_URL:-http://runner:8020}
-      INLUMEN_RUNNER_SERVICE_API_KEY: ${INLUMEN_RUNNER_SERVICE_API_KEY:?INLUMEN_RUNNER_SERVICE_API_KEY is required}
-      INLUMEN_RUNNER_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_RUNNER_REQUEST_TIMEOUT_SECONDS:-10}
-      WATCH_INTERVAL_SECONDS: ${WATCH_INTERVAL_SECONDS:-1.0}
-    command:
-      - python
-      - dev_runner.py
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.getenv(\"INLUMEN_API_PORT\", \"5000\")}/health', timeout=5)"
-      interval: 5s
-      timeout: 5s
-      retries: 12
+      APP_ENV: production
+      AUTH_ENABLED: "true"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-inlumen}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-inlumen}
+      KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER}
+      KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE}
+    command: ["python", "migrate.py"]
     networks:
       - datapact_network
 
@@ -119,37 +96,34 @@ services:
     build:
       context: ./runner
     image: ${INLUMEN_RUNNER_IMAGE:-inlumen-runner-service:local}
-    container_name: inlumen_runner
-    hostname: runner
     restart: unless-stopped
     depends_on:
+      postgres:
+        condition: service_healthy
       neo4j:
         condition: service_healthy
     expose:
       - "8020"
     volumes:
-      - runner_state:/app/state
+      - runner_artifacts:/app/state/artifacts
     environment:
-      PYTHONUNBUFFERED: "1"
+      APP_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-inlumen}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-inlumen}
       RUNNER_SERVICE_API_KEY: ${INLUMEN_RUNNER_SERVICE_API_KEY:?INLUMEN_RUNNER_SERVICE_API_KEY is required}
-      RUNNER_JOB_DB_PATH: ${RUNNER_JOB_DB_PATH:-/app/state/pipeline-runs.sqlite3}
-      RUNNER_ARTIFACT_ROOT: ${RUNNER_ARTIFACT_ROOT:-/app/state/artifacts}
+      RUNNER_ARTIFACT_ROOT: /app/state/artifacts
       RUNNER_ADAPTER: ${RUNNER_ADAPTER:-dagster}
-      INLUMEN_CODEGEN_SERVICE_URL: ${INLUMEN_CODEGEN_SERVICE_URL:-http://codegen:8010}
+      RUNNER_MAX_OUTSTANDING_RUNS: ${RUNNER_MAX_OUTSTANDING_RUNS:-20}
+      RUNNER_MAX_GLOBAL_OUTSTANDING_RUNS: ${RUNNER_MAX_GLOBAL_OUTSTANDING_RUNS:-40}
+      INLUMEN_CODEGEN_SERVICE_URL: http://codegen:8010
       INLUMEN_CODEGEN_SERVICE_API_KEY: ${INLUMEN_CODEGEN_SERVICE_API_KEY:?INLUMEN_CODEGEN_SERVICE_API_KEY is required}
       RUNNER_DAGSTER_TIMEOUT_SECONDS: ${RUNNER_DAGSTER_TIMEOUT_SECONDS:-1800}
-      NEO4J_URI: ${NEO4J_URI:-bolt://datapact-neo4j-db:7687}
-      NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/password}
+      NEO4J_URI: bolt://datapact-neo4j-db:7687
+      NEO4J_AUTH: ${NEO4J_AUTH}
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8020/ready', timeout=5)"
-      interval: 5s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8020/ready', timeout=5)"]
+      interval: 10s
       timeout: 5s
-      retries: 24
-      start_period: 10s
+      retries: 20
     networks:
       - datapact_network
 
@@ -157,20 +131,20 @@ services:
     build:
       context: ./codegen
     image: ${INLUMEN_CODEGEN_IMAGE:-inlumen-codegen-service:local}
-    container_name: inlumen_codegen
-    hostname: codegen
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     expose:
       - "8010"
     volumes:
-      - codegen_state:/app/state
       - inlumen_model_store:/models
       - /var/run/docker.sock:/var/run/docker.sock
       - ${CODEGEN_VALIDATION_HOST_WORKDIR:-/var/lib/inlumen/codegen-workspaces}:${CODEGEN_VALIDATION_WORKDIR:-/var/lib/inlumen/codegen-workspaces}
     environment:
-      PYTHONUNBUFFERED: "1"
-      CODEGEN_SERVICE_API_KEY: ${INLUMEN_CODEGEN_SERVICE_API_KEY:?INLUMEN_CODEGEN_SERVICE_API_KEY is required}
-      CODEGEN_JOB_DB_PATH: ${CODEGEN_JOB_DB_PATH:-/app/state/codegen-jobs.sqlite3}
+      APP_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-inlumen}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-inlumen}
+      CODEGEN_SERVICE_API_KEY: ${INLUMEN_CODEGEN_SERVICE_API_KEY}
       CODEGEN_DOCKER_VALIDATION_ENABLED: ${CODEGEN_DOCKER_VALIDATION_ENABLED:-true}
       CODEGEN_VALIDATION_WORKDIR: ${CODEGEN_VALIDATION_WORKDIR:-/var/lib/inlumen/codegen-workspaces}
       CODEGEN_PIPELINE_CACHE_TTL_SECONDS: ${CODEGEN_PIPELINE_CACHE_TTL_SECONDS:-3600}
@@ -179,46 +153,97 @@ services:
       CODEGEN_DEPENDENCY_INSTALL_TIMEOUT_SECONDS: ${CODEGEN_DEPENDENCY_INSTALL_TIMEOUT_SECONDS:-600}
       INLUMEN_MODEL_ROOT: /models
       INLUMEN_MODEL_STORE_VOLUME: ${INLUMEN_MODEL_STORE_VOLUME:-inlumen_model_store}
-      CODEGEN_INPUT_FILE_BASE_URL: ${CODEGEN_INPUT_FILE_BASE_URL:-http://backend:${INLUMEN_API_PORT:-5000}/api/files/content}
-      CODEGEN_INPUT_FILE_ALLOW_INSECURE_HTTP: ${CODEGEN_INPUT_FILE_ALLOW_INSECURE_HTTP:-true}
+      CODEGEN_INPUT_FILE_BASE_URL: http://backend:5000/api/files/content
+      CODEGEN_INPUT_FILE_ALLOW_INSECURE_HTTP: "true"
       CODEGEN_INPUT_FILE_MAX_BYTES: ${CODEGEN_INPUT_FILE_MAX_BYTES:-52428800}
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/ready', timeout=5)"
-      interval: 5s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/ready', timeout=5)"]
+      interval: 10s
       timeout: 5s
-      retries: 24
-      start_period: 10s
+      retries: 20
+    networks:
+      - datapact_network
+
+  backend:
+    build:
+      context: ./backend
+    image: ${INLUMEN_BACKEND_IMAGE:-inlumen-backend:local}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      neo4j:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      codegen:
+        condition: service_healthy
+      runner:
+        condition: service_healthy
+    expose:
+      - "5000"
+    environment:
+      APP_ENV: production
+      PYTHONUNBUFFERED: "1"
+      INLUMEN_API_PORT: "5000"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-inlumen}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-inlumen}
+      AUTH_ENABLED: "true"
+      KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:?KEYCLOAK_JWKS_URL is required}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:?KEYCLOAK_ISSUER is required}
+      KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:?KEYCLOAK_AUDIENCE is required}
+      CORS_ALLOWED_ORIGINS: ${INLUMEN_PUBLIC_URL:?INLUMEN_PUBLIC_URL is required}
+      NEO4J_AUTH: ${NEO4J_AUTH}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      INLUMEN_SECRET_ENCRYPTION_KEY: ${INLUMEN_SECRET_ENCRYPTION_KEY:?INLUMEN_SECRET_ENCRYPTION_KEY is required}
+      INLUMEN_CODEGEN_SERVICE_URL: http://codegen:8010
+      INLUMEN_CODEGEN_SERVICE_API_KEY: ${INLUMEN_CODEGEN_SERVICE_API_KEY}
+      INLUMEN_CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS:-300}
+      INLUMEN_CODEGEN_PIPELINE_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_CODEGEN_PIPELINE_REQUEST_TIMEOUT_SECONDS:-1200}
+      INLUMEN_CODEGEN_DEPLOYMENT_TIMEOUT_SECONDS: ${INLUMEN_CODEGEN_DEPLOYMENT_TIMEOUT_SECONDS:-1800}
+      INLUMEN_RUNNER_SERVICE_URL: http://runner:8020
+      INLUMEN_RUNNER_SERVICE_API_KEY: ${INLUMEN_RUNNER_SERVICE_API_KEY}
+      INLUMEN_RUNNER_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_RUNNER_REQUEST_TIMEOUT_SECONDS:-10}
+      WATCH_INTERVAL_SECONDS: ${WATCH_INTERVAL_SECONDS:-1.0}
+    command: ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--threads", "4", "--timeout", "1800", "inlumen_api:app"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
     networks:
       - datapact_network
 
   frontend:
     build:
       context: ./frontend
-    container_name: inlumen_frontend
-    hostname: inlumen-frontend
+      dockerfile: Dockerfile.prod
+      args:
+        VITE_INLUMEN_API_URL: ${INLUMEN_PUBLIC_URL}
+        VITE_AUTH_ENABLED: "true"
+        VITE_KEYCLOAK_URL: ${VITE_KEYCLOAK_URL:?VITE_KEYCLOAK_URL is required}
+        VITE_KEYCLOAK_REALM: ${VITE_KEYCLOAK_REALM:-inlumen}
+        VITE_KEYCLOAK_CLIENT_ID: ${VITE_KEYCLOAK_CLIENT_ID:-inlumen-frontend}
+    image: ${INLUMEN_FRONTEND_IMAGE:-inlumen-frontend:local}
     restart: unless-stopped
     depends_on:
       backend:
         condition: service_healthy
-    ports:
-      - "${FRONTEND_PORT:-8080}:${FRONTEND_PORT:-8080}"
-    volumes:
-      - ./frontend:/app
-      - frontend_node_modules:/app/node_modules
+    expose:
+      - "8080"
+    networks:
+      - datapact_network
+
+  cloudflared:
+    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:latest}
+    restart: unless-stopped
+    depends_on:
+      frontend:
+        condition: service_started
     environment:
-      FRONTEND_PORT: ${FRONTEND_PORT:-8080}
-      NODE_ENV: development
-      VITE_INLUMEN_API_PORT: ${INLUMEN_API_PORT:-5000}
-      VITE_INLUMEN_API_URL: ${VITE_INLUMEN_API_URL:-${INLUMEN_API_PUBLIC_URL:-}}
-      VITE_AUTH_ENABLED: ${VITE_AUTH_ENABLED:-${AUTH_ENABLED:-false}}
-      VITE_KEYCLOAK_URL: ${VITE_KEYCLOAK_URL:-http://localhost:8081}
-      VITE_KEYCLOAK_REALM: ${VITE_KEYCLOAK_REALM:-inlumen}
-      VITE_KEYCLOAK_CLIENT_ID: ${VITE_KEYCLOAK_CLIENT_ID:-inlumen-frontend}
-      VITE_ENABLE_REMOTE_CHATBOT_CONFIG_SYNC: ${VITE_ENABLE_REMOTE_CHATBOT_CONFIG_SYNC:-true}
-    command: npm run dev -- --host 0.0.0.0
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN is required}
+    command: tunnel --no-autoupdate run
     networks:
       - datapact_network

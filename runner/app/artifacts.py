@@ -18,8 +18,13 @@ class PipelineArtifactStore:
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def store_bundle(self, run_id: str, files: list[dict[str, Any]]) -> str:
-        path = self._run_root(run_id) / "bundle-files.json"
+    def store_bundle(
+        self,
+        run_id: str,
+        files: list[dict[str, Any]],
+        workspace_id: str = "local-workspace",
+    ) -> str:
+        path = self._run_root(run_id, workspace_id) / "bundle-files.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps(files, ensure_ascii=False, separators=(",", ":")),
@@ -35,10 +40,13 @@ class PipelineArtifactStore:
         return [deepcopy(item) for item in parsed if isinstance(item, dict)]
 
     def store_outputs(
-        self, run_id: str, outputs: list[dict[str, Any]]
+        self,
+        run_id: str,
+        outputs: list[dict[str, Any]],
+        workspace_id: str = "local-workspace",
     ) -> list[dict[str, Any]]:
         stored = []
-        output_root = self._run_root(run_id) / "artifacts"
+        output_root = self._run_root(run_id, workspace_id) / "artifacts"
         for entry in outputs:
             path = self._safe_relative(entry.get("path"))
             destination = (output_root / Path(*path.parts)).resolve()
@@ -64,21 +72,33 @@ class PipelineArtifactStore:
     def read_output(self, reference: str) -> bytes:
         return self._safe_reference(reference).read_bytes()
 
-    def clear(self) -> int:
-        """Remove all run-owned payload directories from the artifact root."""
+    def clear(self, workspace_id: str | None = None) -> int:
+        """Remove run payloads, optionally constrained to one workspace."""
         removed = 0
-        for child in self.root.iterdir():
+        target = (
+            self.root if workspace_id is None else self._workspace_root(workspace_id)
+        )
+        if not target.exists():
+            return 0
+        for child in target.iterdir():
             if child.is_dir():
                 shutil.rmtree(child)
             else:
                 child.unlink()
             removed += 1
+        if workspace_id is not None:
+            target.rmdir()
         return removed
 
-    def _run_root(self, run_id: str) -> Path:
+    def _workspace_root(self, workspace_id: str) -> Path:
+        if not SAFE_RUN_ID.fullmatch(workspace_id):
+            raise ValueError("Unsafe workspace id.")
+        return self.root / workspace_id
+
+    def _run_root(self, run_id: str, workspace_id: str = "local-workspace") -> Path:
         if not SAFE_RUN_ID.fullmatch(run_id):
             raise ValueError("Unsafe pipeline run id.")
-        return self.root / run_id
+        return self._workspace_root(workspace_id) / run_id
 
     def _safe_reference(self, reference: str) -> Path:
         path = Path(str(reference or "")).expanduser().resolve()

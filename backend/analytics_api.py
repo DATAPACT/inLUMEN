@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 from flask import Flask, jsonify, has_request_context, make_response, request
 
 from async_runtime import run_async
-from auth_middleware import require_auth
+from auth_middleware import current_workspace_id, require_auth
 from chat_state import clear_state_from_disk
 from deployment_artifacts import (
     DeploymentArtifactValidationError,
@@ -35,6 +35,8 @@ from pipeline_agent.cancellation import (
 )
 from pipeline_agent.service import PipelineEditorTurnCancelled, run_pipeline_editor_turn
 from runtime_config import add_cors_headers
+from workspace_storage import node_bucket_name
+from workspace_store import WORKSPACE_HEADER
 
 app = Flask(__name__)
 
@@ -84,6 +86,7 @@ def _post_deployment_validation_request(
     encoded = json.dumps(payload).encode("utf-8")
     service_api_key = os.getenv("INLUMEN_CODEGEN_SERVICE_API_KEY", "").strip()
     headers = {"Content-Type": "application/json"}
+    headers[WORKSPACE_HEADER] = current_workspace_id()
     if service_api_key:
         headers["Authorization"] = f"Bearer {service_api_key}"
     http_request = Request(
@@ -141,7 +144,7 @@ def _file_refs_from_version_graph(graph: dict) -> list[dict]:
         step_id = str(data.get("flow_id") or node.get("id") or data.get("id") or "").strip()
         if not step_id:
             continue
-        default_bucket = f"files-step-id-{step_id}".lower()
+        default_bucket = node_bucket_name(step_id)
         raw_files = data.get("file_buckets") if isinstance(data.get("file_buckets"), list) else data.get("files")
         if not isinstance(raw_files, list):
             continue

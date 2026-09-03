@@ -7,12 +7,14 @@ import datetime
 import mimetypes
 import tempfile
 from runtime_config import add_cors_headers
+from workspace_storage import (
+    bucket_belongs_to_workspace,
+    node_bucket_name,
+    version_snapshot_bucket,
+    workspace_bucket_prefix,
+)
 
 app = Flask(__name__)
-
-WORKSPACE_BUCKET_PREFIXES = ("files-step-id-",)
-WORKSPACE_BUCKET_NAMES = {"pipeline-version-file-snapshots"}
-
 
 # Apply the CORS function to all routes using the after_request decorator
 @app.after_request
@@ -35,15 +37,11 @@ def minio_upload_file():
     if 'file' not in request.files:
         return jsonify({'status': 400})
     file = request.files['file']
-    bucket_id = "files-step-id-"+ str(request.form.get('bucket_id'))
-    bucket_id = bucket_id.lower() # Bucket names are always low cased
+    bucket_id = node_bucket_name(request.form.get('bucket_id'))
     # Process the file as needed (e.g., save to database or storage)
-    download_dir = "./downloads"
-    if not os.path.exists(download_dir):
-        os.makedirs(download_dir)
-    # Save the file locally
     file_name = file.filename
-    file_path = os.path.join(download_dir, file_name)
+    descriptor, file_path = tempfile.mkstemp(prefix="inlumen-upload-")
+    os.close(descriptor)
     file.save(file_path)
     try:
         # First, make sure bucket exists
@@ -65,8 +63,10 @@ def minio_upload_file():
 @require_auth
 def minio_read_file():
     filename = request.args.get('filename', '').strip()
-    bucket_id = "files-step-id-"+ str(request.args.get('bucket_id'))
-    bucket_id = bucket_id.lower()
+    requested_bucket = str(request.args.get('bucket_name') or '').strip().lower()
+    if requested_bucket and not bucket_belongs_to_workspace(requested_bucket):
+        return jsonify({'status': 404, 'error': 'bucket not found'}), 404
+    bucket_id = requested_bucket or node_bucket_name(request.args.get('bucket_id'))
     if not filename:
         return jsonify({'status': 400, 'error': 'filename is required'}), 400
     try:
@@ -84,8 +84,7 @@ def minio_update_text_file():
     data = request.get_json(silent=True) or {}
     filename = str(data.get('filename') or '').strip()
     content = data.get('content')
-    bucket_id = "files-step-id-"+ str(data.get('bucket_id'))
-    bucket_id = bucket_id.lower()
+    bucket_id = node_bucket_name(data.get('bucket_id'))
     if not filename:
         return jsonify({'status': 400, 'error': 'filename is required'}), 400
     if not isinstance(content, str):
@@ -111,8 +110,7 @@ def minio_remove_file():
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     filename = request.form.get('filename')
-    bucket_id = "files-step-id-"+ str(request.form.get('bucket_id'))
-    bucket_id = bucket_id.lower() 
+    bucket_id = node_bucket_name(request.form.get('bucket_id'))
     try:
         # Remove file to MinIO
         print(f"[minio_api.py] Received request to remove file {filename} from bucket {bucket_id}")
@@ -134,8 +132,7 @@ def minio_remove_file():
 def minio_clear_bucket():
     if request.method == 'OPTIONS':
         return jsonify({}), 200
-    bucket_id = "files-step-id-"+ str(request.args.get('bucket_id'))
-    bucket_id = bucket_id.lower() 
+    bucket_id = node_bucket_name(request.args.get('bucket_id'))
     try:
         # Remove file to MinIO
         print(f"[minio_api.py] Received request to remove bucket content from bucket {bucket_id}")
@@ -147,11 +144,12 @@ def minio_clear_bucket():
 
 
 def _workspace_bucket_names(client) -> list[str]:
+    prefix = workspace_bucket_prefix()
+    snapshots = version_snapshot_bucket()
     return sorted(
         bucket.name
         for bucket in client.list_buckets()
-        if bucket.name in WORKSPACE_BUCKET_NAMES
-        or bucket.name.startswith(WORKSPACE_BUCKET_PREFIXES)
+        if bucket.name == snapshots or bucket.name.startswith(prefix)
     )
 
 
@@ -186,8 +184,9 @@ def minio_clear_workspace():
 @app.route('/minio_local_download', methods=['GET'])
 @require_auth
 def minio_local_download():
-    bucket_name = request.args.get('bucket_id')
-    bucket_name = bucket_name.lower() # Bucket names are always low cased
+    bucket_name = str(request.args.get('bucket_id') or '').lower()
+    if not bucket_belongs_to_workspace(bucket_name):
+        return jsonify({'status': 404, 'error': 'bucket not found'}), 404
     # Create temp dir if not present from before:
     download_dir = "./downloads"
     if not os.path.exists(download_dir):
@@ -199,8 +198,9 @@ def minio_local_download():
 @app.route('/minio_inlumen_download', methods=['GET'])
 @require_auth
 def minio_inlumen_download():
-    bucket_name = request.args.get('bucket_id')
-    bucket_name = bucket_name.lower() # Bucket names are always low cased
+    bucket_name = str(request.args.get('bucket_id') or '').lower()
+    if not bucket_belongs_to_workspace(bucket_name):
+        return jsonify({'status': 404, 'error': 'bucket not found'}), 404
     # Create temp dir if not present from before:
     download_dir = "./downloads"
     if not os.path.exists(download_dir):
@@ -213,6 +213,8 @@ def minio_inlumen_download():
 @require_auth
 def minio_list_objects():
     bucket_name = request.args.get('bucket_name')  
+    if not bucket_belongs_to_workspace(bucket_name):
+        return jsonify({'status': 404, 'error': 'bucket not found'}), 404
     objects = list_objects(bucket_name=bucket_name)
     object_list = list(objects)
     object_list = [object.object_name for object in object_list]
@@ -223,6 +225,8 @@ def minio_list_objects():
 @require_auth
 def minio_create_bucket():
     bucket_name = request.args.get('bucket_name')  
+    if not bucket_belongs_to_workspace(bucket_name):
+        return jsonify({'status': 404, 'error': 'bucket not found'}), 404
     create_bucket(bucket_name=bucket_name)
     print("[minio_api.py] Bucket "+ bucket_name + " created.")
     return jsonify({'status': 200})
@@ -231,6 +235,8 @@ def minio_create_bucket():
 @require_auth
 def minio_get_object():
     bucket_name = request.args.get('bucket_name')
+    if not bucket_belongs_to_workspace(bucket_name):
+        return jsonify({'status': 404, 'error': 'bucket not found'}), 404
     object_name = request.args.get('object_name') 
     prefix = request.args.get('prefix') 
     object_response = get_object(bucket_name=bucket_name, object_name = object_name, prefix=prefix)
