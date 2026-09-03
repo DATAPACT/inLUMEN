@@ -134,6 +134,7 @@ services:
     build:
       context: ./runner
     image: inlumen-runner-service:local
+    pull_policy: build
     container_name: inlumen_runner
     hostname: runner
     restart: unless-stopped
@@ -174,6 +175,7 @@ services:
     build:
       context: ./codegen
     image: inlumen-codegen-service:local
+    pull_policy: build
     container_name: inlumen_codegen
     hostname: codegen
     restart: unless-stopped
