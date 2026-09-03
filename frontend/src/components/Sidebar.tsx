@@ -937,27 +937,27 @@ export function Sidebar({
                 <h3 className="text-sm font-medium">Runtime code</h3>
               </div>
               <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                Generate validated code or attach reviewed Task packages before running the pipeline.
+                Generate code here, or upload code you created elsewhere.
               </p>
-              <div className="mt-3 grid grid-cols-2 gap-2">
+              <div className="mt-3 space-y-2">
                 <Button
-                  className="h-9 min-w-0 px-2 text-xs"
+                  className="h-9 w-full px-3 text-xs"
                   onClick={onGenerateRuntimeCode}
                   aria-label="Generate runtime code"
                   title="Generate runtime code"
                 >
                   <Wand2 className="mr-1.5 h-3.5 w-3.5 shrink-0" />
-                  <span>Generate</span>
+                  <span>Generate code</span>
                 </Button>
                 <Button
                   variant="outline"
-                  className="h-9 min-w-0 px-2 text-xs"
+                  className="h-9 w-full px-3 text-xs"
                   onClick={onImportRuntimePackages}
-                  aria-label="Import runtime packages"
-                  title="Import reviewed Task packages from a ZIP archive"
+                  aria-label="Upload code ZIP"
+                  title="Upload code from a ZIP archive"
                 >
                   <PackageOpen className="mr-1.5 h-3.5 w-3.5 shrink-0" />
-                  <span>Import ZIP</span>
+                  <span>Upload code ZIP</span>
                 </Button>
               </div>
             </div>
