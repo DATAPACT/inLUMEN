@@ -1195,6 +1195,7 @@ const Index = () => {
   };
 
   const showFlowLayout = activeTab === 'lab' || activeTab === 'overview' || activeTab === 'simulate';
+  const workspacePanelLayout = `${isLibraryOpen ? 'library' : 'no-library'}-${rightPanel ? 'right' : 'no-right'}`;
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden animate-fade-in bg-background text-foreground transition-colors">
@@ -1223,9 +1224,10 @@ const Index = () => {
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {showFlowLayout ? (
           <ResizablePanelGroup
+            key={workspacePanelLayout}
             direction="horizontal"
             className="min-w-0 flex-1"
-            autoSaveId="inlumen-workspace-panels-v2"
+            autoSaveId={`inlumen-workspace-panels-v2-${workspacePanelLayout}`}
           >
             {isLibraryOpen && (
               <>
