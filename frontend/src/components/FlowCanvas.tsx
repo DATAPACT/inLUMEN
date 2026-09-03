@@ -142,6 +142,7 @@ export interface FlowCanvasRef {
   getCurrentGraph: () => AgentGraphSnapshot;
   getCurrentVersionGraph: () => PipelineVersionGraph;
   openCodeGeneration: (selectedFlowIds?: string[]) => void;
+  openTaskPackageImport: () => void;
 }
 
 let nodeId = 1;
@@ -1090,7 +1091,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const taskPackageInputRef = useRef<HTMLInputElement | null>(null);
   const triggerImport = () => fileInputRef.current?.click();
-  const triggerTaskPackageImport = () => taskPackageInputRef.current?.click();
+  const triggerTaskPackageImport = useCallback(() => taskPackageInputRef.current?.click(), []);
 
   const importTaskPackages = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const archive = event.target.files?.[0];
@@ -1374,6 +1375,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     getCurrentGraph,
     getCurrentVersionGraph: createSerializableFlow,
     openCodeGeneration,
+    openTaskPackageImport: triggerTaskPackageImport,
   }), [
     createSerializableFlow,
     getCurrentGraph,
@@ -1382,6 +1384,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     replaceCurrentGraph,
     restoreGraphLocally,
     syncFromBackend,
+    triggerTaskPackageImport,
     updateNode,
   ]);
 
@@ -1683,8 +1686,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       });
     }
   };
-
-  const handleGeneratePipelineScripts = () => openCodeGeneration();
 
   const handleRunPipelineScriptGeneration = async () => {
     if (
@@ -2069,11 +2070,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           onExportJson={exportFlow}
           onImportClick={triggerImport}
           onImport={importFlow}
-          taskPackageInputRef={taskPackageInputRef}
-          onTaskPackageImportClick={triggerTaskPackageImport}
-          onTaskPackageImport={importTaskPackages}
-          onGenerateScripts={handleGeneratePipelineScripts}
-          isGeneratingScripts={isGeneratingScripts}
           showPortDetails={showPortDetails}
           onTogglePortDetails={() => setShowPortDetails((current) => !current)}
           validationErrors={validationErrors}
@@ -2086,6 +2082,14 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         />
       </ReactFlow>
       </PortDisplayContext.Provider>
+
+      <input
+        ref={taskPackageInputRef}
+        type="file"
+        accept=".zip,application/zip"
+        className="hidden"
+        onChange={importTaskPackages}
+      />
 
       <Dialog
         open={pendingTaskPackages.length > 0}

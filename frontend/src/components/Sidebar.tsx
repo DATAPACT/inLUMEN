@@ -24,6 +24,8 @@ import {
   Hash,
   Paperclip,
   Download,
+  PackageOpen,
+  Wand2,
 } from 'lucide-react';
 import {
   createNodeDataFromDefinition,
@@ -82,6 +84,8 @@ interface SidebarProps {
   replaceCurrentPipelineGraph?: (graph: unknown) => Promise<unknown> | unknown;
   currentPipelineName?: string;
   currentPipelineDescription?: string;
+  onGenerateRuntimeCode?: () => void;
+  onImportRuntimePackages?: () => void;
 }
 
 type DragNodeType = {
@@ -258,6 +262,8 @@ export function Sidebar({
   replaceCurrentPipelineGraph,
   currentPipelineName,
   currentPipelineDescription,
+  onGenerateRuntimeCode,
+  onImportRuntimePackages,
 }: SidebarProps) {
   // --- overview state (fetched when Overview tab is opened)
   const [overviewData, setOverviewData] = useState<Partial<PipelineOverview> | null>(null);
@@ -925,6 +931,36 @@ export function Sidebar({
 
         {activeTab === "simulate" && (
           <div className="w-full min-w-0 max-w-full space-y-4 overflow-hidden py-4">
+            <div className="min-w-0 overflow-hidden rounded-lg border border-border bg-muted/20 p-3">
+              <div className="flex items-center gap-2">
+                <Wand2 className="h-4 w-4 text-violet-400" />
+                <h3 className="text-sm font-medium">Runtime code</h3>
+              </div>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                Generate validated code or attach reviewed Task packages before running the pipeline.
+              </p>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <Button
+                  className="h-9 min-w-0 px-2 text-xs"
+                  onClick={onGenerateRuntimeCode}
+                  aria-label="Generate runtime code"
+                  title="Generate runtime code"
+                >
+                  <Wand2 className="mr-1.5 h-3.5 w-3.5 shrink-0" />
+                  <span>Generate</span>
+                </Button>
+                <Button
+                  variant="outline"
+                  className="h-9 min-w-0 px-2 text-xs"
+                  onClick={onImportRuntimePackages}
+                  aria-label="Import runtime packages"
+                  title="Import reviewed Task packages from a ZIP archive"
+                >
+                  <PackageOpen className="mr-1.5 h-3.5 w-3.5 shrink-0" />
+                  <span>Import ZIP</span>
+                </Button>
+              </div>
+            </div>
             <PipelineRunPanel key={`pipeline-runs-${workspaceResetKey}`} />
             <div className="min-w-0 overflow-hidden rounded-lg border border-border p-3">
               <h3 className="text-sm font-medium mb-2">Build deployment artifacts</h3>

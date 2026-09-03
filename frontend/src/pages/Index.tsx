@@ -1254,6 +1254,8 @@ const Index = () => {
                     replaceCurrentPipelineGraph={(graph) => flowCanvasRef.current?.replaceCurrentGraph(graph)}
                     currentPipelineName={activeVersionName}
                     currentPipelineDescription={activePipelineDescription}
+                    onGenerateRuntimeCode={() => flowCanvasRef.current?.openCodeGeneration()}
+                    onImportRuntimePackages={() => flowCanvasRef.current?.openTaskPackageImport()}
                   />
                 </ResizablePanel>
                 <ResizableHandle id="library-panel-handle" withHandle />
