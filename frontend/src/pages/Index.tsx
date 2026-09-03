@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import { apiFetch } from '@/utils/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
 import { cn } from '@/lib/utils';
@@ -40,6 +40,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
+import type { ImperativePanelHandle } from 'react-resizable-panels';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -223,6 +224,8 @@ const Index = () => {
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const flowCanvasRef = useRef<FlowCanvasRef>(null);
+  const libraryPanelRef = useRef<ImperativePanelHandle>(null);
+  const rightPanelRef = useRef<ImperativePanelHandle>(null);
   const activeChatTurnRef = useRef<{
     turnId: string;
     controller: AbortController;
@@ -257,6 +260,20 @@ const Index = () => {
   const defaultConfig = React.useMemo(() => getDefaultChatbotConfig(), []);
   const isLibraryOpen = panelPreferences.libraryOpen;
   const rightPanel = panelPreferences.rightPanel;
+
+  useLayoutEffect(() => {
+    const panel = libraryPanelRef.current;
+    if (!panel) return;
+    if (isLibraryOpen && panel.isCollapsed()) panel.expand(25);
+    if (!isLibraryOpen && panel.isExpanded()) panel.collapse();
+  }, [isLibraryOpen]);
+
+  useLayoutEffect(() => {
+    const panel = rightPanelRef.current;
+    if (!panel) return;
+    if (rightPanel && panel.isCollapsed()) panel.expand(25);
+    if (!rightPanel && panel.isExpanded()) panel.collapse();
+  }, [rightPanel]);
 
   // Backend session id
   const [chatSessionId, setChatSessionId] = useState<string>(() => {
@@ -606,9 +623,9 @@ const Index = () => {
         message: 'Applying validated agent graph changes to the canvas...',
       });
 
-      // Assistant turns can replace the whole graph and its layout. Fit only
-      // after that validated graph has rendered so the user follows the
-      // assistant's result without fighting manual pan/zoom interactions.
+      // Assistant turns can replace the whole graph and its layout. The canvas
+      // follows intermediate tool updates while the turn is active, then fits
+      // the final validated graph once more here.
       const syncedGraph = await flowCanvasRef.current.syncFromBackend(data.graph, {
         fitView: true,
       });
@@ -1221,29 +1238,56 @@ const Index = () => {
       />
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        {isLibraryOpen && (
-          <Sidebar
-            className="w-[17rem] shrink-0 bg-card/95"
-            onDragStart={onDragStart}
-            activeTab={activeTab}
-            onTabChange={handleTabChange}
-            onBlankPipeline={handleBlankPipeline}
-            onSavePipeline={handleSavePipeline}
-            pipelineOverview={pipelineOverview}
-            activeVersionUid={activeVersionUid}
-            onOverviewUpdated={handleOverviewUpdated}
-            activeChatbotConfig={activeConfig}
-            workspaceResetKey={workspaceResetKey}
-            getCurrentPipelineGraph={() => flowCanvasRef.current?.getCurrentGraph() || { nodes: [], edges: [] }}
-            replaceCurrentPipelineGraph={(graph) => flowCanvasRef.current?.replaceCurrentGraph(graph)}
-            currentPipelineName={activeVersionName}
-            currentPipelineDescription={activePipelineDescription}
-          />
-        )}
-
         {showFlowLayout ? (
-          <ResizablePanelGroup direction="horizontal" className="min-w-0 flex-1">
-            <ResizablePanel id="canvas-panel" order={1} defaultSize={rightPanel ? 72 : 100} minSize={45}>
+          <ResizablePanelGroup
+            direction="horizontal"
+            className="min-w-0 flex-1"
+            autoSaveId="inlumen-workspace-panels-v3"
+          >
+            <ResizablePanel
+              ref={libraryPanelRef}
+              id="library-panel"
+              order={1}
+              defaultSize={isLibraryOpen ? 25 : 0}
+              minSize={18}
+              maxSize={32}
+              collapsible
+              collapsedSize={0}
+            >
+              {isLibraryOpen ? (
+                <Sidebar
+                  className="h-full w-full bg-card/95"
+                  onDragStart={onDragStart}
+                  activeTab={activeTab}
+                  onTabChange={handleTabChange}
+                  onBlankPipeline={handleBlankPipeline}
+                  onSavePipeline={handleSavePipeline}
+                  pipelineOverview={pipelineOverview}
+                  activeVersionUid={activeVersionUid}
+                  onOverviewUpdated={handleOverviewUpdated}
+                  activeChatbotConfig={activeConfig}
+                  workspaceResetKey={workspaceResetKey}
+                  getCurrentPipelineGraph={() => flowCanvasRef.current?.getCurrentGraph() || { nodes: [], edges: [] }}
+                  replaceCurrentPipelineGraph={(graph) => flowCanvasRef.current?.replaceCurrentGraph(graph)}
+                  currentPipelineName={activeVersionName}
+                  currentPipelineDescription={activePipelineDescription}
+                  onGenerateRuntimeCode={() => flowCanvasRef.current?.openCodeGeneration()}
+                  onImportRuntimePackages={() => flowCanvasRef.current?.openTaskPackageImport()}
+                />
+              ) : null}
+            </ResizablePanel>
+            <ResizableHandle
+              id="library-panel-handle"
+              className={cn(!isLibraryOpen && "hidden")}
+              withHandle
+            />
+
+            <ResizablePanel
+              id="canvas-panel"
+              order={2}
+              defaultSize={isLibraryOpen ? (rightPanel ? 50 : 75) : (rightPanel ? 75 : 100)}
+              minSize={35}
+            >
               <div className="h-full bg-background">
                 <WrappedFlowCanvas
                   onNodeSelect={onNodeSelect}
@@ -1258,24 +1302,30 @@ const Index = () => {
                   onActiveVersionChange={updateActiveVersion}
                   onActiveVersionNameChange={handleActiveVersionNameChange}
                   onPipelineDescriptionChange={setActivePipelineDescription}
+                  followAssistantDrawing={isProcessing}
                   workspaceResetKey={workspaceResetKey}
                   flowCanvasRef={flowCanvasRef}
                 />
               </div>
             </ResizablePanel>
 
-            {rightPanel && (
-              <>
-                <ResizableHandle id="right-panel-handle" withHandle />
-                <ResizablePanel
-                  id="right-panel"
-                  order={2}
-                  defaultSize={28}
-                  minSize={24}
-                  maxSize={42}
-                  className="min-w-[320px]"
-                >
-                  {rightPanel === 'inspector' ? (
+            <ResizableHandle
+              id="right-panel-handle"
+              className={cn(!rightPanel && "hidden")}
+              withHandle
+            />
+            <ResizablePanel
+              ref={rightPanelRef}
+              id="right-panel"
+              order={3}
+              defaultSize={rightPanel ? 25 : 0}
+              minSize={20}
+              maxSize={38}
+              collapsible
+              collapsedSize={0}
+            >
+              {rightPanel ? (
+                rightPanel === 'inspector' ? (
                     <PropertiesPanel
                       className="bg-card/95"
                       selectedNode={selectedNode}
@@ -1314,10 +1364,9 @@ const Index = () => {
                       onSetMainVersion={(version) => { void handleSetMainVersion(version); }}
                       onVersionDeleted={handleVersionDeleted}
                     />
-                  )}
-                </ResizablePanel>
-              </>
-            )}
+                  )
+              ) : null}
+            </ResizablePanel>
           </ResizablePanelGroup>
         ) : (
           <div className="flex-1 flex items-center justify-center text-muted-foreground">

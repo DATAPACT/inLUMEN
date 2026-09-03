@@ -27,6 +27,11 @@ import {
   type PipelineRunRecord,
   type RunnerCapabilities,
 } from '@/features/runs/pipelineRuns';
+import {
+  formatOutputSize,
+  presentRunOutputs,
+  summarizeNodeEvents,
+} from '@/features/runs/runPresentation';
 import { cn } from '@/lib/utils';
 
 type StageState = 'pending' | 'active' | 'complete' | 'error';
@@ -121,12 +126,16 @@ export const PipelineRunPanel = () => {
   const selectedRunIdForRefresh = selectedRun?.run_id || '';
   const selectedRunStatus = selectedRun?.status;
   const nodeEvents = useMemo(
-    () => events.filter((event) => event.type.startsWith('node.')),
+    () => summarizeNodeEvents(events.filter((event) => event.type.startsWith('node.'))),
     [events],
   );
   const technicalLogs = useMemo(
     () => events.filter((event) => event.type.endsWith('.log')),
     [events],
+  );
+  const presentedOutputs = useMemo(
+    () => presentRunOutputs(selectedRun?.result?.outputs || []),
+    [selectedRun?.result?.outputs],
   );
   const outstandingRunCount = useMemo(
     () => runs.filter((run) => isActivePipelineRun(run.status)).length,
@@ -220,7 +229,6 @@ export const PipelineRunPanel = () => {
     ? stageStates(selectedRun.status, selectedRun.progress?.phase)
     : [];
   const stageLabels = ['Snapshot', 'Runtime', 'Pipeline', 'Results'];
-  const outputs = selectedRun?.result?.outputs || [];
   const elapsedSeconds = selectedRun?.started_at
     ? Math.max(0, (Date.now() - new Date(selectedRun.started_at).valueOf()) / 1000)
     : 0;
@@ -445,31 +453,87 @@ export const PipelineRunPanel = () => {
             </div>
           )}
 
-          {outputs.length > 0 && (
+          {presentedOutputs.all.length > 0 && (
             <div className="mt-3 border-t border-border pt-2">
-              <div className="flex items-center gap-1.5 font-medium">
-                <FileOutput className="h-3.5 w-3.5" />
-                Results
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="flex items-center gap-1.5 font-medium">
+                    <FileOutput className="h-3.5 w-3.5" />
+                    Results
+                  </div>
+                  <p className="mt-0.5 text-[10px] text-muted-foreground">
+                    Final files are grouped by name. Manifests and runtime files are kept below.
+                  </p>
+                </div>
+                <span className="shrink-0 rounded-full bg-background/70 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                  {presentedOutputs.primary.length}
+                </span>
               </div>
-              {outputs.map((output, index) => {
-                const path = String(output.path || '');
-                const filename = String(output.filename || path.split('/').pop() || `output-${index + 1}`);
-                if (!path) return null;
-                return (
-                  <Button
-                    key={path}
-                    variant="ghost"
-                    size="sm"
-                    className="mt-1 h-8 w-full justify-start"
-                    onClick={() => {
-                      void downloadPipelineRunOutput(selectedRun.run_id, path, filename);
-                    }}
-                  >
-                    <Download className="mr-1 h-3.5 w-3.5" />
-                    <span className="truncate">{filename}</span>
-                  </Button>
-                );
-              })}
+              {presentedOutputs.primary.length > 0 ? (
+                <div className="mt-1.5 space-y-1">
+                  {presentedOutputs.primary.map((output) => {
+                    const metadata = [
+                      output.kind || output.contentType,
+                      formatOutputSize(output.sizeBytes),
+                      output.copies > 1 ? `${output.copies} artifacts` : '',
+                    ].filter(Boolean).join(' · ');
+                    return (
+                      <Button
+                        key={output.path}
+                        variant="ghost"
+                        size="sm"
+                        className="h-auto min-h-10 w-full justify-start px-2 py-1.5 text-left"
+                        onClick={() => {
+                          void downloadPipelineRunOutput(selectedRun.run_id, output.path, output.filename);
+                        }}
+                      >
+                        <Download className="mr-2 h-3.5 w-3.5 shrink-0" />
+                        <span className="min-w-0">
+                          <span className="block truncate font-medium">{output.filename}</span>
+                          {metadata && (
+                            <span className="block truncate text-[10px] font-normal text-muted-foreground">
+                              {metadata}
+                            </span>
+                          )}
+                        </span>
+                      </Button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="mt-2 rounded-md border border-dashed border-border p-2 text-[11px] text-muted-foreground">
+                  This run produced technical artifacts only; there is no user-facing result file.
+                </p>
+              )}
+
+              {presentedOutputs.hiddenCount > 0 && (
+                <details className="mt-2 rounded border border-border bg-background/30">
+                  <summary className="cursor-pointer px-2 py-1.5 text-[11px] font-medium text-muted-foreground">
+                    All artifacts and manifests ({presentedOutputs.all.length})
+                  </summary>
+                  <div className="space-y-1 border-t border-border p-1.5">
+                    {presentedOutputs.all.map((output) => (
+                      <Button
+                        key={output.path}
+                        variant="ghost"
+                        size="sm"
+                        className="h-auto min-h-9 w-full justify-start px-1.5 py-1 text-left"
+                        onClick={() => {
+                          void downloadPipelineRunOutput(selectedRun.run_id, output.path, output.filename);
+                        }}
+                      >
+                        <Download className="mr-1.5 h-3 w-3 shrink-0" />
+                        <span className="min-w-0">
+                          <span className="block truncate">{output.filename}</span>
+                          <span className="block truncate text-[9px] font-normal text-muted-foreground">
+                            {output.path}
+                          </span>
+                        </span>
+                      </Button>
+                    ))}
+                  </div>
+                </details>
+              )}
             </div>
           )}
 

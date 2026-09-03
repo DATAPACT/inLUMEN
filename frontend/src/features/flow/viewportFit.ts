@@ -4,9 +4,15 @@ import type { ReactFlowInstance } from "reactflow";
 type ViewportController = Pick<ReactFlowInstance, "fitView" | "setViewport">;
 
 export const GRAPH_FIT_VIEW_OPTIONS = {
-  padding: 0.28,
-  duration: 200,
+  padding: 0.35,
+  duration: 250,
+  minZoom: 0.15,
+  maxZoom: 0.9,
 } as const;
+
+export const GRAPH_MIN_ZOOM = GRAPH_FIT_VIEW_OPTIONS.minZoom;
+export const ASSISTANT_GRAPH_FIT_DURATION = 80;
+export const RESIZE_GRAPH_FIT_DURATION = 120;
 
 export const EMPTY_GRAPH_VIEWPORT = {
   x: 0,
@@ -23,20 +29,26 @@ export const useGraphViewportFit = ({
   nodesInitialized: boolean;
   nodeCount: number;
 }) => {
-  const [requestedRevision, setRequestedRevision] = useState(0);
+  const [request, setRequest] = useState<{ revision: number; duration: number }>({
+    revision: 0,
+    duration: GRAPH_FIT_VIEW_OPTIONS.duration,
+  });
   const completedRevisionRef = useRef(0);
 
-  const requestFit = useCallback(() => {
-    setRequestedRevision((revision) => revision + 1);
+  const requestFit = useCallback((options?: { duration?: number }) => {
+    setRequest((current) => ({
+      revision: current.revision + 1,
+      duration: options?.duration ?? GRAPH_FIT_VIEW_OPTIONS.duration,
+    }));
   }, []);
 
   useEffect(() => {
-    if (!instance || completedRevisionRef.current === requestedRevision) return;
+    if (!instance || completedRevisionRef.current === request.revision) return;
 
     if (nodeCount === 0) {
-      completedRevisionRef.current = requestedRevision;
+      completedRevisionRef.current = request.revision;
       instance.setViewport(EMPTY_GRAPH_VIEWPORT, {
-        duration: GRAPH_FIT_VIEW_OPTIONS.duration,
+        duration: request.duration,
       });
       return;
     }
@@ -46,9 +58,26 @@ export const useGraphViewportFit = ({
     // ready instead of fitting the previous version's graph.
     if (!nodesInitialized) return;
 
-    completedRevisionRef.current = requestedRevision;
-    instance.fitView(GRAPH_FIT_VIEW_OPTIONS);
-  }, [instance, nodeCount, nodesInitialized, requestedRevision]);
+    // React Flow measures new nodes after React commits them. Waiting for two
+    // paint frames prevents a fit request from completing against the previous
+    // set of measured bounds while the assistant is still adding nodes.
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        if (completedRevisionRef.current >= request.revision) return;
+        completedRevisionRef.current = request.revision;
+        instance.fitView({
+          ...GRAPH_FIT_VIEW_OPTIONS,
+          duration: request.duration,
+        });
+      });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) window.cancelAnimationFrame(secondFrame);
+    };
+  }, [instance, nodeCount, nodesInitialized, request]);
 
   return requestFit;
 };

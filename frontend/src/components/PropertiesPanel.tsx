@@ -1375,16 +1375,12 @@ export function PropertiesPanel({
               <InspectorSection
                 id="inspector-connection"
                 title="Connection"
-                description="Uses the inLUMEN-managed artifact boundary by default. No connector configuration is required for the high-level design."
+                description="No setup is needed for most pipelines."
                 status={sectionStatus("configuration")}
               >
-                <div className="rounded-md border border-emerald-500/25 bg-emerald-500/5 p-3 text-xs text-muted-foreground">
-                  <span className="font-medium text-foreground">Default boundary:</span>{" "}
-                  Sources expose supplied run artifacts and Destinations preserve the final artifacts.
-                </div>
                 <details className="rounded-md border border-border bg-muted/10">
                   <summary className="cursor-pointer px-3 py-2 text-xs font-medium">
-                    Advanced connector configuration
+                    Advanced settings
                   </summary>
                   <div className="space-y-3 border-t border-border p-3">
                     <div className="space-y-2">
@@ -1406,7 +1402,7 @@ export function PropertiesPanel({
                     </div>
                     {renderParametersSection({
                       title: "Connection settings",
-                      description: "Advanced overrides. Credentials are stored securely and are never included in the pipeline graph or bundle.",
+                      description: "Only change these settings if this step needs a specific external connection. Sign-in details are kept private.",
                     })}
                   </div>
                 </details>

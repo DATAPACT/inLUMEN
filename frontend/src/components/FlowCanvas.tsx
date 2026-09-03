@@ -66,9 +66,10 @@ import {
   isRestorableGenerationRun,
 } from '@/features/flow/generationState';
 import {
-  estimateGenerationTiming,
   formatGenerationDuration,
+  generationElapsedMs,
   generationCurrentStage,
+  generationLiveProgress,
   generationProgressPercent,
 } from '@/features/flow/generationProgress';
 import {
@@ -79,7 +80,13 @@ import {
 import { normalizeNodePorts, normalizeType } from '@/features/nodes/nodeSchema';
 import { uploadNodeFile } from '@/features/nodes/nodePersistence';
 import { remapSubpipelineParentEdges } from '@/features/flow/subpipeline';
-import { useGraphViewportFit } from '@/features/flow/viewportFit';
+import {
+  ASSISTANT_GRAPH_FIT_DURATION,
+  GRAPH_FIT_VIEW_OPTIONS,
+  GRAPH_MIN_ZOOM,
+  RESIZE_GRAPH_FIT_DURATION,
+  useGraphViewportFit,
+} from '@/features/flow/viewportFit';
 import {
   Dialog,
   DialogContent,
@@ -118,6 +125,7 @@ interface FlowCanvasProps {
   onActiveVersionNameChange?: (versionName: string) => void;
   onPipelineDescriptionChange?: (description: string) => void;
   onDisplayModeChange?: (advanced: boolean) => void;
+  followAssistantDrawing?: boolean;
   workspaceResetKey?: number;
 }
 
@@ -140,6 +148,7 @@ export interface FlowCanvasRef {
   getCurrentGraph: () => AgentGraphSnapshot;
   getCurrentVersionGraph: () => PipelineVersionGraph;
   openCodeGeneration: (selectedFlowIds?: string[]) => void;
+  openTaskPackageImport: () => void;
 }
 
 let nodeId = 1;
@@ -177,6 +186,11 @@ const hasUploadedSampleData = (nodes: Node[]) =>
     }),
   );
 
+const graphLayoutSignature = (graphNodes: Node[]) => graphNodes
+  .map((node) => `${node.id}:${Math.round(node.position.x)}:${Math.round(node.position.y)}`)
+  .sort()
+  .join("|");
+
 const taskPackageName = (value: unknown) => String(value || "")
   .toLowerCase()
   .replace(/[^a-z0-9]+/g, " ")
@@ -202,6 +216,17 @@ type PendingTaskPackage = {
   folder: string;
   files: Array<{ name: string; blob: Blob }>;
   node: Node;
+};
+
+type SkippedTaskPackage = {
+  folder: string;
+  files: string[];
+  reason: string;
+};
+
+type TaskPackageReview = {
+  matches: PendingTaskPackage[];
+  skipped: SkippedTaskPackage[];
 };
 
 const generationModeOptions: Array<{
@@ -473,6 +498,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   onActiveVersionNameChange,
   onPipelineDescriptionChange,
   onDisplayModeChange,
+  followAssistantDrawing = false,
   workspaceResetKey = 0,
 }, ref) => {
   const [nodes, setNodes] = useState<Node[]>(() => {
@@ -494,6 +520,43 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     nodesInitialized,
     nodeCount: nodes.length,
   });
+  const canvasResizeFitTimeoutRef = useRef<number | null>(null);
+  const currentGraphLayoutSignature = useMemo(() => graphLayoutSignature(nodes), [nodes]);
+
+  useEffect(() => {
+    const element = reactFlowWrapper.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+
+    let previousWidth = element.clientWidth;
+    let previousHeight = element.clientHeight;
+    const observer = new ResizeObserver(([entry]) => {
+      const width = Math.round(entry.contentRect.width);
+      const height = Math.round(entry.contentRect.height);
+      if (!width || !height || (width === previousWidth && height === previousHeight)) return;
+      previousWidth = width;
+      previousHeight = height;
+      if (canvasResizeFitTimeoutRef.current !== null) {
+        window.clearTimeout(canvasResizeFitTimeoutRef.current);
+      }
+      canvasResizeFitTimeoutRef.current = window.setTimeout(() => {
+        requestGraphViewportFit({ duration: RESIZE_GRAPH_FIT_DURATION });
+        canvasResizeFitTimeoutRef.current = null;
+      }, 120);
+    });
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+      if (canvasResizeFitTimeoutRef.current !== null) {
+        window.clearTimeout(canvasResizeFitTimeoutRef.current);
+        canvasResizeFitTimeoutRef.current = null;
+      }
+    };
+  }, [requestGraphViewportFit]);
+
+  useEffect(() => {
+    if (!followAssistantDrawing) return;
+    requestGraphViewportFit({ duration: ASSISTANT_GRAPH_FIT_DURATION });
+  }, [currentGraphLayoutSignature, followAssistantDrawing, requestGraphViewportFit]);
   const lastSeenUpdatedAtRef = useRef<string | null>(null);
   const refreshCooldownUntilRef = useRef<number>(0);
   const syncBackoffUntilRef = useRef<number>(0);
@@ -519,7 +582,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const [scriptGenerationPrompt, setScriptGenerationPrompt] = useState("");
   const [scriptGenerationMode, setScriptGenerationMode] =
     useState<PipelineScriptGenerationMode>("validated");
-  const [pendingTaskPackages, setPendingTaskPackages] = useState<PendingTaskPackage[]>([]);
+  const [isTaskPackageGuideOpen, setIsTaskPackageGuideOpen] = useState(false);
+  const [taskPackageReview, setTaskPackageReview] = useState<TaskPackageReview | null>(null);
   const [isTaskPackageImporting, setIsTaskPackageImporting] = useState(false);
   const [scriptGenerationScope, setScriptGenerationScope] =
     useState<PipelineScriptGenerationScope>("missing_changed");
@@ -770,9 +834,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     options?: { fitView?: boolean },
   ) => {
     try {
-      if (options?.fitView) {
-        requestGraphViewportFit();
-      }
       let graph: NormalizedGraph;
       if (graphData == null) {
         graph = await fetchGraphAndApply();
@@ -784,6 +845,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           pushHistorySnapshot(currentSnapshot);
         }
         graph = applyGraph(graphData, normalizedGraph);
+      }
+      if (options?.fitView) {
+        requestGraphViewportFit();
       }
       markSyncHealthy();
       return graph;
@@ -880,7 +944,11 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [fetchGraphAndApply, markSyncHealthy, scheduleSyncRetry]);
+  }, [
+    fetchGraphAndApply,
+    markSyncHealthy,
+    scheduleSyncRetry,
+  ]);
 
   useEffect(() => {
     let disposed = false;
@@ -1080,12 +1148,35 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const taskPackageInputRef = useRef<HTMLInputElement | null>(null);
   const triggerImport = () => fileInputRef.current?.click();
-  const triggerTaskPackageImport = () => taskPackageInputRef.current?.click();
+  const triggerTaskPackageImport = useCallback(() => taskPackageInputRef.current?.click(), []);
+  const openTaskPackageImport = useCallback(() => setIsTaskPackageGuideOpen(true), []);
+
+  const taskPackageExample = useMemo(() => {
+    const taskNames = nodes
+      .filter((node) => normalizeType(node.data?.type) === "task")
+      .slice(0, 2)
+      .map((node) => String(node.data?.label || node.id).replace(/[\\/]/g, "-").trim())
+      .filter(Boolean);
+    const examples = taskNames.length ? taskNames : ["Task name", "Another Task"];
+    const lines = ["pipeline-code.zip"];
+    examples.forEach((name, index) => {
+      const isLast = index === examples.length - 1;
+      lines.push(`${isLast ? "└" : "├"}── ${name}/`);
+      if (index === 0) {
+        lines.push(`${isLast ? " " : "│"}   ├── main.py`);
+        lines.push(`${isLast ? " " : "│"}   └── requirements.txt  (optional)`);
+      } else {
+        lines.push("    └── main.py");
+      }
+    });
+    return lines.join("\n");
+  }, [nodes]);
 
   const importTaskPackages = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const archive = event.target.files?.[0];
     event.target.value = "";
     if (!archive) return;
+    setIsTaskPackageGuideOpen(false);
     if (archive.size > 50 * 1024 * 1024) {
       toast.error("Package archive is too large", { description: "Use a ZIP smaller than 50 MB." });
       return;
@@ -1108,38 +1199,62 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         packages.set(folder, files);
       }
       const tasks = nodes.filter((node) => normalizeType(node.data?.type) === "task");
-      const matches: PendingTaskPackage[] = [...packages.entries()].flatMap(([folder, files]) => {
+      const matches: PendingTaskPackage[] = [];
+      const skipped: SkippedTaskPackage[] = [];
+      const matchedTaskIds = new Set<string>();
+      for (const [folder, files] of packages.entries()) {
+        const filenames = files.map((file) => file.name);
+        if (!files.some((file) => file.name === "main.py")) {
+          skipped.push({ folder, files: filenames, reason: "This folder does not contain main.py." });
+          continue;
+        }
         const node = packageMatch(folder, tasks);
-        if (!node || !files.some((file) => file.name === "main.py")) return [];
+        if (!node) {
+          skipped.push({ folder, files: filenames, reason: "The folder name does not clearly match a Task in this pipeline." });
+          continue;
+        }
         const hasCode = nodeFiles(node).some((file) => isCodegenRuntimeFile(typeof file === "string" ? file : file.filename || file.name));
-        return hasCode ? [] : [{ folder, files, node }];
-      });
-      if (!matches.length) {
-        toast.error("No safe Task packages matched", { description: "Each ZIP folder needs main.py and a uniquely matching Task name." });
-        return;
+        if (hasCode) {
+          skipped.push({ folder, files: filenames, reason: `“${String(node.data?.label || node.id)}” already has code.` });
+          continue;
+        }
+        if (matchedTaskIds.has(node.id)) {
+          skipped.push({ folder, files: filenames, reason: `Another folder already matches “${String(node.data?.label || node.id)}”.` });
+          continue;
+        }
+        matchedTaskIds.add(node.id);
+        matches.push({ folder, files, node });
       }
-      setPendingTaskPackages(matches);
+      if (!packages.size) {
+        skipped.push({
+          folder: archive.name,
+          files: [],
+          reason: "No Task folders containing supported code files were found.",
+        });
+      }
+      setTaskPackageReview({ matches, skipped });
     } catch (error) {
-      toast.error("Could not import Task packages", { description: error instanceof Error ? error.message : "The ZIP could not be read or uploaded." });
+      toast.error("Could not read code ZIP", { description: error instanceof Error ? error.message : "The ZIP could not be read." });
     }
   };
 
   const confirmTaskPackageImport = async () => {
-    if (!pendingTaskPackages.length) return;
+    const matches = taskPackageReview?.matches ?? [];
+    if (!matches.length) return;
     setIsTaskPackageImporting(true);
     try {
       let uploaded = 0;
-      for (const { node, files } of pendingTaskPackages) {
+      for (const { node, files } of matches) {
         for (const file of files) {
           await uploadNodeFile(node.id, new File([file.blob], file.name, { type: file.blob.type || "text/plain" }), "code");
           uploaded += 1;
         }
       }
       await syncFromBackend();
-      toast.success("Task packages attached", { description: `${uploaded} file${uploaded === 1 ? "" : "s"} uploaded to ${pendingTaskPackages.length} Task${pendingTaskPackages.length === 1 ? "" : "s"}.` });
-      setPendingTaskPackages([]);
+      toast.success("Code uploaded", { description: `${uploaded} file${uploaded === 1 ? "" : "s"} uploaded to ${matches.length} Task${matches.length === 1 ? "" : "s"}.` });
+      setTaskPackageReview(null);
     } catch (error) {
-      toast.error("Could not attach Task packages", { description: error instanceof Error ? error.message : "The package upload failed." });
+      toast.error("Could not upload code", { description: error instanceof Error ? error.message : "The code upload failed." });
     } finally {
       setIsTaskPackageImporting(false);
     }
@@ -1364,10 +1479,12 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     getCurrentGraph,
     getCurrentVersionGraph: createSerializableFlow,
     openCodeGeneration,
+    openTaskPackageImport,
   }), [
     createSerializableFlow,
     getCurrentGraph,
     openCodeGeneration,
+    openTaskPackageImport,
     pauseBackendSync,
     replaceCurrentGraph,
     restoreGraphLocally,
@@ -1674,8 +1791,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     }
   };
 
-  const handleGeneratePipelineScripts = () => openCodeGeneration();
-
   const handleRunPipelineScriptGeneration = async () => {
     if (
       isGeneratingScripts
@@ -1907,11 +2022,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const generationProgress = generationProgressPercent(generationJob);
   const generationStage = generationCurrentStage(generationJob);
   const generationStatus = effectiveGenerationStatus(generationJob);
-  const generationTiming = estimateGenerationTiming(
-    generationJob,
-    recentGenerationRuns,
-    generationClockMs,
-  );
+  const generationElapsed = generationElapsedMs(generationJob, generationClockMs);
+  const generationLive = generationLiveProgress(generationJob);
   const generationProgressUpdatedAt = generationJob?.generation_run?.progress_updated_at;
   const generationProgressUpdatedAtMs = generationProgressUpdatedAt
     ? Date.parse(generationProgressUpdatedAt)
@@ -2030,8 +2142,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           },
         }}
         connectionLineType={ConnectionLineType.SmoothStep}
+        minZoom={GRAPH_MIN_ZOOM}
         fitView
-        fitViewOptions={{ padding: 0.28 }}
+        fitViewOptions={GRAPH_FIT_VIEW_OPTIONS}
         className={cn(
           "flow-canvas transition-colors duration-300",
           isLightMode ? "bg-stone-50" : "bg-[#0F1C0F]"
@@ -2062,11 +2175,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           onExportJson={exportFlow}
           onImportClick={triggerImport}
           onImport={importFlow}
-          taskPackageInputRef={taskPackageInputRef}
-          onTaskPackageImportClick={triggerTaskPackageImport}
-          onTaskPackageImport={importTaskPackages}
-          onGenerateScripts={handleGeneratePipelineScripts}
-          isGeneratingScripts={isGeneratingScripts}
           showPortDetails={showPortDetails}
           onTogglePortDetails={() => setShowPortDetails((current) => !current)}
           validationErrors={validationErrors}
@@ -2080,34 +2188,104 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       </ReactFlow>
       </PortDisplayContext.Provider>
 
+      <input
+        ref={taskPackageInputRef}
+        type="file"
+        accept=".zip,application/zip"
+        className="hidden"
+        onChange={importTaskPackages}
+      />
+
+      <Dialog open={isTaskPackageGuideOpen} onOpenChange={setIsTaskPackageGuideOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Upload code ZIP</DialogTitle>
+            <DialogDescription>
+              Upload code you created outside inLUMEN.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 text-sm">
+            <p className="leading-relaxed text-muted-foreground">
+              Create one folder for each <span className="font-medium text-foreground">Task</span> in your pipeline.
+              Name each folder after the Task and put that Task&apos;s scripts directly inside it.
+            </p>
+            <div className="rounded-lg border border-border bg-muted/30 p-3">
+              <p className="mb-2 text-xs font-medium text-foreground">Example ZIP structure</p>
+              <pre className="overflow-x-auto whitespace-pre text-xs leading-5 text-muted-foreground">{taskPackageExample}</pre>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Every Task folder needs a <code className="rounded bg-muted px-1 py-0.5 text-foreground">main.py</code> file.
+              The ZIP must be smaller than 50 MB.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsTaskPackageGuideOpen(false)}>Cancel</Button>
+            <Button onClick={triggerTaskPackageImport}>Choose ZIP</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog
-        open={pendingTaskPackages.length > 0}
-        onOpenChange={(open) => { if (!open && !isTaskPackageImporting) setPendingTaskPackages([]); }}
+        open={taskPackageReview !== null}
+        onOpenChange={(open) => { if (!open && !isTaskPackageImporting) setTaskPackageReview(null); }}
       >
         <DialogContent className="sm:max-w-xl">
           <DialogHeader>
-            <DialogTitle>Review Task package import</DialogTitle>
+            <DialogTitle>Review code ZIP</DialogTitle>
             <DialogDescription>
-              These files will be attached to matching Tasks. Existing uploaded or generated code is not replaced.
+              Check how the folders match your pipeline before uploading.
             </DialogDescription>
           </DialogHeader>
-          <div className="max-h-[45vh] space-y-2 overflow-y-auto">
-            {pendingTaskPackages.map(({ folder, files, node }) => (
-              <div key={`${folder}-${node.id}`} className="rounded-md border border-border bg-muted/30 p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <code className="text-xs font-medium">{folder}</code>
-                  <span className="text-xs text-muted-foreground">→</span>
-                  <span className="min-w-0 truncate text-sm font-medium">{String(node.data?.label || node.id)}</span>
-                </div>
-                <p className="mt-2 text-xs text-muted-foreground">{files.map((file) => file.name).join(", ")}</p>
-              </div>
-            ))}
+          <div className="max-h-[50vh] space-y-4 overflow-y-auto pr-1">
+            {taskPackageReview?.matches.length ? (
+              <section className="space-y-2">
+                <h3 className="flex items-center gap-2 text-sm font-medium">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                  Ready to upload ({taskPackageReview.matches.length})
+                </h3>
+                {taskPackageReview.matches.map(({ folder, files, node }) => (
+                  <div key={`${folder}-${node.id}`} className="rounded-md border border-emerald-500/25 bg-emerald-500/5 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <code className="min-w-0 truncate text-xs font-medium">{folder}</code>
+                      <span className="text-xs text-muted-foreground">→</span>
+                      <span className="min-w-0 truncate text-sm font-medium">{String(node.data?.label || node.id)}</span>
+                    </div>
+                    <p className="mt-2 truncate text-xs text-muted-foreground">{files.map((file) => file.name).join(", ")}</p>
+                  </div>
+                ))}
+              </section>
+            ) : null}
+            {taskPackageReview?.skipped.length ? (
+              <section className="space-y-2">
+                <h3 className="flex items-center gap-2 text-sm font-medium">
+                  <AlertCircle className="h-4 w-4 text-amber-500" />
+                  Needs attention ({taskPackageReview.skipped.length})
+                </h3>
+                {taskPackageReview.skipped.map(({ folder, files, reason }) => (
+                  <div key={`${folder}-${reason}`} className="rounded-md border border-amber-500/25 bg-amber-500/5 p-3">
+                    <code className="block truncate text-xs font-medium">{folder}</code>
+                    <p className="mt-1 text-xs text-muted-foreground">{reason}</p>
+                    {files.length ? <p className="mt-2 truncate text-xs text-muted-foreground">{files.join(", ")}</p> : null}
+                  </div>
+                ))}
+              </section>
+            ) : null}
+            {!taskPackageReview?.matches.length ? (
+              <p className="rounded-md border border-border bg-muted/30 p-3 text-sm text-muted-foreground">
+                Nothing can be uploaded yet. Fix the ZIP structure and try again.
+              </p>
+            ) : null}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setPendingTaskPackages([])} disabled={isTaskPackageImporting}>Cancel</Button>
-            <Button onClick={() => { void confirmTaskPackageImport(); }} disabled={isTaskPackageImporting}>
+            <Button variant="outline" onClick={() => setTaskPackageReview(null)} disabled={isTaskPackageImporting}>Cancel</Button>
+            <Button
+              onClick={() => { void confirmTaskPackageImport(); }}
+              disabled={isTaskPackageImporting || !taskPackageReview?.matches.length}
+            >
               {isTaskPackageImporting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-              Attach packages
+              {taskPackageReview?.matches.length
+                ? `Upload to ${taskPackageReview.matches.length} Task${taskPackageReview.matches.length === 1 ? "" : "s"}`
+                : "Upload code"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -2465,26 +2643,27 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
                           {generationProgress}% · {generationStageLabel(generationStage)}
                         </span>
                         <span className="text-muted-foreground">
-                          Elapsed {formatGenerationDuration(generationTiming.elapsedMs)}
+                          Elapsed {formatGenerationDuration(generationElapsed)}
                         </span>
                       </div>
                       <div className="grid gap-2 sm:grid-cols-2">
                         <div className="flex items-start gap-2 rounded-md bg-background/60 p-2.5 text-xs">
                           <Clock3 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
                           <div>
-                            <p className="font-medium text-foreground">Estimated completion</p>
-                            {generationTiming.remainingMs == null ? (
+                            <p className="font-medium text-foreground">Current run progress</p>
+                            {generationLive.totalSteps > 0 ? (
                               <p className="text-muted-foreground">
-                                Learning from recent comparable runs; an ETA appears after two complete runs.
+                                {generationLive.completedSteps} of {generationLive.totalSteps} packages complete
+                                {generationLive.attempt > 1 ? ` · repair attempt ${generationLive.attempt}` : ''}
                               </p>
-                            ) : generationTiming.remainingMs === 0 ? (
-                              <p className="text-muted-foreground">Finishing now</p>
                             ) : (
                               <p className="text-muted-foreground">
-                                {formatGenerationDuration(generationTiming.lowerRemainingMs || 0)}–{formatGenerationDuration(generationTiming.upperRemainingMs || generationTiming.remainingMs)} remaining
-                                {` · ${generationTiming.sampleCount} comparable run${generationTiming.sampleCount === 1 ? "" : "s"}`}
+                                Waiting for the first measurable worker milestone…
                               </p>
                             )}
+                            <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground/80">
+                              Live stages and completed packages only; no past-run ETA.
+                            </p>
                           </div>
                         </div>
                         <div className="flex items-start gap-2 rounded-md bg-background/60 p-2.5 text-xs">
@@ -2696,6 +2875,7 @@ export const WrappedFlowCanvas = ({
   onActiveVersionNameChange,
   onPipelineDescriptionChange,
   onDisplayModeChange,
+  followAssistantDrawing,
   workspaceResetKey,
   flowCanvasRef,
 }: WrappedFlowCanvasProps) => (
@@ -2715,6 +2895,7 @@ export const WrappedFlowCanvas = ({
       onActiveVersionNameChange={onActiveVersionNameChange}
       onPipelineDescriptionChange={onPipelineDescriptionChange}
       onDisplayModeChange={onDisplayModeChange}
+      followAssistantDrawing={followAssistantDrawing}
       workspaceResetKey={workspaceResetKey}
     />
   </ReactFlowProvider>

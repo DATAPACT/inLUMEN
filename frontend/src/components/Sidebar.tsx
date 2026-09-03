@@ -24,6 +24,8 @@ import {
   Hash,
   Paperclip,
   Download,
+  PackageOpen,
+  Wand2,
 } from 'lucide-react';
 import {
   createNodeDataFromDefinition,
@@ -82,6 +84,8 @@ interface SidebarProps {
   replaceCurrentPipelineGraph?: (graph: unknown) => Promise<unknown> | unknown;
   currentPipelineName?: string;
   currentPipelineDescription?: string;
+  onGenerateRuntimeCode?: () => void;
+  onImportRuntimePackages?: () => void;
 }
 
 type DragNodeType = {
@@ -171,6 +175,12 @@ type PipelineOverviewResponse = {
 const errorToMessage = (error: unknown, fallback: string) =>
   error instanceof Error ? error.message : fallback;
 
+const formatOverviewTimestamp = (value?: string) => {
+  if (!value) return 'Never';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.valueOf()) ? value : parsed.toLocaleString();
+};
+
 const deploymentFailureMessage = (
   payload: Record<string, unknown>,
   fallback: string,
@@ -252,6 +262,8 @@ export function Sidebar({
   replaceCurrentPipelineGraph,
   currentPipelineName,
   currentPipelineDescription,
+  onGenerateRuntimeCode,
+  onImportRuntimePackages,
 }: SidebarProps) {
   // --- overview state (fetched when Overview tab is opened)
   const [overviewData, setOverviewData] = useState<Partial<PipelineOverview> | null>(null);
@@ -877,36 +889,40 @@ export function Sidebar({
                   />
                 </div>
 
-                <div className="p-3 rounded-lg border border-border bg-muted/30">
-                  <div className="flex items-center gap-2 text-muted-foreground mb-1">
-                    <Calendar className="w-3.5 h-3.5" />
-                    <span className="text-xs font-medium">Last Update</span>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="min-w-0 rounded-lg border border-border bg-muted/30 p-3">
+                    <div className="mb-1 flex items-center gap-2 text-muted-foreground">
+                      <LayoutGrid className="h-3.5 w-3.5" />
+                      <span className="truncate text-xs font-medium">Steps</span>
+                    </div>
+                    <p className="text-lg font-semibold">{overview?.stepCount ?? 0}</p>
                   </div>
-                  <p className="text-sm font-semibold">{overview?.lastUpdate || 'Never'}</p>
+                  <div className="min-w-0 rounded-lg border border-border bg-muted/30 p-3">
+                    <div className="mb-1 flex items-center gap-2 text-muted-foreground">
+                      <Paperclip className="h-3.5 w-3.5" />
+                      <span className="truncate text-xs font-medium">Files</span>
+                    </div>
+                    <p className="text-lg font-semibold">{overview?.fileCount ?? 0}</p>
+                  </div>
                 </div>
 
-                <div className="p-3 rounded-lg border border-border bg-muted/30">
-                  <div className="flex items-center gap-2 text-muted-foreground mb-1">
-                    <Calendar className="w-3.5 h-3.5" />
-                    <span className="text-xs font-medium">Created At</span>
+                <div className="rounded-lg border border-border bg-muted/30 p-3">
+                  <div className="grid gap-2 text-xs sm:grid-cols-2">
+                    <div className="min-w-0">
+                      <div className="mb-1 flex items-center gap-1.5 text-muted-foreground">
+                        <Calendar className="h-3.5 w-3.5 shrink-0" />
+                        <span>Updated</span>
+                      </div>
+                      <p className="break-words font-medium">{formatOverviewTimestamp(overview?.lastUpdate)}</p>
+                    </div>
+                    <div className="min-w-0">
+                      <div className="mb-1 flex items-center gap-1.5 text-muted-foreground">
+                        <Calendar className="h-3.5 w-3.5 shrink-0" />
+                        <span>Created</span>
+                      </div>
+                      <p className="break-words font-medium">{formatOverviewTimestamp(overview?.createdAt)}</p>
+                    </div>
                   </div>
-                  <p className="text-sm font-semibold">{overview?.createdAt || 'Never'}</p>
-                </div>
-
-                <div className="p-3 rounded-lg border border-border bg-muted/30">
-                  <div className="flex items-center gap-2 text-muted-foreground mb-1">
-                    <LayoutGrid className="w-3.5 h-3.5" />
-                    <span className="text-xs font-medium">Number of Steps</span>
-                  </div>
-                  <p className="text-sm font-semibold">{overview?.stepCount ?? 0}</p>
-                </div>
-
-                <div className="p-3 rounded-lg border border-border bg-muted/30">
-                  <div className="flex items-center gap-2 text-muted-foreground mb-1">
-                    <Paperclip className="w-3.5 h-3.5" />
-                    <span className="text-xs font-medium">Number of Files</span>
-                  </div>
-                  <p className="text-sm font-semibold">{overview?.fileCount ?? 0}</p>
                 </div>
               </div>
             </div>
@@ -915,6 +931,36 @@ export function Sidebar({
 
         {activeTab === "simulate" && (
           <div className="w-full min-w-0 max-w-full space-y-4 overflow-hidden py-4">
+            <div className="min-w-0 overflow-hidden rounded-lg border border-border bg-muted/20 p-3">
+              <div className="flex items-center gap-2">
+                <Wand2 className="h-4 w-4 text-violet-400" />
+                <h3 className="text-sm font-medium">Runtime code</h3>
+              </div>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                Generate code here, or upload code you created elsewhere.
+              </p>
+              <div className="mt-3 space-y-2">
+                <Button
+                  className="h-9 w-full px-3 text-xs"
+                  onClick={onGenerateRuntimeCode}
+                  aria-label="Generate runtime code"
+                  title="Generate runtime code"
+                >
+                  <Wand2 className="mr-1.5 h-3.5 w-3.5 shrink-0" />
+                  <span>Generate code</span>
+                </Button>
+                <Button
+                  variant="outline"
+                  className="h-9 w-full px-3 text-xs"
+                  onClick={onImportRuntimePackages}
+                  aria-label="Upload code ZIP"
+                  title="Upload code from a ZIP archive"
+                >
+                  <PackageOpen className="mr-1.5 h-3.5 w-3.5 shrink-0" />
+                  <span>Upload code ZIP</span>
+                </Button>
+              </div>
+            </div>
             <PipelineRunPanel key={`pipeline-runs-${workspaceResetKey}`} />
             <div className="min-w-0 overflow-hidden rounded-lg border border-border p-3">
               <h3 className="text-sm font-medium mb-2">Build deployment artifacts</h3>
