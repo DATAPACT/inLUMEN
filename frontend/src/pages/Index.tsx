@@ -1225,17 +1225,16 @@ const Index = () => {
           <ResizablePanelGroup
             direction="horizontal"
             className="min-w-0 flex-1"
-            autoSaveId="inlumen-workspace-panels"
+            autoSaveId="inlumen-workspace-panels-v2"
           >
             {isLibraryOpen && (
               <>
                 <ResizablePanel
                   id="library-panel"
                   order={1}
-                  defaultSize={rightPanel ? 20 : 22}
+                  defaultSize={25}
                   minSize={18}
-                  maxSize={30}
-                  className="min-w-[320px] max-w-[420px]"
+                  maxSize={32}
                 >
                   <Sidebar
                     className="h-full w-full bg-card/95"
@@ -1262,8 +1261,8 @@ const Index = () => {
             <ResizablePanel
               id="canvas-panel"
               order={2}
-              defaultSize={isLibraryOpen ? (rightPanel ? 54 : 78) : (rightPanel ? 72 : 100)}
-              minSize={isLibraryOpen ? 38 : 45}
+              defaultSize={isLibraryOpen ? (rightPanel ? 50 : 75) : (rightPanel ? 75 : 100)}
+              minSize={isLibraryOpen && rightPanel ? 35 : 45}
             >
               <div className="h-full bg-background">
                 <WrappedFlowCanvas
@@ -1292,10 +1291,9 @@ const Index = () => {
                 <ResizablePanel
                   id="right-panel"
                   order={3}
-                  defaultSize={isLibraryOpen ? 26 : 28}
-                  minSize={24}
-                  maxSize={42}
-                  className="min-w-[320px]"
+                  defaultSize={25}
+                  minSize={20}
+                  maxSize={38}
                 >
                   {rightPanel === 'inspector' ? (
                     <PropertiesPanel
