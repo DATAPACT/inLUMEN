@@ -58,11 +58,25 @@ export const useGraphViewportFit = ({
     // ready instead of fitting the previous version's graph.
     if (!nodesInitialized) return;
 
-    completedRevisionRef.current = request.revision;
-    instance.fitView({
-      ...GRAPH_FIT_VIEW_OPTIONS,
-      duration: request.duration,
+    // React Flow measures new nodes after React commits them. Waiting for two
+    // paint frames prevents a fit request from completing against the previous
+    // set of measured bounds while the assistant is still adding nodes.
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        if (completedRevisionRef.current >= request.revision) return;
+        completedRevisionRef.current = request.revision;
+        instance.fitView({
+          ...GRAPH_FIT_VIEW_OPTIONS,
+          duration: request.duration,
+        });
+      });
     });
+
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) window.cancelAnimationFrame(secondFrame);
+    };
   }, [instance, nodeCount, nodesInitialized, request]);
 
   return requestFit;

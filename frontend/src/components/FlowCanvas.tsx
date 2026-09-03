@@ -521,7 +521,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     nodeCount: nodes.length,
   });
   const canvasResizeFitTimeoutRef = useRef<number | null>(null);
-  const lastAssistantFitSignatureRef = useRef<string | null>(null);
+  const currentGraphLayoutSignature = useMemo(() => graphLayoutSignature(nodes), [nodes]);
 
   useEffect(() => {
     const element = reactFlowWrapper.current;
@@ -552,6 +552,11 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       }
     };
   }, [requestGraphViewportFit]);
+
+  useEffect(() => {
+    if (!followAssistantDrawing) return;
+    requestGraphViewportFit({ duration: ASSISTANT_GRAPH_FIT_DURATION });
+  }, [currentGraphLayoutSignature, followAssistantDrawing, requestGraphViewportFit]);
   const lastSeenUpdatedAtRef = useRef<string | null>(null);
   const refreshCooldownUntilRef = useRef<number>(0);
   const syncBackoffUntilRef = useRef<number>(0);
@@ -925,14 +930,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           return;
         }
         if (updatedAt && updatedAt !== lastSeenUpdatedAtRef.current) {
-          const graph = await fetchGraphAndApply();
-          if (followAssistantDrawing) {
-            const layoutSignature = graphLayoutSignature(graph.nodes);
-            if (layoutSignature !== lastAssistantFitSignatureRef.current) {
-              lastAssistantFitSignatureRef.current = layoutSignature;
-              requestGraphViewportFit({ duration: ASSISTANT_GRAPH_FIT_DURATION });
-            }
-          }
+          await fetchGraphAndApply();
         }
       } catch (e) {
         scheduleSyncRetry("Backend poll tick failed", e);
@@ -948,15 +946,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     };
   }, [
     fetchGraphAndApply,
-    followAssistantDrawing,
     markSyncHealthy,
-    requestGraphViewportFit,
     scheduleSyncRetry,
   ]);
-
-  useEffect(() => {
-    if (!followAssistantDrawing) lastAssistantFitSignatureRef.current = null;
-  }, [followAssistantDrawing]);
 
   useEffect(() => {
     let disposed = false;
