@@ -23,6 +23,12 @@ class WorkspaceAccessDenied(WorkspaceStoreError):
     pass
 
 
+class AuthModeTransitionError(WorkspaceStoreError):
+    """A durable deployment was started in a different identity mode."""
+
+    pass
+
+
 @dataclass(frozen=True)
 class Principal:
     user_id: str
@@ -126,9 +132,57 @@ def ensure_schema() -> None:
             );
             CREATE INDEX IF NOT EXISTS workspace_memberships_user_idx
                 ON workspace_memberships(user_id, workspace_id);
+            CREATE TABLE IF NOT EXISTS application_runtime_settings (
+                setting_key TEXT PRIMARY KEY,
+                setting_value TEXT NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
                 """
             )
         _schema_ready = True
+
+
+def validate_auth_mode_continuity(auth_enabled: bool) -> None:
+    """Reject accidental reuse of durable data under another auth mode.
+
+    ``AUTH_ENABLED=false`` is a single shared local identity, whereas true is
+    a set of private identities.  Mixing them against one database is both
+    confusing and unsafe, so an operator must explicitly acknowledge a planned
+    transition with ``INLUMEN_ALLOW_AUTH_MODE_SWITCH=true``.
+    """
+    if not _database_url():
+        return
+    ensure_schema()
+    requested = "keycloak" if auth_enabled else "local"
+    allow_switch = os.getenv("INLUMEN_ALLOW_AUTH_MODE_SWITCH", "").strip().lower() == "true"
+    with _connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT setting_value FROM application_runtime_settings "
+            "WHERE setting_key='auth_mode' FOR UPDATE"
+        )
+        row = cursor.fetchone()
+        if row is None:
+            cursor.execute(
+                "INSERT INTO application_runtime_settings (setting_key, setting_value) "
+                "VALUES ('auth_mode', %s)",
+                (requested,),
+            )
+            return
+        previous = str(row[0])
+        if previous == requested:
+            return
+        if not allow_switch:
+            raise AuthModeTransitionError(
+                "AUTH_ENABLED would change this deployment from "
+                f"'{previous}' to '{requested}'. Use a separate database/volumes for "
+                "local testing, or perform a backed-up migration with "
+                "INLUMEN_ALLOW_AUTH_MODE_SWITCH=true for this one deployment."
+            )
+        cursor.execute(
+            "UPDATE application_runtime_settings SET setting_value=%s, updated_at=now() "
+            "WHERE setting_key='auth_mode'",
+            (requested,),
+        )
 
 
 def resolve_principal(

@@ -108,6 +108,23 @@ describe("chatbot configuration contracts", () => {
       .toThrow("Code Generation Model is required");
   });
 
+  it("references a saved server credential without putting it in the request", () => {
+    expect(buildLLMRequestConfig(completeConfig({
+      id: "saved-config",
+      apiKey: "",
+      hasApiKey: true,
+    }))).toMatchObject({
+      credential_id: "saved-config",
+    });
+    expect(buildCodegenLLMRequestConfig(completeConfig({
+      id: "saved-config",
+      apiKey: "",
+      hasApiKey: true,
+    }))).toMatchObject({
+      credential_id: "saved-config",
+    });
+  });
+
   it("persists and clears the selected configuration", () => {
     expect(readSelectedChatbotConfigId()).toBeNull();
     writeSelectedChatbotConfigId("config-7");

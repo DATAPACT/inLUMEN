@@ -14,6 +14,7 @@ from workspace_store import (
     WORKSPACE_HEADER,
     local_principal,
     resolve_principal,
+    validate_auth_mode_continuity,
 )
 
 _jwks_client: Optional[PyJWKClient] = None
@@ -26,6 +27,7 @@ class AuthValidationError:
     error: str
     detail: str
     details: dict[str, Any] | None = None
+    code: str | None = None
 
 
 def is_auth_enabled() -> bool:
@@ -33,6 +35,7 @@ def is_auth_enabled() -> bool:
 
 
 def validate_production_auth_configuration() -> None:
+    _keycloak_clock_skew_seconds()
     if os.getenv("APP_ENV", "development").strip().lower() != "production":
         return
     if not is_auth_enabled():
@@ -51,6 +54,11 @@ def validate_production_auth_configuration() -> None:
         raise RuntimeError(
             "Production authentication is missing: " + ", ".join(missing)
         )
+
+
+def validate_auth_mode_configuration() -> None:
+    """Keep a persistent deployment from silently changing identity models."""
+    validate_auth_mode_continuity(is_auth_enabled())
 
 
 def current_principal() -> Principal:
@@ -81,6 +89,18 @@ def _keycloak_issuer() -> str:
 
 def _keycloak_audience() -> str:
     return os.getenv("KEYCLOAK_AUDIENCE", "").strip()
+
+
+def _keycloak_clock_skew_seconds() -> int:
+    """Bounded tolerance for synchronized hosts, not a substitute for NTP."""
+    value = os.getenv("KEYCLOAK_CLOCK_SKEW_SECONDS", "5").strip()
+    try:
+        seconds = int(value)
+    except ValueError:
+        raise RuntimeError("KEYCLOAK_CLOCK_SKEW_SECONDS must be an integer from 0 to 60") from None
+    if not 0 <= seconds <= 60:
+        raise RuntimeError("KEYCLOAK_CLOCK_SKEW_SECONDS must be an integer from 0 to 60")
+    return seconds
 
 
 def _claim_values(value: Any) -> set[str]:
@@ -141,6 +161,7 @@ def validate_keycloak_bearer_token(auth_header: str | None = None) -> tuple[dict
         decode_kwargs: dict = {
             "algorithms": ["RS256"],
             "options": {"verify_exp": True, "verify_aud": False},
+            "leeway": _keycloak_clock_skew_seconds(),
         }
         issuer = _keycloak_issuer()
         if issuer:
@@ -160,7 +181,12 @@ def validate_keycloak_bearer_token(auth_header: str | None = None) -> tuple[dict
             )
         return claims, None
     except jwt.ExpiredSignatureError:
-        return None, AuthValidationError(401, "Unauthorized", "Token expired")
+        return None, AuthValidationError(401, "Unauthorized", "Token expired", code="token_expired")
+    except jwt.ImmatureSignatureError:
+        return None, AuthValidationError(
+            401, "Unauthorized", "Token is not yet valid. Check server clock synchronization.",
+            code="token_not_yet_valid",
+        )
     except PyJWKClientConnectionError as e:
         return None, AuthValidationError(503, "Auth unavailable", str(e))
     except PyJWKClientError as e:
@@ -190,6 +216,8 @@ def require_auth(f):
         claims, error = validate_keycloak_bearer_token()
         if error is not None:
             payload = {"error": error.error, "detail": error.detail}
+            if error.code is not None:
+                payload["code"] = error.code
             if error.details is not None:
                 payload.update(error.details)
             return jsonify(payload), error.status_code

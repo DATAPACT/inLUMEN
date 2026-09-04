@@ -1,3 +1,4 @@
+import { getWorkspaceStorage, type WorkspaceStorage } from '@/utils/workspaceStorage';
 import React, { useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import { apiFetch } from '@/utils/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
@@ -95,9 +96,9 @@ const DEFAULT_PANEL_PREFERENCES: PanelPreferences = {
   rightPanel: null,
 };
 
-const readPanelPreferences = (): PanelPreferences => {
+const readPanelPreferences = (workspaceStorage: WorkspaceStorage = getWorkspaceStorage()): PanelPreferences => {
   try {
-    const saved = localStorage.getItem(PANEL_STATE_KEY);
+    const saved = workspaceStorage.getItem(PANEL_STATE_KEY);
     if (!saved) return DEFAULT_PANEL_PREFERENCES;
     const parsed = JSON.parse(saved) as Partial<PanelPreferences>;
     const rightPanel =
@@ -115,9 +116,9 @@ const readPanelPreferences = (): PanelPreferences => {
   }
 };
 
-const readSavedTheme = () => {
+const readSavedTheme = (workspaceStorage: WorkspaceStorage = getWorkspaceStorage()) => {
   try {
-    return localStorage.getItem(THEME_KEY) === "light";
+    return workspaceStorage.getItem(THEME_KEY) === "light";
   } catch {
     return false;
   }
@@ -164,12 +165,12 @@ const normalizeSavedConversation = (value: unknown): ChatMessage[] => {
   });
 };
 
-const readSavedConversation = (): ChatMessage[] => {
+const readSavedConversation = (workspaceStorage: WorkspaceStorage = getWorkspaceStorage()): ChatMessage[] => {
   try {
-    const savedHistory = localStorage.getItem(CHAT_HISTORY_KEY);
+    const savedHistory = workspaceStorage.getItem(CHAT_HISTORY_KEY);
     if (savedHistory) return normalizeSavedConversation(JSON.parse(savedHistory));
 
-    const savedTranscript = localStorage.getItem(CHAT_TRANSCRIPT_KEY);
+    const savedTranscript = workspaceStorage.getItem(CHAT_TRANSCRIPT_KEY);
     if (savedTranscript) return normalizeSavedConversation(JSON.parse(savedTranscript));
   } catch {
     return [];
@@ -209,6 +210,7 @@ type ChatApiResponse = {
 };
 
 const Index = () => {
+  const [workspaceStorage] = useState(() => getWorkspaceStorage());
   const [selectedNode, setSelectedNode] = useState<FlowNode | null>(null);
   const [activeTab, setActiveTab] = useState('lab'); // 'lab', 'overview', or 'simulate'
   const [userInput, setUserInput] = useState('');
@@ -250,7 +252,7 @@ const Index = () => {
   const [activeVersionName, setActiveVersionName] = useState('Main');
   const [activePipelineDescription, setActivePipelineDescription] = useState('');
   const [pipelineHighLevelPrompt, setPipelineHighLevelPrompt] = useState(
-    () => localStorage.getItem(PIPELINE_PROMPT_KEY) || "",
+    () => workspaceStorage.getItem(PIPELINE_PROMPT_KEY) || "",
   );
   const activeVersionSaveTimeoutRef = useRef<number | null>(null);
   const activeVersionDirtyRef = useRef(false);
@@ -277,35 +279,35 @@ const Index = () => {
 
   // Backend session id
   const [chatSessionId, setChatSessionId] = useState<string>(() => {
-    return localStorage.getItem(CHAT_SESSION_KEY) || "";
+    return workspaceStorage.getItem(CHAT_SESSION_KEY) || "";
   });
 
   useEffect(() => {
     if (chatSessionId) {
-      localStorage.setItem(CHAT_SESSION_KEY, chatSessionId);
+      workspaceStorage.setItem(CHAT_SESSION_KEY, chatSessionId);
     }
-  }, [chatSessionId]);
+  }, [workspaceStorage, chatSessionId]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("light", isLightMode);
-    localStorage.setItem(THEME_KEY, isLightMode ? "light" : "dark");
-  }, [isLightMode]);
+    workspaceStorage.setItem(THEME_KEY, isLightMode ? "light" : "dark");
+  }, [workspaceStorage, isLightMode]);
 
   useEffect(() => {
-    localStorage.setItem(PANEL_STATE_KEY, JSON.stringify(panelPreferences));
-  }, [panelPreferences]);
+    workspaceStorage.setItem(PANEL_STATE_KEY, JSON.stringify(panelPreferences));
+  }, [workspaceStorage, panelPreferences]);
 
   useEffect(() => {
     if (pipelineHighLevelPrompt) {
-      localStorage.setItem(PIPELINE_PROMPT_KEY, pipelineHighLevelPrompt);
+      workspaceStorage.setItem(PIPELINE_PROMPT_KEY, pipelineHighLevelPrompt);
     } else {
-      localStorage.removeItem(PIPELINE_PROMPT_KEY);
+      workspaceStorage.removeItem(PIPELINE_PROMPT_KEY);
     }
-  }, [pipelineHighLevelPrompt]);
+  }, [workspaceStorage, pipelineHighLevelPrompt]);
 
   useEffect(() => {
     if (conversation.length === 0) return;
-    localStorage.setItem(
+    workspaceStorage.setItem(
       CHAT_HISTORY_KEY,
       JSON.stringify({
         savedAt: new Date().toISOString(),
@@ -313,7 +315,7 @@ const Index = () => {
         conversation,
       })
     );
-  }, [chatSessionId, conversation]);
+  }, [workspaceStorage, chatSessionId, conversation]);
 
   const formatConfigDescription = (config: ChatbotConfig) =>
     `${formatProviderLabel(config.provider)} / ${config.model}`;
@@ -373,19 +375,19 @@ const Index = () => {
 
   useEffect(() => {
     // Load saved pipeline timestamp (last update)
-    const savedTimestamp = localStorage.getItem('saved-pipeline-timestamp');
+    const savedTimestamp = workspaceStorage.getItem('saved-pipeline-timestamp');
     if (savedTimestamp) {
       setPipelineLastUpdate(new Date(savedTimestamp).toLocaleString());
     }
 
     // Load created-at (if you have it)
-    const savedCreatedAt = localStorage.getItem('saved-pipeline-createdAt');
+    const savedCreatedAt = workspaceStorage.getItem('saved-pipeline-createdAt');
     if (savedCreatedAt) {
       setPipelineCreatedAt(new Date(savedCreatedAt).toLocaleString());
     }
 
     loadConfigurations();
-  }, [loadConfigurations]);
+  }, [workspaceStorage, loadConfigurations]);
 
   useEffect(() => {
     conversationEndRef.current?.scrollIntoView({
@@ -461,6 +463,7 @@ const Index = () => {
 
   useEffect(() => {
     return () => {
+      activeChatTurnRef.current?.controller.abort();
       if (activeVersionSaveTimeoutRef.current) {
         window.clearTimeout(activeVersionSaveTimeoutRef.current);
       }
@@ -730,14 +733,14 @@ const Index = () => {
   const resetLocalConversation = useCallback(() => {
     setConversation([]);
     setChatSessionId("");
-    localStorage.removeItem(CHAT_SESSION_KEY);
-    localStorage.removeItem(CHAT_HISTORY_KEY);
-    localStorage.removeItem(CHAT_TRANSCRIPT_KEY);
+    workspaceStorage.removeItem(CHAT_SESSION_KEY);
+    workspaceStorage.removeItem(CHAT_HISTORY_KEY);
+    workspaceStorage.removeItem(CHAT_TRANSCRIPT_KEY);
     setCanvasSyncStatus({
       state: 'idle',
       message: 'Canvas is ready',
     });
-  }, []);
+  }, [workspaceStorage]);
 
   const handleClearConversation = async () => {
     resetLocalConversation();
@@ -818,7 +821,7 @@ const Index = () => {
       return;
     }
 
-    localStorage.setItem(
+    workspaceStorage.setItem(
       CHAT_TRANSCRIPT_KEY,
       JSON.stringify({
         savedAt: new Date().toISOString(),
@@ -859,7 +862,7 @@ const Index = () => {
   };
 
   const handleSaveWorkflow = () => {
-    localStorage.setItem('ai-workflow-nodes', JSON.stringify(flowNodes));
+    workspaceStorage.setItem('ai-workflow-nodes', JSON.stringify(flowNodes));
     toast.success("Workflow saved", {
       description: "Your AI workflow has been saved",
     });
@@ -921,22 +924,22 @@ const Index = () => {
     setPipelineHighLevelPrompt("");
     setFlowNodes([]);
     setSelectedNode(null);
-    localStorage.removeItem('ai-flow-nodes');
-    localStorage.removeItem('ai-flow-edges');
+    workspaceStorage.removeItem('ai-flow-nodes');
+    workspaceStorage.removeItem('ai-flow-edges');
     toast.success("Blank pipeline created");
   };
 
   const handleSavePipeline = () => {
     const timestamp = new Date().toISOString();
-    const existingCreatedAt = localStorage.getItem('saved-pipeline-createdAt');
+    const existingCreatedAt = workspaceStorage.getItem('saved-pipeline-createdAt');
     if (!existingCreatedAt) {
-      localStorage.setItem('saved-pipeline-createdAt', timestamp);
+      workspaceStorage.setItem('saved-pipeline-createdAt', timestamp);
       setPipelineCreatedAt(new Date(timestamp).toLocaleString());
     } else {
       setPipelineCreatedAt(new Date(existingCreatedAt).toLocaleString());
     }
-    localStorage.setItem('saved-pipeline-nodes', JSON.stringify(flowNodes));
-    localStorage.setItem('saved-pipeline-timestamp', timestamp);
+    workspaceStorage.setItem('saved-pipeline-nodes', JSON.stringify(flowNodes));
+    workspaceStorage.setItem('saved-pipeline-timestamp', timestamp);
     setPipelineLastUpdate(new Date(timestamp).toLocaleString());
     toast.success("Pipeline saved", {
       description: "Your pipeline will persist on next visit"
@@ -1124,9 +1127,9 @@ const Index = () => {
       setPipelineHighLevelPrompt("");
       resetLocalConversation();
       setWorkspaceResetKey((key) => key + 1);
-      localStorage.removeItem('ai-flow');
-      localStorage.removeItem('ai-flow-nodes');
-      localStorage.removeItem('ai-flow-edges');
+      workspaceStorage.removeItem('ai-flow');
+      workspaceStorage.removeItem('ai-flow-nodes');
+      workspaceStorage.removeItem('ai-flow-edges');
       setVersionsRefreshKey((key) => key + 1);
 
       const updatedAt = result.version.updated_at ?? syncedGraph?.updated_at ?? null;

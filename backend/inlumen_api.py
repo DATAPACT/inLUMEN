@@ -28,7 +28,12 @@ from analytics_api import (
     prepare_dagster_execution_bundle,
 )
 from attachment_validation import attachment_input_errors, read_attachment_probe
-from auth_middleware import current_principal, require_auth, validate_production_auth_configuration
+from auth_middleware import (
+    current_principal,
+    require_auth,
+    validate_auth_mode_configuration,
+    validate_production_auth_configuration,
+)
 from chat_state import clear_state_from_disk
 from chatbot_config_store import load_chatbot_configs, save_chatbot_configs
 from codegen_runs import CodegenRunStore
@@ -49,6 +54,12 @@ from node_secrets import (
     delete_node_secret,
     normalize_parameter_name,
     set_node_secret,
+)
+from llm_credential_store import (
+    delete_llm_credential,
+    has_llm_credential,
+    save_llm_credential,
+    get_llm_credential,
 )
 from object_client import dispatch_object_request
 from pipeline_runner_client import (
@@ -153,6 +164,7 @@ CHATBOT_CONFIGS_PATH = Path(
 
 app = Flask(__name__)
 validate_production_auth_configuration()
+validate_auth_mode_configuration()
 app.register_blueprint(create_public_api_blueprint())
 app.register_blueprint(create_node_definitions_blueprint())
 app.register_blueprint(create_generator_blueprint())
@@ -1036,6 +1048,8 @@ def _prepare_codegen_request(
     if isinstance(raw_config, dict):
         raw_config.pop("api_key", None)
         raw_config.pop("apiKey", None)
+        raw_config.pop("credential_id", None)
+        raw_config.pop("config_id", None)
     return request_payload
 
 
@@ -1045,7 +1059,10 @@ def _codegen_llm_api_key(payload: dict[str, Any] | None) -> str:
     config = payload.get("llm_config")
     if not isinstance(config, dict):
         return ""
-    return str(config.get("api_key") or config.get("apiKey") or "").strip()
+    supplied = str(config.get("api_key") or config.get("apiKey") or "").strip()
+    if supplied:
+        return supplied
+    return get_llm_credential(str(config.get("credential_id") or config.get("config_id") or "")) or ""
 
 
 def _codegen_request_headers(
@@ -1958,6 +1975,7 @@ def _chatbot_config_response(config: dict[str, Any]) -> dict[str, Any]:
         "temperature": config.get("temperature", 0.7),
         "created_at": config.get("created_at"),
         "updated_at": config.get("updated_at"),
+        "has_api_key": has_llm_credential(str(config.get("id") or "")),
     }
     if config.get("readOnly") or config.get("read_only"):
         response["readOnly"] = True
@@ -2104,6 +2122,10 @@ def chatbot_configs():
         return config
     configs.insert(0, config)
     _save_chatbot_configs(configs)
+    save_llm_credential(
+        str(config.get("id") or ""),
+        str(payload.get("api_key") or payload.get("apiKey") or ""),
+    )
     return jsonify({"config": _chatbot_config_response(config)}), 201
 
 
@@ -2127,13 +2149,19 @@ def chatbot_config(config_id: str):
     if request.method == "DELETE":
         deleted = configs.pop(index)
         _save_chatbot_configs(configs)
+        delete_llm_credential(str(deleted.get("id") or config_id))
         return jsonify({"deleted_id": str(deleted.get("id") or config_id)}), 200
 
-    config = _validate_chatbot_config_payload(_request_json(), existing=configs[index])
+    payload = _request_json()
+    config = _validate_chatbot_config_payload(payload, existing=configs[index])
     if isinstance(config, tuple):
         return config
     configs[index] = config
     _save_chatbot_configs(configs)
+    save_llm_credential(
+        str(config.get("id") or config_id),
+        str(payload.get("api_key") or payload.get("apiKey") or ""),
+    )
     return jsonify({"config": _chatbot_config_response(config)}), 200
 
 

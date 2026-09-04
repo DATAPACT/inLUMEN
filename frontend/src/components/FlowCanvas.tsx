@@ -1,3 +1,4 @@
+import { getWorkspaceStorage } from '@/utils/workspaceStorage';
 import React, { useState, useCallback, useRef, useEffect, forwardRef, useImperativeHandle, useMemo } from 'react';
 import { ChatbotConfig } from '@/services/chatbotService';
 import ReactFlow, {
@@ -501,16 +502,17 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   followAssistantDrawing = false,
   workspaceResetKey = 0,
 }, ref) => {
+  const [workspaceStorage] = useState(() => getWorkspaceStorage());
   const [nodes, setNodes] = useState<Node[]>(() => {
-    const savedNodes = localStorage.getItem('ai-flow-nodes');
+    const savedNodes = workspaceStorage.getItem('ai-flow-nodes');
     return savedNodes ? JSON.parse(savedNodes) : [];
   });
   const [edges, setEdges] = useState<Edge[]>(() => {
-    const savedEdges = localStorage.getItem('ai-flow-edges');
+    const savedEdges = workspaceStorage.getItem('ai-flow-edges');
     return savedEdges ? JSON.parse(savedEdges) : [];
   });
   const [showPortDetails, setShowPortDetails] = useState(
-    () => localStorage.getItem('inlumen-show-port-details') === 'true',
+    () => workspaceStorage.getItem('inlumen-show-port-details') === 'true',
   );
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
@@ -606,7 +608,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     generationCancelRequestedRef.current = false;
     handledGenerationRunsRef.current.clear();
     generationPreflightRequestRef.current += 1;
-    localStorage.removeItem(ACTIVE_GENERATION_RUN_STORAGE_KEY);
+    workspaceStorage.removeItem(ACTIVE_GENERATION_RUN_STORAGE_KEY);
     setGenerationJob(null);
     setRecentGenerationRuns([]);
     setIsGeneratingScripts(false);
@@ -615,7 +617,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     setGenerationPreflight(null);
     setGenerationPreflightError("");
     setOverwriteProtectedCode(false);
-  }, []);
+  }, [workspaceStorage]);
   const previousWorkspaceResetKeyRef = useRef(workspaceResetKey);
   useEffect(() => {
     if (previousWorkspaceResetKeyRef.current === workspaceResetKey) return;
@@ -636,13 +638,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     }
     if (runId) {
       if (complete) {
-        localStorage.removeItem(ACTIVE_GENERATION_RUN_STORAGE_KEY);
+        workspaceStorage.removeItem(ACTIVE_GENERATION_RUN_STORAGE_KEY);
       } else {
-        localStorage.setItem(ACTIVE_GENERATION_RUN_STORAGE_KEY, runId);
+        workspaceStorage.setItem(ACTIVE_GENERATION_RUN_STORAGE_KEY, runId);
       }
     }
     setIsGeneratingScripts(!complete);
-  }, []);
+  }, [workspaceStorage]);
   const activeGenerationRunId = String(
     generationJob?.run_id || generationJob?.generation_run?.run_id || "",
   ).trim();
@@ -955,7 +957,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     const restoreGenerationRun = async () => {
       const resetVersion = generationHistoryResetVersionRef.current;
       const rememberedRunId = String(
-        localStorage.getItem(ACTIVE_GENERATION_RUN_STORAGE_KEY) || "",
+        workspaceStorage.getItem(ACTIVE_GENERATION_RUN_STORAGE_KEY) || "",
       ).trim();
       let restored: PipelineGenerationJob | null = null;
       if (rememberedRunId) {
@@ -969,7 +971,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         }
       }
       if (restored && !isRestorableGenerationRun(restored)) {
-        localStorage.removeItem(ACTIVE_GENERATION_RUN_STORAGE_KEY);
+        workspaceStorage.removeItem(ACTIVE_GENERATION_RUN_STORAGE_KEY);
         restored = null;
       }
       if (!restored) {
@@ -995,7 +997,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     return () => {
       disposed = true;
     };
-  }, [rememberGenerationJob]);
+  }, [workspaceStorage, rememberGenerationJob]);
 
   useEffect(() => {
     const runId = activeGenerationRunId;
@@ -1493,14 +1495,14 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   ]);
 
   useEffect(() => {
-    localStorage.setItem('ai-flow-nodes', JSON.stringify(nodes));
-    localStorage.setItem('ai-flow-edges', JSON.stringify(edges));
-  }, [nodes, edges]);
+    workspaceStorage.setItem('ai-flow-nodes', JSON.stringify(nodes));
+    workspaceStorage.setItem('ai-flow-edges', JSON.stringify(edges));
+  }, [workspaceStorage, nodes, edges]);
 
   useEffect(() => {
-    localStorage.setItem('inlumen-show-port-details', String(showPortDetails));
+    workspaceStorage.setItem('inlumen-show-port-details', String(showPortDetails));
     onDisplayModeChange?.(showPortDetails);
-  }, [onDisplayModeChange, showPortDetails]);
+  }, [workspaceStorage, onDisplayModeChange, showPortDetails]);
 
   useEffect(() => {
     if (onNodesChange) onNodesChange(nodes);
@@ -1754,7 +1756,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       setIsSavingVersion(true);
       const flow = createSerializableFlow();
       const savedVersion = await savePipelineVersion(trimmedName, flow);
-      localStorage.setItem('ai-flow', JSON.stringify(flow));
+      workspaceStorage.setItem('ai-flow', JSON.stringify(flow));
       markLocalWrite(1200);
       setIsSaveVersionOpen(false);
       onVersionSaved?.(savedVersion);
@@ -2001,9 +2003,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       setEdges([]);
       selectedNodeIdRef.current = null;
       onNodeSelect(null);
-      localStorage.removeItem('ai-flow');
-      localStorage.removeItem('ai-flow-nodes');
-      localStorage.removeItem('ai-flow-edges');
+      workspaceStorage.removeItem('ai-flow');
+      workspaceStorage.removeItem('ai-flow-nodes');
+      workspaceStorage.removeItem('ai-flow-edges');
       nodeId = 1;
       markLocalWrite(1200);
       await rebuildBackendFromFlow([], []);

@@ -69,6 +69,68 @@ only the frontend to Cloudflare Tunnel over the private Compose network.
 
 ## Operations
 
+### Auth-mode changes
+
+`AUTH_ENABLED=false` is deliberately a single shared local identity, not a
+multi-user mode. The gateway records the selected mode in PostgreSQL and
+refuses to start if a deployment's setting changes. This prevents a browser or
+operator from accidentally treating local data as account data (or vice versa).
+
+Use a distinct Compose project and distinct PostgreSQL, Neo4j, MinIO, and
+runner volumes for unauthenticated local testing. If a one-time transition is
+unavoidable, make verified backups, set
+`INLUMEN_ALLOW_AUTH_MODE_SWITCH=true` only for that deployment startup, and
+run an explicit data migration that assigns the local workspace to one named
+account. The override does not infer ownership or transfer browser-local
+drafts, secrets, or provider keys.
+
+### Browser state and account switching
+
+Authenticated browser drafts, chat history/session IDs, generation-run IDs,
+model configuration metadata, and selections
+are namespaced by the server-resolved user ID and workspace ID. Logout invalidates
+in-flight storage handles; account/workspace changes remount private UI and its
+query cache. Do not use two tabs in one browser profile as independent Keycloak
+login sessions; use separate profiles for simultaneous two-user testing.
+
+Legacy, unscoped browser entries are left intact but are **not imported into an
+authenticated account**, because their owner is unknown. Users may need to
+re-enter their LLM API key once so it can be encrypted in their account's
+workspace. Existing server-owned workspace data is not
+deleted. Auth-disabled local mode continues to use the legacy keys. Browser
+namespacing prevents accidental application-level mixing; it is not encryption
+or protection against someone with access to the browser profile/DevTools.
+
+For the graph regression/integration test (no LLM calls), run:
+
+```sh
+docker compose exec -T -e RUN_NEO4J_INTEGRATION=1 backend python -m unittest discover -s tests -p test_agent_workspace_queries.py
+```
+
+This executes the actual agent-generated queries and workspace validator against
+Neo4j in two synthetic workspaces, then rolls back the entire transaction.
+
+### Clock synchronization and authentication
+
+Keep the application VM and Keycloak host synchronized using the host's NTP
+service (for example, chrony or systemd-timesyncd). Containers inherit their
+host/kernel clock; do not run an NTP daemon inside each application container.
+On Linux, check `timedatectl status` and, when using chrony, `chronyc tracking`.
+Monitor clock offset and synchronization failures on both hosts. Docker Desktop
+also depends on its Linux VM clock; check it after the machine resumes from sleep.
+
+`KEYCLOAK_CLOCK_SKEW_SECONDS` defaults to 5 and accepts integers from 0 through
+60. Invalid values fail startup. This small PyJWT leeway applies to `iat`,
+`nbf`, and `exp` (including at most that many extra seconds after expiry);
+signature, issuer, and audience validation remain enabled. It is not a remedy
+for sustained clock drift. Keep the default unless measured operational needs
+justify a different bounded value; fix host time synchronization first.
+
+A 401 with code `token_not_yet_valid` indicates token timing outside this
+tolerance. The frontend reports this separately from Keycloak login failures.
+Never log bearer tokens or paste them into third-party JWT debugging sites.
+See the [PyJWT leeway documentation](https://pyjwt.readthedocs.io/en/stable/usage.html#expiration-time-claim-exp).
+
 Back up the PostgreSQL, Neo4j, MinIO, runner-artifact, and model-store volumes.
 Test restores regularly. Rotate the two internal service keys and the MinIO,
 Neo4j, PostgreSQL, and node-secret encryption credentials under a planned

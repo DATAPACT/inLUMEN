@@ -1,4 +1,5 @@
 import React from 'react';
+import { AccountMenu } from '@/components/AccountMenu';
 import { Button } from "@/components/ui/button";
 import {
   HelpCircle,
@@ -254,6 +255,7 @@ export function Toolbar({
         >
           {isLightMode ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
         </Button>
+        <AccountMenu />
       </div>
       
     </div>

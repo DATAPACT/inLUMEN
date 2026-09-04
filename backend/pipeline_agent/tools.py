@@ -723,7 +723,7 @@ def build_pipeline_editor_tools(
             OPTIONAL MATCH (p)-[:HAS_STEP]->(candidateTail:STEP)
             WITH p, nextFlowId, collect(candidateTail) AS candidateTails
             WITH p, nextFlowId,
-                [candidate IN candidateTails WHERE NOT (candidate)-[:FLOWS_TO]->()] AS tails
+                [candidate IN candidateTails WHERE NOT (candidate)-[:FLOWS_TO]->(:STEP)] AS tails
             WITH p, nextFlowId, tails,
                 CASE WHEN size(tails) = 1 THEN head(tails) ELSE NULL END AS prev
             WHERE size(tails) <= 1

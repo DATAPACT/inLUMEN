@@ -55,7 +55,7 @@ const formSchema = z.object({
     .string()
     .min(1, "Base URL is required")
     .refine((value) => /^https?:\/\/.+/i.test(value), "Use an http(s) OpenAI-compatible base URL"),
-  apiKey: z.string().trim().min(1, "API key is required for LLM calls"),
+  apiKey: z.string().trim(),
 });
 
 interface ChatbotConfigFormProps {
@@ -158,6 +158,10 @@ export function ChatbotConfigForm({
 
   const onSubmit = async (values: z.infer<typeof formSchema>) => {
     try {
+      if (!values.apiKey.trim() && !initialConfig?.hasApiKey) {
+        form.setError("apiKey", { message: "API key is required for LLM calls" });
+        return;
+      }
       const configData: ChatbotConfig = {
         id: initialConfig?.id,
         name: values.name,
@@ -170,6 +174,7 @@ export function ChatbotConfigForm({
           values.provider === "openrouter" ? values.codegenOpenrouterProviderOnly : [],
         baseUrl: values.baseUrl,
         apiKey: values.apiKey?.trim() || "",
+        hasApiKey: initialConfig?.hasApiKey,
       };
 
       const savedConfig = initialConfig?.id
@@ -196,7 +201,7 @@ export function ChatbotConfigForm({
             {initialConfig ? "Edit LLM Configuration" : "New LLM Configuration"}
           </DialogTitle>
           <DialogDescription>
-            Configure an OpenAI-compatible endpoint. API keys are stored only in this browser.
+            Configure an OpenAI-compatible endpoint. Saved credentials are encrypted by the gateway and are never returned to the browser.
           </DialogDescription>
         </DialogHeader>
 
@@ -339,10 +344,12 @@ export function ChatbotConfigForm({
                 <FormItem>
                   <FormLabel>API Key</FormLabel>
                   <FormControl>
-                    <Input type="password" placeholder="Provider API key" autoComplete="off" {...field} />
+                    <Input type="password" placeholder={initialConfig?.hasApiKey ? "Saved securely — enter a replacement to rotate" : "Provider API key"} autoComplete="new-password" {...field} />
                   </FormControl>
                   <p className="text-xs text-muted-foreground">
-                    Required for LLM calls. Stored only in this browser and restored on startup.
+                    {initialConfig?.hasApiKey
+                      ? "A credential is saved securely. Leave this blank to keep it, or enter a new value to replace it."
+                      : "Required for LLM calls. It is encrypted by the gateway and is never returned to this browser."}
                   </p>
                   <FormMessage />
                 </FormItem>

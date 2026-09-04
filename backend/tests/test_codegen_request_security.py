@@ -58,6 +58,21 @@ class CodegenRequestSecurityTests(unittest.TestCase):
         self.assertEqual("clean", json.loads(encoded)["flow_id"])
         self.assertNotIn("api_key", json.loads(encoded)["llm_config"])
 
+    @patch("inlumen_api.get_llm_credential", return_value="stored-provider-secret")
+    def test_codegen_resolves_a_saved_credential_without_forwarding_its_id(self, get_credential):
+        encoded, headers = inlumen_api._codegen_request_parts({
+            "llm_config": {
+                "provider": "openrouter",
+                "model": "code-model",
+                "base_url": "https://llm.example/v1",
+                "credential_id": "saved-config",
+            },
+        })
+
+        self.assertEqual("stored-provider-secret", headers["X-LLM-API-Key"])
+        self.assertNotIn("credential_id", json.loads(encoded)["llm_config"])
+        get_credential.assert_called_once_with("saved-config")
+
     def test_pipeline_codegen_payload_maps_single_pass_to_pipeline_first(self):
         codegen_payload, metadata = inlumen_api._build_pipeline_codegen_payload(
             {"nodes": [], "edges": []},

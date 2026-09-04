@@ -5,12 +5,16 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Index from "./pages/Index";
 import NotFound from "./pages/NotFound";
 import { AuthProvider } from "@/context/AuthContext";
+import { useState } from 'react';
 
-const queryClient = new QueryClient();
+const SessionQueryProvider = ({ children }: { children: React.ReactNode }) => {
+  const [queryClient] = useState(() => new QueryClient());
+  return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+};
 
 const App = () => (
   <AuthProvider>
-    <QueryClientProvider client={queryClient}>
+    <SessionQueryProvider>
       <TooltipProvider>
         <Sonner
           position="bottom-center"
@@ -27,7 +31,7 @@ const App = () => (
           </Routes>
         </BrowserRouter>
       </TooltipProvider>
-    </QueryClientProvider>
+    </SessionQueryProvider>
   </AuthProvider>
 );
 
