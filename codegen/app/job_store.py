@@ -10,6 +10,8 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 
+from .leases import durable_write
+
 from .schemas import GeneratePipelineScriptsRequest
 
 LOCAL_WORKSPACE_ID = "local-workspace"
@@ -39,6 +41,7 @@ class PipelineJobStore:
         )
         self._engine = create_engine(_database_url(database_path), **options)
         with self._engine.begin() as connection:
+            connection.execute(text('CREATE TABLE IF NOT EXISTS pipeline_generation_jobs_deleted (workspace_id TEXT NOT NULL, run_id TEXT NOT NULL, PRIMARY KEY(workspace_id,run_id))'))
             connection.execute(
                 text("""
                 CREATE TABLE IF NOT EXISTS pipeline_generation_jobs (
@@ -94,7 +97,10 @@ class PipelineJobStore:
         encoded = json.dumps(
             self._serializable_job(job), ensure_ascii=False, separators=(",", ":")
         )
-        with self._lock, self._engine.begin() as connection:
+        with self._lock, durable_write(self._engine) as connection:
+            if connection.execute(text('SELECT 1 FROM pipeline_generation_jobs_deleted WHERE workspace_id=:workspace AND run_id=:run'),
+                                  {'workspace': workspace_id, 'run': job['run_id']}).first():
+                return
             connection.execute(
                 text("""
                 INSERT INTO pipeline_generation_jobs (
@@ -183,13 +189,15 @@ class PipelineJobStore:
                 jobs.append(self._hydrated_job(payload))
         return jobs
 
-    def clear(self, workspace_id: str | None = LOCAL_WORKSPACE_ID) -> None:
+    def clear(self, workspace_id: str | None = LOCAL_WORKSPACE_ID, *, protect_inflight: bool = True) -> None:
         parameters: dict[str, Any] = {}
         where = ""
         if workspace_id is not None:
             where = "WHERE workspace_id = :workspace_id"
             parameters["workspace_id"] = workspace_id
-        with self._lock, self._engine.begin() as connection:
+        with self._lock, durable_write(self._engine) as connection:
+            if protect_inflight:
+                connection.execute(text(f"INSERT INTO pipeline_generation_jobs_deleted (workspace_id,run_id) SELECT workspace_id,run_id FROM pipeline_generation_jobs {where or 'WHERE 1=1'} ON CONFLICT DO NOTHING"), parameters)
             connection.execute(
                 text(f"DELETE FROM pipeline_generation_jobs {where}"), parameters
             )

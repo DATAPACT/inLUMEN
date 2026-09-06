@@ -9,6 +9,8 @@ from typing import Any
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 
+from .leases import durable_write
+
 LOCAL_WORKSPACE_ID = "local-workspace"
 
 
@@ -37,6 +39,7 @@ class PipelineRunStore:
         )
         self._engine = create_engine(url, **options)
         with self._engine.begin() as connection:
+            connection.execute(text('CREATE TABLE IF NOT EXISTS pipeline_runs_deleted (workspace_id TEXT NOT NULL, run_id TEXT NOT NULL, PRIMARY KEY(workspace_id,run_id))'))
             connection.execute(
                 text("""
                 CREATE TABLE IF NOT EXISTS pipeline_runs (
@@ -74,7 +77,10 @@ class PipelineRunStore:
         workspace_id = self._workspace(record)
         record["workspace_id"] = workspace_id
         encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
-        with self._lock, self._engine.begin() as connection:
+        with self._lock, durable_write(self._engine) as connection:
+            if connection.execute(text('SELECT 1 FROM pipeline_runs_deleted WHERE workspace_id=:workspace AND run_id=:run'),
+                                  {'workspace': workspace_id, 'run': record['run_id']}).first():
+                return
             connection.execute(
                 text("""
                 INSERT INTO pipeline_runs (
@@ -182,16 +188,18 @@ class PipelineRunStore:
             ).fetchall()
         return [record for row in rows if (record := self._decode(row)) is not None]
 
-    def clear(self, workspace_id: str | None = None) -> int:
+    def clear(self, workspace_id: str | None = None, *, protect_inflight: bool = True) -> int:
         parameters: dict[str, Any] = {}
         where = ""
         if workspace_id is not None:
             where = "WHERE workspace_id = :workspace_id"
             parameters["workspace_id"] = workspace_id
-        with self._lock, self._engine.begin() as connection:
+        with self._lock, durable_write(self._engine) as connection:
             row = connection.execute(
                 text(f"SELECT count(*) FROM pipeline_runs {where}"), parameters
             ).first()
+            if protect_inflight:
+                connection.execute(text(f"INSERT INTO pipeline_runs_deleted (workspace_id, run_id) SELECT workspace_id,run_id FROM pipeline_runs {where or 'WHERE 1=1'} ON CONFLICT DO NOTHING"), parameters)
             connection.execute(text(f"DELETE FROM pipeline_runs {where}"), parameters)
         return int(row[0] if row is not None else 0)
 

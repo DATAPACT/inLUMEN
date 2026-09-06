@@ -39,6 +39,8 @@ from workspace_storage import node_bucket_name
 from workspace_store import WORKSPACE_HEADER
 
 app = Flask(__name__)
+from observability import install_request_observability
+install_request_observability(app)
 
 CODEGEN_SERVICE_URL = os.getenv(
     "INLUMEN_CODEGEN_SERVICE_URL",

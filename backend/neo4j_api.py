@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, g, has_request_context
 from neo4j import GraphDatabase
 from auth_middleware import current_workspace_id, is_auth_enabled, require_auth
 import uuid
@@ -37,7 +37,8 @@ from subpipeline_reference import (
     plan_subpipeline_port_migration,
     public_ports_for_interface,
 )
-from workspace_storage import node_bucket_name, version_snapshot_bucket
+from workspace_storage import node_bucket_name, version_snapshot_bucket, bucket_belongs_to_workspace
+from graph_document import validate_graph_document
 
 NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD = get_neo4j_settings()
 
@@ -45,6 +46,8 @@ NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD = get_neo4j_settings()
 graph_data = []
 
 app = Flask(__name__)
+from observability import install_request_observability
+install_request_observability(app)
 
 _base_driver = GraphDatabase.driver(
     NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD)
@@ -59,36 +62,10 @@ _WORKSPACE_OWNED_LABELS = (
 )
 
 
-def _workspace_label(workspace_id: str) -> str:
-    digest = hashlib.sha256(workspace_id.encode("utf-8")).hexdigest()[:24]
-    return f"INLUMEN_WS_{digest}"
-
-
-def _scope_cypher(query: str, workspace_id: str) -> str:
-    """Add an unforgeable workspace label to every workspace-owned node pattern.
-
-    Neo4j Community has no row-level security. A label selected exclusively
-    from the server-verified workspace context gives all existing graph
-    operations a mandatory namespace without accepting Cypher identifiers from
-    the client. The base labels remain for schema readability and migrations.
-    """
-    scoped = str(query)
-    scope_label = _workspace_label(workspace_id)
-    for label in _WORKSPACE_OWNED_LABELS:
-        scoped = re.sub(
-            rf":{label}\b(?!:{scope_label}\b)",
-            f":{label}:{scope_label}",
-            scoped,
-        )
-    # Deep workspace cleanup intentionally uses a generic entity match. Keep
-    # that operation inside the same workspace label as well.
-    scoped = re.sub(
-        r"\bMATCH\s*\(entity\)",
-        f"MATCH (entity:{scope_label})",
-        scoped,
-        flags=re.IGNORECASE,
-    )
-    return scoped
+from workspace_queries import (
+    INTERNAL_QUERY_CAPABILITY, parameterize_literals,
+    scope_cypher as _scope_cypher, workspace_label as _workspace_label,
+)
 
 
 def _validate_workspace_cypher(query: str) -> None:
@@ -99,6 +76,10 @@ def _validate_workspace_cypher(query: str) -> None:
     a workspace-owned label, but every independently introduced node must use
     one of the platform labels that `_scope_cypher` namespaces.
     """
+    from workspace_queries import TOKENS
+    code = "".join(TOKENS.split(query)[::2])
+    if re.search(r"\b(?:LOAD\s+CSV|CALL\s+[A-Za-z_]\w*|SHOW|DROP|GRANT|DENY|REVOKE)\b", code, re.I):
+        raise ValueError("Procedures and administrative Cypher are not allowed.")
     owned = "|".join(re.escape(label) for label in _WORKSPACE_OWNED_LABELS)
     declared = {
         value.lower()
@@ -153,35 +134,45 @@ class _WorkspaceQueryRunner:
 
 class _WorkspaceSession(_WorkspaceQueryRunner):
     def __enter__(self):
-        self._runner.__enter__()
+        from graph_revision import lock_revision
+        self._session = self._runner
+        self._session.__enter__()
+        self._transaction = self._session.begin_transaction()
+        self._runner = self._transaction
+        try:
+            self._revision, self._mutation = lock_revision(self._transaction, self._workspace_id)
+        except BaseException:
+            self._transaction.rollback()
+            self._session.close()
+            raise
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        return self._runner.__exit__(exc_type, exc_value, traceback)
+        from graph_revision import finish_revision
+        try:
+            if exc_type is None:
+                finish_revision(self._transaction, self._workspace_id, self._revision, self._mutation)
+                self._transaction.commit()
+            else:
+                self._transaction.rollback()
+        finally:
+            self._session.close()
 
     def execute_write(self, work, *args, **kwargs):
-        def scoped_work(transaction, *work_args, **work_kwargs):
-            return work(
-                _WorkspaceQueryRunner(transaction, self._workspace_id),
-                *work_args,
-                **work_kwargs,
-            )
-
-        return self._runner.execute_write(scoped_work, *args, **kwargs)
+        return work(self, *args, **kwargs)
 
     def execute_read(self, work, *args, **kwargs):
-        def scoped_work(transaction, *work_args, **work_kwargs):
-            return work(
-                _WorkspaceQueryRunner(transaction, self._workspace_id),
-                *work_args,
-                **work_kwargs,
-            )
-
-        return self._runner.execute_read(scoped_work, *args, **kwargs)
+        return work(self, *args, **kwargs)
 
 
 class _WorkspaceDriver:
+    _schema_ready = False
+
     def session(self, *args, **kwargs):
+        if not self._schema_ready:
+            with _base_driver.session() as schema_session:
+                schema_session.run("CREATE CONSTRAINT workspace_revision_id IF NOT EXISTS FOR (r:WORKSPACE_REVISION) REQUIRE r.workspace_id IS UNIQUE").consume()
+            self._schema_ready = True
         _adopt_legacy_local_graph()
         return _WorkspaceSession(
             _base_driver.session(*args, **kwargs), current_workspace_id()
@@ -215,6 +206,18 @@ def _adopt_legacy_local_graph() -> None:
 
 MAIN_VERSION_UID = "main"
 MAIN_VERSION_NAME = "Main"
+@app.after_request
+def graph_revision_headers(response):
+    conflict = getattr(g, "graph_revision_conflict", None)
+    if conflict is not None:
+        response = jsonify({"error": "Graph changed in another session. Reload before editing.", "code": "graph_conflict", "revision": conflict})
+        response.status_code = 409
+    revision = getattr(g, "graph_revision", conflict)
+    if revision is not None:
+        response.headers["ETag"] = f'"{revision}"'
+    return response
+
+
 @app.route('/health', methods=['GET'])
 def health():
     try:
@@ -615,9 +618,10 @@ def _sync_graph_to_session(
             MATCH (s:STEP {flow_id: $flow_id})
             MERGE (f:FILE {filename: $filename, bucket: $bucket})
             ON CREATE SET f.uid = randomUUID(), f.added_at = datetime()
-            SET f.role = CASE WHEN $role = '' THEN f.role ELSE $role END
+            SET f.role = CASE WHEN $role = '' THEN f.role ELSE $role END,
+                f.snapshot_bucket = $snapshot_bucket, f.snapshot_object = $snapshot_object
             MERGE (s)-[:HAS_FILE]->(f)
-            """, flow_id=props["flow_id"], filename=file_ref["filename"], bucket=file_ref["bucket"], role=file_ref.get("role", ""))
+            """, flow_id=props["flow_id"], filename=file_ref["filename"], bucket=file_ref["bucket"], role=file_ref.get("role", ""), snapshot_bucket=file_ref.get("snapshot_bucket"), snapshot_object=file_ref.get("snapshot_object"))
 
     session.run("""
     MATCH (:STEP)-[r:FLOWS_TO]->(:STEP)
@@ -724,6 +728,8 @@ def _upload_bytes_to_minio(bucket: str, object_name: str, content: bytes) -> Non
 
 
 def _copy_minio_object(source_bucket: str, source_name: str, target_bucket: str, target_name: str) -> None:
+    if not bucket_belongs_to_workspace(source_bucket) or not bucket_belongs_to_workspace(target_bucket):
+        raise PermissionError("File snapshots must remain within the current workspace")
     content = read_object_bytes(source_bucket, source_name)
     _upload_bytes_to_minio(target_bucket, target_name, content)
 
@@ -818,9 +824,10 @@ def _set_file_entry_snapshot(file_list: list, index: int, item, file_ref: dict, 
 
 def _snapshot_version_files(version_uid: str, graph: dict) -> list[dict]:
     snapshots = []
-    _delete_version_file_snapshots(version_uid)
+    # Publish new immutable snapshots before replacing the version metadata.
+    snapshot_generation = uuid.uuid4().hex
     for file_list, index, item, file_ref in _iter_graph_file_entries(graph):
-        snapshot_object = _snapshot_object_name(version_uid, file_ref["bucket"], file_ref["filename"])
+        snapshot_object = _snapshot_object_name(version_uid, file_ref["bucket"], file_ref["filename"]) + "." + snapshot_generation
         snapshot = {
             "filename": file_ref["filename"],
             "bucket": file_ref["bucket"],
@@ -829,8 +836,8 @@ def _snapshot_version_files(version_uid: str, graph: dict) -> list[dict]:
         }
         try:
             _copy_minio_object(
-                file_ref["bucket"],
-                file_ref["filename"],
+                file_ref.get("snapshot_bucket") or file_ref["bucket"],
+                file_ref.get("snapshot_object") or file_ref["filename"],
                 version_snapshot_bucket(),
                 snapshot_object,
             )
@@ -840,6 +847,7 @@ def _snapshot_version_files(version_uid: str, graph: dict) -> list[dict]:
             print("[neo4j_api.py] Could not snapshot file object:", file_ref, exc)
             snapshot["status"] = "missing"
             snapshot["error"] = str(exc)
+            raise RuntimeError("Version was not saved because a file snapshot could not be copied") from exc
         snapshots.append(snapshot)
     return snapshots
 
@@ -1385,6 +1393,21 @@ def neo4j_add_node():
         return jsonify({"error": str(e)}), 500
 
 
+@app.get('/neo4j_resolve_file')
+@require_auth
+def neo4j_resolve_file():
+    container = str(request.args.get("container_id") or "")
+    filename = str(request.args.get("filename") or "")
+    bucket = node_bucket_name(container)
+    with driver.session() as session:
+        record = session.run("""
+            MATCH (f:FILE {filename:$filename})
+            WHERE f.bucket=$bucket OR f.bucket=$container
+            RETURN f.snapshot_bucket AS bucket, f.snapshot_object AS object LIMIT 1
+        """, filename=filename, bucket=bucket, container=container).single()
+    return jsonify({"bucket": record["bucket"] if record else None, "object": record["object"] if record else None})
+
+
 # Adds (or updates) a FILE node once a file is added
 @app.route('/neo4j_add_file', methods=['POST'])
 @require_auth
@@ -1407,7 +1430,7 @@ def neo4j_add_file():
       filename: $filename,
       bucket: $bucket
     })
-    SET f.added_at = datetime()
+    SET f.added_at = datetime(), f.snapshot_bucket = null, f.snapshot_object = null
     SET f.uid = randomUUID()
     SET f.role = CASE WHEN $role = '' THEN f.role ELSE $role END
     MERGE (n)-[:HAS_FILE]->(f)
@@ -1576,6 +1599,23 @@ def neo4j_update_generated_artifact():
                 return jsonify(
                     {"error": f"No STEP node found with flow_id={flow_id}"}
                 ), 404
+            publish_files = data.get("publish_files")
+            if isinstance(publish_files, list):
+                session.run("""
+                    MATCH (n:STEP {flow_id:$flow_id})-[:HAS_FILE]->(old:FILE {role:'code'})
+                    WHERE NOT old.filename IN $filenames
+                    DETACH DELETE old
+                """, flow_id=flow_id, filenames=[item["filename"] for item in publish_files]).consume()
+                for item in publish_files:
+                    session.run("""
+                        MATCH (n:STEP {flow_id:$flow_id})
+                        MERGE (f:FILE {filename:$filename, bucket:$bucket})
+                        SET f.uid=coalesce(f.uid,randomUUID()), f.role='code', f.added_at=datetime(),
+                            f.snapshot_bucket=$bucket, f.snapshot_object=$object
+                        MERGE (n)-[:HAS_FILE]->(f)
+                        SET n.has_files='yes'
+                    """, flow_id=flow_id, filename=item["filename"], bucket=node_bucket_name(flow_id),
+                        object=item["snapshot_object"]).consume()
             return jsonify(record["n"]._properties), 200
     except Exception as e:
         print("[neo4j_api.py] Error storing generated artifact:", e)
@@ -3050,6 +3090,8 @@ def neo4j_record_provenance_event():
 @app.route('/neo4j_run_query', methods=['POST'])
 @require_auth
 def neo4j_run_query():
+    if request.environ.get("inlumen.query_capability") is not INTERNAL_QUERY_CAPABILITY:
+        return jsonify({"error": "Raw query submission is not available."}), 403
     data = request.json
     query = data['query']
     query_type = data.get("query_type")
@@ -3057,9 +3099,9 @@ def neo4j_run_query():
         _validate_workspace_cypher(str(query))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    print("[neo4j_api.py] Received query to execute in Neo4J:", query)
     with driver.session() as session:
-        session_result = session.run(query)
+        query, parameters = parameterize_literals(query)
+        session_result = session.run(query, **parameters)
         # We are assuming that the query returns something to jsonify
         results = [record.data() for record in session_result]
         if _mutation_query_type(query_type):
@@ -3118,7 +3160,11 @@ def neo4j_sync_graph():
         return jsonify({}), 200
 
     payload = request.get_json(force=True) or {}
-    graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+    graph = payload.get("graph")
+    try:
+        validate_graph_document(graph)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 422
     active_version_uid = str(payload.get("active_version_uid") or payload.get("version_uid") or MAIN_VERSION_UID).strip() or MAIN_VERSION_UID
     version_name = str(payload.get("version_name") or payload.get("active_version_name") or "").strip()
 
@@ -3157,7 +3203,11 @@ def neo4j_restore_graph_history():
         return jsonify({}), 200
 
     payload = request.get_json(force=True) or {}
-    graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+    graph = payload.get("graph")
+    try:
+        validate_graph_document(graph)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 422
     direction = str(payload.get("direction") or "").strip().lower()
     if direction not in {"undo", "redo"}:
         return jsonify({"error": "direction must be 'undo' or 'redo'"}), 400
@@ -3221,7 +3271,7 @@ def neo4j_get_graph():
       s,
       t,
       r,
-      collect(DISTINCT f { .filename, .bucket, .role, added_at: toString(f.added_at) }) AS files_for_step
+      collect(DISTINCT f { .filename, .bucket, .role, .snapshot_bucket, .snapshot_object, added_at: toString(f.added_at) }) AS files_for_step
     RETURN
       toString(p.updated_at) AS updated_at,
       p {

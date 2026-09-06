@@ -13,7 +13,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from flask import Flask, Response, jsonify, make_response, request
+from flask import Flask, Response, g, jsonify, make_response, request
 
 from artifact_contract import classify_artifact
 from analytics_api import (
@@ -163,6 +163,8 @@ CHATBOT_CONFIGS_PATH = Path(
 )
 
 app = Flask(__name__)
+from observability import install_request_observability
+install_request_observability(app)
 validate_production_auth_configuration()
 validate_auth_mode_configuration()
 app.register_blueprint(create_public_api_blueprint())
@@ -251,6 +253,10 @@ def _forward_headers(include_content_type: bool = True) -> dict[str, str]:
     if authorization:
         headers["Authorization"] = authorization
     headers[WORKSPACE_HEADER] = current_principal().workspace_id
+    if getattr(g, "request_id", None):
+        headers["X-Request-ID"] = g.request_id
+    if request.headers.get("If-Match"):
+        headers["If-Match"] = request.headers["If-Match"]
     accept = request.headers.get("Accept")
     if accept:
         headers["Accept"] = accept
@@ -1141,34 +1147,6 @@ def _persist_codegen_artifact(
 ) -> dict[str, Any]:
     files = artifact.get("files") if isinstance(artifact.get("files"), list) else []
     runtime_environment = runtime_environment_from_files(files)
-    new_filenames = {
-        str(item.get("filename") or "").strip()
-        for item in files
-        if isinstance(item, dict) and str(item.get("filename") or "").strip()
-    }
-    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
-    current_node = next(
-        (
-            item
-            for item in nodes
-            if isinstance(item, dict)
-            and str(item.get("id") or item.get("flow_id") or "") == node_id
-        ),
-        None,
-    )
-    current_data = _node_data(current_node) if isinstance(current_node, dict) else {}
-    current_artifact = (
-        current_data.get("generated_artifact")
-        if isinstance(current_data.get("generated_artifact"), dict)
-        else {}
-    )
-    stale_filenames = {
-        str(item.get("filename") or "").strip()
-        for item in current_artifact.get("files") or []
-        if isinstance(item, dict)
-        and str(item.get("filename") or "").strip()
-        and str(item.get("filename") or "").strip() not in new_filenames
-    }
     stored_files = []
     file_hashes: dict[str, str] = {}
     bucket = node_bucket_name(node_id)
@@ -1179,6 +1157,8 @@ def _persist_codegen_artifact(
         content = file_item.get("content")
         if not filename or not isinstance(content, str):
             continue
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        object_name = f".generated/{content_hash}/{filename}"
         storage_response = _proxy(
             dispatch_object_request,
             "minio_update_text_file",
@@ -1186,29 +1166,17 @@ def _persist_codegen_artifact(
             data=b"",
             json_payload={
                 "bucket_id": node_id,
-                "filename": filename,
+                "filename": object_name,
                 "content": content,
             },
         )
         storage_response.raise_for_status()
-        graph_response = _proxy(
-            dispatch_graph_request,
-            "neo4j_add_file",
-            method="POST",
-            data=b"",
-            json_payload={
-                "properties": {
-                    "flow_id": node_id,
-                    "filename": filename,
-                    "role": "code",
-                }
-            },
-        )
-        graph_response.raise_for_status()
         stored_files.append(
             {
                 "filename": filename,
                 "bucket": bucket,
+                "snapshot_bucket": bucket,
+                "snapshot_object": object_name,
                 "content_type": str(file_item.get("content_type") or "text/plain"),
                 "role": "code",
             }
@@ -1216,28 +1184,6 @@ def _persist_codegen_artifact(
         file_hashes[filename] = "sha256:" + hashlib.sha256(
             content.encode("utf-8")
         ).hexdigest()
-
-    for filename in sorted(stale_filenames):
-        storage_response = _proxy(
-            dispatch_object_request,
-            "minio_remove_file",
-            method="DELETE",
-            params={},
-            data=b"",
-            form={"bucket_id": node_id, "filename": filename},
-        )
-        storage_response.raise_for_status()
-        graph_response = _proxy(
-            dispatch_graph_request,
-            "neo4j_delete_file",
-            method="DELETE",
-            params={},
-            data=b"",
-            json_payload={
-                "properties": {"flow_id": node_id, "filename": filename}
-            },
-        )
-        graph_response.raise_for_status()
 
     generated_artifact = {
         **artifact,
@@ -1266,6 +1212,7 @@ def _persist_codegen_artifact(
         json_payload={
             "flow_id": node_id,
             "generated_artifact": generated_artifact,
+            "publish_files": stored_files,
         },
     )
     graph_response.raise_for_status()
@@ -1307,6 +1254,8 @@ def _mark_codegen_artifact_user_modified(
                 "status": "current",
                 "generator": "user-upload",
             }
+        if isinstance(data.get("file_buckets"), list):
+            artifact["files"] = [deepcopy(item) for item in data["file_buckets"] if isinstance(item, dict) and item.get("role") == "code"]
         if python_source is not None:
             artifact["runtime_environment"] = discover_runtime_environment(
                 python_source
@@ -2619,11 +2568,17 @@ def file_content():
     filename = str(request.args.get("filename") or "").strip()
     if not container_id or not filename:
         return _json_error(400, "container_id and filename are required")
+    resolved = _proxy(dispatch_graph_request, "neo4j_resolve_file", method="GET",
+                      params={"container_id": container_id, "filename": filename}, data=b"")
+    if not resolved.ok:
+        return _response_from_upstream(resolved)
+    location = _upstream_json(resolved)
+    filename = location.get("object") or filename
     storage_response = _proxy(
         dispatch_object_request,
         "minio_read_file",
         method="GET",
-        params={"bucket_id": container_id, "filename": filename},
+        params={"bucket_id": container_id, "filename": filename, **({"bucket_name": location["bucket"]} if location.get("bucket") else {})},
         data=b"",
     )
     return _response_from_upstream(storage_response)
@@ -3354,6 +3309,11 @@ def node_text_file(node_id: str):
     )
     generated_artifact = None
     if storage_response.ok:
+        file_update = _proxy(dispatch_graph_request, "neo4j_add_file", method="POST", data=b"",
+            json_payload={"properties": {"flow_id": node_id, "filename": filename}})
+        if not file_update.ok:
+            return _response_from_upstream(file_update)
+
         if _is_codegen_runtime_file(filename):
             generated_artifact = _mark_codegen_artifact_user_modified(
                 node_id,

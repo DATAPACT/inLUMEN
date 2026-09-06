@@ -139,9 +139,9 @@ def build_pipeline_editor_tools(
         try:
             query_type = "create_pipeline"
             data = json.loads(params)
-            name = data.get("name", "").replace("'", "\\'")
-            description = data.get("description", "").replace("'", "\\'")
-            version = str(data.get("version", "")).replace("'", "\\'")
+            name = data.get("name", "").replace("\\", "\\\\").replace("'", "\\'")
+            description = data.get("description", "").replace("\\", "\\\\").replace("'", "\\'")
+            version = str(data.get("version", "")).replace("\\", "\\\\").replace("'", "\\'")
             query = f"""
             OPTIONAL MATCH (candidate:PIPELINE {{status:'design'}})
             OPTIONAL MATCH (candidate)-[:HAS_STEP]->(candidateStep:STEP)
@@ -533,7 +533,7 @@ def build_pipeline_editor_tools(
             raw_label = str(data.get("label", ""))
             label = _cypher_string(raw_label)
             raw_description = str(data.get("description", ""))
-            description = raw_description.replace("'", "\\'")
+            description = raw_description.replace("\\", "\\\\").replace("'", "\\'")
             resolved_template = _resolved_template_for_step(
                 step_type,
                 data.get("template"),
@@ -545,7 +545,7 @@ def build_pipeline_editor_tools(
                 step_type,
                 label,
                 description,
-                resolved_template.replace("'", "\\'"),
+                resolved_template.replace("\\", "\\\\").replace("'", "\\'"),
                 data.get("implementation"),
                 data.get("parameters"),
                 data.get("secret_parameters"),
@@ -576,7 +576,7 @@ def build_pipeline_editor_tools(
                 resolved_subpipeline["input_ids"][0]
                 if resolved_subpipeline
                 else default_input_port_id(step_type, resolved_template)
-            ).replace("'", "\\'")
+            ).replace("\\", "\\\\").replace("'", "\\'")
             raw_after_flow_id = data.get("after_flow_id")
             after_flow_id = str(raw_after_flow_id or "").strip()
             allow_fan_out = data.get("allow_fan_out") is True
@@ -1164,7 +1164,7 @@ def build_pipeline_editor_tools(
             if not interface["inputs"] or not interface["outputs"]:
                 raise ValueError("Reusable pipeline requires Source and Destination boundaries")
             public_ports = public_ports_for_interface(interface)
-            escaped_name = name.replace("'", "\\'")
+            escaped_name = name.replace("\\", "\\\\").replace("'", "\\'")
 
             duplicate_lookup = await run_query(f"""
             MATCH (existing:PIPELINE {{status:'reusable'}})
@@ -1184,8 +1184,8 @@ def build_pipeline_editor_tools(
             def escaped_json(value: Any) -> str:
                 return json.dumps(value, ensure_ascii=True, sort_keys=True).replace("\\", "\\\\").replace("'", "\\'")
 
-            escaped_description = description.replace("'", "\\'")
-            escaped_version_name = version_name.replace("'", "\\'")
+            escaped_description = description.replace("\\", "\\\\").replace("'", "\\'")
+            escaped_version_name = version_name.replace("\\", "\\\\").replace("'", "\\'")
             graph_json = escaped_json(graph)
             interface_json = escaped_json(interface)
             public_ports_json = escaped_json(public_ports)
@@ -1388,8 +1388,8 @@ def build_pipeline_editor_tools(
             step_type = require_agent_step_type(data.get("type"))
             raw_label = str(data.get("label", ""))
             raw_description = str(data.get("description", ""))
-            label = raw_label.replace("'", "\\'")
-            description = raw_description.replace("'", "\\'")
+            label = raw_label.replace("\\", "\\\\").replace("'", "\\'")
+            description = raw_description.replace("\\", "\\\\").replace("'", "\\'")
             resolved_template = _resolved_template_for_step(
                 step_type,
                 data.get("template"),
@@ -1397,10 +1397,10 @@ def build_pipeline_editor_tools(
                 raw_description,
             )
             require_supported_connector(step_type, resolved_template)
-            before_flow_id = str(data["before_flow_id"]).replace("'", "\\'")
+            before_flow_id = str(data["before_flow_id"]).replace("\\", "\\\\").replace("'", "\\'")
             raw_after_flow_id = data.get("after_flow_id")
             after_flow_id = (
-                str(raw_after_flow_id).replace("'", "\\'")
+                str(raw_after_flow_id).replace("\\", "\\\\").replace("'", "\\'")
                 if raw_after_flow_id is not None and str(raw_after_flow_id).strip() != ""
                 else None
             )
@@ -1409,7 +1409,7 @@ def build_pipeline_editor_tools(
                 step_type,
                 label,
                 description,
-                resolved_template.replace("'", "\\'"),
+                resolved_template.replace("\\", "\\\\").replace("'", "\\'"),
                 data.get("implementation"),
                 data.get("parameters"),
                 data.get("secret_parameters"),

@@ -134,3 +134,15 @@ def test_jobs_are_isolated_by_workspace() -> None:
     assert [job["workspace_id"] for job in store.list(workspace_id="workspace-a")] == [
         "workspace-a"
     ]
+
+
+def test_deleted_job_cannot_be_recreated_by_another_worker(tmp_path):
+    path = str(tmp_path / 'jobs.sqlite')
+    first, other = PipelineJobStore(path), PipelineJobStore(path)
+    job = {'run_id': 'deleted', 'workspace_id': 'alice', 'status': 'running'}
+    first.save(job)
+    first.clear('alice')
+    other.save({**job, 'status': 'valid'})
+    assert other.get('deleted', 'alice') is None
+    other.save({**job, 'workspace_id': 'bob'})
+    assert other.get('deleted', 'bob') is not None

@@ -201,7 +201,7 @@ Step 1: Clone this repository on your computer.
 
 Step 2: Navigate to the cloned project directory.
 
-Step 3: Copy `.env.example` to `.env`, set the public backend URL, and replace the three token placeholders. Static-token authentication is enabled by default; uncomment the Keycloak block and set `AUTH_ENABLED=true` when deploying with Keycloak. The same `.env` file is used by both the development and production Compose stacks. Neo4J, MinIO, codegen, and runner routing remain private and use Compose-owned defaults.
+Step 3: For local development, copy `.env.example` to `.env` and replace the service token placeholders. `AUTH_ENABLED=false` gives the browser one shared local workspace. For production, use `.env.production.example` and the separate [multi-user deployment guide](production-multi-user.md); production requires Keycloak and PostgreSQL.
 
 The Docker setup derives frontend API URLs, Neo4J URI, and MinIO endpoint from the Compose service names, ports, and credential values, so you do not need separate `NEO4J_URI`, `MINIO_ENDPOINT`, or `VITE_*_API_URL` entries for normal local use. The backend sends permissive CORS headers by default.
 
@@ -209,7 +209,7 @@ The sample contains the public backend URL and API tokens, with Keycloak configu
 
 The browser uses `INLUMEN_API_PUBLIC_URL`. The backend reaches codegen privately as `http://codegen:8010` and the runner as `http://runner:8020`, including when the Compose project runs on a VM behind Cloudflare; the frontend never calls either private service directly.
 
-Set `AUTH_ENABLED=false` for local static-token authentication or keep it `true` for Keycloak. Advanced deployments can still override any Compose variable directly; for example, a separately hosted codegen service can set `INLUMEN_CODEGEN_SERVICE_URL`.
+Set `AUTH_ENABLED=false` only for a local shared workspace; set it `true` for Keycloak. Advanced deployments can still override any Compose variable directly; for example, a separately hosted codegen service can set `INLUMEN_CODEGEN_SERVICE_URL`.
 
 Step 4: Run the following command to build the docker containers:
 ```
@@ -218,10 +218,10 @@ docker compose up --build
 
 The default `docker-compose.yml` is optimized for local development and exposes Neo4J and MinIO inspection ports. Neo4J is available at `localhost:7474` and `localhost:7687`; MinIO is available at `localhost:9000` with console access at `localhost:9099`. You can override those inspection ports with `NEO4J_HTTP_PORT`, `NEO4J_BOLT_PORT`, `MINIO_S3_PORT`, and `MINIO_CONSOLE_PORT`.
 
-For deployment/production-like runs, use the production compose file. It exposes only the frontend and backend gateway on the host; Neo4J and MinIO stay private on the Compose network:
+For production, use the production Compose file and its dedicated environment file. It publishes no host ports; Cloudflare Tunnel reaches the frontend over a private network:
 
 ```
-docker compose -f docker-compose-prod.yml up --build
+docker compose --env-file .env.production -f docker-compose-prod.yml up -d --build
 ```
 
 For a deployment where the browser frontend calls a separately deployed backend URL, configure the root `.env` before building:
@@ -259,8 +259,8 @@ a private service with the root Compose stack. The browser never calls it
 directly: inLUMEN creates a background job through the backend, and the backend
 authenticates to `http://codegen:8010` over the internal Compose network.
 
-Generation jobs and inLUMEN artifact-finalization metadata are stored in SQLite
-databases on persistent volumes. A run therefore continues when its progress
+Production generation jobs and artifact-finalization metadata use PostgreSQL.
+Local development and tests retain the SQLite fallback. A run therefore continues when its progress
 panel is closed, can be rediscovered after a browser reload, and remains
 inspectable after an application restart. Work that was executing during a
 codegen-process restart is marked as interrupted and can be resumed from its
@@ -287,11 +287,12 @@ Use HTTPS for any non-local endpoint. The service token authenticates inLUMEN
 to codegen; the separately forwarded provider credential authenticates codegen
 to the configured model endpoint.
 
-The embedded SQLite job store is durable and appropriate for a single codegen
-replica. A horizontally scaled deployment should replace it with a shared job
-database and worker queue. Production sandbox execution should likewise use
-isolated workers or cluster jobs rather than expose a host Docker socket beyond
-the dedicated codegen service.
+Generation workers use database leases, heartbeats and per-workspace/global
+admission limits. Expired work becomes resumable; the service never silently
+replays an interrupted execution. Shared PostgreSQL is required across replicas.
+Generated imports and materialization always run in Docker. See the
+[hardening and operations guide](hardening-and-operations.md) for worker isolation,
+recovery, backups, and the boundaries of the current implementation.
 
 For OpenRouter, use your OpenRouter API key after adding the provider key in OpenRouter settings. The model fields provide live autocomplete, per-million input/output token pricing, and Cerebras availability. Selecting a Cerebras-hosted model pins that specific chat or code-generation request to the `cerebras` OpenRouter provider; a Cerebras BYOK key configured as prioritized in OpenRouter is then attempted before shared capacity. Short model aliases such as `gpt-oss-120b` are accepted by inLUMEN and normalized before the request is sent. OpenRouter response usage is accumulated across generation and repair calls, then shown as USD cost and token usage in the generation run dialog. Chat and code-generation requests are automatically attributed to inLUMEN using the project repository URL and `inLUMEN` title.
 
@@ -403,11 +404,11 @@ current pipeline also exposes its latest run status, duration, output count, and
 snapshot digest. Full logs, events, secrets, bundles, and outputs remain in the
 runner lifecycle and artifact stores.
 
-The runner's embedded SQLite lifecycle store and separate filesystem artifact
-store are durable for a single runner replica; bundle and output bytes are not
-embedded in lifecycle rows. Production configures the Dagster adapter through the private codegen
-execution service. A horizontally scaled runner must use a shared job store and
-worker queue; user execution must never be placed in the gateway process.
+The runner uses PostgreSQL in production and SQLite locally. Bundle and output
+bytes live in a separate artifact directory; multiple replicas need the same
+artifact filesystem. Execution receipts let a restarted runner retrieve outcomes
+without resubmitting side effects. Generated code executes in the private codegen
+worker, outside the gateway process.
 
 API key handling:
 - Authenticated provider API keys are submitted once to the gateway, encrypted at rest with `INLUMEN_SECRET_ENCRYPTION_KEY`, and scoped to the selected workspace/configuration. The API returns only a `has_api_key` flag; it never returns the plaintext to the browser or stores it in configuration JSON.
@@ -434,7 +435,9 @@ Local URLs:
 
 Swagger UI is enabled by default. Open `http://localhost:5000/docs`, enter a bearer token, then use the Swagger `Authorize` button or the pre-filled bearer auth to run live requests. The live schema documents both the integration-oriented `/api/v1/*` endpoints and the UI-equivalent gateway endpoints for canvas graph editing, file operations, pipeline version management, chat, and deployment artifact generation.
 
-When `AUTH_ENABLED=false`, authentication uses a static bearer token:
+With `AUTH_ENABLED=false`, the public integration API (`/api/v1/*`, OpenAPI and
+Swagger) uses a static bearer token. Browser gateway endpoints use the shared
+local identity without authentication:
 
 ```
 Authorization: Bearer <API_AUTH_TOKEN>
@@ -446,7 +449,7 @@ When `AUTH_ENABLED=true`, authentication uses Keycloak access tokens:
 Authorization: Bearer <KEYCLOAK_JWT>
 ```
 
-The API validates Keycloak JWTs with `KEYCLOAK_JWKS_URL`, checks `KEYCLOAK_ISSUER` when configured, and accepts `KEYCLOAK_AUDIENCE` matches from the token `aud`, `azp`, or `client_id` claims. `/health` and `/ready` are public. The OpenAPI JSON and all `/api/v1/*` endpoints require the bearer token in static-token mode; UI-equivalent gateway endpoints require a valid Keycloak bearer token when `AUTH_ENABLED=true` and also accept the same header in local static-token mode. Invalid or missing tokens return `401` or `403`; validation errors return `400` or `422`; missing resources return `404`.
+The API validates Keycloak JWTs with `KEYCLOAK_JWKS_URL`, checks `KEYCLOAK_ISSUER` when configured, and accepts `KEYCLOAK_AUDIENCE` matches from the token `aud`, `azp`, or `client_id` claims. `/health` and `/ready` are public. The OpenAPI JSON and all `/api/v1/*` endpoints require the bearer token in static-token mode; UI-equivalent gateway endpoints require a valid Keycloak bearer token when `AUTH_ENABLED=true` and are unauthenticated in local mode. Invalid or missing tokens return `401` or `403`; validation errors return `400` or `422`; missing resources return `404`.
 
 Example requests:
 

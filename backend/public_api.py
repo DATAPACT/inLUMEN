@@ -366,6 +366,9 @@ def api_auth_required(route_handler):
                     "workspace_unavailable",
                     "The workspace database could not be queried",
                 )
+            from permissions import permits
+            if not permits(g.inlumen_principal.workspace_role, request.method, request.path):
+                return _error_response(403, "insufficient_permissions", "Your workspace role does not allow this action")
             return route_handler(*args, **kwargs)
 
         configured_token = _configured_api_token()

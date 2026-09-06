@@ -1,14 +1,15 @@
 import { getWorkspaceStorage, type WorkspaceStorage } from '@/utils/workspaceStorage';
-import React, { useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useLayoutEffect, useRef, lazy, Suspense } from 'react';
 import { apiFetch } from '@/utils/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
 import { cn } from '@/lib/utils';
-import { Sidebar } from '@/components/Sidebar';
-import { PropertiesPanel, PropertyNodeData } from '@/components/PropertiesPanel';
+const Sidebar = lazy(() => import('@/components/Sidebar').then((module) => ({ default: module.Sidebar })));
+import type { PropertyNodeData } from '@/components/PropertiesPanel';
+const PropertiesPanel = lazy(() => import('@/components/PropertiesPanel').then((module) => ({ default: module.PropertiesPanel })));
 import { Toolbar } from '@/components/Toolbar';
 import { WrappedFlowCanvas, FlowCanvasRef } from '@/components/FlowCanvas';
 import { ChatPanel } from '@/components/chat/ChatPanel';
-import { VersionsPanel } from '@/components/versions/VersionsPanel';
+const VersionsPanel = lazy(() => import('@/components/versions/VersionsPanel').then((module) => ({ default: module.VersionsPanel })));
 import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
 import { sanitizeAssistantMessage } from '@/features/chat/messageSafety';
 import { CHAT_PROMPT_SUGGESTIONS } from '@/features/chat/promptSuggestions';
@@ -1258,7 +1259,7 @@ const Index = () => {
               collapsedSize={0}
             >
               {isLibraryOpen ? (
-                <Sidebar
+                <Suspense fallback={<p role="status" className="p-4">Loading panel…</p>}><Sidebar
                   className="h-full w-full bg-card/95"
                   onDragStart={onDragStart}
                   activeTab={activeTab}
@@ -1276,7 +1277,7 @@ const Index = () => {
                   currentPipelineDescription={activePipelineDescription}
                   onGenerateRuntimeCode={() => flowCanvasRef.current?.openCodeGeneration()}
                   onImportRuntimePackages={() => flowCanvasRef.current?.openTaskPackageImport()}
-                />
+                /></Suspense>
               ) : null}
             </ResizablePanel>
             <ResizableHandle
@@ -1329,7 +1330,7 @@ const Index = () => {
             >
               {rightPanel ? (
                 rightPanel === 'inspector' ? (
-                    <PropertiesPanel
+                    <Suspense fallback={<p role="status" className="p-4">Loading panel…</p>}><PropertiesPanel
                       className="bg-card/95"
                       selectedNode={selectedNode}
                       onNodeUpdate={onNodeUpdate}
@@ -1338,7 +1339,7 @@ const Index = () => {
                         flowCanvasRef.current?.openCodeGeneration([nodeId]);
                       }}
                       activeChatbotConfig={activeConfig}
-                    />
+                    /></Suspense>
                   ) : rightPanel === 'chat' ? (
                     <ChatPanel
                       activeConfig={activeConfig}
@@ -1358,7 +1359,7 @@ const Index = () => {
                       onSuggestionClick={handleSuggestionClick}
                     />
                   ) : (
-                    <VersionsPanel
+                    <Suspense fallback={<p role="status" className="p-4">Loading panel…</p>}><VersionsPanel
                       className="bg-card/95"
                       refreshKey={versionsRefreshKey}
                       activeVersionUid={activeVersionUid}
@@ -1366,7 +1367,7 @@ const Index = () => {
                       onRestoreVersion={(version) => { void handleRestoreVersion(version); }}
                       onSetMainVersion={(version) => { void handleSetMainVersion(version); }}
                       onVersionDeleted={handleVersionDeleted}
-                    />
+                    /></Suspense>
                   )
               ) : null}
             </ResizablePanel>

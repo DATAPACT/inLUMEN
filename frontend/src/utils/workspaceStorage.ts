@@ -1,8 +1,10 @@
+import { reportPersistenceError } from '@/features/flow/persistenceState';
 import { AUTH_ENABLED } from '@/config/auth';
 
 // Identity comes only from the validated /api/session response, never storage.
 let scope: string | null = AUTH_ENABLED ? null : '';
 let generation = 0;
+const protectedDrafts = new Set<string>();
 
 export const setWorkspaceStorageScope = (userId: string | null, workspaceId: string | null) => {
   const next = !AUTH_ENABLED ? '' : userId && workspaceId
@@ -28,8 +30,8 @@ export const getWorkspaceStorage = (kind: 'localStorage' | 'sessionStorage' = 'l
       try { return window[kind].getItem(prefix + key); } catch { return null; }
     },
     setItem(key, value) {
-      if (!available()) return;
-      try { window[kind].setItem(prefix + key, value); } catch { /* Storage may be unavailable/full. */ }
+      if (!available() || protectedDrafts.has(prefix + key)) return;
+      try { window[kind].setItem(prefix + key, value); } catch { queueMicrotask(() => reportPersistenceError(new Error("Browser draft storage is full or unavailable. Download your draft to keep a copy."))); }
     },
     removeItem(key) {
       if (!available()) return;
@@ -37,3 +39,23 @@ export const getWorkspaceStorage = (kind: 'localStorage' | 'sessionStorage' = 'l
     },
   };
 };
+
+/** Invalid drafts are retained for recovery; they must never crash the canvas. */
+export function readStoredArray<T>(storage: WorkspaceStorage, key: string, valid: (value: unknown) => value is T): T[] {
+  const raw = storage.getItem(key);
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed) || !parsed.every(valid)) throw new Error('Invalid draft');
+    return parsed;
+  } catch {
+    protectedDrafts.add((scope || '') + key);
+    storage.setItem(key + ':recovery', raw);
+    queueMicrotask(() => reportPersistenceError(new Error('A browser draft could not be read. The original draft has been retained; reload the saved graph to recover.')));
+    return [];
+  }
+}
+
+export function releaseDraftProtection() {
+  for (const key of protectedDrafts) if (key.startsWith(scope || '')) protectedDrafts.delete(key);
+}

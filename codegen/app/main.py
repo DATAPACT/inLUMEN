@@ -6,7 +6,10 @@ import time
 import uuid
 from collections import OrderedDict
 from datetime import UTC, datetime
+from contextlib import asynccontextmanager
 from typing import Annotated, Any
+
+from .request_diagnostics import RequestDiagnosticsMiddleware
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 
@@ -19,6 +22,8 @@ from .deployment_validation import (
 )
 from .generator import generate_node_script_bundle, generate_pipeline_script_bundles
 from .job_store import PipelineJobStore
+from .leases import WorkerLeases
+from .execution_store import ExecutionStore
 from .llm import LLMGenerationError
 from .sandbox import cancel_sandbox_run
 from .schemas import (
@@ -47,6 +52,8 @@ PIPELINE_JOB_STORE = PipelineJobStore(
     os.getenv("DATABASE_URL")
     or os.getenv("CODEGEN_JOB_DB_PATH", "state/codegen-jobs.sqlite3")
 )
+EXECUTION_STORE = ExecutionStore(PIPELINE_JOB_STORE._engine)
+GENERATION_LEASES = WorkerLeases(PIPELINE_JOB_STORE._engine, "codegen")
 PIPELINE_GENERATION_JOBS: dict[str, dict[str, Any]] = PIPELINE_JOB_STORE.load_all()
 PIPELINE_GENERATION_TASKS: dict[str, asyncio.Task[None]] = {}
 PIPELINE_GENERATION_PURGED_RUN_IDS: set[str] = set()
@@ -55,7 +62,22 @@ PIPELINE_GENERATION_CACHE: OrderedDict[str, tuple[float, dict[str, Any]]] = (
 )
 PIPELINE_CACHE_SCHEMA_VERSION = "pipeline-first-v9-ai-runtime-artifacts"
 
+@asynccontextmanager
+async def lifespan(_app):
+    async def reconcile():
+        while True:
+            await asyncio.sleep(20)
+            recover_interrupted_pipeline_jobs(refresh=True)
+    recovery = asyncio.create_task(reconcile())
+    try:
+        yield
+    finally:
+        recovery.cancel()
+        await asyncio.gather(recovery, return_exceptions=True)
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="InLumen Code Generation Service",
     version="0.1.0",
     description=(
@@ -64,6 +86,7 @@ app = FastAPI(
     ),
 )
 app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestDiagnosticsMiddleware)
 
 SERVICE_AUTH = [Depends(require_service_api_key)]
 
@@ -123,11 +146,7 @@ def update_pipeline_job(run_id: str, **updates: Any) -> None:
 
 
 def pipeline_job_for_workspace(run_id: str, workspace_id: str) -> dict[str, Any] | None:
-    job = PIPELINE_GENERATION_JOBS.get(run_id)
-    if job is None:
-        job = PIPELINE_JOB_STORE.get(run_id, workspace_id)
-        if job is not None:
-            PIPELINE_GENERATION_JOBS[run_id] = job
+    job = PIPELINE_JOB_STORE.get(run_id, workspace_id)
     if job is None:
         return None
     if str(job.get("workspace_id") or "local-workspace") != workspace_id:
@@ -155,7 +174,7 @@ def clear_pipeline_job_llm_key(run_id: str) -> None:
 def clear_pipeline_job_state(*, preserve_purged_run_ids: bool = False) -> None:
     """Clear job state for tests and explicit administrative resets."""
     PIPELINE_GENERATION_JOBS.clear()
-    PIPELINE_JOB_STORE.clear()
+    PIPELINE_JOB_STORE.clear(protect_inflight=preserve_purged_run_ids)
     if not preserve_purged_run_ids:
         PIPELINE_GENERATION_PURGED_RUN_IDS.clear()
 
@@ -295,25 +314,55 @@ def mark_pipeline_job_failed(run_id: str, error: str) -> None:
     )
 
 
-def recover_interrupted_pipeline_jobs() -> None:
+def recover_interrupted_pipeline_jobs(*, refresh: bool = False) -> None:
     """Turn process-local work left by a restart into resumable failed jobs."""
+    if refresh:
+        for run_id, job in PIPELINE_JOB_STORE.load_all().items():
+            if run_id not in PIPELINE_GENERATION_TASKS:
+                PIPELINE_GENERATION_JOBS[run_id] = job
     for run_id, job in list(PIPELINE_GENERATION_JOBS.items()):
+        if run_id in PIPELINE_GENERATION_TASKS:
+            continue
         if str(job.get("status") or "").lower() not in {"queued", "running"}:
+            continue
+        workspace = str(job.get("workspace_id") or "local-workspace")
+        if GENERATION_LEASES.active(run_id, workspace):
+            continue
+        if not GENERATION_LEASES.claim(run_id, workspace):
             continue
         mark_pipeline_job_failed(
             run_id,
             "Code generation was interrupted by a service restart. Resume this run "
             "to retry it from its durable request snapshot.",
         )
+        GENERATION_LEASES.release(run_id, workspace)
 
 
 recover_interrupted_pipeline_jobs()
 
 
+def admit_generation(run_id: str, workspace_id: str) -> None:
+    if not GENERATION_LEASES.claim(run_id, workspace_id,
+            int(os.getenv("CODEGEN_MAX_OUTSTANDING_RUNS", "4")),
+            int(os.getenv("CODEGEN_MAX_GLOBAL_OUTSTANDING_RUNS", "12"))):
+        raise HTTPException(429, "Generation capacity is full. Wait for a run to finish.", headers={"Retry-After": "5"})
+
+
 def track_pipeline_task(run_id: str, task: asyncio.Task[None]) -> None:
     PIPELINE_GENERATION_TASKS[run_id] = task
 
+    workspace = str(PIPELINE_GENERATION_JOBS.get(run_id, {}).get("workspace_id") or "local-workspace")
+    async def renew():
+        while not task.done():
+            await asyncio.sleep(15)
+            durable = PIPELINE_JOB_STORE.get(run_id, workspace)
+            if durable is None or durable.get("status") == "cancelled" or not GENERATION_LEASES.renew(run_id, workspace):
+                task.cancel()
+                return
+    heartbeat = asyncio.create_task(renew())
     def discard_completed(completed: asyncio.Task[None]) -> None:
+        heartbeat.cancel()
+        GENERATION_LEASES.release(run_id, workspace)
         if PIPELINE_GENERATION_TASKS.get(run_id) is completed:
             PIPELINE_GENERATION_TASKS.pop(run_id, None)
 
@@ -482,6 +531,7 @@ async def start_pipeline_generation_run(
         allow_deterministic_fallback=request.options.allow_deterministic_fallback,
     )
     run_id = uuid.uuid4().hex
+    admit_generation(run_id, workspace_id)
     update_pipeline_job(
         run_id,
         status="queued",
@@ -521,7 +571,7 @@ def list_pipeline_generation_runs(
     )
     for job in jobs:
         run_id = str(job.get("run_id") or "")
-        if run_id:
+        if run_id and run_id not in PIPELINE_GENERATION_TASKS:
             PIPELINE_GENERATION_JOBS[run_id] = job
     if not include_result:
         jobs = [
@@ -654,6 +704,7 @@ async def resume_pipeline_generation_run(
         },
     )
     new_run_id = uuid.uuid4().hex
+    admit_generation(new_run_id, workspace_id)
     update_pipeline_job(
         new_run_id,
         status="queued",
@@ -742,6 +793,12 @@ def failed_flow_id_from_job(job: dict[str, Any]) -> str:
     return ""
 
 
+def scoped_execution_id(execution_id: str, workspace_id: str) -> str:
+    if workspace_id == "local-workspace":
+        return execution_id
+    return hashlib.sha256(f"{workspace_id}\0{execution_id}".encode()).hexdigest()
+
+
 @app.post(
     "/v1/validate/node-script",
     response_model=ValidationReport,
@@ -761,8 +818,21 @@ def validate_node_script(request: ValidateNodeScriptRequest) -> ValidationReport
 )
 async def validate_deployment_bundle_endpoint(
     request: DeploymentBundleValidationRequest,
+    workspace_id: Annotated[str, Depends(workspace_context)],
 ) -> dict[str, Any]:
     """Validate deployment artifacts inside the private codegen service."""
+    request = request.model_copy(update={"execution_id": scoped_execution_id(
+        request.execution_id or uuid.uuid4().hex, workspace_id
+    )})
+    try:
+        fresh = EXECUTION_STORE.start(request.execution_id, request.model_dump(), request.timeout_seconds)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not fresh:
+        receipt = EXECUTION_STORE.get(request.execution_id)
+        if receipt and receipt.get("result") is not None:
+            return receipt["result"]
+        raise HTTPException(409, "Execution was already submitted. Observe its result; it will not be replayed.")
     try:
         if request.execution_id:
             prepare_deployment_execution(request.execution_id)
@@ -782,34 +852,46 @@ async def validate_deployment_bundle_endpoint(
             runtime_secrets=request.runtime_secrets,
             execution_id=request.execution_id,
         )
+        result = EXECUTION_STORE.finish(request.execution_id, result, request.runtime_secrets)
         finish_deployment_execution(
             request.execution_id,
             succeeded=bool(result.get("ok")),
         )
         return result
     except (TypeError, ValueError) as exc:
+        EXECUTION_STORE.finish(request.execution_id, {"ok": False, "validation_report": {"errors": [str(exc)]}}, request.runtime_secrets)
         finish_deployment_execution(request.execution_id, succeeded=False)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception:
+        EXECUTION_STORE.finish(request.execution_id, {"ok": False, "validation_report": {"errors": ["Execution worker failed."]}}, {})
         finish_deployment_execution(request.execution_id, succeeded=False)
         raise
+
+
+@app.get("/v1/validate/deployment-bundle/{execution_id}/result", dependencies=SERVICE_AUTH)
+def get_execution_result(execution_id: str, workspace_id: Annotated[str, Depends(workspace_context)]):
+    receipt = EXECUTION_STORE.get(scoped_execution_id(execution_id, workspace_id))
+    if receipt is None:
+        raise HTTPException(404, "Execution not found")
+    return receipt
 
 
 @app.get(
     "/v1/validate/deployment-bundle/{execution_id}/progress",
     dependencies=SERVICE_AUTH,
 )
-def get_deployment_bundle_execution_progress(execution_id: str) -> dict[str, Any]:
+def get_deployment_bundle_execution_progress(execution_id: str, workspace_id: Annotated[str, Depends(workspace_context)]) -> dict[str, Any]:
     """Observe private, bounded progress for an active background execution."""
-    return deployment_execution_progress(execution_id)
+    return {**deployment_execution_progress(scoped_execution_id(execution_id, workspace_id)), "execution_id": execution_id}
 
 
 @app.delete(
     "/v1/validate/deployment-bundle/{execution_id}",
     dependencies=SERVICE_AUTH,
 )
-async def cancel_deployment_bundle_execution(execution_id: str) -> dict[str, Any]:
+async def cancel_deployment_bundle_execution(execution_id: str, workspace_id: Annotated[str, Depends(workspace_context)]) -> dict[str, Any]:
     """Cancel installation or Dagster materialization for a background run."""
+    execution_id = scoped_execution_id(execution_id, workspace_id)
     await asyncio.gather(
         asyncio.to_thread(cancel_deployment_execution, execution_id),
         asyncio.to_thread(cancel_sandbox_run, execution_id),

@@ -22,7 +22,9 @@ class CodegenDagsterExecutor:
         service_url: str | None = None,
         api_key: str | None = None,
         timeout_seconds: int | None = None,
+        workspace_id: str = "local-workspace",
     ) -> None:
+        self.workspace_id = workspace_id
         self.service_url = (
             service_url
             or os.getenv("INLUMEN_CODEGEN_SERVICE_URL", "http://codegen:8010")
@@ -35,6 +37,10 @@ class CodegenDagsterExecutor:
         self.timeout_seconds = timeout_seconds or int(
             os.getenv("RUNNER_DAGSTER_TIMEOUT_SECONDS", "1800")
         )
+
+    def for_workspace(self, workspace_id: str) -> "CodegenDagsterExecutor":
+        return CodegenDagsterExecutor(service_url=self.service_url, api_key=self.api_key,
+                                     timeout_seconds=self.timeout_seconds, workspace_id=workspace_id)
 
     @property
     def configured(self) -> bool:
@@ -62,6 +68,10 @@ class CodegenDagsterExecutor:
                 "runtime_secrets": runtime_secrets,
             },
         )
+
+    async def result(self, run_id: str) -> dict[str, Any]:
+        return await asyncio.to_thread(self._request, "GET",
+            f"/v1/validate/deployment-bundle/{quote(run_id, safe='')}/result", None, 10)
 
     async def cancel(self, run_id: str) -> None:
         await asyncio.to_thread(
@@ -102,6 +112,7 @@ class CodegenDagsterExecutor:
             method=method,
             headers={
                 "Accept": "application/json",
+                "X-InLumen-Workspace-Id": self.workspace_id,
                 "Authorization": f"Bearer {self.api_key}",
                 **({"Content-Type": "application/json"} if encoded else {}),
             },

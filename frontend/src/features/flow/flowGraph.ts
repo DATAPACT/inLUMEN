@@ -124,7 +124,7 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
     return [{
       ...rawNode,
       id: String(rawNode.id),
-      type: hasNestedData ? String(rawNode.type || "custom") : "custom",
+      type: "custom",
       position: {
         x: Number.isFinite(Number(position.x)) ? Number(position.x) : 0,
         y: Number.isFinite(Number(position.y)) ? Number(position.y) : 0,

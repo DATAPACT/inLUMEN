@@ -236,6 +236,9 @@ def require_auth(f):
                 "detail": "The workspace database could not be queried.",
             }), 503
 
+        from permissions import permits
+        if not permits(g.inlumen_principal.workspace_role, request.method, request.path):
+            return jsonify({"error": "Forbidden", "code": "insufficient_permissions"}), 403
         return f(*args, **kwargs)
 
     return decorated

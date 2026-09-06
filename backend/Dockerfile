@@ -1,16 +1,16 @@
-FROM python:3.10.18
+FROM python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534
 COPY --from=ghcr.io/astral-sh/uv:0.11.32 /uv /uvx /bin/
 
 # Create and set the working directory
 WORKDIR /usr/inlumen
 
 # Copy requirements.txt. 
-COPY ./requirements.txt ./requirements.txt
+COPY ./requirements.lock ./requirements.lock
 
 # Install Python dependencies from requirements.txt. 
 # Install before copying the rest of the files to leverage Docker cache
 # and avoid reinstalling dependencies if only the code changes.
-RUN --mount=type=cache,target=/root/.cache/uv uv pip install --system -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/uv uv pip install --system --require-hashes -r requirements.lock
 
 # Copy all files to the working directory in the container
 COPY . ./

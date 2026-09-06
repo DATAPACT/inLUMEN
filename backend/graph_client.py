@@ -57,6 +57,7 @@ def dispatch_graph_request(
     files=None,
     form: dict | None = None,
     headers: dict | None = None,
+    query_capability: object | None = None,
 ) -> LocalApiResponse:
     return dispatch_flask_request(
         _neo4j_app(),
@@ -68,6 +69,7 @@ def dispatch_graph_request(
         files=files,
         form=form,
         headers=headers,
+        **({"query_capability": query_capability} if query_capability is not None else {}),
     )
 
 
@@ -221,6 +223,7 @@ async def run_neo4j_query(
     provenance_context: dict | None = None,
 ) -> str:
     """Run a Cypher query through the Neo4j API and return a string payload."""
+    from workspace_queries import INTERNAL_QUERY_CAPABILITY
     try:
         print("[graph_client.py] Executing Neo4J query of type: " + query_type)
         payload = {"query": query, "query_type": query_type}
@@ -235,6 +238,7 @@ async def run_neo4j_query(
                 method="POST",
                 json_payload=payload,
                 headers=headers,
+                query_capability=INTERNAL_QUERY_CAPABILITY,
             ),
         ))
         response.raise_for_status()

@@ -54,7 +54,7 @@ const validationNodeSubject = (node: Node): ValidationIssueSubject => {
   const template = String(objectValue(data.template).name || data.template_label || "").trim();
   return {
     label,
-    context: kind === "flow" && template && template.toLowerCase() !== kindLabel.toLowerCase()
+    context: kind === "flow" && template && (template || "").toLowerCase() !== kindLabel.toLowerCase()
       ? `${kindLabel} · ${template}`
       : kindLabel,
   };
@@ -180,7 +180,7 @@ export const validateGraph = (
         category: "configuration",
         code: "missing-required-parameter",
         nodeId,
-        message: `Template “${template.label}” requires parameter “${name}”.`,
+        message: `Template “${template?.label || templateName}” requires parameter “${name}”.`,
       });
     });
 

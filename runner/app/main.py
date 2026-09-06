@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import os
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
+
+from .request_diagnostics import RequestDiagnosticsMiddleware
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
 
@@ -53,8 +56,17 @@ SERVICE_AUTH = [Depends(require_service_api_key)]
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await RUN_MANAGER.reconcile_interrupted()
-    yield
-    RUN_SUMMARY_STORE.close()
+    async def reconcile():
+        while True:
+            await asyncio.sleep(20)
+            await RUN_MANAGER.reconcile_interrupted()
+    recovery = asyncio.create_task(reconcile())
+    try:
+        yield
+    finally:
+        recovery.cancel()
+        await asyncio.gather(recovery, return_exceptions=True)
+        RUN_SUMMARY_STORE.close()
 
 
 app = FastAPI(
@@ -63,6 +75,7 @@ app = FastAPI(
     description="Durable background pipeline-run lifecycle and execution adapters.",
     lifespan=lifespan,
 )
+app.add_middleware(RequestDiagnosticsMiddleware)
 
 
 @app.get("/health")

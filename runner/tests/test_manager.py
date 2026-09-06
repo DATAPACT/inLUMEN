@@ -490,3 +490,39 @@ async def test_restart_reconciliation_cancels_orphaned_dagster_run(tmp_path):
     reconciled = manager.get("orphaned")
     assert reconciled["status"] == "failed"
     assert reconciled["error"]["code"] == "runner_restarted"
+
+
+@pytest.mark.asyncio
+async def test_recovery_consumes_receipt_without_resubmitting_pipeline(tmp_path):
+    store = PipelineRunStore(str(tmp_path / 'runs.sqlite'))
+    original = PipelineRunManager(store, adapter='dagster', executor=FakeDagsterExecutor())
+    run, _ = await original.start(request())
+    await asyncio.gather(*original.tasks.values())
+    record = store.get(run['run_id'])
+    record['status'] = 'running'
+    store.save(record)
+
+    class ReceiptExecutor(FakeDagsterExecutor):
+        async def execute(self, *args):
+            raise AssertionError('Recovery must not replay external side effects')
+        async def result(self, run_id):
+            return {'status': 'completed', 'result': {'ok': True, 'run_outputs': []}}
+
+    recovered = PipelineRunManager(store, adapter='dagster', executor=ReceiptExecutor())
+    assert await recovered.reconcile_interrupted() == 1
+    await asyncio.gather(*recovered.tasks.values())
+    assert recovered.get(run['run_id'])['status'] == 'succeeded'
+    assert not recovered.leases.active(run['run_id'], 'local-workspace')
+
+
+@pytest.mark.asyncio
+async def test_clear_blocks_late_callbacks_from_another_worker(tmp_path):
+    path = str(tmp_path / 'runs.sqlite')
+    store = PipelineRunStore(path)
+    manager = PipelineRunManager(store, adapter='dagster', executor=FakeDagsterExecutor())
+    run, _ = await manager.start(request())
+    await asyncio.gather(*manager.tasks.values())
+    stale = store.get(run['run_id'])
+    store.clear('local-workspace')
+    PipelineRunStore(path).save(stale)
+    assert store.get(run['run_id']) is None

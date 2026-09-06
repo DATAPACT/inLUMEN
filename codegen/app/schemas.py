@@ -49,7 +49,8 @@ class LLMConfig(BaseModel):
     model: str
     base_url: str
     api_key: str = Field(default="", exclude=True, repr=False)
-    timeout_seconds: int = 180
+    timeout_seconds: int = Field(default=180, ge=1, le=900)
+    max_output_tokens: int = Field(default=16384, ge=256, le=32768)
     model_family: str = "code"
     supports_function_calling: bool = True
     supports_json_output: bool = True
@@ -165,7 +166,10 @@ class GenerationContext(BaseModel):
 
 class GenerationOptions(BaseModel):
     persist: bool = True
-    repair_attempts: int = 2
+    repair_attempts: int = Field(default=2, ge=0, le=6)
+    max_llm_requests: int = Field(default=12, ge=1, le=32)
+    max_reported_cost_usd: float = Field(default=5.0, gt=0, le=100)
+    max_generation_seconds: int = Field(default=1200, ge=30, le=3600)
     include_sample_data: bool = False
     validation_mode: ValidationMode = "static"
     user_instruction: str = ""
@@ -280,7 +284,7 @@ class GeneratePipelineScriptsRequest(BaseModel):
 
 class ResumePipelineGenerationRunRequest(BaseModel):
     flow_id: str | None = None
-    repair_attempts: int | None = None
+    repair_attempts: int | None = Field(default=None, ge=0, le=6)
     user_instruction: str = ""
     llm_config: LLMConfig | None = None
 

@@ -15,7 +15,7 @@ volumes:
 
 services:
   postgres:
-    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
+    image: ${POSTGRES_IMAGE:-postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73}
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-inlumen}
@@ -32,7 +32,7 @@ services:
       - datapact_network
 
   neo4j:
-    image: ${NEO4J_IMAGE:-neo4j:5-community}
+    image: ${NEO4J_IMAGE:-neo4j:5-community@sha256:037cf5756f0135cbfd66b739b6df7c7c4bb100f9ce11602f6f9538e17e02c74d}
     restart: unless-stopped
     mem_limit: ${NEO4J_MEM_LIMIT:-2G}
     volumes:
@@ -55,7 +55,7 @@ services:
           - datapact-neo4j-db
 
   minio:
-    image: ${MINIO_IMAGE:-minio/minio:latest}
+    image: ${MINIO_IMAGE:-minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e}
     command: server --address 0.0.0.0:9000 --console-address ":9099" /data
     restart: unless-stopped
     environment:
@@ -148,6 +148,8 @@ services:
       CODEGEN_SERVICE_API_KEY: ${INLUMEN_CODEGEN_SERVICE_API_KEY}
       CODEGEN_DOCKER_VALIDATION_ENABLED: ${CODEGEN_DOCKER_VALIDATION_ENABLED:-true}
       CODEGEN_VALIDATION_WORKDIR: ${CODEGEN_VALIDATION_WORKDIR:-/var/lib/inlumen/codegen-workspaces}
+      CODEGEN_MAX_OUTSTANDING_RUNS: ${CODEGEN_MAX_OUTSTANDING_RUNS:-4}
+      CODEGEN_MAX_GLOBAL_OUTSTANDING_RUNS: ${CODEGEN_MAX_GLOBAL_OUTSTANDING_RUNS:-12}
       CODEGEN_PIPELINE_CACHE_TTL_SECONDS: ${CODEGEN_PIPELINE_CACHE_TTL_SECONDS:-3600}
       CODEGEN_PIPELINE_CACHE_MAX_ENTRIES: ${CODEGEN_PIPELINE_CACHE_MAX_ENTRIES:-32}
       CODEGEN_ALLOW_DETERMINISTIC_FALLBACK: "false"
@@ -239,7 +241,7 @@ services:
       - datapact_network
 
   cloudflared:
-    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:latest}
+    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:latest@sha256:51c9cefcb4569df44e1ad403ab1d3d8065aa8e84339bcfc6aee75502e1140339}
     restart: unless-stopped
     depends_on:
       frontend:

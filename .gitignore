@@ -72,3 +72,9 @@ frontend/.env
 codegen/secrets/
 codegen/state/
 runner/state/
+
+# Deployment credentials and browser test artifacts
+.env.production
+.env.staging
+frontend/test-results/
+frontend/playwright-report/

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextvars import ContextVar
 import hmac
 import os
 from pathlib import Path
@@ -9,6 +10,8 @@ from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
+
+EXECUTION_WORKSPACE: ContextVar[str] = ContextVar("execution_workspace", default="local-workspace")
 
 SERVICE_API_KEY_ENV = "CODEGEN_SERVICE_API_KEY"
 SERVICE_API_KEY_FILE_ENV = "CODEGEN_SERVICE_API_KEY_FILE"
@@ -44,7 +47,7 @@ def read_secret(env_name: str, file_env_name: str) -> str:
 def service_auth_configuration_error() -> str | None:
     """Return a safe readiness error when service authentication cannot work."""
     if env_flag(AUTH_DISABLED_ENV):
-        return None
+        return "Authentication cannot be disabled in production" if os.getenv("APP_ENV") == "production" else None
     try:
         expected = read_secret(SERVICE_API_KEY_ENV, SERVICE_API_KEY_FILE_ENV)
     except RuntimeError:
@@ -58,7 +61,7 @@ async def require_service_api_key(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
 ) -> None:
     """Authenticate internal callers using only the codegen service credential."""
-    if env_flag(AUTH_DISABLED_ENV):
+    if env_flag(AUTH_DISABLED_ENV) and os.getenv("APP_ENV") != "production":
         return
 
     configuration_error = service_auth_configuration_error()
@@ -87,12 +90,14 @@ async def workspace_context(
 ) -> str:
     resolved = str(workspace_id or "").strip()
     if resolved:
+        EXECUTION_WORKSPACE.set(resolved)
         return resolved
     if os.getenv("APP_ENV", "development").strip().lower() == "production":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="X-InLumen-Workspace-Id is required.",
         )
+    EXECUTION_WORKSPACE.set("local-workspace")
     return "local-workspace"
 
 

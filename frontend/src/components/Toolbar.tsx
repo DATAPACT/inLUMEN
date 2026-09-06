@@ -91,10 +91,10 @@ export function Toolbar({
   const currentVersionName = activeVersionName?.trim() || "Main";
 
   return (
-    <div className={cn("relative h-14 border-b border-border bg-card/95 flex items-center px-3 gap-2 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-card/80", className)}>
+    <div className={cn("relative min-h-14 shrink-0 flex-wrap py-2 border-b border-border bg-card/95 flex items-center px-3 gap-2 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-card/80", className)}>
       <div className="flex shrink-0 min-w-0 items-center gap-2 pr-2">
         <img src={inlumenLogo} alt="inLUMEN" className="h-8 w-8 shrink-0 rounded-lg" />
-        <div className="hidden min-w-0 flex-col justify-center sm:flex">
+        <div className="hidden min-w-0 flex-col justify-center xl:flex">
           <h1 className="truncate text-sm font-semibold tracking-[0.18em]">
             <span className="font-mono text-[hsl(var(--brand-foreground))] drop-shadow-[0_0_4px_hsl(var(--brand-foreground)/0.25)]">in</span>
             <span className="ml-1 text-foreground">LUMEN</span>
@@ -107,7 +107,7 @@ export function Toolbar({
 
       <Separator orientation="vertical" className="hidden h-6 sm:block" />
 
-      <div className="pointer-events-none absolute left-1/2 top-1/2 hidden -translate-x-1/2 -translate-y-1/2 sm:flex">
+      <div className="pointer-events-none hidden shrink-0 2xl:flex">
         <div className="max-w-[min(40vw,20rem)] rounded-full border border-border bg-background/60 px-3 py-1 text-xs text-muted-foreground shadow-sm">
           <span className="block truncate text-foreground">{currentVersionName}</span>
         </div>
@@ -165,7 +165,7 @@ export function Toolbar({
           <Button
             variant="ghost"
             size="sm"
-            className="h-8 text-xs text-destructive hover:text-destructive"
+            className="h-8 text-xs text-[hsl(var(--danger-text))] hover:text-[hsl(var(--danger-text))]"
             onClick={() => setIsClearWarningOpen(true)}
             disabled={isClearingAll}
             title="Permanently clear the entire workspace"

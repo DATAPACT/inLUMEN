@@ -16,8 +16,8 @@ workspaces return 404.
   includes code-generation jobs, pipeline runs, node secrets, chat state, and
   chatbot configurations.
 - Neo4j nodes receive a server-derived workspace label. All graph sessions add
-  that label, and raw Cypher is rejected unless every node is introduced through
-  an inLUMEN-owned label.
+  that label. HTTP callers cannot submit raw Cypher; server-owned agent tools
+  carry an in-process capability and parameterize literal values.
 - MinIO bucket names contain a non-reversible workspace digest. Generic bucket
   endpoints reject buckets outside the current workspace.
 - Runner artifacts are stored below a workspace-specific directory. The runner
@@ -144,7 +144,9 @@ deployment, move codegen and pipeline execution to a dedicated worker VM with
 a rootless container runtime; the workspace protocol and PostgreSQL schema stay
 the same.
 
-Before upgrades, run the full regression suite and `npm audit`. The current
-React Router 6 line retains two moderate upstream advisories that require a
-breaking React Router 7 migration; the server-rendering issue does not apply to
-this client-only SPA, but the migration should be tracked.
+Before upgrades, run the full regression suite, browser checks, and `npm audit`.
+The frontend now uses React Router 7 and Vite 8 with a locked dependency tree.
+Use Node 22.12+ (the pinned production Node image meets this requirement).
+
+See [hardening and operations](hardening-and-operations.md) for the role policy,
+revision conflicts, job recovery, image pins, evaluation suite, and backup/restore commands.
