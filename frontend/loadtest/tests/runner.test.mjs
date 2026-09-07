@@ -25,10 +25,11 @@ async function fixture(status = 200, wrongLLM = false) {
     if (url.pathname === '/') {
       const username = req.headers.cookie?.match(/user=([^;]+)/)?.[1];
       if (!username) {res.writeHead(302,{Location:'/realms/inlumen/login'});res.end();return;}
-      res.end(`<button id="clear">Clear all</button><button id="settings">Settings</button><div id="dialog" role="dialog" hidden><button aria-haspopup="menu" id="menu">Choose config</button><p id="selected" hidden>Application-provided LLM · Managed by your administrator. No API key needed.</p><button id="close">Close</button></div><button role="menuitem" id="item" hidden>Application-provided LLM</button><button id="chat">Chat</button><div id="panel" hidden><textarea placeholder="Describe the pipeline..."></textarea><button id="send">Send</button></div><div id="canvas"></div><script>
+      res.end(`<button id="clear">Clear all</button><div role="alertdialog" aria-label="Clear the entire workspace?" id="confirmation" hidden><button id="confirmClear">Clear workspace</button><button>Keep workspace</button></div><button id="settings">Settings</button><div id="dialog" role="dialog" hidden><button aria-haspopup="menu" id="menu">Choose config</button><p id="selected" hidden>Application-provided LLM · Managed by your administrator. No API key needed.</p><button id="close">Close</button></div><button role="menuitem" id="item" hidden>Application-provided LLM</button><button id="chat">Chat</button><div id="panel" hidden><textarea placeholder="Describe the pipeline..."></textarea><button id="send">Send</button></div><div id="canvas"></div><script>
       const api=(path,options={})=>fetch(path,{...options,headers:{Authorization:'Bearer ${username}','Content-Type':'application/json'}});
       api('/api/session');
-      clear.onclick=async()=>{clear.disabled=true;await api('/api/workspace/clear-all',{method:'POST'});canvas.innerHTML='';clear.disabled=false;};
+      clear.onclick=()=>confirmation.hidden=false;
+      confirmClear.onclick=async()=>{confirmation.hidden=true;clear.disabled=true;await api('/api/workspace/clear-all',{method:'POST'});canvas.innerHTML='';clear.disabled=false;};
       settings.onclick=()=>dialog.hidden=false; menu.onclick=()=>item.hidden=false; item.onclick=()=>{item.hidden=true;document.getElementById('selected').hidden=false;}; close.onclick=()=>dialog.hidden=true;
       document.getElementById('close').onclick=()=>dialog.hidden=true;
       chat.onclick=()=>panel.hidden=false;

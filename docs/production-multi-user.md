@@ -48,7 +48,7 @@ Keycloak user therefore does not move or duplicate their data.
 2. Copy `.env.production.example` to `.env.production`, replace every sample
    secret, and pin infrastructure image versions or digests tested in staging.
 3. Create a remotely managed Cloudflare Tunnel and route the public inLUMEN
-   hostname to `http://frontend:8080`. Put its token in `.env.production`.
+   hostname to `http://inlumen-frontend:8080`. Put its token in `.env.production`.
 4. Start the stack:
 
    ```sh
@@ -204,3 +204,24 @@ revision conflicts, job recovery, image pins, evaluation suite, and backup/resto
 See [the VM load-test guide](vm-load-test.md) for deploying the feature branch
 without merging main, creating dedicated Keycloak test users, and running
 automated concurrent pipeline-design scenarios.
+
+## Existing Cloudflare connector (single Compose file)
+
+The production file supports either its own connector or an existing one, with no
+host port publishing. For a new connector keep `COMPOSE_PROFILES=standalone-tunnel`
+from `.env.production.example` and set its tunnel token. For an existing connector,
+set these in `.env.production` instead:
+
+```dotenv
+COMPOSE_PROFILES=
+INLUMEN_TUNNEL_NETWORK=cloudflare_default
+INLUMEN_TUNNEL_NETWORK_EXTERNAL=true
+```
+
+Use the existing connector's actual Docker network name. Route the hostname to
+`http://inlumen-frontend:8080`. No token is needed in this file for an existing
+connector. Only the frontend joins the tunnel network; application services use
+the private network. `INLUMEN_PRIVATE_NETWORK` can preserve its existing name.
+Always use `docker compose --env-file .env.production -f docker-compose-prod.yml`.
+No Compose override is required. `expose` entries are container metadata, not
+host port mappings; the file has no `ports` entries.

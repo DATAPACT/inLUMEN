@@ -26,6 +26,7 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, serviceWorkers: 'block' });
     const actor = { context, page: await context.newPage(), index, token: '', workspace: null, session: null };
     actors.push(actor);
+    onProgress(`User ${index + 1}: signing in.`);
     const { page } = actor;
     page.setDefaultTimeout(30000);
     // Observe only this app's authenticated requests; tokens stay in memory.
@@ -81,9 +82,12 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
     ensure(shared?.has_api_key, 'shared_llm_not_enabled');
     actor.model = shared.model;
     if (!preflight) {
-      // Exercise the same clear-all action as the UI, including local state reset.
+      onProgress(`User ${actor.index + 1}, round ${round}: clearing default workspace.`);
+      // The toolbar opens a confirmation dialog; only its action sends the request.
       const cleared = actor.page.waitForResponse(r => appPath(r.url()) && new URL(r.url()).pathname === '/api/workspace/clear-all', { timeout: timeoutMs }).catch(() => null);
       await actor.page.getByRole('button', { name: 'Clear all', exact: true }).click();
+      const confirmation = actor.page.getByRole('alertdialog', { name: 'Clear the entire workspace?' });
+      await confirmation.getByRole('button', { name: 'Clear workspace', exact: true }).click();
       const response = await cleared;
       ensure(response?.status() === 200, response ? `clear_all_http_${response.status()}` : 'clear_all_timeout_outcome_unknown');
       ensure((await response.json()).status !== 'partial', 'clear_all_incomplete');
@@ -97,6 +101,7 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
     const dialog = actor.page.getByRole('dialog');
     await dialog.locator('button[aria-haspopup="menu"]').click();
     await actor.page.getByRole('menuitem').filter({ hasText: 'Application-provided LLM' }).click();
+    onProgress(`User ${actor.index + 1}, round ${round}: selecting Application-provided LLM.`);
     await expect(dialog.getByText('Application-provided LLM · Managed by your administrator. No API key needed.', { exact: true })).toBeVisible();
     await dialog.getByRole('button', { name: 'Close', exact: true }).click();
     await expect(dialog).not.toBeVisible();

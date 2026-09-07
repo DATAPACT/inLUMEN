@@ -2,7 +2,10 @@ name: inlumen
 
 networks:
   datapact_network:
-    name: datapact_network
+    name: ${INLUMEN_PRIVATE_NETWORK:-datapact_network}
+  tunnel_network:
+    name: ${INLUMEN_TUNNEL_NETWORK:-inlumen_tunnel}
+    external: ${INLUMEN_TUNNEL_NETWORK_EXTERNAL:-false}
 
 volumes:
   postgres_data:
@@ -238,16 +241,19 @@ services:
     expose:
       - "8080"
     networks:
-      - datapact_network
+      datapact_network: {}
+      tunnel_network:
+        aliases: [inlumen-frontend]
 
   cloudflared:
+    profiles: [standalone-tunnel]
     image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:latest@sha256:51c9cefcb4569df44e1ad403ab1d3d8065aa8e84339bcfc6aee75502e1140339}
     restart: unless-stopped
     depends_on:
       frontend:
         condition: service_started
     environment:
-      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN is required}
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
     command: tunnel --no-autoupdate run
     networks:
-      - datapact_network
+      - tunnel_network

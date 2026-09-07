@@ -28,7 +28,7 @@ web origins (`https://HOST`), preserving existing entries. Keycloak's issuer mus
 be reachable from both browsers and the VM. Assign `inlumen-admin` only to your
 application administrator; the username `admin` alone does not grant permission.
 
-Create a Cloudflare Tunnel public hostname pointing to `http://frontend:8080`
+Create a Cloudflare Tunnel public hostname pointing to `http://inlumen-frontend:8080`
 and set its token in `.env.production`. The Compose tunnel container joins the
 application network. No database or application origin ports need publishing.
 If Cloudflare Access protects the hostname, the load browsers also need an
@@ -181,3 +181,24 @@ npm run test:stress
 These tests use local HTTP fixtures and Chromium to exercise concurrent isolated
 sessions, workspace denial, repeated rounds, preflight and HTTP524 handling.
 They incur no LLM charges and do not establish real VM/Keycloak capacity.
+
+## Existing Cloudflare connector (single Compose file)
+
+The production file supports either its own connector or an existing one, with no
+host port publishing. For a new connector keep `COMPOSE_PROFILES=standalone-tunnel`
+from `.env.production.example` and set its tunnel token. For an existing connector,
+set these in `.env.production` instead:
+
+```dotenv
+COMPOSE_PROFILES=
+INLUMEN_TUNNEL_NETWORK=cloudflare_default
+INLUMEN_TUNNEL_NETWORK_EXTERNAL=true
+```
+
+Use the existing connector's actual Docker network name. Route the hostname to
+`http://inlumen-frontend:8080`. No token is needed in this file for an existing
+connector. Only the frontend joins the tunnel network; application services use
+the private network. `INLUMEN_PRIVATE_NETWORK` can preserve its existing name.
+Always use `docker compose --env-file .env.production -f docker-compose-prod.yml`.
+No Compose override is required. `expose` entries are container metadata, not
+host port mappings; the file has no `ports` entries.
