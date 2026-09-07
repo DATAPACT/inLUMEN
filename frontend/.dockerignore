@@ -3,3 +3,6 @@ dist
 coverage
 .env*
 npm-debug.log*
+loadtest/
+test-results/
+playwright-report/
