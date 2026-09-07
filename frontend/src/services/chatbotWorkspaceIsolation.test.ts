@@ -17,6 +17,28 @@ describe('account-scoped chatbot settings', () => {
     setWorkspaceStorageScope('bob', 'workspace-b');
     expect(readSelectedChatbotConfigId()).toBeNull();
   });
+  it('makes the application config usable in each workspace without storing a secret', async () => {
+    const managed = {
+      id: 'application-llm', name: 'Application-provided LLM',
+      provider: 'custom', baseUrl: 'https://llm.test/v1',
+      model: 'chat', codegenModel: 'code', has_api_key: true,
+      readOnly: true, applicationProvided: true,
+    };
+    mocks.fetch.mockImplementation(async () => new Response(JSON.stringify({ configs: [managed] })));
+    for (const user of ['alice', 'bob']) {
+      setWorkspaceStorageScope(user, `workspace-${user}`);
+      const configs = await fetchChatbotConfigs();
+      expect(configs).toHaveLength(1);
+      expect(configs[0]).toMatchObject({
+        id: 'application-llm', readOnly: true, applicationProvided: true,
+        hasApiKey: true, apiKey: '', model: 'chat', codegenModel: 'code',
+      });
+      const overrides = JSON.parse(getWorkspaceStorage().getItem('inlumen-chatbot-config-overrides')!);
+      expect(overrides['id:application-llm']).not.toHaveProperty('apiKey');
+    }
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ configs: [] })));
+    expect(await fetchChatbotConfigs()).toEqual([]);
+  });
   it('discards an old user’s successful cache response after account switching', async () => {
     let resolve!: (response: Response) => void;
     mocks.fetch.mockReturnValue(new Promise<Response>(done => { resolve = done; }));

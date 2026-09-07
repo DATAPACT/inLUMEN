@@ -57,6 +57,17 @@ describe('account session lifecycle', () => {
     expect(container.textContent).not.toContain('Alice');
   });
 
+  it('rejects a local workspace returned after Keycloak sign-in', async () => {
+    mocks.apiFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      user: { id: 'local-user', display_name: 'Local user' },
+      active_workspace_id: 'local-workspace', workspaces: [],
+    })));
+    await act(async () => root.render(<AuthProvider><Harness /></AuthProvider>));
+    expect(container.textContent).toContain('Authentication configuration mismatch');
+    expect(mocks.setAuthToken).not.toHaveBeenCalledWith('test-token');
+    expect(mocks.setActiveWorkspaceId).not.toHaveBeenCalledWith('local-workspace');
+  });
+
   it('preserves no-auth local mode without contacting Keycloak or the backend', async () => {
     mocks.enabled = false;
     await act(async () => root.render(<AuthProvider><Harness /></AuthProvider>));

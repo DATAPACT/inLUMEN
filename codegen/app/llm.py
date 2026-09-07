@@ -139,6 +139,8 @@ async def generate_json(
         "open_router",
     }:
         headers.update(_openrouter_headers())
+        if config.openrouter_provider_only:
+            body["provider"] = {"only": config.openrouter_provider_only}
     timeout = httpx.Timeout(max(1, config.timeout_seconds))
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:

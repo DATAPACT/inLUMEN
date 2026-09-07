@@ -2027,6 +2027,25 @@ def _ui_api_openapi_paths(
                 "responses": generic_ok,
             },
         },
+        "/api/admin/application-llm": {
+            "get": {
+                "tags": ["Settings"],
+                "summary": "Read shared LLM settings (inlumen-admin realm role required)",
+                "operationId": "getApplicationLLMSettings",
+                "responses": {"200": _json_response("#/components/schemas/ApplicationLLMSettings"), **protected_responses},
+            },
+            "put": {
+                "tags": ["Settings"],
+                "summary": "Save and enable or disable the shared LLM (inlumen-admin realm role required)",
+                "operationId": "saveApplicationLLMSettings",
+                "requestBody": _json_request("#/components/schemas/ApplicationLLMUpdate"),
+                "responses": {
+                    "200": _json_response("#/components/schemas/ApplicationLLMSettings"),
+                    "409": {"description": "Another administrator changed the settings; reload before saving."},
+                    **protected_responses,
+                },
+            },
+        },
         "/api/chatbot-configs": {
             "get": {
                 "tags": ["Settings"],
@@ -2368,9 +2387,33 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                 "message": {"type": "string", "nullable": True},
             },
         },
+        "ApplicationLLMSettings": {
+            "type": "object", "required": ["config", "enabled", "revision"],
+            "properties": {
+                "config": {"type": "object", "nullable": True, "description": "Shared configuration metadata; never includes the API key."},
+                "enabled": {"type": "boolean"},
+                "revision": {"type": "integer", "minimum": 0},
+            },
+        },
+        "ApplicationLLMUpdate": {
+            "type": "object", "required": ["config", "enabled", "revision"],
+            "properties": {
+                "config": {"$ref": "#/components/schemas/ChatbotConfigUpsertRequest"},
+                "enabled": {"type": "boolean"},
+                "revision": {"type": "integer", "minimum": 0, "description": "Revision returned by the last read; zero for first setup."},
+            },
+        },
         "LLMConfig": {
             "type": "object",
-            "required": ["provider", "model", "base_url", "api_key"],
+            "description": "Select application-llm by credential_id for deployment-managed settings, or supply provider settings with a workspace credential or API key.",
+            "anyOf": [
+                {"required": ["credential_id"], "properties": {"credential_id": {"enum": ["application-llm"]}}},
+                {"required": ["config_id"], "properties": {"config_id": {"enum": ["application-llm"]}}},
+                {"required": ["provider", "model", "base_url"], "anyOf": [
+                    {"required": ["api_key"]}, {"required": ["apiKey"]},
+                    {"required": ["credential_id"]}, {"required": ["config_id"]},
+                ]},
+            ],
             "additionalProperties": True,
             "properties": {
                 "provider": {"type": "string"},
@@ -2378,6 +2421,8 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                 "baseUrl": {"type": "string"},
                 "api_key": {"type": "string"},
                 "apiKey": {"type": "string"},
+                "credential_id": {"type": "string"},
+                "config_id": {"type": "string"},
                 "model": {"type": "string"},
             },
         },
@@ -2392,6 +2437,9 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
             "required": ["id", "name", "provider", "model", "codegenModel", "baseUrl"],
             "properties": {
                 "id": {"type": "string"},
+                "has_api_key": {"type": "boolean"},
+                "readOnly": {"type": "boolean"},
+                "applicationProvided": {"type": "boolean"},
                 "name": {"type": "string"},
                 "provider": {"type": "string"},
                 "model": {"type": "string"},
@@ -2411,6 +2459,7 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
             "required": ["name", "model", "codegenModel", "baseUrl"],
             "properties": {
                 "name": {"type": "string"},
+                "api_key": {"type": "string", "writeOnly": True, "description": "New provider key. Blank preserves an existing saved key."},
                 "provider": {"type": "string"},
                 "model": {"type": "string"},
                 "codegenModel": {"type": "string"},

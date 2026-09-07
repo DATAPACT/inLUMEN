@@ -71,6 +71,8 @@ import {
   writeSelectedChatbotConfigId
 } from '@/services/chatbotService';
 import { ChatbotConfigForm } from '@/components/ChatbotConfigForm';
+import { ApplicationLLMSettings } from '@/components/ApplicationLLMSettings';
+import { useAuthSession } from '@/context/authSession';
 
 const CHAT_SESSION_KEY = "chat-session-id";
 const CHAT_TRANSCRIPT_KEY = "inlumen-chat-transcript";
@@ -226,6 +228,8 @@ const Index = () => {
   const [panelPreferences, setPanelPreferences] = useState<PanelPreferences>(readPanelPreferences);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isSharedLLMSettingsOpen, setIsSharedLLMSettingsOpen] = useState(false);
+  const { session } = useAuthSession();
   const flowCanvasRef = useRef<FlowCanvasRef>(null);
   const libraryPanelRef = useRef<ImperativePanelHandle>(null);
   const rightPanelRef = useRef<ImperativePanelHandle>(null);
@@ -327,7 +331,7 @@ const Index = () => {
       const savedConfig = savedConfigId
         ? configsList.find((config) => config.id === savedConfigId)
         : null;
-      return savedConfig || configsList.find((config) => config.provider === "openrouter") || configsList[0] || defaultConfig;
+      return savedConfig || configsList.find((config) => config.applicationProvided) || configsList.find((config) => config.provider === "openrouter") || configsList[0] || defaultConfig;
     },
     [defaultConfig]
   );
@@ -1494,8 +1498,16 @@ const Index = () => {
                 <Key className="h-4 w-4 text-emerald-500" />
                 LLM configuration
               </div>
+              {session?.is_application_admin && (
+                <Button variant="outline" className="mb-3 w-full" onClick={() => {
+                  setIsSettingsOpen(false);
+                  setIsSharedLLMSettingsOpen(true);
+                }}>Manage shared LLM</Button>
+              )}
               <p className="mb-3 text-xs text-muted-foreground">
-                The design model powers Pipeline Chat; the code model generates runtime code.
+                {activeConfig.applicationProvided
+                  ? "Application-provided LLM · Managed by your administrator. No API key needed."
+                  : "The design model powers Pipeline Chat; the code model generates runtime code."}
               </p>
               <div className="mb-3 rounded-md bg-background/70 p-3 text-xs text-muted-foreground space-y-1">
                 <div>
@@ -1545,6 +1557,9 @@ const Index = () => {
                           <div className="truncate text-sm font-medium">
                             {config.name}
                           </div>
+                          {config.applicationProvided && (
+                            <p className="text-xs text-muted-foreground">Managed by your administrator · No API key needed</p>
+                          )}
                           <div
                             className={cn(
                               "truncate text-xs text-muted-foreground",
@@ -1605,6 +1620,11 @@ const Index = () => {
           </div>
         </DialogContent>
       </Dialog>
+
+      {isSharedLLMSettingsOpen && session?.is_application_admin && <ApplicationLLMSettings
+        onClose={() => setIsSharedLLMSettingsOpen(false)}
+        onSaved={() => { void loadConfigurations(); }}
+      />}
 
       <ChatbotConfigForm
         isOpen={isConfigFormOpen}

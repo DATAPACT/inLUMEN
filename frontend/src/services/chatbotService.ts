@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { getWorkspaceStorage, captureWorkspaceGeneration, isWorkspaceGenerationCurrent, type WorkspaceStorage } from '@/utils/workspaceStorage';
 
 export type LLMProvider = "openrouter" | "ollama_cloud" | "custom";
+export const APPLICATION_LLM_ID = "application-llm";
 
 export interface ChatbotConfig {
   id?: string;
@@ -17,6 +18,7 @@ export interface ChatbotConfig {
   apiKey?: string;
   hasApiKey?: boolean;
   readOnly?: boolean;
+  applicationProvided?: boolean;
   system_prompt?: string;
   temperature?: number;
 }
@@ -286,14 +288,15 @@ export const getDefaultChatbotConfig = (): ChatbotConfig => ({
 
 const normalizeConfig = (config: Partial<ChatbotConfig> & Record<string, unknown>): ChatbotConfig => {
   const id = typeof config.id === "string" ? config.id : undefined;
+  const applicationProvided = id === APPLICATION_LLM_ID;
   const isRemoteConfig = Boolean(id && !isLocalConfigId(id) && REMOTE_CONFIG_SYNC_ENABLED);
   const storageKey = configStorageKey({
     id,
     name: String(config.name || "OpenRouter"),
     model: String(config.model || LLM_PROVIDER_DETAILS.openrouter.defaultModel),
   });
-  const stored = readStoredConfigValues()[storageKey] || {};
-  const legacySessionApiKey = readLegacySessionApiKeys()[storageKey] || "";
+  const stored = applicationProvided ? {} : readStoredConfigValues()[storageKey] || {};
+  const legacySessionApiKey = applicationProvided ? "" : readLegacySessionApiKeys()[storageKey] || "";
 
   const provider = normalizeProvider(
     (config.provider as string | undefined) || stored.provider || "openrouter"
@@ -337,7 +340,7 @@ const normalizeConfig = (config: Partial<ChatbotConfig> & Record<string, unknown
     baseUrl,
     // A remotely saved key is intentionally never recovered from browser
     // storage. It stays encrypted in the gateway and is addressed by config id.
-    apiKey: String(
+    apiKey: applicationProvided ? "" : String(
       (config.apiKey as string | undefined) ||
         (config.api_key as string | undefined) ||
         (isRemoteConfig ? "" : stored.apiKey) ||
@@ -348,7 +351,8 @@ const normalizeConfig = (config: Partial<ChatbotConfig> & Record<string, unknown
       config.hasApiKey || config.has_api_key || config.apiKey || config.api_key ||
       (!isRemoteConfig && (stored.apiKey || legacySessionApiKey)),
     ),
-    readOnly: Boolean(config.readOnly || config.read_only),
+    readOnly: applicationProvided || Boolean(config.readOnly || config.read_only),
+    applicationProvided,
     system_prompt: typeof config.system_prompt === "string" ? config.system_prompt : "",
     temperature: typeof config.temperature === "number" ? config.temperature : 0.7,
   };
@@ -682,6 +686,9 @@ export const fetchChatbotConfig = async (id: string): Promise<ChatbotConfig | nu
 };
 
 export const createChatbotConfig = async (config: ChatbotConfig): Promise<ChatbotConfig | null> => {
+  if (config.id === APPLICATION_LLM_ID) {
+    throw new Error("Application-provided LLM is managed by your administrator.");
+  }
   const generation = captureWorkspaceGeneration();
   if (!config.name || !config.model || !config.baseUrl) {
     throw new Error("Missing required configuration fields");
@@ -712,6 +719,9 @@ export const createChatbotConfig = async (config: ChatbotConfig): Promise<Chatbo
 };
 
 export const updateChatbotConfig = async (config: ChatbotConfig): Promise<ChatbotConfig | null> => {
+  if (config.id === APPLICATION_LLM_ID) {
+    throw new Error("Application-provided LLM is managed by your administrator.");
+  }
   const generation = captureWorkspaceGeneration();
   if (!config.id) return null;
   if (!config.name || !config.model || !config.baseUrl) {
@@ -749,6 +759,9 @@ export const updateChatbotConfig = async (config: ChatbotConfig): Promise<Chatbo
 };
 
 export const deleteChatbotConfig = async (id: string): Promise<boolean> => {
+  if (id === APPLICATION_LLM_ID) {
+    throw new Error("Application-provided LLM is managed by your administrator.");
+  }
   const generation = captureWorkspaceGeneration();
   if (isLocalConfigId(id)) {
     deleteLocalOnlyConfig(id);

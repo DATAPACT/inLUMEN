@@ -1,12 +1,14 @@
 import { createContext, useContext } from 'react';
 
 export interface AuthSession {
+  is_application_admin?: boolean;
   user: { id: string; subject: string; display_name: string };
   active_workspace_id: string;
   workspaces: Array<{ id: string; name: string; role: string }>;
 }
 
 export const LOCAL_SESSION: AuthSession = {
+  is_application_admin: true,
   user: { id: 'local-user', subject: 'local-user', display_name: 'Local user' },
   active_workspace_id: 'local-workspace',
   workspaces: [{ id: 'local-workspace', name: 'Local workspace', role: 'owner' }],

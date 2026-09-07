@@ -67,6 +67,54 @@ requires Keycloak and database settings, serves a compiled frontend through
 Nginx, runs the backend with Gunicorn, publishes no origin ports, and exposes
 only the frontend to Cloudflare Tunnel over the private Compose network.
 
+## Application-provided LLM
+
+Manage shared LLM access from an administrator account. No LLM environment
+variables or container restarts are needed.
+
+1. In your existing Keycloak realm, create a realm role named `inlumen-admin`.
+2. Assign that role only to the account(s) that should administer this application.
+   Do not make it a default role. Ensure the frontend client's role scope includes
+   it and the access token carries it in `realm_access.roles`. Sign out and back
+   in after assigning it. See [Keycloak role mappings](https://www.keycloak.org/docs/latest/server_admin/index.html#_role_mappings).
+3. Open inLUMEN **Settings → Manage shared LLM**.
+4. Choose the provider, chat model, coding model, and API key. Turn on
+   **Enable for all users**, then **Save Configuration**.
+
+The configuration appears as **Application-provided LLM** for authenticated users
+in every authorized workspace. Users without an existing selection use it by
+default. Personal configurations and workspace data remain separate.
+
+Admins can edit the settings, replace the API key, or turn sharing off from the
+same form. Leave the key field blank to retain its saved value. Changing the
+provider URL requires entering a new key. Turning sharing off retains the saved
+configuration so it can be enabled again later. Changes apply to new LLM requests;
+a request already executing may finish with the settings it previously resolved.
+
+The API checks the signed Keycloak realm role on every admin request. Workspace
+ownership, username, email, and browser flags never confer this permission.
+Role removal takes effect when existing access tokens expire or are replaced.
+In unauthenticated local development only, the local user can administer shared
+LLM settings; production requires Keycloak authentication.
+
+Settings are persisted once in `application_llm_settings`. The key is encrypted
+with the existing `INLUMEN_SECRET_ENCRYPTION_KEY` and is never returned to the
+browser, including the admin form. Keep that existing infrastructure key stable
+and backed up alongside PostgreSQL. The migration creates the settings table;
+no new infrastructure secrets are required. Concurrent admin edits are protected
+by a revision check; reopen the form if another admin saved first.
+
+Clients reference `application-llm` as the credential ID. The gateway controls
+the provider URL, models, routing, and the fixed 8192-token output cap for chat
+and code generation. Client overrides cannot redirect the shared key. The
+private codegen request carries the key in a header, excluded from stored job
+snapshots. Disabled settings disappear from users' configuration lists when
+refreshed, and stale requests are rejected.
+
+Shared billing still requires provider capacity and spending limits for a paid
+20-user stress test. Existing codegen/runner queue limits apply; per-user LLM
+quotas and a global chat concurrency limit are separate features.
+
 ## Operations
 
 ### Auth-mode changes

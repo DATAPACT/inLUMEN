@@ -16,6 +16,13 @@ from urllib.request import Request, urlopen
 from flask import Flask, Response, g, jsonify, make_response, request
 
 from artifact_contract import classify_artifact
+from application_llm import (
+    APPLICATION_LLM_ID,
+    application_llm_request_config,
+    application_llm_settings,
+    validate_application_llm_config,
+)
+from application_llm_store import ApplicationLLMConflict, save_application_llm
 from analytics_api import (
     agentic_generate_deployment_bundle,
     agentic_generate_dagster,
@@ -30,6 +37,7 @@ from analytics_api import (
 from attachment_validation import attachment_input_errors, read_attachment_probe
 from auth_middleware import (
     current_principal,
+    is_application_admin,
     require_auth,
     validate_auth_mode_configuration,
     validate_production_auth_configuration,
@@ -290,6 +298,7 @@ def application_session():
             "display_name": principal.display_name,
         },
         "active_workspace_id": principal.workspace_id,
+        "is_application_admin": is_application_admin(),
         "workspaces": workspaces,
     }), 200
 
@@ -1102,6 +1111,11 @@ def _codegen_request_parts(
     payload: dict[str, Any] | None = None,
 ) -> tuple[bytes | None, dict[str, str]]:
     request_payload: dict[str, Any] | None = None
+    if payload is not None and isinstance(payload.get("llm_config"), dict):
+        payload = {
+            **payload,
+            "llm_config": application_llm_request_config(payload["llm_config"], purpose="codegen"),
+        }
     if payload is not None:
         request_payload = _prepare_codegen_request(payload)
     headers = _codegen_request_headers(
@@ -2056,6 +2070,38 @@ def graph_nodes():
     return jsonify({"graph": graph_payload, "storage_cleanup": storage_cleanup}), graph_response.status_code
 
 
+@app.route("/api/admin/application-llm", methods=["GET", "PUT", "OPTIONS"])
+@require_auth
+def admin_application_llm():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    if not is_application_admin():
+        return _json_error(403, "Application administrator role required.")
+    if request.method == "GET":
+        return jsonify(application_llm_settings()), 200
+    payload = _request_json()
+    if not isinstance(payload.get("enabled"), bool):
+        return _json_error(400, "enabled must be a boolean")
+    revision = payload.get("revision")
+    if type(revision) is not int or revision < 0:
+        return _json_error(400, "revision must be a non-negative integer")
+    raw = payload.get("config")
+    if not isinstance(raw, dict):
+        return _json_error(400, "config is required")
+    key = raw.get("api_key", raw.get("apiKey", ""))
+    if not isinstance(key, str) or "\n" in key.strip() or "\r" in key.strip():
+        return _json_error(400, "API key must be a single-line string")
+    try:
+        config = validate_application_llm_config(raw)
+        save_application_llm(config, key.strip(), enabled=payload["enabled"], revision=revision, updated_by=current_principal().user_id)
+    except ApplicationLLMConflict as exc:
+        return _json_error(409, str(exc))
+    except ValueError as exc:
+        return _json_error(400, str(exc))
+    app.logger.info("Shared LLM updated by user=%s revision=%s enabled=%s", current_principal().user_id, revision + 1, payload["enabled"])
+    return jsonify(application_llm_settings()), 200
+
+
 @app.route("/api/chatbot-configs", methods=["GET", "POST", "OPTIONS"])
 @require_auth
 def chatbot_configs():
@@ -2064,14 +2110,19 @@ def chatbot_configs():
 
     configs = _load_chatbot_configs()
     if request.method == "GET":
+        shared = application_llm_settings()
+        application_config = shared["config"] if shared["enabled"] else None
         return jsonify({
-            "configs": [
+            "configs": ([application_config] if application_config else []) + [
                 _chatbot_config_response(config)
                 for config in configs
+                if str(config.get("id")) != APPLICATION_LLM_ID
             ]
         }), 200
 
     payload = _request_json()
+    if str(payload.get("id") or "").strip() == APPLICATION_LLM_ID:
+        return _json_error(403, "Application-provided LLM is managed by the deployment administrator.")
     config = _validate_chatbot_config_payload(payload)
     if isinstance(config, tuple):
         return config
@@ -2089,6 +2140,14 @@ def chatbot_configs():
 def chatbot_config(config_id: str):
     if request.method == "OPTIONS":
         return _preflight_response()
+
+    if config_id == APPLICATION_LLM_ID:
+        if request.method != "GET":
+            return _json_error(403, "Application-provided LLM is managed by the deployment administrator.")
+        shared = application_llm_settings()
+        if not shared["enabled"] or shared["config"] is None:
+            return _json_error(404, "chatbot config not found")
+        return jsonify({"config": shared["config"]}), 200
 
     configs = _load_chatbot_configs()
     index = next(

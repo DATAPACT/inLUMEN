@@ -31,10 +31,14 @@ class AuthValidationError:
 
 
 def is_auth_enabled() -> bool:
-    return os.getenv("AUTH_ENABLED", "false").lower() == "true"
+    value = os.getenv("AUTH_ENABLED", "false").strip().lower()
+    if value not in {"true", "false"}:
+        raise RuntimeError("AUTH_ENABLED must be exactly true or false; refusing to select an identity mode.")
+    return value == "true"
 
 
 def validate_production_auth_configuration() -> None:
+    is_auth_enabled()  # Validate configuration in development as well as production.
     _keycloak_clock_skew_seconds()
     if os.getenv("APP_ENV", "development").strip().lower() != "production":
         return
@@ -77,6 +81,11 @@ def current_workspace_id() -> str:
 
 def current_user_id() -> str:
     return current_principal().user_id
+
+
+def is_application_admin() -> bool:
+    """Set only by require_auth after validating identity; never by workspace role."""
+    return has_request_context() and getattr(g, "inlumen_is_application_admin", False) is True
 
 
 def _keycloak_jwks_url() -> str:
@@ -210,7 +219,13 @@ def require_auth(f):
             return f(*args, **kwargs)
 
         if not is_auth_enabled():
+            if request.headers.get("Authorization"):
+                return jsonify({
+                    "error": "Authentication configuration mismatch",
+                    "detail": "The browser sent an authenticated request but the server is in local mode. Align AUTH_ENABLED and VITE_AUTH_ENABLED, then reload.",
+                }), 409
             g.inlumen_principal = local_principal()
+            g.inlumen_is_application_admin = os.getenv("APP_ENV", "development").strip().lower() != "production"
             return f(*args, **kwargs)
 
         claims, error = validate_keycloak_bearer_token()
@@ -235,6 +250,14 @@ def require_auth(f):
                 "error": "Workspace unavailable",
                 "detail": "The workspace database could not be queried.",
             }), 503
+
+        realm_access = (claims or {}).get("realm_access")
+        roles = realm_access.get("roles") if isinstance(realm_access, dict) else None
+        g.inlumen_is_application_admin = isinstance(roles, list) and "inlumen-admin" in roles
+        if request.path == "/api/admin/application-llm":
+            if not is_application_admin():
+                return jsonify({"error": "Forbidden", "code": "application_admin_required"}), 403
+            return f(*args, **kwargs)
 
         from permissions import permits
         if not permits(g.inlumen_principal.workspace_role, request.method, request.path):

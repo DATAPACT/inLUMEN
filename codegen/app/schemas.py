@@ -51,6 +51,7 @@ class LLMConfig(BaseModel):
     api_key: str = Field(default="", exclude=True, repr=False)
     timeout_seconds: int = Field(default=180, ge=1, le=900)
     max_output_tokens: int = Field(default=16384, ge=256, le=32768)
+    openrouter_provider_only: list[str] = Field(default_factory=list)
     model_family: str = "code"
     supports_function_calling: bool = True
     supports_json_output: bool = True
