@@ -59,10 +59,6 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
   }
 
   async function prepare(actor, round) {
-    const created = await api(actor, '/api/workspaces', { method: 'POST', data: { name: `${runID}-u${actor.index + 1}-r${round}` } });
-    ensure(created.status() === 201, `workspace_http_${created.status()}`);
-    actor.workspace = (await created.json()).workspace?.id;
-    ensure(actor.workspace, 'workspace_missing_id');
     workspaces.push({ user_index: actor.index + 1, user_id: actor.session.user.id, round, workspace_id: actor.workspace });
     const freshSession = actor.page.waitForResponse(r => appPath(r.url()) && new URL(r.url()).pathname === '/api/session', { timeout: 60000 })
       .then(r => r.json()).catch(() => null);
@@ -74,10 +70,19 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
     const shared = (await configs.json()).configs?.find(c => c.id === 'application-llm');
     ensure(shared?.has_api_key, 'shared_llm_not_enabled');
     actor.model = shared.model;
+    if (!preflight) {
+      // Exercise the same clear-all action as the UI, including local state reset.
+      const cleared = actor.page.waitForResponse(r => appPath(r.url()) && new URL(r.url()).pathname === '/api/workspace/clear-all', { timeout: timeoutMs }).catch(() => null);
+      await actor.page.getByRole('button', { name: 'Clear all', exact: true }).click();
+      const response = await cleared;
+      ensure(response?.status() === 200, response ? `clear_all_http_${response.status()}` : 'clear_all_timeout_outcome_unknown');
+      ensure((await response.json()).status !== 'partial', 'clear_all_incomplete');
+      await expect(actor.page.getByRole('button', { name: 'Clear all', exact: true })).toBeEnabled();
+    }
     const graph = await api(actor, '/api/pipeline/graph');
     ensure(graph.ok(), `graph_http_${graph.status()}`);
     const initialGraph = await graph.json();
-    ensure(Array.isArray(initialGraph.nodes) && initialGraph.nodes.length === 0, 'workspace_not_empty');
+    ensure(Array.isArray(initialGraph.nodes) && (preflight || initialGraph.nodes.length === 0), 'workspace_not_empty');
     await actor.page.getByRole('button', { name: 'Settings', exact: true }).click();
     const dialog = actor.page.getByRole('dialog');
     await dialog.locator('button[aria-haspopup="menu"]').click();
@@ -147,18 +152,20 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
     if (rejected) throw rejected.reason;
     actors.sort((a, b) => a.index - b.index);
     validateSessions(actors.map(a => a.session));
+    for (const actor of actors) actor.workspace = actor.session.active_workspace_id;
+    // Check denied cross-workspace reads before any paid workload.
+    if (actors.length > 1) for (const [i, actor] of actors.entries()) {
+      const denied = await api(actor, '/api/pipeline/graph', { workspace: actors[(i + 1) % actors.length].workspace });
+      ensure(denied.status() === 404, 'cross_workspace_access_not_denied');
+    }
+
     for (let round = 1; round <= rounds; round++) {
       phase = 'prepare';
       const prepared = await Promise.allSettled(actors.map(actor => prepare(actor, round)));
       const failed = prepared.find(r => r.status === 'rejected');
       if (failed) throw failed.reason;
       ensure(new Set(actors.map(a => a.workspace)).size === accounts.length, 'duplicate_test_workspaces');
-      // Check denied cross-workspace reads before any paid workload.
-      if (actors.length > 1) for (const [i, actor] of actors.entries()) {
-        const denied = await api(actor, '/api/pipeline/graph', { workspace: actors[(i + 1) % actors.length].workspace });
-        ensure(denied.status() === 404, 'cross_workspace_access_not_denied');
-      }
-      onProgress(`Round ${round}: ${actors.length} distinct users ready in fresh workspaces.`);
+      onProgress(`Round ${round}: ${actors.length} distinct users ready in their default workspaces.`);
       if (preflight) break;
       phase = 'design';
       await Promise.all(actors.map(actor => design(actor, round)));
@@ -170,7 +177,7 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
     await browser.close();
   }
   return { schema_version: 1, run_id: runID, base_url: baseURL, finished_at: new Date().toISOString(),
-    preflight, requested_rounds: rounds, failure, workspaces, results,
+    workspace_mode: 'default', clear_all_before_each_round: !preflight, preflight, requested_rounds: rounds, failure, workspaces, results,
     summary: summarize(results, accounts.length),
     passed: !failure && (preflight || results.length === accounts.length * rounds && results.every(r => r.ok)),
   };

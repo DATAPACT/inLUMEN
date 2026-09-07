@@ -25,7 +25,7 @@ try {
     const timeoutMs = positiveInteger(values['timeout-seconds'], 'timeout', 3600) * 1000;
     const rampMs = values['ramp-seconds'] === '0' ? 0 : positiveInteger(values['ramp-seconds'], 'ramp', 3600) * 1000;
     const prompt = values['prompt-file'] ? await readFile(values['prompt-file'], 'utf8') : DEFAULT_PROMPT;
-    console.log(`${values.preflight ? 'Preflight only' : 'LIVE LLM workload'}: ${count} users, ${rounds} round(s). Fresh test workspaces will be retained.`);
+    console.log(`${values.preflight ? 'Preflight only' : 'LIVE LLM workload'}: ${count} users, ${rounds} round(s). ${values.preflight ? 'Default workspaces will not be cleared.' : 'CLEAR ALL will erase participating users’ default workspace content before each round; final results remain there.'}`);
     const report = await runLoadTest({ baseURL, issuer, accounts, rounds, timeoutMs, rampMs, prompt, preflight: values.preflight, headed: values.headed });
     try { report.load_generator_commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { report.load_generator_commit = null; }
     report.server_commit = 'Record the deployed VM commit separately.';

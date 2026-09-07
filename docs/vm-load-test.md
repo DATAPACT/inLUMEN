@@ -98,9 +98,9 @@ or creating a new realm is unnecessary. See [Keycloak authentication flows](http
 
 ## 3. Validate without LLM calls, then increase load
 
-Replace the example URLs below. Preflight logs in two distinct users, creates
-fresh workspaces, selects the shared LLM, and verifies cross-user workspace reads
-are denied. It sends no chat prompts, but does retain those test workspaces.
+Replace the example URLs below. Preflight logs in two distinct users, selects their default workspaces and the
+shared LLM, and verifies cross-user workspace reads are denied. It does not clear
+workspace content or send chat prompts.
 
 ```sh
 npm run stress -- --url https://inlumen.example.com --issuer https://identity.example.com/realms/inlumen --users 2 --preflight
@@ -112,7 +112,14 @@ npm run stress -- --url https://inlumen.example.com --issuer https://identity.ex
 
 Each user has an isolated [Playwright browser context](https://playwright.dev/docs/browser-contexts)
 and a separate Keycloak identity. All users prepare first, then click Send together.
-Each round uses fresh workspaces. The default prompt requests a connected CSV
+**Before every live round, the runner clicks Clear all in each participating
+user’s default workspace. This deletes pipelines, files, runs, outputs, chat,
+provenance, node secrets and generation history there.** Use only accounts whose
+workspace content you intend to erase. No new workspaces are created. After the
+run, log in normally as that user to see the final round’s pipeline. If the final
+design fails validation and is rolled back, the canvas can be empty. Earlier
+rounds are overwritten, and older test workspaces from previous runner versions
+are left untouched. The default prompt requests a connected CSV
 transformation pipeline, without code generation or execution. `--prompt-file`
 customizes it; avoid execution requests or sensitive data in the first experiment.
 `--ramp-seconds 30` spreads submissions over 30 seconds instead of a simultaneous
@@ -129,7 +136,7 @@ be running on the server; inspect it before starting another test.
 Each run writes `frontend/loadtest/results/<run-id>/report.json` and exits nonzero
 on failure. Reports contain success/failure counts, successful-scenario p50/p95/max
 latency, observed overlapping chat requests, HTTP status/request IDs where present,
-and created workspace IDs. Passwords, tokens, prompts and raw server errors are
+and the default workspace IDs used. Passwords, tokens, prompts and raw server errors are
 not saved. The load-generator SHA is recorded; record the deployed server SHA
 separately. Workspace IDs/user IDs in reports are operational metadata.
 
@@ -159,7 +166,7 @@ runner timeout or Gunicorn timeout cannot fix that boundary. If observed, the
 application needs background chat jobs with polling/streaming designed for the
 proxy, or a suitable Cloudflare plan/configuration. See [Cloudflare error524](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-524/).
 
-Workspaces remain for inspection; use report IDs to identify them. Delete only
+Final results remain in each user’s default workspace for inspection. Delete only
 identified test data through supported administration, or reset a dedicated
 throwaway staging deployment after collecting results. Disable/delete the test
 Keycloak accounts when testing is finished. Do not delete shared production volumes.
