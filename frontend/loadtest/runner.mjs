@@ -35,6 +35,16 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
     await page.route('**/*', async route => {
       const request = route.request();
       const headers = request.headers();
+      if (appPath(request.url()) && new URL(request.url()).pathname === '/simple_chat') {
+        let credential;
+        try { credential = request.postDataJSON()?.llm_config?.credential_id; } catch { /* Block malformed requests. */ }
+        if (credential !== 'application-llm') {
+          actor.wrongLLMConfiguration = true;
+          actor.onBlockedChat?.();
+          await route.abort('blockedbyclient');
+          return;
+        }
+      }
       if (appPath(request.url()) && actor.workspace && headers.authorization) {
         // Real requests are forwarded unchanged except workspace selection.
         // The server still verifies membership. No responses are mocked.
@@ -87,6 +97,7 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
     const dialog = actor.page.getByRole('dialog');
     await dialog.locator('button[aria-haspopup="menu"]').click();
     await actor.page.getByRole('menuitem').filter({ hasText: 'Application-provided LLM' }).click();
+    await expect(dialog.getByText('Application-provided LLM · Managed by your administrator. No API key needed.', { exact: true })).toBeVisible();
     await dialog.getByRole('button', { name: 'Close', exact: true }).click();
     await expect(dialog).not.toBeVisible();
     if (!await actor.page.getByPlaceholder('Describe the pipeline...').isVisible()) {
@@ -100,6 +111,8 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
     const result = { user_index: actor.index + 1, round, workspace_id: actor.workspace, model: actor.model, ok: false, phase: 'design' };
     const { page } = actor;
     let started;
+    actor.wrongLLMConfiguration = false;
+    const blockedChat = new Promise(resolve => { actor.onBlockedChat = () => resolve(null); });
     const onRequest = request => {
       if (appPath(request.url()) && new URL(request.url()).pathname === '/simple_chat') {
         started = request;
@@ -113,9 +126,11 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
       const responsePromise = page.waitForResponse(r => r.request() === started, { timeout: timeoutMs })
         .catch(() => null);
       await page.getByRole('button', { name: 'Send', exact: true }).click();
-      const response = await responsePromise;
+      const response = await Promise.race([responsePromise, blockedChat]);
       result.request_finished_ms = Date.now();
+      ensure(!actor.wrongLLMConfiguration, 'wrong_llm_configuration_blocked');
       ensure(response, 'chat_timeout_outcome_unknown');
+      result.llm_credential_id = 'application-llm';
       result.http_status = response.status();
       result.request_id = response.headers()['x-request-id'] || null;
       ensure(response.ok(), `chat_http_${response.status()}`);
@@ -137,8 +152,9 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
       result.failure = safeFailure(error);
       result.request_finished_ms ??= Date.now();
       // No replay: a timeout/524 may leave the original operation executing.
-      result.outcome_may_be_running = Boolean(started) && !result.ok;
+      result.outcome_may_be_running = Boolean(started) && !actor.wrongLLMConfiguration && !result.ok;
     } finally {
+      actor.onBlockedChat = null;
       page.off('request', onRequest);
       result.elapsed_ms = Date.now() - begin;
       results.push(result);
