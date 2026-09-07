@@ -47,3 +47,52 @@ class GraphTransactionIntegrationTests(unittest.TestCase):
             data = graph['nodes'][0]['data']
             self.assertEqual(data['generated_artifact']['publication_id'], 'original')
             self.assertEqual(data['file_buckets'][0]['snapshot_object'], original['snapshot_object'])
+
+    def test_internal_read_post_does_not_invalidate_browser_revision(self):
+        from workspace_queries import INTERNAL_QUERY_CAPABILITY
+        with patch.dict('os.environ', {'AUTH_ENABLED': 'false'}):
+            client = app.test_client()
+            initial = client.get('/neo4j_get_graph')
+            read = client.post('/neo4j_run_query', json={
+                'query': 'MATCH (s:STEP) RETURN count(s) AS count',
+            }, environ_overrides={'inlumen.query_capability': INTERNAL_QUERY_CAPABILITY})
+            self.assertEqual(read.status_code, 200, read.json)
+            self.assertEqual(read.headers['ETag'], initial.headers['ETag'])
+            saved = client.post('/neo4j_sync_graph', headers={'If-Match': initial.headers['ETag']},
+                                json={'graph': {'nodes': [], 'edges': []}})
+            self.assertEqual(saved.status_code, 200, saved.json)
+            self.assertNotEqual(saved.headers['ETag'], initial.headers['ETag'])
+
+    def test_auth_toggle_and_local_clear_preserve_private_graph(self):
+        import neo4j_api
+        from workspace_store import Principal, LOCAL_WORKSPACE_ID
+        private = Principal('test-user', 'test-user', 'issuer', 'private-toggle-test', 'tenant', 'owner')
+        private_label = neo4j_api._workspace_label(private.workspace_id)
+        local_label = neo4j_api._workspace_label(LOCAL_WORKSPACE_ID)
+        client = app.test_client()
+        with patch('auth_middleware.validate_keycloak_bearer_token', return_value=({'sub': 'test-user'}, None)), \
+             patch('auth_middleware.resolve_principal', return_value=private):
+            with patch.dict('os.environ', {'AUTH_ENABLED': 'true'}):
+                saved = client.post('/neo4j_sync_graph', json={'graph': {'nodes': [
+                    {'id': 'private-drawing', 'data': {'type': 'source', 'label': 'Keep me'}, 'position': {'x': 12, 'y': 34}},
+                ], 'edges': []}})
+                self.assertEqual(saved.status_code, 200, saved.json)
+                revision = saved.headers['ETag']
+            # A fresh process runs legacy adoption when local mode starts.
+            with patch.object(neo4j_api, '_legacy_graph_adopted', False), \
+                 patch.dict('os.environ', {'AUTH_ENABLED': 'false'}):
+                with _base_driver.session() as session:
+                    session.run("CREATE (:STEP {flow_id:'unowned-legacy-test'})").consume()
+                local = client.get('/neo4j_get_graph')
+                self.assertEqual(local.status_code, 200, local.json)
+                with _base_driver.session() as session:
+                    self.assertEqual(session.run(f'MATCH(n:{private_label}:{local_label}) RETURN count(n) AS n').single()['n'], 0)
+                    self.assertEqual(session.run(f"MATCH(n:STEP:{local_label} {{flow_id:'unowned-legacy-test'}}) RETURN count(n) AS n").single()['n'], 1)
+                cleared = client.delete('/neo4j_clear_nodes')
+                self.assertEqual(cleared.status_code, 200, cleared.json)
+            with patch.dict('os.environ', {'AUTH_ENABLED': 'true'}):
+                restored = client.get('/neo4j_get_graph')
+                self.assertEqual(restored.status_code, 200, restored.json)
+                self.assertEqual([node['id'] for node in restored.json['nodes']], ['private-drawing'])
+                self.assertEqual(restored.headers['ETag'], revision)
+                self.assertEqual(restored.json['nodes'][0]['position'], {'x': 12, 'y': 34})

@@ -39,6 +39,7 @@ from subpipeline_reference import (
 )
 from workspace_storage import node_bucket_name, version_snapshot_bucket, bucket_belongs_to_workspace
 from graph_document import validate_graph_document
+from workspace_store import LOCAL_WORKSPACE_ID
 
 NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD = get_neo4j_settings()
 
@@ -138,6 +139,7 @@ class _WorkspaceSession(_WorkspaceQueryRunner):
         self._session = self._runner
         self._session.__enter__()
         self._transaction = self._session.begin_transaction()
+        self._results = []
         self._runner = self._transaction
         try:
             self._revision, self._mutation = lock_revision(self._transaction, self._workspace_id)
@@ -151,12 +153,19 @@ class _WorkspaceSession(_WorkspaceQueryRunner):
         from graph_revision import finish_revision
         try:
             if exc_type is None:
-                finish_revision(self._transaction, self._workspace_id, self._revision, self._mutation)
+                # Internal read queries use POST too. Only graph writes advance the revision.
+                changed = any([result.consume().counters.contains_updates for result in self._results])
+                finish_revision(self._transaction, self._workspace_id, self._revision, changed)
                 self._transaction.commit()
             else:
                 self._transaction.rollback()
         finally:
             self._session.close()
+
+    def run(self, query, *args, **kwargs):
+        result = super().run(query, *args, **kwargs)
+        self._results.append(result)
+        return result
 
     def execute_write(self, work, *args, **kwargs):
         return work(self, *args, **kwargs)
@@ -190,14 +199,14 @@ _legacy_graph_adopted = False
 def _adopt_legacy_local_graph() -> None:
     """Attach pre-workspace development data to the fixed local workspace."""
     global _legacy_graph_adopted
-    if _legacy_graph_adopted or is_auth_enabled():
+    if _legacy_graph_adopted or is_auth_enabled() or current_workspace_id() != LOCAL_WORKSPACE_ID:
         return
-    scope_label = _workspace_label(current_workspace_id())
+    scope_label = _workspace_label(LOCAL_WORKSPACE_ID)
     query = f"""
     MATCH (node)
     WHERE (node:PIPELINE OR node:PIPELINE_VERSION OR node:STEP OR
            node:FILE OR node:PROVENANCE_EVENT)
-      AND NOT node:{scope_label}
+      AND NONE(label IN labels(node) WHERE label STARTS WITH 'INLUMEN_WS_')
     SET node:{scope_label}
     """
     with _base_driver.session() as session:

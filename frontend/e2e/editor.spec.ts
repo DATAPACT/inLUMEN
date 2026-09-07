@@ -50,3 +50,52 @@ test('editor recovers from a conflicting save and remains keyboard accessible', 
   await expect(page.locator('.react-flow')).toBeVisible();
   await page.screenshot({ path: 'test-results/editor-tablet.png', fullPage: true });
 });
+
+test('agent changes refresh the revision before autosave and the next canvas edit', async ({ page }) => {
+  let revision = 1;
+  let agentFinished = false;
+  const writes: string[] = [];
+  const graph = () => ({ nodes: [{ id: '1', type: 'source', position: { x: 150, y: 150 }, data: { type: 'source', label: agentFinished ? 'Agent updated source' : 'Original source' } }], edges: [], updated_at: '2026-01-01' });
+  await page.route('**/api/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() !== 'GET' && (path.startsWith('/api/graph/') || path.startsWith('/api/pipeline/'))) {
+      const expected = route.request().headers()['if-match'];
+      writes.push(expected);
+      if (expected !== `"${revision}"`) {
+        await route.fulfill({ status: 409, json: { error: 'stale' } });
+        return;
+      }
+      revision++;
+      await route.fulfill({ json: { ok: true, version: { uid: 'main', name: 'Main' } }, headers: { ETag: `"${revision}"` } });
+    } else if (path === '/api/pipeline/graph') {
+      await route.fulfill({ json: graph(), headers: { ETag: `"${revision}"` } });
+    } else if (path === '/api/pipeline/updated-at') {
+      await route.fulfill({ json: { updated_at: '2026-01-01' } });
+    } else if (path === '/api/chatbot-configs') {
+      await route.fulfill({ json: { configs: [{ id: 'test-config', name: 'Test model', provider: 'openrouter', model: 'test/model', has_api_key: true }] } });
+    } else {
+      await route.fulfill({ json: { configs: [], runs: [], versions: [], definitions: [] } });
+    }
+  });
+  await page.route('**/simple_chat', async route => {
+    agentFinished = true;
+    revision++;
+    await route.fulfill({ json: { assistant_message: 'Updated the source.', graph: graph(), sync: { guardrail_passed: true, graph_safe_to_apply: true } } });
+  });
+  await page.goto('/');
+  await expect(page.getByText('Original source', { exact: true }).first()).toBeVisible();
+  await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  await page.getByPlaceholder('Describe the pipeline...').fill('Rename the source');
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  await expect(page.getByText('Agent updated source', { exact: true }).first()).toBeVisible();
+  await expect.poll(() => writes.length).toBeGreaterThan(0);
+  expect(writes[0]).toBe('"2"');
+  await expect(page.getByText('Changes saved', { exact: true })).toBeVisible();
+  const count = writes.length;
+  const node = page.locator('.react-flow__node').first();
+  await node.focus();
+  await node.press('Enter');
+  await node.press('ArrowRight');
+  await expect.poll(() => writes.length).toBeGreaterThan(count);
+  await expect(page.getByText(/Not saved:/)).toHaveCount(0);
+});

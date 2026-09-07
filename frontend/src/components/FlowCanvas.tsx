@@ -854,7 +854,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         if (incomingSignature !== currentSnapshot.signature) {
           pushHistorySnapshot(currentSnapshot);
         }
-        graph = applyGraph(graphData, normalizedGraph);
+        // Agent responses do not carry the graph read metadata/ETag. Refresh both
+        // together before a subsequent autosave can submit an obsolete revision.
+        graph = await fetchGraphAndApply();
       }
       if (options?.fitView) {
         requestGraphViewportFit();
@@ -866,7 +868,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       throw error;
     }
   }, [
-    applyGraph,
     createHistorySnapshot,
     fetchGraphAndApply,
     markSyncHealthy,

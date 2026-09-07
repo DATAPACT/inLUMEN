@@ -240,6 +240,8 @@ app.add_url_rule(
 
 @app.after_request
 def apply_cors(response):
+    if getattr(g, "graph_response_etag", None):
+        response.headers["ETag"] = g.graph_response_etag
     return add_cors_headers(response, request.headers.get("Origin"))
 
 
@@ -347,7 +349,7 @@ def _proxy(
 ) -> LocalApiResponse:
     include_content_type = files is None and form is None and json_payload is None
     body = None if json_payload is not None else data if data is not None else request.get_data()
-    return adapter_request(
+    upstream = adapter_request(
         backend_path,
         method=method or request.method,
         params=params if params is not None else request.args,
@@ -357,6 +359,10 @@ def _proxy(
         form=form,
         headers=_forward_headers(include_content_type=include_content_type),
     )
+    if adapter_request is dispatch_graph_request and upstream.headers.get("ETag"):
+        # Preserve revisions when routes rebuild JSON to include cleanup results.
+        g.graph_response_etag = upstream.headers["ETag"]
+    return upstream
 
 
 def _proxy_response(adapter_request, backend_path: str) -> Response:
