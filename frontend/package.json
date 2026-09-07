@@ -12,7 +12,10 @@
     "test:run": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json",
     "preview": "vite preview",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "stress:users": "node loadtest/create-users.mjs",
+    "stress": "node loadtest/run.mjs",
+    "test:stress": "node --test loadtest/tests/*.test.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.0",

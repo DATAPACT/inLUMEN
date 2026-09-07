@@ -78,3 +78,5 @@ runner/state/
 .env.staging
 frontend/test-results/
 frontend/playwright-report/
+frontend/loadtest/*.local.json
+frontend/loadtest/results/

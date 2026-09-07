@@ -198,3 +198,9 @@ Use Node 22.12+ (the pinned production Node image meets this requirement).
 
 See [hardening and operations](hardening-and-operations.md) for the role policy,
 revision conflicts, job recovery, image pins, evaluation suite, and backup/restore commands.
+
+## Branch deployment and concurrent-user testing
+
+See [the VM load-test guide](vm-load-test.md) for deploying the feature branch
+without merging main, creating dedicated Keycloak test users, and running
+automated concurrent pipeline-design scenarios.

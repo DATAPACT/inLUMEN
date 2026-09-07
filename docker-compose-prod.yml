@@ -211,7 +211,7 @@ services:
       INLUMEN_RUNNER_SERVICE_API_KEY: ${INLUMEN_RUNNER_SERVICE_API_KEY}
       INLUMEN_RUNNER_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_RUNNER_REQUEST_TIMEOUT_SECONDS:-10}
       WATCH_INTERVAL_SECONDS: ${WATCH_INTERVAL_SECONDS:-1.0}
-    command: ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--threads", "4", "--timeout", "1800", "inlumen_api:app"]
+    command: ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "${INLUMEN_WEB_WORKERS:-2}", "--threads", "${INLUMEN_WEB_THREADS:-4}", "--timeout", "1800", "inlumen_api:app"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=5)"]
       interval: 10s
