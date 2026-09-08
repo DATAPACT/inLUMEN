@@ -1,3 +1,4 @@
+import { rememberGraphRead, persistenceEpoch } from "./persistenceState";
 import { Connection, Edge, Node } from 'reactflow';
 import { apiFetch } from '@/utils/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
@@ -214,12 +215,13 @@ export const addNodeToBackend = async (node: Node) => {
     console.log("[flowPersistence.ts] Graph add_node:", result);
   } catch (err) {
     console.error("[flowPersistence.ts] Graph add node error:", err);
+    throw err;
   }
 };
 
 export const updateNodePositionInBackend = async (node: Node) => {
   try {
-    await apiFetch(`${INLUMEN_API_URL}/api/graph/nodes/position`, {
+    const response = await apiFetch(`${INLUMEN_API_URL}/api/graph/nodes/position`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -228,8 +230,10 @@ export const updateNodePositionInBackend = async (node: Node) => {
         y: node.position.y,
       }),
     });
+    if (!response.ok) throw new Error("Failed to save node position");
   } catch (e) {
     console.warn("[flowPersistence.ts] Failed to update node position:", e);
+    throw e;
   }
 };
 
@@ -257,6 +261,7 @@ export const addEdgeToBackend = async (
     console.log("[flowPersistence.ts] Graph adding edge:", result);
   } catch (err) {
     console.error("[flowPersistence.ts] Graph adding edge error:", err);
+    throw err;
   }
 };
 
@@ -301,6 +306,7 @@ export const deleteNodeFromBackend = async (nodeId: string) => {
     console.log("[flowPersistence.ts] Graph delete_node:", result);
   } catch (err) {
     console.error("[flowPersistence.ts] deleteNodeFromBackend error:", err);
+    throw err;
   }
 };
 
@@ -314,6 +320,7 @@ export const clearBackendGraph = async () => {
     console.log("Backend graph cleared:", result);
   } catch (err) {
     console.error("[flowPersistence.ts] clearBackendGraph error:", err);
+    throw err;
   }
 };
 
@@ -325,9 +332,12 @@ export const fetchPipelineUpdatedAt = async (): Promise<string | null> => {
 };
 
 export const fetchPipelineGraph = async () => {
+  const epoch = persistenceEpoch();
   const res = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/graph`, { method: "GET" });
   if (!res.ok) throw new Error("Failed to fetch pipeline graph");
-  return res.json();
+  const graph = await res.json();
+  if (graph && typeof graph === "object") rememberGraphRead(graph, res, epoch);
+  return graph;
 };
 
 export const fetchPipelineVersions = async (): Promise<PipelineVersionSummary[]> => {
@@ -549,50 +559,12 @@ export const rebuildBackendFromFlow = async (
   edges: Edge[],
   settings?: Record<string, unknown>,
 ) => {
-  try {
-    const response = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/graph`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        graph: {
-          nodes,
-          edges,
-          ...(settings && Object.keys(settings).length > 0 ? { settings } : {}),
-        },
-      }),
-    });
-    if (response.ok) {
-      const result = await response.json().catch(() => ({}));
-      console.log("[flowPersistence.ts] Graph sync:", result);
-      return;
-    }
-    const errText = await response.text().catch(() => "");
-    console.warn(
-      `[flowPersistence.ts] Whole graph sync unavailable (${response.status}): ${errText}`,
-    );
-  } catch (err) {
-    console.warn("[flowPersistence.ts] Whole graph sync failed, falling back:", err);
-  }
-
-  await clearBackendGraph();
-
-  for (const node of nodes) {
-    await addNodeToBackend(node);
-  }
-
-  const nodeById = new Map(nodes.map((node) => [node.id, node]));
-  for (const edge of edges) {
-    const sourceNode = nodeById.get(edge.source);
-    const targetNode = nodeById.get(edge.target);
-    if (!sourceNode || !targetNode) {
-      console.warn(
-        `[flowPersistence.ts] Skipping edge; missing source/target node for edge id=${edge.id}`,
-        edge,
-      );
-      continue;
-    }
-    await addEdgeToBackend(sourceNode, targetNode, edge);
-  }
+  const response = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/graph`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ graph: { nodes, edges, ...(settings ? { settings } : {}) } }),
+  });
+  if (!response.ok) throw new Error(`Graph save failed (${response.status}). The saved graph was preserved.`);
+  return response.json();
 };
 
 const buildPipelineGenerationPayload = (

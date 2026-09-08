@@ -31,6 +31,8 @@ class CreatePipelineRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     snapshot: PipelineSnapshotRequest
+    workspace_id: str = Field(default="local-workspace", min_length=1, max_length=160)
+    requested_by: str = Field(default="local-user", min_length=1, max_length=160)
     idempotency_key: str | None = Field(default=None, max_length=200)
     runtime_secrets: dict[str, str] = Field(default_factory=dict, repr=False)
 
@@ -66,6 +68,8 @@ class PipelineRunRecord(BaseModel):
 
     schema_version: Literal["inlumen.pipeline-run@1"]
     run_id: str
+    workspace_id: str = "local-workspace"
+    requested_by: str = "local-user"
     status: RunStatus
     engine: str
     execution_mode: str

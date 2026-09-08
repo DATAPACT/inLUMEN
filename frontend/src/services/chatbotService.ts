@@ -1,8 +1,10 @@
 import { INLUMEN_API_URL } from "@/config/api";
 import { apiFetch } from "@/utils/apiFetch";
 import { toast } from "sonner";
+import { getWorkspaceStorage, captureWorkspaceGeneration, isWorkspaceGenerationCurrent, type WorkspaceStorage } from '@/utils/workspaceStorage';
 
 export type LLMProvider = "openrouter" | "ollama_cloud" | "custom";
+export const APPLICATION_LLM_ID = "application-llm";
 
 export interface ChatbotConfig {
   id?: string;
@@ -14,7 +16,9 @@ export interface ChatbotConfig {
   codegenOpenrouterProviderOnly?: string[];
   baseUrl: string;
   apiKey?: string;
+  hasApiKey?: boolean;
   readOnly?: boolean;
+  applicationProvided?: boolean;
   system_prompt?: string;
   temperature?: number;
 }
@@ -24,6 +28,7 @@ export interface LLMRequestConfig extends Record<string, unknown> {
   model: string;
   base_url: string;
   api_key?: string;
+  credential_id?: string;
   timeout_seconds?: number;
   model_family: string;
   supports_function_calling: boolean;
@@ -83,19 +88,19 @@ const normalizeProviderOnly = (value: unknown): string[] => {
   return Array.from(new Set(values.map((item) => String(item).trim().toLowerCase()).filter(Boolean)));
 };
 
-const getLocalStorage = (): Storage | null => {
+const getLocalStorage = (): WorkspaceStorage | null => {
   if (typeof window === "undefined") return null;
   try {
-    return window.localStorage;
+    return getWorkspaceStorage();
   } catch {
     return null;
   }
 };
 
-const getSessionStorage = (): Storage | null => {
+const getSessionStorage = (): WorkspaceStorage | null => {
   if (typeof window === "undefined") return null;
   try {
-    return window.sessionStorage;
+    return getWorkspaceStorage('sessionStorage');
   } catch {
     return null;
   }
@@ -282,13 +287,16 @@ export const getDefaultChatbotConfig = (): ChatbotConfig => ({
 });
 
 const normalizeConfig = (config: Partial<ChatbotConfig> & Record<string, unknown>): ChatbotConfig => {
+  const id = typeof config.id === "string" ? config.id : undefined;
+  const applicationProvided = id === APPLICATION_LLM_ID;
+  const isRemoteConfig = Boolean(id && !isLocalConfigId(id) && REMOTE_CONFIG_SYNC_ENABLED);
   const storageKey = configStorageKey({
-    id: typeof config.id === "string" ? config.id : undefined,
+    id,
     name: String(config.name || "OpenRouter"),
     model: String(config.model || LLM_PROVIDER_DETAILS.openrouter.defaultModel),
   });
-  const stored = readStoredConfigValues()[storageKey] || {};
-  const legacySessionApiKey = readLegacySessionApiKeys()[storageKey] || "";
+  const stored = applicationProvided ? {} : readStoredConfigValues()[storageKey] || {};
+  const legacySessionApiKey = applicationProvided ? "" : readLegacySessionApiKeys()[storageKey] || "";
 
   const provider = normalizeProvider(
     (config.provider as string | undefined) || stored.provider || "openrouter"
@@ -330,14 +338,21 @@ const normalizeConfig = (config: Partial<ChatbotConfig> & Record<string, unknown
         stored.codegenOpenrouterProviderOnly,
     ),
     baseUrl,
-    apiKey: String(
+    // A remotely saved key is intentionally never recovered from browser
+    // storage. It stays encrypted in the gateway and is addressed by config id.
+    apiKey: applicationProvided ? "" : String(
       (config.apiKey as string | undefined) ||
         (config.api_key as string | undefined) ||
-        stored.apiKey ||
-        legacySessionApiKey ||
+        (isRemoteConfig ? "" : stored.apiKey) ||
+        (isRemoteConfig ? "" : legacySessionApiKey) ||
         ""
     ),
-    readOnly: Boolean(config.readOnly || config.read_only),
+    hasApiKey: Boolean(
+      config.hasApiKey || config.has_api_key || config.apiKey || config.api_key ||
+      (!isRemoteConfig && (stored.apiKey || legacySessionApiKey)),
+    ),
+    readOnly: applicationProvided || Boolean(config.readOnly || config.read_only),
+    applicationProvided,
     system_prompt: typeof config.system_prompt === "string" ? config.system_prompt : "",
     temperature: typeof config.temperature === "number" ? config.temperature : 0.7,
   };
@@ -346,10 +361,11 @@ const normalizeConfig = (config: Partial<ChatbotConfig> & Record<string, unknown
 const persistLocalConfigValues = (config: ChatbotConfig) => {
   const values = readStoredConfigValues();
   const storageKey = configStorageKey(config);
+  const remote = Boolean(config.id && !isLocalConfigId(config.id) && REMOTE_CONFIG_SYNC_ENABLED);
   values[storageKey] = {
     provider: config.provider,
     baseUrl: config.baseUrl,
-    apiKey: config.apiKey || "",
+    ...(remote ? {} : { apiKey: config.apiKey || "" }),
     codegenModel: config.codegenModel || "",
     openrouterProviderOnly: config.openrouterProviderOnly || [],
     codegenOpenrouterProviderOnly: config.codegenOpenrouterProviderOnly || [],
@@ -450,6 +466,9 @@ const backendConfigPayload = (config: ChatbotConfig) => ({
   baseUrl: config.baseUrl,
   system_prompt: config.system_prompt || "",
   temperature: config.temperature ?? 0.7,
+  // The server encrypts this separately from configuration metadata and never
+  // returns it. Omit an empty value so edits do not erase an existing key.
+  ...(config.apiKey ? { api_key: config.apiKey } : {}),
 });
 
 const readBackendError = async (response: Response) => {
@@ -483,7 +502,10 @@ const configFromBackendPayload = (
     ...config,
     provider: localValues?.provider || config.provider,
     baseUrl: localValues?.baseUrl || config.baseUrl,
-    apiKey: localValues?.apiKey || config.apiKey || "",
+    // The response never contains a plaintext key. Do not retain the key that
+    // may have been supplied in the save request either.
+    apiKey: "",
+    hasApiKey: Boolean(config.hasApiKey),
     codegenModel: localValues?.codegenModel || config.codegenModel || "",
     openrouterProviderOnly:
       localValues?.openrouterProviderOnly || config.openrouterProviderOnly || [],
@@ -546,7 +568,7 @@ export const buildLLMRequestConfig = (config: ChatbotConfig): LLMRequestConfig =
   if (!normalizedConfig.provider || !normalizedConfig.model || !normalizedConfig.baseUrl) {
     throw new Error("Complete the LLM provider, model, and base URL in Settings before using LLM features.");
   }
-  if (!normalizedConfig.apiKey) {
+  if (!normalizedConfig.apiKey && !(normalizedConfig.id && normalizedConfig.hasApiKey)) {
     throw new Error("Enter an LLM API key in Settings before using Pipeline Chat.");
   }
   const requestConfig: LLMRequestConfig = {
@@ -561,6 +583,8 @@ export const buildLLMRequestConfig = (config: ChatbotConfig): LLMRequestConfig =
   };
   if (normalizedConfig.apiKey) {
     requestConfig.api_key = normalizedConfig.apiKey;
+  } else if (normalizedConfig.id) {
+    requestConfig.credential_id = normalizedConfig.id;
   }
   if (normalizedConfig.provider === "openrouter" && normalizedConfig.openrouterProviderOnly?.length) {
     requestConfig.openrouter_provider_only = normalizedConfig.openrouterProviderOnly;
@@ -583,7 +607,7 @@ export const buildCodegenLLMRequestConfig = (config: ChatbotConfig): LLMRequestC
       "Complete the LLM provider and base URL in Settings before using code generation.",
     );
   }
-  if (!normalizedConfig.apiKey) {
+  if (!normalizedConfig.apiKey && !(normalizedConfig.id && normalizedConfig.hasApiKey)) {
     throw new Error(
       "Enter an LLM API key in Settings before using code generation.",
     );
@@ -595,7 +619,6 @@ export const buildCodegenLLMRequestConfig = (config: ChatbotConfig): LLMRequestC
     provider: normalizedConfig.provider,
     model: normalizedCodegenModel,
     base_url: normalizedConfig.baseUrl,
-    api_key: normalizedConfig.apiKey,
     model_family: "code",
     supports_function_calling: true,
     supports_json_output: true,
@@ -603,6 +626,11 @@ export const buildCodegenLLMRequestConfig = (config: ChatbotConfig): LLMRequestC
     supports_vision: false,
     timeout_seconds: 180,
   };
+  if (normalizedConfig.apiKey) {
+    requestConfig.api_key = normalizedConfig.apiKey;
+  } else if (normalizedConfig.id) {
+    requestConfig.credential_id = normalizedConfig.id;
+  }
   if (
     normalizedConfig.provider === "openrouter" &&
     normalizedConfig.codegenOpenrouterProviderOnly?.length
@@ -616,6 +644,7 @@ export const buildCodegenLLMRequestConfig = (config: ChatbotConfig): LLMRequestC
 export const formatProviderLabel = (provider: LLMProvider) => LLM_PROVIDER_DETAILS[provider].label;
 
 export const fetchChatbotConfigs = async (): Promise<ChatbotConfig[]> => {
+  const generation = captureWorkspaceGeneration();
   const cachedRemoteConfigs = readCachedRemoteConfigs();
   if (!REMOTE_CONFIG_SYNC_ENABLED) {
     return getAvailableConfigs(cachedRemoteConfigs);
@@ -623,15 +652,18 @@ export const fetchChatbotConfigs = async (): Promise<ChatbotConfig[]> => {
 
   try {
     const remoteConfigs = await fetchBackendConfigs();
+    if (!isWorkspaceGenerationCurrent(generation)) return [];
     writeCachedRemoteConfigs(remoteConfigs);
     return getAvailableConfigs(remoteConfigs);
   } catch (error) {
+    if (!isWorkspaceGenerationCurrent(generation)) return [];
     console.warn("Falling back to locally cached chatbot configurations:", error);
     return getAvailableConfigs(cachedRemoteConfigs);
   }
 };
 
 export const fetchChatbotConfig = async (id: string): Promise<ChatbotConfig | null> => {
+  const generation = captureWorkspaceGeneration();
   if (isLocalConfigId(id)) {
     return readLocalOnlyConfigs().find((config) => config.id === id) || null;
   }
@@ -642,15 +674,22 @@ export const fetchChatbotConfig = async (id: string): Promise<ChatbotConfig | nu
   }
 
   try {
-    const savedConfig = upsertCachedRemoteConfig(await fetchBackendConfig(id));
+    const remoteConfig = await fetchBackendConfig(id);
+    if (!isWorkspaceGenerationCurrent(generation)) return null;
+    const savedConfig = upsertCachedRemoteConfig(remoteConfig);
     return savedConfig;
   } catch (error) {
+    if (!isWorkspaceGenerationCurrent(generation)) return null;
     console.error("Error fetching chatbot configuration:", error);
     return cachedRemoteConfig;
   }
 };
 
 export const createChatbotConfig = async (config: ChatbotConfig): Promise<ChatbotConfig | null> => {
+  if (config.id === APPLICATION_LLM_ID) {
+    throw new Error("Application-provided LLM is managed by your administrator.");
+  }
+  const generation = captureWorkspaceGeneration();
   if (!config.name || !config.model || !config.baseUrl) {
     throw new Error("Missing required configuration fields");
   }
@@ -663,11 +702,13 @@ export const createChatbotConfig = async (config: ChatbotConfig): Promise<Chatbo
 
   try {
     const savedConfig = await createBackendConfig(config);
+    if (!isWorkspaceGenerationCurrent(generation)) return null;
     upsertCachedRemoteConfig(savedConfig);
     persistLocalConfigValues(savedConfig);
     toast.success("Configuration saved successfully");
     return savedConfig;
   } catch (error) {
+    if (!isWorkspaceGenerationCurrent(generation)) return null;
     console.error("Error creating chatbot configuration:", error);
     const savedConfig = createLocalOnlyConfig(config);
     toast.success("Configuration saved locally", {
@@ -678,6 +719,10 @@ export const createChatbotConfig = async (config: ChatbotConfig): Promise<Chatbo
 };
 
 export const updateChatbotConfig = async (config: ChatbotConfig): Promise<ChatbotConfig | null> => {
+  if (config.id === APPLICATION_LLM_ID) {
+    throw new Error("Application-provided LLM is managed by your administrator.");
+  }
+  const generation = captureWorkspaceGeneration();
   if (!config.id) return null;
   if (!config.name || !config.model || !config.baseUrl) {
     throw new Error("Missing required configuration fields");
@@ -697,11 +742,13 @@ export const updateChatbotConfig = async (config: ChatbotConfig): Promise<Chatbo
 
   try {
     const savedConfig = await updateBackendConfig(config);
+    if (!isWorkspaceGenerationCurrent(generation)) return null;
     upsertCachedRemoteConfig(savedConfig);
     persistLocalConfigValues(savedConfig);
     toast.success("Configuration updated successfully");
     return savedConfig;
   } catch (error) {
+    if (!isWorkspaceGenerationCurrent(generation)) return null;
     console.error("Error updating chatbot configuration:", error);
     const savedConfig = updateLocalOnlyConfig(config);
     toast.success("Configuration updated locally", {
@@ -712,6 +759,10 @@ export const updateChatbotConfig = async (config: ChatbotConfig): Promise<Chatbo
 };
 
 export const deleteChatbotConfig = async (id: string): Promise<boolean> => {
+  if (id === APPLICATION_LLM_ID) {
+    throw new Error("Application-provided LLM is managed by your administrator.");
+  }
+  const generation = captureWorkspaceGeneration();
   if (isLocalConfigId(id)) {
     deleteLocalOnlyConfig(id);
     toast.success("Configuration deleted successfully");
@@ -726,10 +777,12 @@ export const deleteChatbotConfig = async (id: string): Promise<boolean> => {
 
   try {
     await deleteBackendConfig(id);
+    if (!isWorkspaceGenerationCurrent(generation)) return false;
     deleteCachedRemoteConfig(id);
     toast.success("Configuration deleted successfully");
     return true;
   } catch (error) {
+    if (!isWorkspaceGenerationCurrent(generation)) return false;
     console.error("Error deleting chatbot configuration:", error);
     toast.error("Failed to delete configuration", {
       description: errorToMessage(error),

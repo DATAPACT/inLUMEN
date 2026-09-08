@@ -891,7 +891,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("definition_id:'core.flow'", query)
         self.assertIn("definition_version:1", query)
         self.assertIn("OPTIONAL MATCH (p)-[:HAS_STEP]->(candidateTail:STEP)", query)
-        self.assertIn("WHERE NOT (candidate)-[:FLOWS_TO]->()", query)
+        self.assertIn("WHERE NOT (candidate)-[:FLOWS_TO]->(:STEP)", query)
         self.assertIn("CASE WHEN size(tails) = 1 THEN head(tails)", query)
         self.assertIn("configuration_status:'unconfigured'", query)
         self.assertIn("param_json: '{}'", query)

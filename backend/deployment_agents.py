@@ -29,6 +29,7 @@ from model_plans import (
     unresolved_model_plan_errors_from_python_source,
 )
 from node_parameters import normalize_secret_param_keys
+from workspace_storage import node_bucket_name
 
 CODEGEN_GENERATOR = "inlumen-codegen-service"
 ATTACHED_RUNTIME_GENERATOR = "inlumen-attached-runtime"
@@ -75,7 +76,7 @@ async def generate_dockerfiles_with_agent(
         file_refs = [
             {
                 "filename": filename,
-                "bucket": f"files-step-id-{step_id}",
+                "bucket": node_bucket_name(step_id),
                 "step_id": step_id,
             }
             for filename, step_id in zip(filenames, ids)
@@ -433,7 +434,7 @@ async def _read_root_input_files(
         bucket = str(
             file_ref.get("snapshot_bucket")
             or file_ref.get("bucket")
-            or f"files-step-id-{flow_id}"
+            or node_bucket_name(flow_id)
         ).strip().lower()
         object_name = str(
             file_ref.get("snapshot_object") or filename
@@ -2115,7 +2116,7 @@ async def _read_attached_python_runtime(
         read_bucket = str(
             file_ref.get("snapshot_bucket")
             or file_ref.get("bucket")
-            or f"files-step-id-{flow_id}"
+            or node_bucket_name(flow_id)
         ).strip().lower()
         read_object = str(
             file_ref.get("snapshot_object") or filename
@@ -2401,7 +2402,7 @@ async def _read_persisted_codegen_artifact(
         if not isinstance(item, dict):
             continue
         filename = str(item.get("filename") or "").strip()
-        bucket = str(item.get("bucket") or f"files-step-id-{flow_id}").strip().lower()
+        bucket = str(item.get("bucket") or node_bucket_name(flow_id)).strip().lower()
         read_bucket = str(item.get("snapshot_bucket") or bucket).strip().lower()
         read_object = str(item.get("snapshot_object") or filename).strip()
         if not filename or not read_bucket or not read_object:

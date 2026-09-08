@@ -1,4 +1,5 @@
 import asyncio
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -32,7 +33,8 @@ class FakeResponse:
         }
 
 
-def test_chat_completions_uses_dedicated_model_and_ephemeral_key(monkeypatch) -> None:
+@pytest.mark.parametrize("provider_only", [[], ["cerebras"]])
+def test_chat_completions_uses_dedicated_model_and_ephemeral_key(monkeypatch, provider_only) -> None:
     captured: dict = {}
     reported_usage = []
 
@@ -56,6 +58,8 @@ def test_chat_completions_uses_dedicated_model_and_ephemeral_key(monkeypatch) ->
         model="openai/gpt-5.2-codex",
         base_url="https://openrouter.ai/api/v1",
         api_key="provider-secret",
+        max_output_tokens=8192,
+        openrouter_provider_only=provider_only,
     )
 
     payload = asyncio.run(
@@ -70,6 +74,11 @@ def test_chat_completions_uses_dedicated_model_and_ephemeral_key(monkeypatch) ->
     assert payload == {"main_py": "print('ok')"}
     assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
     assert captured["body"]["model"] == "openai/gpt-5.2-codex"
+    assert captured["body"]["max_tokens"] == 8192
+    if provider_only:
+        assert captured["body"]["provider"] == {"only": provider_only}
+    else:
+        assert "provider" not in captured["body"]
     assert captured["headers"]["Authorization"] == "Bearer provider-secret"
     assert captured["headers"]["HTTP-Referer"] == (
         "https://github.com/DATAPACT/inLUMEN"

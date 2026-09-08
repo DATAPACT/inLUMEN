@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { OpenRouterModelCombobox } from "@/components/OpenRouterModelCombobox";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
@@ -55,7 +56,7 @@ const formSchema = z.object({
     .string()
     .min(1, "Base URL is required")
     .refine((value) => /^https?:\/\/.+/i.test(value), "Use an http(s) OpenAI-compatible base URL"),
-  apiKey: z.string().trim().min(1, "API key is required for LLM calls"),
+  apiKey: z.string().trim(),
 });
 
 interface ChatbotConfigFormProps {
@@ -63,6 +64,8 @@ interface ChatbotConfigFormProps {
   onClose: () => void;
   initialConfig?: ChatbotConfig;
   onConfigSaved: (config: ChatbotConfig) => void;
+  saveConfig?: (config: ChatbotConfig) => Promise<ChatbotConfig | null>;
+  sharedAccess?: { enabled: boolean; onChange: (enabled: boolean) => void };
 }
 
 export function ChatbotConfigForm({
@@ -70,6 +73,8 @@ export function ChatbotConfigForm({
   onClose,
   initialConfig,
   onConfigSaved,
+  saveConfig,
+  sharedAccess,
 }: ChatbotConfigFormProps) {
   const defaultConfig = React.useMemo(() => getDefaultChatbotConfig(), []);
 
@@ -158,6 +163,10 @@ export function ChatbotConfigForm({
 
   const onSubmit = async (values: z.infer<typeof formSchema>) => {
     try {
+      if (!values.apiKey.trim() && !initialConfig?.hasApiKey) {
+        form.setError("apiKey", { message: "API key is required for LLM calls" });
+        return;
+      }
       const configData: ChatbotConfig = {
         id: initialConfig?.id,
         name: values.name,
@@ -170,11 +179,14 @@ export function ChatbotConfigForm({
           values.provider === "openrouter" ? values.codegenOpenrouterProviderOnly : [],
         baseUrl: values.baseUrl,
         apiKey: values.apiKey?.trim() || "",
+        hasApiKey: initialConfig?.hasApiKey,
       };
 
-      const savedConfig = initialConfig?.id
-        ? await updateChatbotConfig(configData)
-        : await createChatbotConfig(configData);
+      const savedConfig = saveConfig
+        ? await saveConfig(configData)
+        : initialConfig?.id
+          ? await updateChatbotConfig(configData)
+          : await createChatbotConfig(configData);
 
       if (!savedConfig) throw new Error("Failed to save configuration");
 
@@ -193,16 +205,24 @@ export function ChatbotConfigForm({
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[680px]">
         <DialogHeader>
           <DialogTitle>
-            {initialConfig ? "Edit LLM Configuration" : "New LLM Configuration"}
+            {sharedAccess ? "Manage shared LLM" : initialConfig ? "Edit LLM Configuration" : "New LLM Configuration"}
           </DialogTitle>
           <DialogDescription>
-            Configure an OpenAI-compatible endpoint. API keys are stored only in this browser.
+            {sharedAccess
+              ? "Provide LLM access for all users. The API key is encrypted and never displayed after saving."
+              : "Configure an OpenAI-compatible endpoint. Saved credentials are encrypted by the gateway and are never returned to the browser."}
           </DialogDescription>
         </DialogHeader>
 
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-5">
-            <FormField
+            {sharedAccess && (
+              <div className="flex items-center justify-between rounded-lg border p-3">
+                <label htmlFor="shared-llm-enabled" className="text-sm font-medium">Enable for all users</label>
+                <Switch id="shared-llm-enabled" checked={sharedAccess.enabled} onCheckedChange={sharedAccess.onChange} />
+              </div>
+            )}
+            {!sharedAccess && <FormField
               control={form.control}
               name="name"
               render={({ field }) => (
@@ -214,7 +234,7 @@ export function ChatbotConfigForm({
                   <FormMessage />
                 </FormItem>
               )}
-            />
+            />}
 
             <FormField
               control={form.control}
@@ -339,10 +359,12 @@ export function ChatbotConfigForm({
                 <FormItem>
                   <FormLabel>API Key</FormLabel>
                   <FormControl>
-                    <Input type="password" placeholder="Provider API key" autoComplete="off" {...field} />
+                    <Input type="password" placeholder={initialConfig?.hasApiKey ? "Saved securely — enter a replacement to rotate" : "Provider API key"} autoComplete="new-password" {...field} />
                   </FormControl>
                   <p className="text-xs text-muted-foreground">
-                    Required for LLM calls. Stored only in this browser and restored on startup.
+                    {initialConfig?.hasApiKey
+                      ? "A credential is saved securely. Leave this blank to keep it, or enter a new value to replace it."
+                      : "Required for LLM calls. It is encrypted by the gateway and is never returned to this browser."}
                   </p>
                   <FormMessage />
                 </FormItem>
@@ -350,7 +372,9 @@ export function ChatbotConfigForm({
             />
 
             <DialogFooter>
-              <Button type="submit">Save Configuration</Button>
+              <Button type="submit" disabled={form.formState.isSubmitting}>
+                {form.formState.isSubmitting ? "Saving…" : "Save Configuration"}
+              </Button>
             </DialogFooter>
           </form>
         </Form>

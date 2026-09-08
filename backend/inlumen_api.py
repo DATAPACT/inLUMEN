@@ -13,9 +13,16 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from flask import Flask, Response, jsonify, make_response, request
+from flask import Flask, Response, g, jsonify, make_response, request
 
 from artifact_contract import classify_artifact
+from application_llm import (
+    APPLICATION_LLM_ID,
+    application_llm_request_config,
+    application_llm_settings,
+    validate_application_llm_config,
+)
+from application_llm_store import ApplicationLLMConflict, save_application_llm
 from analytics_api import (
     agentic_generate_deployment_bundle,
     agentic_generate_dagster,
@@ -28,8 +35,15 @@ from analytics_api import (
     prepare_dagster_execution_bundle,
 )
 from attachment_validation import attachment_input_errors, read_attachment_probe
-from auth_middleware import require_auth
+from auth_middleware import (
+    current_principal,
+    is_application_admin,
+    require_auth,
+    validate_auth_mode_configuration,
+    validate_production_auth_configuration,
+)
 from chat_state import clear_state_from_disk
+from chatbot_config_store import load_chatbot_configs, save_chatbot_configs
 from codegen_runs import CodegenRunStore
 from deployment_artifacts import DeploymentArtifactValidationError
 from generators.routes import create_generator_blueprint
@@ -49,6 +63,12 @@ from node_secrets import (
     normalize_parameter_name,
     set_node_secret,
 )
+from llm_credential_store import (
+    delete_llm_credential,
+    has_llm_credential,
+    save_llm_credential,
+    get_llm_credential,
+)
 from object_client import dispatch_object_request
 from pipeline_runner_client import (
     PipelineRunnerError,
@@ -61,6 +81,14 @@ from public_api import create_public_api_blueprint
 from runtime_environment import discover_runtime_environment, runtime_environment_from_files
 from runtime_config import add_cors_headers, get_service_port
 from step_types import normalize_step_type
+from workspace_store import (
+    LOCAL_TENANT_ID,
+    LOCAL_WORKSPACE_ID,
+    WORKSPACE_HEADER,
+    create_workspace,
+    list_workspaces,
+)
+from workspace_storage import node_bucket_name
 
 
 INLUMEN_API_PORT = get_service_port("INLUMEN_API_PORT", 5000)
@@ -79,7 +107,8 @@ CODEGEN_SAMPLE_BINARY_MAX_BYTES = int(
     os.getenv("INLUMEN_CODEGEN_SAMPLE_BINARY_MAX_BYTES", str(16 * 1024 * 1024))
 )
 CODEGEN_RUN_STORE = CodegenRunStore(
-    os.getenv("INLUMEN_CODEGEN_RUN_DB_PATH", "state/codegen-runs.sqlite3")
+    os.getenv("DATABASE_URL")
+    or os.getenv("INLUMEN_CODEGEN_RUN_DB_PATH", "state/codegen-runs.sqlite3")
 )
 DEFAULT_CODEGEN_ALLOWED_PACKAGES = [
     "pandas",
@@ -142,6 +171,10 @@ CHATBOT_CONFIGS_PATH = Path(
 )
 
 app = Flask(__name__)
+from observability import install_request_observability
+install_request_observability(app)
+validate_production_auth_configuration()
+validate_auth_mode_configuration()
 app.register_blueprint(create_public_api_blueprint())
 app.register_blueprint(create_node_definitions_blueprint())
 app.register_blueprint(create_generator_blueprint())
@@ -215,6 +248,8 @@ app.add_url_rule(
 
 @app.after_request
 def apply_cors(response):
+    if getattr(g, "graph_response_etag", None):
+        response.headers["ETag"] = g.graph_response_etag
     return add_cors_headers(response, request.headers.get("Origin"))
 
 
@@ -227,12 +262,72 @@ def _forward_headers(include_content_type: bool = True) -> dict[str, str]:
     authorization = request.headers.get("Authorization")
     if authorization:
         headers["Authorization"] = authorization
+    headers[WORKSPACE_HEADER] = current_principal().workspace_id
+    if getattr(g, "request_id", None):
+        headers["X-Request-ID"] = g.request_id
+    if request.headers.get("If-Match"):
+        headers["If-Match"] = request.headers["If-Match"]
     accept = request.headers.get("Accept")
     if accept:
         headers["Accept"] = accept
     if include_content_type and request.content_type:
         headers["Content-Type"] = request.content_type
     return headers
+
+
+@app.route("/api/session", methods=["GET", "OPTIONS"])
+@require_auth
+def application_session():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    principal = current_principal()
+    if principal.is_local:
+        workspaces = [{
+            "id": LOCAL_WORKSPACE_ID,
+            "tenant_id": LOCAL_TENANT_ID,
+            "name": "Local workspace",
+            "revision": 0,
+            "role": "owner",
+        }]
+    else:
+        workspaces = list_workspaces(principal.user_id)
+    return jsonify({
+        "user": {
+            "id": principal.user_id,
+            "subject": principal.subject,
+            "display_name": principal.display_name,
+        },
+        "active_workspace_id": principal.workspace_id,
+        "is_application_admin": is_application_admin(),
+        "workspaces": workspaces,
+    }), 200
+
+
+@app.route("/api/workspaces", methods=["GET", "POST", "OPTIONS"])
+@require_auth
+def application_workspaces():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    principal = current_principal()
+    if principal.is_local:
+        if request.method == "POST":
+            return _json_error(409, "Local mode supports its default workspace only")
+        return jsonify({"workspaces": [{
+            "id": LOCAL_WORKSPACE_ID,
+            "tenant_id": LOCAL_TENANT_ID,
+            "name": "Local workspace",
+            "revision": 0,
+            "role": "owner",
+        }]}), 200
+    if request.method == "POST":
+        try:
+            workspace = create_workspace(
+                principal.user_id, str(_request_json().get("name") or "")
+            )
+        except ValueError as exc:
+            return _json_error(400, str(exc))
+        return jsonify({"workspace": workspace}), 201
+    return jsonify({"workspaces": list_workspaces(principal.user_id)}), 200
 
 
 def _response_from_upstream(upstream: LocalApiResponse) -> Response:
@@ -263,7 +358,7 @@ def _proxy(
 ) -> LocalApiResponse:
     include_content_type = files is None and form is None and json_payload is None
     body = None if json_payload is not None else data if data is not None else request.get_data()
-    return adapter_request(
+    upstream = adapter_request(
         backend_path,
         method=method or request.method,
         params=params if params is not None else request.args,
@@ -273,6 +368,10 @@ def _proxy(
         form=form,
         headers=_forward_headers(include_content_type=include_content_type),
     )
+    if adapter_request is dispatch_graph_request and upstream.headers.get("ETag"):
+        # Preserve revisions when routes rebuild JSON to include cleanup results.
+        g.graph_response_etag = upstream.headers["ETag"]
+    return upstream
 
 
 def _proxy_response(adapter_request, backend_path: str) -> Response:
@@ -517,7 +616,7 @@ def _node_file_entries(
     if not isinstance(raw_files, list):
         return []
     flow_id = str(node.get("id") or data.get("flow_id") or data.get("id") or "").strip()
-    default_bucket = f"files-step-id-{flow_id}".lower()
+    default_bucket = node_bucket_name(flow_id)
     entries = []
     for item in raw_files:
         if isinstance(item, str):
@@ -563,13 +662,12 @@ def _sample_file_descriptor(
 ) -> dict[str, Any]:
     kind = descriptor.get("kind")
     file_format = descriptor.get("format")
-    bucket_id = bucket.removeprefix("files-step-id-")
     try:
         response = _proxy(
             dispatch_object_request,
             "minio_read_file",
             method="GET",
-            params={"bucket_id": bucket_id, "filename": filename},
+            params={"bucket_name": bucket, "filename": filename},
             data=b"",
         )
         response.raise_for_status()
@@ -971,6 +1069,8 @@ def _prepare_codegen_request(
     if isinstance(raw_config, dict):
         raw_config.pop("api_key", None)
         raw_config.pop("apiKey", None)
+        raw_config.pop("credential_id", None)
+        raw_config.pop("config_id", None)
     return request_payload
 
 
@@ -980,7 +1080,10 @@ def _codegen_llm_api_key(payload: dict[str, Any] | None) -> str:
     config = payload.get("llm_config")
     if not isinstance(config, dict):
         return ""
-    return str(config.get("api_key") or config.get("apiKey") or "").strip()
+    supplied = str(config.get("api_key") or config.get("apiKey") or "").strip()
+    if supplied:
+        return supplied
+    return get_llm_credential(str(config.get("credential_id") or config.get("config_id") or "")) or ""
 
 
 def _codegen_request_headers(
@@ -989,6 +1092,7 @@ def _codegen_request_headers(
     llm_api_key: str = "",
 ) -> dict[str, str]:
     headers = {"Accept": "application/json"}
+    headers[WORKSPACE_HEADER] = current_principal().workspace_id
     if include_content_type:
         headers["Content-Type"] = "application/json"
 
@@ -1007,6 +1111,11 @@ def _codegen_request_parts(
     payload: dict[str, Any] | None = None,
 ) -> tuple[bytes | None, dict[str, str]]:
     request_payload: dict[str, Any] | None = None
+    if payload is not None and isinstance(payload.get("llm_config"), dict):
+        payload = {
+            **payload,
+            "llm_config": application_llm_request_config(payload["llm_config"], purpose="codegen"),
+        }
     if payload is not None:
         request_payload = _prepare_codegen_request(payload)
     headers = _codegen_request_headers(
@@ -1058,37 +1167,9 @@ def _persist_codegen_artifact(
 ) -> dict[str, Any]:
     files = artifact.get("files") if isinstance(artifact.get("files"), list) else []
     runtime_environment = runtime_environment_from_files(files)
-    new_filenames = {
-        str(item.get("filename") or "").strip()
-        for item in files
-        if isinstance(item, dict) and str(item.get("filename") or "").strip()
-    }
-    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
-    current_node = next(
-        (
-            item
-            for item in nodes
-            if isinstance(item, dict)
-            and str(item.get("id") or item.get("flow_id") or "") == node_id
-        ),
-        None,
-    )
-    current_data = _node_data(current_node) if isinstance(current_node, dict) else {}
-    current_artifact = (
-        current_data.get("generated_artifact")
-        if isinstance(current_data.get("generated_artifact"), dict)
-        else {}
-    )
-    stale_filenames = {
-        str(item.get("filename") or "").strip()
-        for item in current_artifact.get("files") or []
-        if isinstance(item, dict)
-        and str(item.get("filename") or "").strip()
-        and str(item.get("filename") or "").strip() not in new_filenames
-    }
     stored_files = []
     file_hashes: dict[str, str] = {}
-    bucket = f"files-step-id-{node_id}".lower()
+    bucket = node_bucket_name(node_id)
     for file_item in files:
         if not isinstance(file_item, dict):
             continue
@@ -1096,6 +1177,8 @@ def _persist_codegen_artifact(
         content = file_item.get("content")
         if not filename or not isinstance(content, str):
             continue
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        object_name = f".generated/{content_hash}/{filename}"
         storage_response = _proxy(
             dispatch_object_request,
             "minio_update_text_file",
@@ -1103,29 +1186,17 @@ def _persist_codegen_artifact(
             data=b"",
             json_payload={
                 "bucket_id": node_id,
-                "filename": filename,
+                "filename": object_name,
                 "content": content,
             },
         )
         storage_response.raise_for_status()
-        graph_response = _proxy(
-            dispatch_graph_request,
-            "neo4j_add_file",
-            method="POST",
-            data=b"",
-            json_payload={
-                "properties": {
-                    "flow_id": node_id,
-                    "filename": filename,
-                    "role": "code",
-                }
-            },
-        )
-        graph_response.raise_for_status()
         stored_files.append(
             {
                 "filename": filename,
                 "bucket": bucket,
+                "snapshot_bucket": bucket,
+                "snapshot_object": object_name,
                 "content_type": str(file_item.get("content_type") or "text/plain"),
                 "role": "code",
             }
@@ -1133,28 +1204,6 @@ def _persist_codegen_artifact(
         file_hashes[filename] = "sha256:" + hashlib.sha256(
             content.encode("utf-8")
         ).hexdigest()
-
-    for filename in sorted(stale_filenames):
-        storage_response = _proxy(
-            dispatch_object_request,
-            "minio_remove_file",
-            method="DELETE",
-            params={},
-            data=b"",
-            form={"bucket_id": node_id, "filename": filename},
-        )
-        storage_response.raise_for_status()
-        graph_response = _proxy(
-            dispatch_graph_request,
-            "neo4j_delete_file",
-            method="DELETE",
-            params={},
-            data=b"",
-            json_payload={
-                "properties": {"flow_id": node_id, "filename": filename}
-            },
-        )
-        graph_response.raise_for_status()
 
     generated_artifact = {
         **artifact,
@@ -1183,6 +1232,7 @@ def _persist_codegen_artifact(
         json_payload={
             "flow_id": node_id,
             "generated_artifact": generated_artifact,
+            "publish_files": stored_files,
         },
     )
     graph_response.raise_for_status()
@@ -1224,6 +1274,8 @@ def _mark_codegen_artifact_user_modified(
                 "status": "current",
                 "generator": "user-upload",
             }
+        if isinstance(data.get("file_buckets"), list):
+            artifact["files"] = [deepcopy(item) for item in data["file_buckets"] if isinstance(item, dict) and item.get("role") == "code"]
         if python_source is not None:
             artifact["runtime_environment"] = discover_runtime_environment(
                 python_source
@@ -1263,7 +1315,7 @@ def _persist_codegen_run_report(run_report: Any) -> dict[str, Any] | None:
         return run_report
     filename = f"{run_id}.json"
     bucket_id = "pipeline-codegen-runs"
-    bucket = f"files-step-id-{bucket_id}".lower()
+    bucket = node_bucket_name(bucket_id)
     report = {
         **run_report,
         "object_storage": {
@@ -1596,15 +1648,14 @@ def _hydrate_reusable_codegen_node(
         if not isinstance(content, str):
             bucket = str(
                 file_item.get("bucket")
-                or f"files-step-id-{_node_flow_id(node)}"
+                or node_bucket_name(_node_flow_id(node))
             ).strip().lower()
-            bucket_id = bucket.removeprefix("files-step-id-")
             try:
                 response = _proxy(
                     dispatch_object_request,
                     "minio_read_file",
                     method="GET",
-                    params={"bucket_id": bucket_id, "filename": filename},
+                    params={"bucket_name": bucket, "filename": filename},
                     data=b"",
                 )
                 response.raise_for_status()
@@ -1859,22 +1910,11 @@ def _finalize_pipeline_codegen_response(
 
 
 def _load_chatbot_configs() -> list[dict[str, Any]]:
-    try:
-        payload = json.loads(CHATBOT_CONFIGS_PATH.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return []
-    except json.JSONDecodeError:
-        return []
-    configs = payload.get("configs") if isinstance(payload, dict) else payload
-    return configs if isinstance(configs, list) else []
+    return load_chatbot_configs(CHATBOT_CONFIGS_PATH)
 
 
 def _save_chatbot_configs(configs: list[dict[str, Any]]) -> None:
-    CHATBOT_CONFIGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CHATBOT_CONFIGS_PATH.write_text(
-        json.dumps({"configs": configs}, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    save_chatbot_configs(CHATBOT_CONFIGS_PATH, configs)
 
 
 def _chatbot_config_response(config: dict[str, Any]) -> dict[str, Any]:
@@ -1904,6 +1944,7 @@ def _chatbot_config_response(config: dict[str, Any]) -> dict[str, Any]:
         "temperature": config.get("temperature", 0.7),
         "created_at": config.get("created_at"),
         "updated_at": config.get("updated_at"),
+        "has_api_key": has_llm_credential(str(config.get("id") or "")),
     }
     if config.get("readOnly") or config.get("read_only"):
         response["readOnly"] = True
@@ -2029,6 +2070,38 @@ def graph_nodes():
     return jsonify({"graph": graph_payload, "storage_cleanup": storage_cleanup}), graph_response.status_code
 
 
+@app.route("/api/admin/application-llm", methods=["GET", "PUT", "OPTIONS"])
+@require_auth
+def admin_application_llm():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    if not is_application_admin():
+        return _json_error(403, "Application administrator role required.")
+    if request.method == "GET":
+        return jsonify(application_llm_settings()), 200
+    payload = _request_json()
+    if not isinstance(payload.get("enabled"), bool):
+        return _json_error(400, "enabled must be a boolean")
+    revision = payload.get("revision")
+    if type(revision) is not int or revision < 0:
+        return _json_error(400, "revision must be a non-negative integer")
+    raw = payload.get("config")
+    if not isinstance(raw, dict):
+        return _json_error(400, "config is required")
+    key = raw.get("api_key", raw.get("apiKey", ""))
+    if not isinstance(key, str) or "\n" in key.strip() or "\r" in key.strip():
+        return _json_error(400, "API key must be a single-line string")
+    try:
+        config = validate_application_llm_config(raw)
+        save_application_llm(config, key.strip(), enabled=payload["enabled"], revision=revision, updated_by=current_principal().user_id)
+    except ApplicationLLMConflict as exc:
+        return _json_error(409, str(exc))
+    except ValueError as exc:
+        return _json_error(400, str(exc))
+    app.logger.info("Shared LLM updated by user=%s revision=%s enabled=%s", current_principal().user_id, revision + 1, payload["enabled"])
+    return jsonify(application_llm_settings()), 200
+
+
 @app.route("/api/chatbot-configs", methods=["GET", "POST", "OPTIONS"])
 @require_auth
 def chatbot_configs():
@@ -2037,19 +2110,28 @@ def chatbot_configs():
 
     configs = _load_chatbot_configs()
     if request.method == "GET":
+        shared = application_llm_settings()
+        application_config = shared["config"] if shared["enabled"] else None
         return jsonify({
-            "configs": [
+            "configs": ([application_config] if application_config else []) + [
                 _chatbot_config_response(config)
                 for config in configs
+                if str(config.get("id")) != APPLICATION_LLM_ID
             ]
         }), 200
 
     payload = _request_json()
+    if str(payload.get("id") or "").strip() == APPLICATION_LLM_ID:
+        return _json_error(403, "Application-provided LLM is managed by the deployment administrator.")
     config = _validate_chatbot_config_payload(payload)
     if isinstance(config, tuple):
         return config
     configs.insert(0, config)
     _save_chatbot_configs(configs)
+    save_llm_credential(
+        str(config.get("id") or ""),
+        str(payload.get("api_key") or payload.get("apiKey") or ""),
+    )
     return jsonify({"config": _chatbot_config_response(config)}), 201
 
 
@@ -2058,6 +2140,14 @@ def chatbot_configs():
 def chatbot_config(config_id: str):
     if request.method == "OPTIONS":
         return _preflight_response()
+
+    if config_id == APPLICATION_LLM_ID:
+        if request.method != "GET":
+            return _json_error(403, "Application-provided LLM is managed by the deployment administrator.")
+        shared = application_llm_settings()
+        if not shared["enabled"] or shared["config"] is None:
+            return _json_error(404, "chatbot config not found")
+        return jsonify({"config": shared["config"]}), 200
 
     configs = _load_chatbot_configs()
     index = next(
@@ -2073,13 +2163,19 @@ def chatbot_config(config_id: str):
     if request.method == "DELETE":
         deleted = configs.pop(index)
         _save_chatbot_configs(configs)
+        delete_llm_credential(str(deleted.get("id") or config_id))
         return jsonify({"deleted_id": str(deleted.get("id") or config_id)}), 200
 
-    config = _validate_chatbot_config_payload(_request_json(), existing=configs[index])
+    payload = _request_json()
+    config = _validate_chatbot_config_payload(payload, existing=configs[index])
     if isinstance(config, tuple):
         return config
     configs[index] = config
     _save_chatbot_configs(configs)
+    save_llm_credential(
+        str(config.get("id") or config_id),
+        str(payload.get("api_key") or payload.get("apiKey") or ""),
+    )
     return jsonify({"config": _chatbot_config_response(config)}), 200
 
 
@@ -2188,6 +2284,8 @@ def pipeline_runs():
         client_payload = _request_json()
         executable = prepare_dagster_execution_bundle(graph)
         runner_payload = {
+            "workspace_id": current_principal().workspace_id,
+            "requested_by": current_principal().user_id,
             "snapshot": {
                 "graph": graph,
                 "pipeline_id": str(pipeline.get("uid") or "").strip() or None,
@@ -2535,11 +2633,17 @@ def file_content():
     filename = str(request.args.get("filename") or "").strip()
     if not container_id or not filename:
         return _json_error(400, "container_id and filename are required")
+    resolved = _proxy(dispatch_graph_request, "neo4j_resolve_file", method="GET",
+                      params={"container_id": container_id, "filename": filename}, data=b"")
+    if not resolved.ok:
+        return _response_from_upstream(resolved)
+    location = _upstream_json(resolved)
+    filename = location.get("object") or filename
     storage_response = _proxy(
         dispatch_object_request,
         "minio_read_file",
         method="GET",
-        params={"bucket_id": container_id, "filename": filename},
+        params={"bucket_id": container_id, "filename": filename, **({"bucket_name": location["bucket"]} if location.get("bucket") else {})},
         data=b"",
     )
     return _response_from_upstream(storage_response)
@@ -3270,6 +3374,11 @@ def node_text_file(node_id: str):
     )
     generated_artifact = None
     if storage_response.ok:
+        file_update = _proxy(dispatch_graph_request, "neo4j_add_file", method="POST", data=b"",
+            json_payload={"properties": {"flow_id": node_id, "filename": filename}})
+        if not file_update.ok:
+            return _response_from_upstream(file_update)
+
         if _is_codegen_runtime_file(filename):
             generated_artifact = _mark_codegen_artifact_user_modified(
                 node_id,

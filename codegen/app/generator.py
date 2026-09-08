@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .generation_budget import budgeted
 from .llm import (
     LLMGenerationError,
     generate_node_payload,
@@ -126,6 +127,7 @@ def threadsafe_stage_callback(
     return callback
 
 
+@budgeted
 async def generate_node_script_bundle(
     request: GenerateNodeScriptRequest,
     *,
@@ -275,6 +277,7 @@ async def build_and_validate_node(
     return files, data_contract, validation
 
 
+@budgeted
 async def generate_pipeline_script_bundles(
     request: GeneratePipelineScriptsRequest,
     *,

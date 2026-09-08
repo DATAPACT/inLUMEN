@@ -1,8 +1,9 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
 from autogen_core.models import ChatCompletionClient
 from autogen_ext.models.openai import OpenAIChatCompletionClient
+from application_llm import application_llm_request_config
 
 # OpenAI-compatible LLM providers. The app no longer starts or depends on a
 # local Ollama daemon; cloud and on-prem endpoints are selected by base URL.
@@ -35,7 +36,7 @@ class LLMConfig:
     provider: str
     model: str
     base_url: str
-    api_key: str
+    api_key: str = field(repr=False)
     model_family: str = "unknown"
     max_tokens: Optional[int] = None
     openrouter_provider_only: tuple[str, ...] = ()
@@ -97,7 +98,7 @@ def _raw_config_value(raw: Mapping[str, Any], *keys: str) -> Any:
 
 
 def resolve_llm_config(raw_config: Optional[Mapping[str, Any]] = None) -> LLMConfig:
-    raw = raw_config or {}
+    raw = application_llm_request_config(raw_config or {})
     provider = _normalize_provider(
         raw.get("provider")
         or raw.get("llm_provider")
@@ -108,6 +109,13 @@ def resolve_llm_config(raw_config: Optional[Mapping[str, Any]] = None) -> LLMCon
         model = OPENROUTER_MODEL_ALIASES.get(model.lower(), model)
     base_url = str(raw.get("base_url") or raw.get("baseUrl") or "").strip()
     api_key = str(raw.get("api_key") or raw.get("apiKey") or "").strip()
+    if not api_key:
+        # Import lazily: this module is also used by non-request tooling, while
+        # credential resolution is meaningful only inside the gateway request.
+        from llm_credential_store import get_llm_credential
+        api_key = get_llm_credential(
+            str(raw.get("credential_id") or raw.get("config_id") or "")
+        ) or ""
     model_family = (
         str(raw.get("model_family") or raw.get("modelFamily") or "").strip()
         or DEFAULT_LLM_MODEL_FAMILY
@@ -134,7 +142,7 @@ def resolve_llm_config(raw_config: Optional[Mapping[str, Any]] = None) -> LLMCon
     if not api_key:
         raise ValueError(
             f"LLM API key is required for provider '{provider}'. "
-            "Enter it in the UI LLM settings for this browser."
+            "Save it in the UI LLM settings before using this configuration."
         )
 
     return LLMConfig(

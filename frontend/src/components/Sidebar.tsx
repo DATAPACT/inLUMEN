@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import JSZip from 'jszip';
+
 import { apiFetch } from '@/utils/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
 import type { ChatbotConfig } from '@/services/chatbotService';
@@ -413,7 +413,8 @@ export function Sidebar({
   const buildDeploymentZip = async (
     files: DeploymentBundleFile[],
   ) => {
-    const zip = new JSZip();
+    const { default: JSZip } = await import("jszip");
+      const zip = new JSZip();
     const written = new Set<string>();
     const writeFile = (
       path: string,

@@ -1,13 +1,15 @@
-import React, { useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
+import { getWorkspaceStorage, type WorkspaceStorage } from '@/utils/workspaceStorage';
+import React, { useState, useCallback, useEffect, useLayoutEffect, useRef, lazy, Suspense } from 'react';
 import { apiFetch } from '@/utils/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
 import { cn } from '@/lib/utils';
-import { Sidebar } from '@/components/Sidebar';
-import { PropertiesPanel, PropertyNodeData } from '@/components/PropertiesPanel';
+const Sidebar = lazy(() => import('@/components/Sidebar').then((module) => ({ default: module.Sidebar })));
+import type { PropertyNodeData } from '@/components/PropertiesPanel';
+const PropertiesPanel = lazy(() => import('@/components/PropertiesPanel').then((module) => ({ default: module.PropertiesPanel })));
 import { Toolbar } from '@/components/Toolbar';
 import { WrappedFlowCanvas, FlowCanvasRef } from '@/components/FlowCanvas';
 import { ChatPanel } from '@/components/chat/ChatPanel';
-import { VersionsPanel } from '@/components/versions/VersionsPanel';
+const VersionsPanel = lazy(() => import('@/components/versions/VersionsPanel').then((module) => ({ default: module.VersionsPanel })));
 import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
 import { sanitizeAssistantMessage } from '@/features/chat/messageSafety';
 import { CHAT_PROMPT_SUGGESTIONS } from '@/features/chat/promptSuggestions';
@@ -69,6 +71,8 @@ import {
   writeSelectedChatbotConfigId
 } from '@/services/chatbotService';
 import { ChatbotConfigForm } from '@/components/ChatbotConfigForm';
+import { ApplicationLLMSettings } from '@/components/ApplicationLLMSettings';
+import { useAuthSession } from '@/context/authSession';
 
 const CHAT_SESSION_KEY = "chat-session-id";
 const CHAT_TRANSCRIPT_KEY = "inlumen-chat-transcript";
@@ -95,9 +99,9 @@ const DEFAULT_PANEL_PREFERENCES: PanelPreferences = {
   rightPanel: null,
 };
 
-const readPanelPreferences = (): PanelPreferences => {
+const readPanelPreferences = (workspaceStorage: WorkspaceStorage = getWorkspaceStorage()): PanelPreferences => {
   try {
-    const saved = localStorage.getItem(PANEL_STATE_KEY);
+    const saved = workspaceStorage.getItem(PANEL_STATE_KEY);
     if (!saved) return DEFAULT_PANEL_PREFERENCES;
     const parsed = JSON.parse(saved) as Partial<PanelPreferences>;
     const rightPanel =
@@ -115,9 +119,9 @@ const readPanelPreferences = (): PanelPreferences => {
   }
 };
 
-const readSavedTheme = () => {
+const readSavedTheme = (workspaceStorage: WorkspaceStorage = getWorkspaceStorage()) => {
   try {
-    return localStorage.getItem(THEME_KEY) === "light";
+    return workspaceStorage.getItem(THEME_KEY) === "light";
   } catch {
     return false;
   }
@@ -164,12 +168,12 @@ const normalizeSavedConversation = (value: unknown): ChatMessage[] => {
   });
 };
 
-const readSavedConversation = (): ChatMessage[] => {
+const readSavedConversation = (workspaceStorage: WorkspaceStorage = getWorkspaceStorage()): ChatMessage[] => {
   try {
-    const savedHistory = localStorage.getItem(CHAT_HISTORY_KEY);
+    const savedHistory = workspaceStorage.getItem(CHAT_HISTORY_KEY);
     if (savedHistory) return normalizeSavedConversation(JSON.parse(savedHistory));
 
-    const savedTranscript = localStorage.getItem(CHAT_TRANSCRIPT_KEY);
+    const savedTranscript = workspaceStorage.getItem(CHAT_TRANSCRIPT_KEY);
     if (savedTranscript) return normalizeSavedConversation(JSON.parse(savedTranscript));
   } catch {
     return [];
@@ -209,6 +213,7 @@ type ChatApiResponse = {
 };
 
 const Index = () => {
+  const [workspaceStorage] = useState(() => getWorkspaceStorage());
   const [selectedNode, setSelectedNode] = useState<FlowNode | null>(null);
   const [activeTab, setActiveTab] = useState('lab'); // 'lab', 'overview', or 'simulate'
   const [userInput, setUserInput] = useState('');
@@ -223,6 +228,8 @@ const Index = () => {
   const [panelPreferences, setPanelPreferences] = useState<PanelPreferences>(readPanelPreferences);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isSharedLLMSettingsOpen, setIsSharedLLMSettingsOpen] = useState(false);
+  const { session } = useAuthSession();
   const flowCanvasRef = useRef<FlowCanvasRef>(null);
   const libraryPanelRef = useRef<ImperativePanelHandle>(null);
   const rightPanelRef = useRef<ImperativePanelHandle>(null);
@@ -250,7 +257,7 @@ const Index = () => {
   const [activeVersionName, setActiveVersionName] = useState('Main');
   const [activePipelineDescription, setActivePipelineDescription] = useState('');
   const [pipelineHighLevelPrompt, setPipelineHighLevelPrompt] = useState(
-    () => localStorage.getItem(PIPELINE_PROMPT_KEY) || "",
+    () => workspaceStorage.getItem(PIPELINE_PROMPT_KEY) || "",
   );
   const activeVersionSaveTimeoutRef = useRef<number | null>(null);
   const activeVersionDirtyRef = useRef(false);
@@ -277,35 +284,35 @@ const Index = () => {
 
   // Backend session id
   const [chatSessionId, setChatSessionId] = useState<string>(() => {
-    return localStorage.getItem(CHAT_SESSION_KEY) || "";
+    return workspaceStorage.getItem(CHAT_SESSION_KEY) || "";
   });
 
   useEffect(() => {
     if (chatSessionId) {
-      localStorage.setItem(CHAT_SESSION_KEY, chatSessionId);
+      workspaceStorage.setItem(CHAT_SESSION_KEY, chatSessionId);
     }
-  }, [chatSessionId]);
+  }, [workspaceStorage, chatSessionId]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("light", isLightMode);
-    localStorage.setItem(THEME_KEY, isLightMode ? "light" : "dark");
-  }, [isLightMode]);
+    workspaceStorage.setItem(THEME_KEY, isLightMode ? "light" : "dark");
+  }, [workspaceStorage, isLightMode]);
 
   useEffect(() => {
-    localStorage.setItem(PANEL_STATE_KEY, JSON.stringify(panelPreferences));
-  }, [panelPreferences]);
+    workspaceStorage.setItem(PANEL_STATE_KEY, JSON.stringify(panelPreferences));
+  }, [workspaceStorage, panelPreferences]);
 
   useEffect(() => {
     if (pipelineHighLevelPrompt) {
-      localStorage.setItem(PIPELINE_PROMPT_KEY, pipelineHighLevelPrompt);
+      workspaceStorage.setItem(PIPELINE_PROMPT_KEY, pipelineHighLevelPrompt);
     } else {
-      localStorage.removeItem(PIPELINE_PROMPT_KEY);
+      workspaceStorage.removeItem(PIPELINE_PROMPT_KEY);
     }
-  }, [pipelineHighLevelPrompt]);
+  }, [workspaceStorage, pipelineHighLevelPrompt]);
 
   useEffect(() => {
     if (conversation.length === 0) return;
-    localStorage.setItem(
+    workspaceStorage.setItem(
       CHAT_HISTORY_KEY,
       JSON.stringify({
         savedAt: new Date().toISOString(),
@@ -313,7 +320,7 @@ const Index = () => {
         conversation,
       })
     );
-  }, [chatSessionId, conversation]);
+  }, [workspaceStorage, chatSessionId, conversation]);
 
   const formatConfigDescription = (config: ChatbotConfig) =>
     `${formatProviderLabel(config.provider)} / ${config.model}`;
@@ -324,7 +331,7 @@ const Index = () => {
       const savedConfig = savedConfigId
         ? configsList.find((config) => config.id === savedConfigId)
         : null;
-      return savedConfig || configsList.find((config) => config.provider === "openrouter") || configsList[0] || defaultConfig;
+      return savedConfig || configsList.find((config) => config.applicationProvided) || configsList.find((config) => config.provider === "openrouter") || configsList[0] || defaultConfig;
     },
     [defaultConfig]
   );
@@ -373,19 +380,19 @@ const Index = () => {
 
   useEffect(() => {
     // Load saved pipeline timestamp (last update)
-    const savedTimestamp = localStorage.getItem('saved-pipeline-timestamp');
+    const savedTimestamp = workspaceStorage.getItem('saved-pipeline-timestamp');
     if (savedTimestamp) {
       setPipelineLastUpdate(new Date(savedTimestamp).toLocaleString());
     }
 
     // Load created-at (if you have it)
-    const savedCreatedAt = localStorage.getItem('saved-pipeline-createdAt');
+    const savedCreatedAt = workspaceStorage.getItem('saved-pipeline-createdAt');
     if (savedCreatedAt) {
       setPipelineCreatedAt(new Date(savedCreatedAt).toLocaleString());
     }
 
     loadConfigurations();
-  }, [loadConfigurations]);
+  }, [workspaceStorage, loadConfigurations]);
 
   useEffect(() => {
     conversationEndRef.current?.scrollIntoView({
@@ -461,6 +468,7 @@ const Index = () => {
 
   useEffect(() => {
     return () => {
+      activeChatTurnRef.current?.controller.abort();
       if (activeVersionSaveTimeoutRef.current) {
         window.clearTimeout(activeVersionSaveTimeoutRef.current);
       }
@@ -730,14 +738,14 @@ const Index = () => {
   const resetLocalConversation = useCallback(() => {
     setConversation([]);
     setChatSessionId("");
-    localStorage.removeItem(CHAT_SESSION_KEY);
-    localStorage.removeItem(CHAT_HISTORY_KEY);
-    localStorage.removeItem(CHAT_TRANSCRIPT_KEY);
+    workspaceStorage.removeItem(CHAT_SESSION_KEY);
+    workspaceStorage.removeItem(CHAT_HISTORY_KEY);
+    workspaceStorage.removeItem(CHAT_TRANSCRIPT_KEY);
     setCanvasSyncStatus({
       state: 'idle',
       message: 'Canvas is ready',
     });
-  }, []);
+  }, [workspaceStorage]);
 
   const handleClearConversation = async () => {
     resetLocalConversation();
@@ -818,7 +826,7 @@ const Index = () => {
       return;
     }
 
-    localStorage.setItem(
+    workspaceStorage.setItem(
       CHAT_TRANSCRIPT_KEY,
       JSON.stringify({
         savedAt: new Date().toISOString(),
@@ -859,7 +867,7 @@ const Index = () => {
   };
 
   const handleSaveWorkflow = () => {
-    localStorage.setItem('ai-workflow-nodes', JSON.stringify(flowNodes));
+    workspaceStorage.setItem('ai-workflow-nodes', JSON.stringify(flowNodes));
     toast.success("Workflow saved", {
       description: "Your AI workflow has been saved",
     });
@@ -921,22 +929,22 @@ const Index = () => {
     setPipelineHighLevelPrompt("");
     setFlowNodes([]);
     setSelectedNode(null);
-    localStorage.removeItem('ai-flow-nodes');
-    localStorage.removeItem('ai-flow-edges');
+    workspaceStorage.removeItem('ai-flow-nodes');
+    workspaceStorage.removeItem('ai-flow-edges');
     toast.success("Blank pipeline created");
   };
 
   const handleSavePipeline = () => {
     const timestamp = new Date().toISOString();
-    const existingCreatedAt = localStorage.getItem('saved-pipeline-createdAt');
+    const existingCreatedAt = workspaceStorage.getItem('saved-pipeline-createdAt');
     if (!existingCreatedAt) {
-      localStorage.setItem('saved-pipeline-createdAt', timestamp);
+      workspaceStorage.setItem('saved-pipeline-createdAt', timestamp);
       setPipelineCreatedAt(new Date(timestamp).toLocaleString());
     } else {
       setPipelineCreatedAt(new Date(existingCreatedAt).toLocaleString());
     }
-    localStorage.setItem('saved-pipeline-nodes', JSON.stringify(flowNodes));
-    localStorage.setItem('saved-pipeline-timestamp', timestamp);
+    workspaceStorage.setItem('saved-pipeline-nodes', JSON.stringify(flowNodes));
+    workspaceStorage.setItem('saved-pipeline-timestamp', timestamp);
     setPipelineLastUpdate(new Date(timestamp).toLocaleString());
     toast.success("Pipeline saved", {
       description: "Your pipeline will persist on next visit"
@@ -1124,9 +1132,9 @@ const Index = () => {
       setPipelineHighLevelPrompt("");
       resetLocalConversation();
       setWorkspaceResetKey((key) => key + 1);
-      localStorage.removeItem('ai-flow');
-      localStorage.removeItem('ai-flow-nodes');
-      localStorage.removeItem('ai-flow-edges');
+      workspaceStorage.removeItem('ai-flow');
+      workspaceStorage.removeItem('ai-flow-nodes');
+      workspaceStorage.removeItem('ai-flow-edges');
       setVersionsRefreshKey((key) => key + 1);
 
       const updatedAt = result.version.updated_at ?? syncedGraph?.updated_at ?? null;
@@ -1255,7 +1263,7 @@ const Index = () => {
               collapsedSize={0}
             >
               {isLibraryOpen ? (
-                <Sidebar
+                <Suspense fallback={<p role="status" className="p-4">Loading panel…</p>}><Sidebar
                   className="h-full w-full bg-card/95"
                   onDragStart={onDragStart}
                   activeTab={activeTab}
@@ -1273,7 +1281,7 @@ const Index = () => {
                   currentPipelineDescription={activePipelineDescription}
                   onGenerateRuntimeCode={() => flowCanvasRef.current?.openCodeGeneration()}
                   onImportRuntimePackages={() => flowCanvasRef.current?.openTaskPackageImport()}
-                />
+                /></Suspense>
               ) : null}
             </ResizablePanel>
             <ResizableHandle
@@ -1326,7 +1334,7 @@ const Index = () => {
             >
               {rightPanel ? (
                 rightPanel === 'inspector' ? (
-                    <PropertiesPanel
+                    <Suspense fallback={<p role="status" className="p-4">Loading panel…</p>}><PropertiesPanel
                       className="bg-card/95"
                       selectedNode={selectedNode}
                       onNodeUpdate={onNodeUpdate}
@@ -1335,7 +1343,7 @@ const Index = () => {
                         flowCanvasRef.current?.openCodeGeneration([nodeId]);
                       }}
                       activeChatbotConfig={activeConfig}
-                    />
+                    /></Suspense>
                   ) : rightPanel === 'chat' ? (
                     <ChatPanel
                       activeConfig={activeConfig}
@@ -1355,7 +1363,7 @@ const Index = () => {
                       onSuggestionClick={handleSuggestionClick}
                     />
                   ) : (
-                    <VersionsPanel
+                    <Suspense fallback={<p role="status" className="p-4">Loading panel…</p>}><VersionsPanel
                       className="bg-card/95"
                       refreshKey={versionsRefreshKey}
                       activeVersionUid={activeVersionUid}
@@ -1363,7 +1371,7 @@ const Index = () => {
                       onRestoreVersion={(version) => { void handleRestoreVersion(version); }}
                       onSetMainVersion={(version) => { void handleSetMainVersion(version); }}
                       onVersionDeleted={handleVersionDeleted}
-                    />
+                    /></Suspense>
                   )
               ) : null}
             </ResizablePanel>
@@ -1490,8 +1498,16 @@ const Index = () => {
                 <Key className="h-4 w-4 text-emerald-500" />
                 LLM configuration
               </div>
+              {session?.is_application_admin && (
+                <Button variant="outline" className="mb-3 w-full" onClick={() => {
+                  setIsSettingsOpen(false);
+                  setIsSharedLLMSettingsOpen(true);
+                }}>Manage shared LLM</Button>
+              )}
               <p className="mb-3 text-xs text-muted-foreground">
-                The design model powers Pipeline Chat; the code model generates runtime code.
+                {activeConfig.applicationProvided
+                  ? "Application-provided LLM · Managed by your administrator. No API key needed."
+                  : "The design model powers Pipeline Chat; the code model generates runtime code."}
               </p>
               <div className="mb-3 rounded-md bg-background/70 p-3 text-xs text-muted-foreground space-y-1">
                 <div>
@@ -1541,6 +1557,9 @@ const Index = () => {
                           <div className="truncate text-sm font-medium">
                             {config.name}
                           </div>
+                          {config.applicationProvided && (
+                            <p className="text-xs text-muted-foreground">Managed by your administrator · No API key needed</p>
+                          )}
                           <div
                             className={cn(
                               "truncate text-xs text-muted-foreground",
@@ -1601,6 +1620,11 @@ const Index = () => {
           </div>
         </DialogContent>
       </Dialog>
+
+      {isSharedLLMSettingsOpen && session?.is_application_admin && <ApplicationLLMSettings
+        onClose={() => setIsSharedLLMSettingsOpen(false)}
+        onSaved={() => { void loadConfigurations(); }}
+      />}
 
       <ChatbotConfigForm
         isOpen={isConfigFormOpen}

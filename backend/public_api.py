@@ -9,7 +9,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from flask import Blueprint, jsonify, make_response, request
+from flask import Blueprint, g, jsonify, make_response, request
 
 from auth_middleware import is_auth_enabled, validate_keycloak_bearer_token
 from async_runtime import run_async
@@ -26,6 +26,14 @@ from graph_client import (
 )
 from minio_gateway import get_minio_client
 from object_client import check_object_health
+from workspace_storage import node_bucket_name
+from workspace_store import (
+    WORKSPACE_HEADER,
+    WorkspaceAccessDenied,
+    WorkspaceStoreError,
+    local_principal,
+    resolve_principal,
+)
 
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -336,7 +344,7 @@ def api_auth_required(route_handler):
             return route_handler(*args, **kwargs)
 
         if is_auth_enabled():
-            _claims, error = validate_keycloak_bearer_token()
+            claims, error = validate_keycloak_bearer_token()
             if error is not None:
                 return _error_response(
                     error.status_code,
@@ -344,6 +352,23 @@ def api_auth_required(route_handler):
                     error.detail,
                     error.details,
                 )
+            try:
+                g.inlumen_principal = resolve_principal(
+                    claims or {}, request.headers.get(WORKSPACE_HEADER)
+                )
+            except WorkspaceAccessDenied:
+                return _error_response(404, "not_found", "Workspace was not found")
+            except WorkspaceStoreError as exc:
+                return _error_response(503, "workspace_unavailable", str(exc))
+            except Exception:
+                return _error_response(
+                    503,
+                    "workspace_unavailable",
+                    "The workspace database could not be queried",
+                )
+            from permissions import permits
+            if not permits(g.inlumen_principal.workspace_role, request.method, request.path):
+                return _error_response(403, "insufficient_permissions", "Your workspace role does not allow this action")
             return route_handler(*args, **kwargs)
 
         configured_token = _configured_api_token()
@@ -363,6 +388,7 @@ def api_auth_required(route_handler):
         if not hmac.compare_digest(provided_token.strip(), configured_token):
             return _error_response(403, "forbidden", "Invalid Bearer token")
 
+        g.inlumen_principal = local_principal()
         return route_handler(*args, **kwargs)
 
     return decorated
@@ -863,7 +889,7 @@ def _file_refs_from_graph(graph: dict[str, Any]) -> list[dict[str, str]]:
         if not step_id:
             continue
 
-        default_bucket = f"files-step-id-{step_id}".lower()
+        default_bucket = node_bucket_name(step_id)
         raw_files = data.get("file_buckets") if isinstance(data.get("file_buckets"), list) else data.get("files")
         if not isinstance(raw_files, list):
             continue
@@ -2001,6 +2027,25 @@ def _ui_api_openapi_paths(
                 "responses": generic_ok,
             },
         },
+        "/api/admin/application-llm": {
+            "get": {
+                "tags": ["Settings"],
+                "summary": "Read shared LLM settings (inlumen-admin realm role required)",
+                "operationId": "getApplicationLLMSettings",
+                "responses": {"200": _json_response("#/components/schemas/ApplicationLLMSettings"), **protected_responses},
+            },
+            "put": {
+                "tags": ["Settings"],
+                "summary": "Save and enable or disable the shared LLM (inlumen-admin realm role required)",
+                "operationId": "saveApplicationLLMSettings",
+                "requestBody": _json_request("#/components/schemas/ApplicationLLMUpdate"),
+                "responses": {
+                    "200": _json_response("#/components/schemas/ApplicationLLMSettings"),
+                    "409": {"description": "Another administrator changed the settings; reload before saving."},
+                    **protected_responses,
+                },
+            },
+        },
         "/api/chatbot-configs": {
             "get": {
                 "tags": ["Settings"],
@@ -2342,9 +2387,33 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                 "message": {"type": "string", "nullable": True},
             },
         },
+        "ApplicationLLMSettings": {
+            "type": "object", "required": ["config", "enabled", "revision"],
+            "properties": {
+                "config": {"type": "object", "nullable": True, "description": "Shared configuration metadata; never includes the API key."},
+                "enabled": {"type": "boolean"},
+                "revision": {"type": "integer", "minimum": 0},
+            },
+        },
+        "ApplicationLLMUpdate": {
+            "type": "object", "required": ["config", "enabled", "revision"],
+            "properties": {
+                "config": {"$ref": "#/components/schemas/ChatbotConfigUpsertRequest"},
+                "enabled": {"type": "boolean"},
+                "revision": {"type": "integer", "minimum": 0, "description": "Revision returned by the last read; zero for first setup."},
+            },
+        },
         "LLMConfig": {
             "type": "object",
-            "required": ["provider", "model", "base_url", "api_key"],
+            "description": "Select application-llm by credential_id for deployment-managed settings, or supply provider settings with a workspace credential or API key.",
+            "anyOf": [
+                {"required": ["credential_id"], "properties": {"credential_id": {"enum": ["application-llm"]}}},
+                {"required": ["config_id"], "properties": {"config_id": {"enum": ["application-llm"]}}},
+                {"required": ["provider", "model", "base_url"], "anyOf": [
+                    {"required": ["api_key"]}, {"required": ["apiKey"]},
+                    {"required": ["credential_id"]}, {"required": ["config_id"]},
+                ]},
+            ],
             "additionalProperties": True,
             "properties": {
                 "provider": {"type": "string"},
@@ -2352,6 +2421,8 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                 "baseUrl": {"type": "string"},
                 "api_key": {"type": "string"},
                 "apiKey": {"type": "string"},
+                "credential_id": {"type": "string"},
+                "config_id": {"type": "string"},
                 "model": {"type": "string"},
             },
         },
@@ -2366,6 +2437,9 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
             "required": ["id", "name", "provider", "model", "codegenModel", "baseUrl"],
             "properties": {
                 "id": {"type": "string"},
+                "has_api_key": {"type": "boolean"},
+                "readOnly": {"type": "boolean"},
+                "applicationProvided": {"type": "boolean"},
                 "name": {"type": "string"},
                 "provider": {"type": "string"},
                 "model": {"type": "string"},
@@ -2385,6 +2459,7 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
             "required": ["name", "model", "codegenModel", "baseUrl"],
             "properties": {
                 "name": {"type": "string"},
+                "api_key": {"type": "string", "writeOnly": True, "description": "New provider key. Blank preserves an existing saved key."},
                 "provider": {"type": "string"},
                 "model": {"type": "string"},
                 "codegenModel": {"type": "string"},

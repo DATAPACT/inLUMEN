@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
+from .generation_budget import CURRENT_BUDGET
 
 from .schemas import (
     GenerateNodeScriptRequest,
@@ -111,6 +112,8 @@ async def generate_json(
     if not config.api_key.strip():
         raise LLMGenerationError("Code-generation provider API key is missing.")
 
+    budget = CURRENT_BUDGET.get()
+    if budget is not None: budget.reserve()
     body: dict[str, Any] = {
         "model": config.model,
         "messages": [
@@ -122,7 +125,7 @@ async def generate_json(
         # functions. Give the coding model enough room to finish the JSON
         # envelope and every function instead of returning a syntactically
         # truncated module for larger graphs.
-        "max_tokens": 16384,
+        "max_tokens": config.max_output_tokens,
     }
     if config.supports_json_output:
         body["response_format"] = {"type": "json_object"}
@@ -136,6 +139,8 @@ async def generate_json(
         "open_router",
     }:
         headers.update(_openrouter_headers())
+        if config.openrouter_provider_only:
+            body["provider"] = {"only": config.openrouter_provider_only}
     timeout = httpx.Timeout(max(1, config.timeout_seconds))
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -163,6 +168,9 @@ async def generate_json(
         raise LLMGenerationError(
             "Coding model returned an unsupported chat-completions response."
         )
+    if budget is not None:
+        usage = _usage_from_response(response_payload, include_usd_cost=config.provider.lower() in {"openrouter", "open_router"})
+        budget.reported_cost_usd += usage.cost_usd or 0
     if usage_callback is not None:
         callback_result = usage_callback(
             _usage_from_response(

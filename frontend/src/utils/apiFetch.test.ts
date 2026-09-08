@@ -44,4 +44,18 @@ describe("apiFetch", () => {
     expect(headers.get("Content-Type")).toBe("application/json");
     expect(headers.get("Authorization")).toBe("Bearer sso-token");
   });
+
+  it("injects the active workspace selector", async () => {
+    vi.stubEnv("VITE_AUTH_ENABLED", "true");
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    globalThis.fetch = fetchMock;
+    const { apiFetch, setActiveWorkspaceId } = await import("@/utils/apiFetch");
+
+    setActiveWorkspaceId("workspace-123");
+    await apiFetch("https://example.test/pipelines");
+
+    const [, requestInit] = fetchMock.mock.calls[0];
+    const headers = new Headers(requestInit.headers);
+    expect(headers.get("X-InLumen-Workspace-Id")).toBe("workspace-123");
+  });
 });

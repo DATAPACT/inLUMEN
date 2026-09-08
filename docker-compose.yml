@@ -8,10 +8,30 @@ volumes:
   frontend_node_modules:
   codegen_state:
   runner_state:
-  inlumen_model_store:
-    name: ${INLUMEN_MODEL_STORE_VOLUME:-inlumen_model_store}
+  postgres_data:
 
 services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: inlumen_postgres
+    hostname: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-inlumen}
+      POSTGRES_USER: ${POSTGRES_USER:-inlumen}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-inlumen}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - datapact_network
+
   neo4j:
     image: neo4j:5-community
     container_name: inlumen_neo4j
@@ -78,6 +98,8 @@ services:
     hostname: inlumen-backend
     restart: unless-stopped
     depends_on:
+      postgres:
+        condition: service_healthy
       neo4j:
         condition: service_healthy
       minio:
@@ -100,9 +122,12 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio-datapact}
       API_AUTH_TOKEN: ${API_AUTH_TOKEN:-}
       AUTH_ENABLED: ${AUTH_ENABLED:-false}
+      APP_ENV: development
+      DATABASE_URL: postgresql://${POSTGRES_USER:-inlumen}:${POSTGRES_PASSWORD:-inlumen}@postgres:5432/${POSTGRES_DB:-inlumen}
       KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-}
       KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-}
       KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:-}
+      KEYCLOAK_CLOCK_SKEW_SECONDS: ${KEYCLOAK_CLOCK_SKEW_SECONDS:-5}
       INLUMEN_CODEGEN_SERVICE_URL: ${INLUMEN_CODEGEN_SERVICE_URL:-http://codegen:8010}
       INLUMEN_CODEGEN_SERVICE_API_KEY: ${INLUMEN_CODEGEN_SERVICE_API_KEY:-inlumen-local-codegen-token}
       INLUMEN_CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS:-300}
@@ -139,6 +164,8 @@ services:
     hostname: runner
     restart: unless-stopped
     depends_on:
+      postgres:
+        condition: service_healthy
       neo4j:
         condition: service_healthy
     expose:
@@ -150,6 +177,8 @@ services:
       PYTHONUNBUFFERED: "1"
       RUNNER_SERVICE_API_KEY: ${INLUMEN_RUNNER_SERVICE_API_KEY:-inlumen-local-runner-token}
       RUNNER_JOB_DB_PATH: ${RUNNER_JOB_DB_PATH:-/app/state/pipeline-runs.sqlite3}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-inlumen}:${POSTGRES_PASSWORD:-inlumen}@postgres:5432/${POSTGRES_DB:-inlumen}
+      APP_ENV: development
       RUNNER_ARTIFACT_ROOT: ${RUNNER_ARTIFACT_ROOT:-/app/state/artifacts}
       RUNNER_ADAPTER: ${RUNNER_ADAPTER:-dagster}
       INLUMEN_CODEGEN_SERVICE_URL: ${INLUMEN_CODEGEN_SERVICE_URL:-http://codegen:8010}
@@ -181,23 +210,27 @@ services:
     restart: unless-stopped
     expose:
       - "8010"
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - ./codegen/app:/app/app
       - codegen_state:/app/state
-      - inlumen_model_store:/models
       - /var/run/docker.sock:/var/run/docker.sock
       - ${CODEGEN_VALIDATION_HOST_WORKDIR:-/tmp/inlumen-codegen-workspaces}:${CODEGEN_VALIDATION_WORKDIR:-/tmp/inlumen-codegen-workspaces}
     environment:
       PYTHONUNBUFFERED: "1"
       CODEGEN_SERVICE_API_KEY: ${INLUMEN_CODEGEN_SERVICE_API_KEY:-inlumen-local-codegen-token}
       CODEGEN_JOB_DB_PATH: ${CODEGEN_JOB_DB_PATH:-/app/state/codegen-jobs.sqlite3}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-inlumen}:${POSTGRES_PASSWORD:-inlumen}@postgres:5432/${POSTGRES_DB:-inlumen}
+      APP_ENV: development
       CODEGEN_DOCKER_VALIDATION_ENABLED: ${CODEGEN_DOCKER_VALIDATION_ENABLED:-true}
       CODEGEN_VALIDATION_WORKDIR: ${CODEGEN_VALIDATION_WORKDIR:-/tmp/inlumen-codegen-workspaces}
       CODEGEN_PIPELINE_CACHE_TTL_SECONDS: ${CODEGEN_PIPELINE_CACHE_TTL_SECONDS:-3600}
       CODEGEN_PIPELINE_CACHE_MAX_ENTRIES: ${CODEGEN_PIPELINE_CACHE_MAX_ENTRIES:-32}
       CODEGEN_ALLOW_DETERMINISTIC_FALLBACK: "false"
       CODEGEN_DEPENDENCY_INSTALL_TIMEOUT_SECONDS: ${CODEGEN_DEPENDENCY_INSTALL_TIMEOUT_SECONDS:-600}
-      INLUMEN_MODEL_ROOT: /models
+      # Dagster workers create persistent per-workspace caches on demand.
       INLUMEN_MODEL_STORE_VOLUME: ${INLUMEN_MODEL_STORE_VOLUME:-inlumen_model_store}
       CODEGEN_INPUT_FILE_BASE_URL: ${CODEGEN_INPUT_FILE_BASE_URL:-http://backend:${INLUMEN_API_PORT:-5000}/api/files/content}
       CODEGEN_INPUT_FILE_ALLOW_INSECURE_HTTP: ${CODEGEN_INPUT_FILE_ALLOW_INSECURE_HTTP:-true}
@@ -235,7 +268,8 @@ services:
       NODE_ENV: development
       VITE_INLUMEN_API_PORT: ${INLUMEN_API_PORT:-5000}
       VITE_INLUMEN_API_URL: ${VITE_INLUMEN_API_URL:-${INLUMEN_API_PUBLIC_URL:-}}
-      VITE_AUTH_ENABLED: ${VITE_AUTH_ENABLED:-${AUTH_ENABLED:-false}}
+      # Keep browser and gateway identity modes in sync.
+      VITE_AUTH_ENABLED: ${AUTH_ENABLED:-false}
       VITE_KEYCLOAK_URL: ${VITE_KEYCLOAK_URL:-http://localhost:8081}
       VITE_KEYCLOAK_REALM: ${VITE_KEYCLOAK_REALM:-inlumen}
       VITE_KEYCLOAK_CLIENT_ID: ${VITE_KEYCLOAK_CLIENT_ID:-inlumen-frontend}

@@ -29,6 +29,7 @@
     --accent-foreground: 0 0% 100%;
 
     --destructive: 0 80% 60%;
+    --danger-text: 0 90% 72%;
     --destructive-foreground: 210 20% 98%;
 
     --border: 220 25% 20%;
@@ -63,6 +64,7 @@
     --accent-foreground: 160 45% 98%;
 
     --destructive: 0 72% 50%;
+    --danger-text: 0 72% 40%;
     --destructive-foreground: 210 20% 98%;
 
     --border: 214 24% 87%;

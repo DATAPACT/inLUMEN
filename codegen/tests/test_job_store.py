@@ -27,9 +27,7 @@ def test_pipeline_job_survives_store_reopen(tmp_path) -> None:
         {
             "run_id": "run-1",
             "status": "running",
-            "request": GeneratePipelineScriptsRequest.model_validate(
-                request_payload()
-            ),
+            "request": GeneratePipelineScriptsRequest.model_validate(request_payload()),
             "created_at": "2026-08-10T10:00:00Z",
             "updated_at": "2026-08-10T10:00:01Z",
         }
@@ -112,3 +110,39 @@ def test_provider_key_is_not_persisted_with_job_request() -> None:
 
     assert restored is not None
     assert restored["request"].llm_config.api_key == ""
+
+
+def test_jobs_are_isolated_by_workspace() -> None:
+    store = PipelineJobStore(":memory:")
+    for workspace_id, status in (("workspace-a", "running"), ("workspace-b", "valid")):
+        store.save(
+            {
+                "workspace_id": workspace_id,
+                "run_id": "same-run-id",
+                "status": status,
+                "request": GeneratePipelineScriptsRequest.model_validate(
+                    request_payload()
+                ),
+                "created_at": "2026-08-10T10:00:00Z",
+                "updated_at": "2026-08-10T10:00:01Z",
+            }
+        )
+
+    assert store.get("same-run-id", "workspace-a")["status"] == "running"
+    assert store.get("same-run-id", "workspace-b")["status"] == "valid"
+    assert store.get("same-run-id", "workspace-c") is None
+    assert [job["workspace_id"] for job in store.list(workspace_id="workspace-a")] == [
+        "workspace-a"
+    ]
+
+
+def test_deleted_job_cannot_be_recreated_by_another_worker(tmp_path):
+    path = str(tmp_path / 'jobs.sqlite')
+    first, other = PipelineJobStore(path), PipelineJobStore(path)
+    job = {'run_id': 'deleted', 'workspace_id': 'alice', 'status': 'running'}
+    first.save(job)
+    first.clear('alice')
+    other.save({**job, 'status': 'valid'})
+    assert other.get('deleted', 'alice') is None
+    other.save({**job, 'workspace_id': 'bob'})
+    assert other.get('deleted', 'bob') is not None

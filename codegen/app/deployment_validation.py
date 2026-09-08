@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+
+from .security import EXECUTION_WORKSPACE
 import json
 import mimetypes
 import os
@@ -10,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 import threading
 import time
 from datetime import UTC, datetime
@@ -369,6 +372,7 @@ def _isolated_dagster_execution(
     execution_id: str,
     timeout_seconds: int,
     runtime_secrets: dict[str, str] | None,
+    materialize: bool = True,
 ) -> dict[str, Any]:
     """Build and materialize the generated project outside the control plane."""
     bundle_root = _bundle_root(project_root)
@@ -517,6 +521,7 @@ def _isolated_dagster_execution(
         model_volume = os.getenv(
             "INLUMEN_MODEL_STORE_VOLUME", "inlumen_model_store"
         ).strip()
+        model_volume += "-ws-" + hashlib.sha256(EXECUTION_WORKSPACE.get().encode()).hexdigest()[:20]
         has_models = model_requirements.is_file() and model_prefetch.is_file()
         if has_models:
             _set_deployment_progress(
@@ -525,7 +530,6 @@ def _isolated_dagster_execution(
                 "Preparing reviewed model files for offline execution.",
             )
             prefetch_environment = {
-                **(runtime_secrets or {}),
                 "HF_HOME": "/models/huggingface",
                 "HF_HUB_CACHE": "/models/huggingface",
                 "HF_HUB_DISABLE_XET": os.getenv("HF_HUB_DISABLE_XET", "1"),
@@ -635,7 +639,7 @@ def _isolated_dagster_execution(
         }
         container = client.containers.run(
             image.id,
-            command=["python", "-c", _materialize_script()],
+            command=["python", "-c", _materialize_script() if materialize else _validation_script()],
             working_dir="/workspace/dagster",
             user="65532:65532",
             detach=True,
@@ -722,160 +726,22 @@ def validate_dagster_project(
     execution_id: str | None = None,
 ) -> dict[str, Any]:
     project_root = _dagster_project_root(path)
-    if execution_id:
-        return _isolated_dagster_execution(
-            project_root,
-            execution_id=execution_id,
-            timeout_seconds=timeout_seconds,
-            runtime_secrets=runtime_secrets,
-        )
-    report: dict[str, Any] = {
-        "project_root": str(project_root),
-        "package_manager": "uv" if shutil.which("uv") else "pip-fallback",
-        "ok": False,
-        "steps": [],
-    }
-
-    required_files = [
-        "pyproject.toml",
-        "src/inlumen_dagster_project/definitions.py",
-        "src/inlumen_dagster_project/components/shell_command.py",
-    ]
-    missing = [item for item in required_files if not (project_root / item).is_file()]
-    if missing:
-        report["errors"] = [f"Missing required file: {item}" for item in missing]
-        return report
-
+    pyproject = (project_root / "pyproject.toml").read_text(encoding="utf-8")
     dockerfile = project_root / "Dockerfile"
-    pyproject_content = (project_root / "pyproject.toml").read_text(encoding="utf-8")
-    dockerfile_content = (
-        dockerfile.read_text(encoding="utf-8") if dockerfile.is_file() else ""
-    )
-    if (
-        '"dagster", "dev"' in dockerfile_content
-        and "dagster-webserver" not in pyproject_content
-    ):
-        report["errors"] = [
-            (
-                "Generated Dagster Dockerfile runs `dagster dev`, but "
-                "pyproject.toml does not install dagster-webserver."
-            )
-        ]
-        return report
-
-    venv_dir = project_root / ".inlumen_dagster_validation_venv"
-    if skip_install:
-        if not (venv_dir / "bin" / "python").is_file():
-            report["errors"] = [
-                (
-                    "skip_install was requested, but no validation venv exists. "
-                    "Run once without --skip-install."
-                )
-            ]
-            return report
-    else:
-        venv_dir, install_steps = _ensure_venv(
-            project_root,
-            reinstall=reinstall,
-            timeout_seconds=timeout_seconds,
-            execution_id=execution_id,
-        )
-        report["steps"].extend(install_steps)
-        if any(not step["ok"] for step in install_steps):
-            report["errors"] = ["Generated Dagster project installation failed."]
-            return report
-
-    python = venv_dir / "bin" / "python"
-    env = {
-        **os.environ,
-        **(runtime_secrets or {}),
-        "DAGSTER_HOME": str(project_root / ".dagster_home"),
-        "PYTHONPATH": str(project_root / "src"),
-    }
-    Path(env["DAGSTER_HOME"]).mkdir(parents=True, exist_ok=True)
-
-    model_prefetch_script = project_root / "model-prefetch.py"
-    model_requirements_path = project_root / "model-requirements.json"
-    if model_prefetch_script.is_file() and model_requirements_path.is_file():
-        model_root = Path(
-            os.getenv("INLUMEN_MODEL_ROOT") or project_root / ".inlumen-models"
-        ).resolve()
-        model_root.mkdir(parents=True, exist_ok=True)
-        prefetch_env = {
-            **env,
-            "HF_HOME": str(model_root / "huggingface"),
-            "HF_HUB_CACHE": str(model_root / "huggingface"),
-            "HF_HUB_DISABLE_XET": os.getenv("HF_HUB_DISABLE_XET", "1"),
-            "HF_HUB_ETAG_TIMEOUT": os.getenv("HF_HUB_ETAG_TIMEOUT", "30"),
-            "HF_HUB_DOWNLOAD_TIMEOUT": os.getenv("HF_HUB_DOWNLOAD_TIMEOUT", "600"),
-            "HF_HUB_OFFLINE": "0",
-            "TRANSFORMERS_OFFLINE": "0",
-            "INLUMEN_ACCELERATOR": os.getenv("INLUMEN_ACCELERATOR", "cpu"),
-            "INLUMEN_ASR_DEVICE": os.getenv("INLUMEN_ASR_DEVICE", "auto"),
-            "INLUMEN_ASR_PROFILE": os.getenv("INLUMEN_ASR_PROFILE", "auto"),
-            "INLUMEN_MODEL_ROOT": str(model_root),
-            "INLUMEN_MODEL_REQUIREMENTS": str(model_requirements_path),
-            "INLUMEN_MODEL_VERIFY_ON_START": os.getenv(
-                "INLUMEN_MODEL_VERIFY_ON_START", "manifest"
-            ),
-        }
-        prefetch_step = _run(
-            [str(python), str(model_prefetch_script)],
-            cwd=project_root,
-            timeout_seconds=timeout_seconds,
-            env=prefetch_env,
-            execution_id=execution_id,
-        )
-        prefetch_step["name"] = "model_prefetch"
-        report["steps"].append(prefetch_step)
-        if not prefetch_step["ok"]:
-            report["errors"] = ["Reviewed model prefetch or verification failed."]
-            return report
-        env.update(
-            {
-                "HF_HOME": prefetch_env["HF_HOME"],
-                "HF_HUB_CACHE": prefetch_env["HF_HUB_CACHE"],
-                "HF_HUB_OFFLINE": "1",
-                "TRANSFORMERS_OFFLINE": "1",
-                "INLUMEN_ACCELERATOR": prefetch_env["INLUMEN_ACCELERATOR"],
-                "INLUMEN_ASR_DEVICE": prefetch_env["INLUMEN_ASR_DEVICE"],
-                "INLUMEN_ASR_PROFILE": prefetch_env["INLUMEN_ASR_PROFILE"],
-                "INLUMEN_MODEL_ROOT": prefetch_env["INLUMEN_MODEL_ROOT"],
-            }
-        )
-
-    load_step = _run(
-        [str(python), "-c", _validation_script()],
-        cwd=project_root,
+    if not dockerfile.is_file():
+        return {"ok": False, "errors": ["Generated Dagster project requires a Dockerfile."], "steps": []}
+    dockerfile_text = dockerfile.read_text(encoding="utf-8")
+    if '"dagster", "dev"' in dockerfile_text and 'dagster-webserver' not in pyproject:
+        return {"ok": False, "errors": ["dagster dev requires dagster-webserver."], "steps": []}
+    # Validation imports arbitrary project Python too; it must use the same
+    # isolation boundary as a materialized run, even for CLI/export callers.
+    return _isolated_dagster_execution(
+        project_root,
+        execution_id=execution_id or "validation-" + uuid.uuid4().hex,
         timeout_seconds=timeout_seconds,
-        env=env,
-        execution_id=execution_id,
+        runtime_secrets=runtime_secrets,
+        materialize=materialize,
     )
-    report["steps"].append(load_step)
-    if not load_step["ok"]:
-        report["errors"] = ["Dagster definitions failed to load."]
-        return report
-
-    try:
-        report["assets"] = json.loads(load_step["output"]).get("asset_keys", [])
-    except (AttributeError, json.JSONDecodeError, TypeError):
-        report["assets"] = []
-
-    if materialize:
-        materialize_step = _run(
-            [str(python), "-c", _materialize_script()],
-            cwd=project_root,
-            timeout_seconds=timeout_seconds,
-            env=env,
-            execution_id=execution_id,
-        )
-        report["steps"].append(materialize_step)
-        if not materialize_step["ok"]:
-            report["errors"] = ["Dagster asset materialization failed."]
-            return report
-
-    report["ok"] = True
-    return report
 
 
 def _load_json(path: Path) -> dict[str, Any]:

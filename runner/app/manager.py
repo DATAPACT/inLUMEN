@@ -19,6 +19,7 @@ from .artifacts import PipelineArtifactStore
 from .models import CreatePipelineRunRequest
 from .run_summaries import RunSummaryStore
 from .store import PipelineRunStore
+from .leases import WorkerLeases
 
 logger = logging.getLogger(__name__)
 
@@ -105,9 +106,11 @@ class PipelineRunManager:
         executor: DagsterExecutor | None = None,
         artifact_store: PipelineArtifactStore | None = None,
         max_outstanding_runs: int = DEFAULT_MAX_OUTSTANDING_RUNS,
+        max_global_outstanding_runs: int | None = None,
         summary_store: RunSummaryStore | None = None,
     ) -> None:
         self.store = store
+        self.leases = WorkerLeases(store._engine, "runner")
         self.adapter = adapter
         self.executor = executor
         self.artifact_store = artifact_store or PipelineArtifactStore(
@@ -116,7 +119,14 @@ class PipelineRunManager:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self._submission_lock = asyncio.Lock()
         self.max_outstanding_runs = max(int(max_outstanding_runs), 1)
+        self.max_global_outstanding_runs = max(
+            int(max_global_outstanding_runs or self.max_outstanding_runs), 1
+        )
         self.summary_store = summary_store
+
+    def _executor_for(self, record: dict):
+        factory = getattr(self.executor, "for_workspace", None)
+        return factory(str(record.get("workspace_id") or "local-workspace")) if factory else self.executor
 
     @property
     def execution_available(self) -> bool:
@@ -126,9 +136,9 @@ class PipelineRunManager:
             and self.executor.configured
         )
 
-    def capabilities(self) -> dict[str, Any]:
+    def capabilities(self, workspace_id: str | None = None) -> dict[str, Any]:
         enabled = self.execution_available
-        outstanding = self._outstanding_run_count()
+        outstanding = self._outstanding_run_count(workspace_id)
         return {
             "background_runs": True,
             "execution_available": enabled,
@@ -168,7 +178,7 @@ class PipelineRunManager:
         bundle_sha256 = canonical_sha256(files)
         key = str(request.idempotency_key or "").strip() or None
         if key:
-            existing = self.store.get_by_idempotency_key(key)
+            existing = self.store.get_by_idempotency_key(key, request.workspace_id)
             if existing is not None:
                 if existing["snapshot"]["bundle_sha256"] != bundle_sha256:
                     raise PipelineRunConflict(
@@ -176,88 +186,110 @@ class PipelineRunManager:
                     )
                 return public_run_record(existing), False
 
-        outstanding = self._outstanding_run_count()
+        outstanding = self._outstanding_run_count(request.workspace_id)
         if outstanding >= self.max_outstanding_runs:
             raise PipelineRunCapacityError(
                 limit=self.max_outstanding_runs,
                 outstanding=outstanding,
+            )
+        global_outstanding = self._outstanding_run_count()
+        if global_outstanding >= self.max_global_outstanding_runs:
+            raise PipelineRunCapacityError(
+                limit=self.max_global_outstanding_runs,
+                outstanding=global_outstanding,
             )
 
         nodes = list(graph.get("nodes") or [])
         edges = list(graph.get("edges") or [])
         now = utc_now_iso()
         run_id = uuid.uuid4().hex
-        record: dict[str, Any] = {
-            "schema_version": "inlumen.pipeline-run@1",
-            "run_id": run_id,
-            "status": "queued",
-            "engine": "dagster",
-            "execution_mode": "background",
-            "snapshot": {
-                "snapshot_id": bundle_sha256,
-                "graph_sha256": graph_sha256,
-                "bundle_sha256": bundle_sha256,
-                "pipeline_id": request.snapshot.pipeline_id,
-                "pipeline_version": request.snapshot.pipeline_version,
-                "active_version_uid": request.snapshot.active_version_uid,
-                "node_count": len(nodes),
-                "edge_count": len(edges),
-            },
-            "created_at": now,
-            "updated_at": now,
-            "started_at": None,
-            "finished_at": None,
-            "cancel_requested_at": None,
-            "event_cursor": 0,
-            "progress": {
-                "phase": "queued",
-                "message": "Waiting for the background runner.",
-                "active_node_id": None,
-                "active_node_name": None,
-                "node_elapsed_seconds": None,
-                "heartbeat_at": None,
-                "resource_profile": None,
-                "resource_cpu": None,
-                "resource_memory_bytes": None,
-                "resource_reason": None,
-                "queue_position": None,
-            },
-            "error": None,
-            "result": None,
-            "_snapshot_graph": deepcopy(graph),
-            "_bundle_reference": self.artifact_store.store_bundle(run_id, files),
-            "_bundle_manifest": deepcopy(request.snapshot.bundle_manifest),
-            "_runtime_secret_names": sorted(request.runtime_secrets),
-            "_output_files": [],
-            "_idempotency_key": key,
-            "_events": [],
-        }
-        self._append_event(record, "run.queued", "queued", "Dagster run queued.")
-        self.store.save(record)
+        if not self.leases.claim(run_id, request.workspace_id, self.max_outstanding_runs, self.max_global_outstanding_runs):
+            raise PipelineRunCapacityError(limit=self.max_global_outstanding_runs, outstanding=self.max_global_outstanding_runs)
+        try:
+            record: dict[str, Any] = {
+                "schema_version": "inlumen.pipeline-run@1",
+                "run_id": run_id,
+                "workspace_id": request.workspace_id,
+                "requested_by": request.requested_by,
+                "status": "queued",
+                "engine": "dagster",
+                "execution_mode": "background",
+                "snapshot": {
+                    "snapshot_id": bundle_sha256,
+                    "graph_sha256": graph_sha256,
+                    "bundle_sha256": bundle_sha256,
+                    "pipeline_id": request.snapshot.pipeline_id,
+                    "pipeline_version": request.snapshot.pipeline_version,
+                    "active_version_uid": request.snapshot.active_version_uid,
+                    "node_count": len(nodes),
+                    "edge_count": len(edges),
+                },
+                "created_at": now,
+                "updated_at": now,
+                "started_at": None,
+                "finished_at": None,
+                "cancel_requested_at": None,
+                "event_cursor": 0,
+                "progress": {
+                    "phase": "queued",
+                    "message": "Waiting for the background runner.",
+                    "active_node_id": None,
+                    "active_node_name": None,
+                    "node_elapsed_seconds": None,
+                    "heartbeat_at": None,
+                    "resource_profile": None,
+                    "resource_cpu": None,
+                    "resource_memory_bytes": None,
+                    "resource_reason": None,
+                    "queue_position": None,
+                },
+                "error": None,
+                "result": None,
+                "_snapshot_graph": deepcopy(graph),
+                "_bundle_reference": self.artifact_store.store_bundle(
+                    run_id, files, request.workspace_id
+                ),
+                "_bundle_manifest": deepcopy(request.snapshot.bundle_manifest),
+                "_runtime_secret_names": sorted(request.runtime_secrets),
+                "_output_files": [],
+                "_idempotency_key": key,
+                "_events": [],
+            }
+            self._append_event(record, "run.queued", "queued", "Dagster run queued.")
+            self.store.save(record)
+        except Exception:
+            self.leases.release(run_id, request.workspace_id)
+            raise
         task = asyncio.create_task(
-            self._execute_dagster(run_id, dict(request.runtime_secrets))
+            self._execute_with_lease(run_id, dict(request.runtime_secrets))
         )
         self.tasks[run_id] = task
         task.add_done_callback(lambda _task: self.tasks.pop(run_id, None))
         return public_run_record(record), True
 
-    def _outstanding_run_count(self) -> int:
-        return self.store.count_statuses(ACTIVE_STATUSES)
+    def _outstanding_run_count(self, workspace_id: str | None = None) -> int:
+        return self.store.count_statuses(ACTIVE_STATUSES, workspace_id)
 
-    def get(self, run_id: str) -> dict[str, Any] | None:
-        record = self.store.get(run_id)
+    def get(
+        self, run_id: str, workspace_id: str | None = None
+    ) -> dict[str, Any] | None:
+        record = self.store.get(run_id, workspace_id)
         return public_run_record(record) if record else None
 
-    def list(self, *, limit: int = 20) -> list[dict[str, Any]]:
+    def list(
+        self, *, limit: int = 20, workspace_id: str | None = None
+    ) -> list[dict[str, Any]]:
         records = [
             record
-            for record in self.store.list(limit=None)
+            for record in self.store.list(limit=None, workspace_id=workspace_id)
             if record.get("engine") != "contract-test"
         ]
         return [public_run_record(record) for record in records[:limit]]
 
-    def events(self, run_id: str, *, after: int = 0) -> dict[str, Any] | None:
-        record = self.store.get(run_id)
+    def events(
+        self, run_id: str, *, after: int = 0, workspace_id: str | None = None
+    ) -> dict[str, Any] | None:
+        record = self.store.get(run_id, workspace_id)
         if record is None:
             return None
         events = [
@@ -269,8 +301,10 @@ class PipelineRunManager:
             "next_cursor": int(record.get("event_cursor") or 0),
         }
 
-    def output(self, run_id: str, path: str) -> tuple[bytes, str, str] | None:
-        record = self.store.get(run_id)
+    def output(
+        self, run_id: str, path: str, workspace_id: str | None = None
+    ) -> tuple[bytes, str, str] | None:
+        record = self.store.get(run_id, workspace_id)
         if record is None:
             return None
         for entry in record.get("_output_files", []):
@@ -293,8 +327,8 @@ class PipelineRunManager:
             )
         return None
 
-    def bundle_zip(self, run_id: str) -> bytes | None:
-        record = self.store.get(run_id)
+    def bundle_zip(self, run_id: str, workspace_id: str | None = None) -> bytes | None:
+        record = self.store.get(run_id, workspace_id)
         if record is None:
             return None
         files = self._bundle_files(record)
@@ -314,8 +348,10 @@ class PipelineRunManager:
                 archive.writestr(str(relative), body)
         return buffer.getvalue()
 
-    async def cancel(self, run_id: str) -> dict[str, Any] | None:
-        record = self.store.get(run_id)
+    async def cancel(
+        self, run_id: str, workspace_id: str | None = None
+    ) -> dict[str, Any] | None:
+        record = self.store.get(run_id, workspace_id)
         if record is None:
             return None
         if record["status"] in TERMINAL_STATUSES:
@@ -333,7 +369,7 @@ class PipelineRunManager:
         self.store.save(record)
         if self.executor is not None:
             try:
-                await self.executor.cancel(run_id)
+                await self._executor_for(record).cancel(run_id)
             except Exception as exc:  # noqa: BLE001 - keep lifecycle cancellable.
                 latest = self.store.get(run_id) or record
                 self._append_event(
@@ -347,10 +383,10 @@ class PipelineRunManager:
             self._finish_cancelled(self.store.get(run_id) or record)
         return public_run_record(self.store.get(run_id) or record)
 
-    async def clear_all(self) -> dict[str, int]:
+    async def clear_all(self, workspace_id: str | None = None) -> dict[str, int]:
         """Cancel active work and purge all lifecycle records and artifacts."""
         async with self._submission_lock:
-            records = self.store.list(limit=None)
+            records = self.store.list(limit=None, workspace_id=workspace_id)
             active_ids = [
                 str(record.get("run_id") or "")
                 for record in records
@@ -359,7 +395,7 @@ class PipelineRunManager:
             if self.executor is not None:
                 for run_id in active_ids:
                     try:
-                        await self.executor.cancel(run_id)
+                        await self._executor_for(self.store.get(run_id) or {}).cancel(run_id)
                     except Exception:
                         # Clear all is authoritative. A stale remote execution
                         # must not preserve user-visible lifecycle metadata.
@@ -368,13 +404,15 @@ class PipelineRunManager:
                             run_id,
                             exc_info=True,
                         )
-            active_tasks = [self.tasks[run_id] for run_id in active_ids if run_id in self.tasks]
+            active_tasks = [
+                self.tasks[run_id] for run_id in active_ids if run_id in self.tasks
+            ]
             for task in active_tasks:
                 task.cancel()
             if active_tasks:
                 await asyncio.gather(*active_tasks, return_exceptions=True)
-            removed_artifact_roots = self.artifact_store.clear()
-            removed_runs = self.store.clear()
+            removed_artifact_roots = self.artifact_store.clear(workspace_id)
+            removed_runs = self.store.clear(workspace_id)
             return {
                 "removed_runs": removed_runs,
                 "cancelled_runs": len(active_ids),
@@ -386,9 +424,20 @@ class PipelineRunManager:
         for record in self.store.list(limit=None):
             if record.get("status") not in ACTIVE_STATUSES:
                 continue
+            workspace = str(record.get("workspace_id") or "local-workspace")
+            if self.leases.active(record["run_id"], workspace):
+                continue
+            if not self.leases.claim(record["run_id"], workspace):
+                continue
+            if callable(getattr(self._executor_for(record), "result", None)):
+                task = asyncio.create_task(self._recover_execution(record))
+                self.tasks[record["run_id"]] = task
+                task.add_done_callback(lambda done, run_id=record["run_id"]: self.tasks.pop(run_id, None))
+                count += 1
+                continue
             if self.executor is not None:
                 try:
-                    await self.executor.cancel(record["run_id"])
+                    await self._executor_for(record).cancel(record["run_id"])
                 except Exception as exc:  # noqa: BLE001 - recovery remains authoritative.
                     self._append_event(
                         record,
@@ -416,15 +465,59 @@ class PipelineRunManager:
             self._save_terminal_record(record)
             count += 1
         for record in self.store.list(limit=None):
-            if (
-                record.get("status") in TERMINAL_STATUSES
-                and not record.get("_summary_published_at")
+            if record.get("status") in TERMINAL_STATUSES and not record.get(
+                "_summary_published_at"
             ):
                 self._publish_terminal_summary(record)
         return count
 
+    async def _recover_execution(self, record: dict) -> None:
+        run_id, workspace = record["run_id"], str(record.get("workspace_id") or "local-workspace")
+        executor = self._executor_for(record)
+        try:
+            # Receipt deadlines bound recovery; never resubmit a side-effecting job.
+            for _ in range(400):
+                if not self.leases.renew(run_id, workspace): return
+                try:
+                    receipt = await executor.result(run_id)
+                except Exception:
+                    # A temporary worker/network outage must not erase a recoverable outcome.
+                    await asyncio.sleep(10)
+                    continue
+                if receipt.get("status") == "completed":
+                    await self._execute_dagster(run_id, {}, recovered_response=receipt["result"])
+                    return
+                if receipt.get("status") == "interrupted": break
+                await asyncio.sleep(10)
+            self._finish_failed(self.store.get(run_id) or record, {
+                "code": "execution_outcome_unknown", "message": "Execution could not be reconciled. Verify external effects before starting a new run."})
+        except Exception:
+            self._finish_failed(self.store.get(run_id) or record, {
+                "code": "execution_recovery_failed", "message": "The execution receipt could not be recovered. The pipeline was not replayed."})
+        finally:
+            self.leases.release(run_id, workspace)
+
+    async def _execute_with_lease(self, run_id: str, runtime_secrets: dict[str, str]) -> None:
+        record = self.store.get(run_id) or {}
+        workspace = str(record.get("workspace_id") or "local-workspace")
+        task = asyncio.current_task()
+        async def heartbeat():
+            while True:
+                await asyncio.sleep(15)
+                if self.store.get(run_id, workspace) is None or not self.leases.renew(run_id, workspace):
+                    if task: task.cancel()
+                    return
+        renewal = asyncio.create_task(heartbeat())
+        try:
+            await self._execute_dagster(run_id, runtime_secrets)
+        finally:
+            renewal.cancel()
+            await asyncio.gather(renewal, return_exceptions=True)
+            runtime_secrets.clear()
+            self.leases.release(run_id, workspace)
+
     async def _execute_dagster(
-        self, run_id: str, runtime_secrets: dict[str, str]
+        self, run_id: str, runtime_secrets: dict[str, str], *, recovered_response: dict | None = None
     ) -> None:
         try:
             record = self.store.get(run_id)
@@ -441,7 +534,7 @@ class PipelineRunManager:
                 return
             progress_task = asyncio.create_task(self._track_live_progress(run_id))
             try:
-                response = await self.executor.execute(
+                response = recovered_response if recovered_response is not None else await self._executor_for(record).execute(
                     run_id,
                     self._bundle_files(record),
                     runtime_secrets,
@@ -476,9 +569,7 @@ class PipelineRunManager:
                     "message": message,
                     "details": {
                         "errors": (
-                            [message, *errors]
-                            if message not in errors
-                            else errors
+                            [message, *errors] if message not in errors else errors
                         )
                     },
                 }
@@ -488,7 +579,9 @@ class PipelineRunManager:
             outputs = response.get("run_outputs")
             output_files = [item for item in outputs or [] if isinstance(item, dict)]
             record["_output_files"] = self.artifact_store.store_outputs(
-                run_id, output_files
+                run_id,
+                output_files,
+                str(record.get("workspace_id") or "local-workspace"),
             )
             now = utc_now_iso()
             record["status"] = "succeeded"
@@ -522,14 +615,12 @@ class PipelineRunManager:
             if record.get("status") == "cancelling":
                 self._finish_cancelled(record)
                 return
-            self._finish_failed(
-                record, {"code": "runner_error", "message": str(exc)}
-            )
+            self._finish_failed(record, {"code": "runner_error", "message": str(exc)})
 
     async def _track_live_progress(self, run_id: str) -> None:
         if self.executor is None:
             return
-        progress = getattr(self.executor, "progress", None)
+        progress = getattr(self._executor_for(self.store.get(run_id) or {}), "progress", None)
         if not callable(progress):
             return
         while True:
@@ -565,9 +656,10 @@ class PipelineRunManager:
             for item in record.get("_progress_node_events", [])
             if isinstance(item, list) and len(item) >= 2
         }
-        active_node_id = str(
-            (record.get("progress") or {}).get("active_node_id") or ""
-        ).strip() or None
+        active_node_id = (
+            str((record.get("progress") or {}).get("active_node_id") or "").strip()
+            or None
+        )
         events_changed = False
         for match in NODE_EVENT_PATTERN.finditer(logs):
             node_id = match.group("node")
@@ -581,8 +673,11 @@ class PipelineRunManager:
                     "failure": "failed",
                 }[outcome]
                 event_status = (
-                    "failed" if outcome == "failure" else "succeeded"
-                    if outcome == "success" else "running"
+                    "failed"
+                    if outcome == "failure"
+                    else "succeeded"
+                    if outcome == "success"
+                    else "running"
                 )
                 self._append_event(
                     record,
@@ -694,8 +789,11 @@ class PipelineRunManager:
                     continue
                 emitted_node_events.add(key)
                 event_status = (
-                    "failed" if outcome == "failure" else "succeeded"
-                    if outcome == "success" else "running"
+                    "failed"
+                    if outcome == "failure"
+                    else "succeeded"
+                    if outcome == "success"
+                    else "running"
                 )
                 action = {
                     "start": "started",
@@ -732,6 +830,7 @@ class PipelineRunManager:
 
     def _save_terminal_record(self, record: dict[str, Any]) -> None:
         self.store.save(record)
+        self.leases.release(record["run_id"], str(record.get("workspace_id") or "local-workspace"))
         self._publish_terminal_summary(record)
 
     def _publish_terminal_summary(self, record: dict[str, Any]) -> None:
@@ -781,9 +880,7 @@ class PipelineRunManager:
         return {
             "run_id": str(record.get("run_id") or ""),
             "pipeline_id": str(snapshot.get("pipeline_id") or ""),
-            "active_version_uid": str(
-                snapshot.get("active_version_uid") or "main"
-            ),
+            "active_version_uid": str(snapshot.get("active_version_uid") or "main"),
             "snapshot_sha256": str(snapshot.get("graph_sha256") or ""),
             "bundle_sha256": str(snapshot.get("bundle_sha256") or ""),
             "status": str(record.get("status") or "failed"),
@@ -861,7 +958,9 @@ class PipelineRunManager:
             "node_elapsed_seconds": None,
         }
         record["result"] = self._terminal_result(record, "cancelled")
-        self._append_event(record, "run.cancelled", "cancelled", "Dagster run cancelled.")
+        self._append_event(
+            record, "run.cancelled", "cancelled", "Dagster run cancelled."
+        )
         self._save_terminal_record(record)
 
     def _finish_failed(self, record: dict[str, Any], error: dict[str, Any]) -> None:

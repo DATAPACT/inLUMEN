@@ -13,6 +13,7 @@ from node_ports import normalize_node_ports
 from node_secrets import runtime_secret_name
 from runtime_environment import discover_runtime_environment, merge_runtime_environment
 from step_types import normalize_step_type
+from workspace_storage import node_bucket_name
 
 try:
     import yaml
@@ -369,7 +370,7 @@ def _files_from_step_data(data: dict, flow_id: str) -> List[dict]:
             {
                 "filename": _clean_string(entry.get("filename")),
                 "bucket": _clean_string(entry.get("bucket"))
-                or f"files-step-id-{flow_id}",
+                or node_bucket_name(flow_id),
                 "step_id": flow_id,
                 **(
                     {"role": _clean_string(entry.get("role")).lower()}
@@ -409,7 +410,7 @@ def _files_from_step_data(data: dict, flow_id: str) -> List[dict]:
             {
                 "filename": filename,
                 "bucket": _clean_string(metadata.get("bucket"))
-                or f"files-step-id-{flow_id}",
+                or node_bucket_name(flow_id),
                 "step_id": flow_id,
                 **({"role": role} if role in {"code", "data"} else {}),
                 **(
@@ -481,7 +482,7 @@ def extract_pipeline_steps(pipeline_graph: Optional[dict], files: Any = None) ->
                 [
                     {
                         "filename": f.get("filename"),
-                        "bucket": f.get("bucket") or f"files-step-id-{flow_id}",
+                        "bucket": f.get("bucket") or node_bucket_name(flow_id),
                         "step_id": flow_id,
                         "snapshot_bucket": f.get("snapshot_bucket"),
                         "snapshot_object": f.get("snapshot_object"),

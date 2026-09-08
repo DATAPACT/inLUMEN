@@ -2,15 +2,22 @@ import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
-import Index from "./pages/Index";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { lazy, Suspense } from "react";
+const Index = lazy(() => import("./pages/Index"));
 import NotFound from "./pages/NotFound";
 import { AuthProvider } from "@/context/AuthContext";
+import { useState } from 'react';
 
-const queryClient = new QueryClient();
+const SessionQueryProvider = ({ children }: { children: React.ReactNode }) => {
+  const [queryClient] = useState(() => new QueryClient());
+  return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+};
 
 const App = () => (
+  <ErrorBoundary>
   <AuthProvider>
-    <QueryClientProvider client={queryClient}>
+    <SessionQueryProvider>
       <TooltipProvider>
         <Sonner
           position="bottom-center"
@@ -21,14 +28,15 @@ const App = () => (
         />
         <BrowserRouter>
           <Routes>
-            <Route path="/" element={<Index />} />
+            <Route path="/" element={<Suspense fallback={<p role="status" className="p-6">Loading editor…</p>}><Index /></Suspense>} />
             {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
             <Route path="*" element={<NotFound />} />
           </Routes>
         </BrowserRouter>
       </TooltipProvider>
-    </QueryClientProvider>
+    </SessionQueryProvider>
   </AuthProvider>
+  </ErrorBoundary>
 );
 
 export default App;

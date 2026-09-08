@@ -44,12 +44,15 @@ def dispatch_flask_request(
     files: dict[str, Any] | None = None,
     form: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
+    query_capability: object | None = None,
 ) -> LocalApiResponse:
     request_kwargs: dict[str, Any] = {
         "path": f"/{backend_path.lstrip('/')}",
         "method": method,
         "headers": headers or {},
     }
+    if query_capability is not None:
+        request_kwargs["environ_overrides"] = {"inlumen.query_capability": query_capability}
     if params is not None:
         request_kwargs["query_string"] = params
 

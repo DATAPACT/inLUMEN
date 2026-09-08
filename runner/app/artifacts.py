@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import tempfile
 import re
 import shutil
 from copy import deepcopy
@@ -11,20 +13,35 @@ from typing import Any
 SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$")
 
 
+def atomic_write(path: Path, body: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, staging = tempfile.mkstemp(prefix=".pending-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(staging, path)
+    finally:
+        if os.path.exists(staging): os.unlink(staging)
+
+
 class PipelineArtifactStore:
-    """Filesystem payload store; lifecycle metadata remains in SQLite."""
+    """Filesystem payload store; lifecycle metadata remains in the job database."""
 
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def store_bundle(self, run_id: str, files: list[dict[str, Any]]) -> str:
-        path = self._run_root(run_id) / "bundle-files.json"
+    def store_bundle(
+        self,
+        run_id: str,
+        files: list[dict[str, Any]],
+        workspace_id: str = "local-workspace",
+    ) -> str:
+        path = self._run_root(run_id, workspace_id) / "bundle-files.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(files, ensure_ascii=False, separators=(",", ":")),
-            encoding="utf-8",
-        )
+        atomic_write(path, json.dumps(files, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
         return str(path)
 
     def load_bundle(self, reference: str) -> list[dict[str, Any]]:
@@ -35,10 +52,13 @@ class PipelineArtifactStore:
         return [deepcopy(item) for item in parsed if isinstance(item, dict)]
 
     def store_outputs(
-        self, run_id: str, outputs: list[dict[str, Any]]
+        self,
+        run_id: str,
+        outputs: list[dict[str, Any]],
+        workspace_id: str = "local-workspace",
     ) -> list[dict[str, Any]]:
         stored = []
-        output_root = self._run_root(run_id) / "artifacts"
+        output_root = self._run_root(run_id, workspace_id) / "artifacts"
         for entry in outputs:
             path = self._safe_relative(entry.get("path"))
             destination = (output_root / Path(*path.parts)).resolve()
@@ -51,7 +71,7 @@ class PipelineArtifactStore:
                 if str(entry.get("content_encoding") or "") == "base64"
                 else content.encode("utf-8")
             )
-            destination.write_bytes(body)
+            atomic_write(destination, body)
             metadata = {
                 key: deepcopy(value)
                 for key, value in entry.items()
@@ -64,21 +84,33 @@ class PipelineArtifactStore:
     def read_output(self, reference: str) -> bytes:
         return self._safe_reference(reference).read_bytes()
 
-    def clear(self) -> int:
-        """Remove all run-owned payload directories from the artifact root."""
+    def clear(self, workspace_id: str | None = None) -> int:
+        """Remove run payloads, optionally constrained to one workspace."""
         removed = 0
-        for child in self.root.iterdir():
+        target = (
+            self.root if workspace_id is None else self._workspace_root(workspace_id)
+        )
+        if not target.exists():
+            return 0
+        for child in target.iterdir():
             if child.is_dir():
                 shutil.rmtree(child)
             else:
                 child.unlink()
             removed += 1
+        if workspace_id is not None:
+            target.rmdir()
         return removed
 
-    def _run_root(self, run_id: str) -> Path:
+    def _workspace_root(self, workspace_id: str) -> Path:
+        if not SAFE_RUN_ID.fullmatch(workspace_id):
+            raise ValueError("Unsafe workspace id.")
+        return self.root / workspace_id
+
+    def _run_root(self, run_id: str, workspace_id: str = "local-workspace") -> Path:
         if not SAFE_RUN_ID.fullmatch(run_id):
             raise ValueError("Unsafe pipeline run id.")
-        return self.root / run_id
+        return self._workspace_root(workspace_id) / run_id
 
     def _safe_reference(self, reference: str) -> Path:
         path = Path(str(reference or "")).expanduser().resolve()

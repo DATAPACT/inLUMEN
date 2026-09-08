@@ -3,6 +3,10 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   buildCodegenLLMRequestConfig,
   buildLLMRequestConfig,
+  APPLICATION_LLM_ID,
+  createChatbotConfig,
+  updateChatbotConfig,
+  deleteChatbotConfig,
   getDefaultChatbotConfig,
   readSelectedChatbotConfigId,
   writeSelectedChatbotConfigId,
@@ -108,11 +112,52 @@ describe("chatbot configuration contracts", () => {
       .toThrow("Code Generation Model is required");
   });
 
+  it("references a saved server credential without putting it in the request", () => {
+    expect(buildLLMRequestConfig(completeConfig({
+      id: "saved-config",
+      apiKey: "",
+      hasApiKey: true,
+    }))).toMatchObject({
+      credential_id: "saved-config",
+    });
+    expect(buildCodegenLLMRequestConfig(completeConfig({
+      id: "saved-config",
+      apiKey: "",
+      hasApiKey: true,
+    }))).toMatchObject({
+      credential_id: "saved-config",
+    });
+  });
+
   it("persists and clears the selected configuration", () => {
     expect(readSelectedChatbotConfigId()).toBeNull();
     writeSelectedChatbotConfigId("config-7");
     expect(readSelectedChatbotConfigId()).toBe("config-7");
     writeSelectedChatbotConfigId(null);
     expect(readSelectedChatbotConfigId()).toBeNull();
+  });
+
+  it("uses the application credential reference for both models and discards supplied keys", () => {
+    const managed = completeConfig({
+      id: APPLICATION_LLM_ID,
+      name: "Application-provided LLM",
+      hasApiKey: true,
+      readOnly: true,
+      apiKey: "stale-browser-key",
+    });
+    for (const build of [buildLLMRequestConfig, buildCodegenLLMRequestConfig]) {
+      const request = build(managed);
+      expect(request.credential_id).toBe(APPLICATION_LLM_ID);
+      expect(request).not.toHaveProperty("api_key");
+      expect(JSON.stringify(request)).not.toContain("stale-browser-key");
+    }
+  });
+
+  it("rejects application config mutations without an offline fallback", async () => {
+    const managed = completeConfig({ id: APPLICATION_LLM_ID });
+    await expect(createChatbotConfig(managed)).rejects.toThrow("managed by your administrator");
+    await expect(updateChatbotConfig(managed)).rejects.toThrow("managed by your administrator");
+    await expect(deleteChatbotConfig(APPLICATION_LLM_ID)).rejects.toThrow("managed by your administrator");
+    expect(window.localStorage.length).toBe(0);
   });
 });

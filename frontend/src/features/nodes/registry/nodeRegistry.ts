@@ -1,7 +1,9 @@
+import coreManifest from "./core.generated.json";
 import { apiFetch } from "@/utils/apiFetch";
 import { INLUMEN_API_URL } from "@/config/api";
 import {
   nodeDefinitionResponseSchema,
+  nodeDefinitionSchema,
   type NodeDefinition,
   type NodeDefinitionData,
 } from "@/features/nodes/registry/types";
@@ -12,93 +14,8 @@ import {
   findTemplateForType,
 } from "@/features/nodes/templateCatalog";
 
-const CORE_FALLBACK_DEFINITIONS: NodeDefinition[] = [
-  {
-    id: "core.source",
-    version: 1,
-    base_type: "source",
-    family: "sources",
-    enabled: true,
-    palette: {
-      label: "Source",
-      description: "Adapt an external system into logical pipeline data.",
-      icon: "file-text",
-      color: "blue",
-      order: 10,
-    },
-    editor: { kind: "default" },
-    runtime: { generator: "generic" },
-    default_implementation: {},
-  },
-  {
-    id: "core.task",
-    version: 1,
-    base_type: "task",
-    family: "tasks",
-    enabled: true,
-    palette: {
-      label: "Task",
-      description: "Process, transform, validate, or analyze pipeline data.",
-      icon: "zap",
-      color: "amber",
-      order: 20,
-    },
-    editor: { kind: "default" },
-    runtime: { generator: "generic" },
-    default_implementation: { kind: "python", language: "python" },
-  },
-  {
-    id: "core.destination",
-    version: 1,
-    base_type: "destination",
-    family: "destinations",
-    enabled: true,
-    palette: {
-      label: "Destination",
-      description: "Write or publish pipeline results outside the pipeline.",
-      icon: "file-output",
-      color: "emerald",
-      order: 30,
-    },
-    editor: { kind: "default" },
-    runtime: { generator: "generic" },
-    default_implementation: {},
-  },
-  {
-    id: "core.flow",
-    version: 1,
-    base_type: "flow",
-    family: "flow",
-    enabled: true,
-    palette: {
-      label: "Flow",
-      description: "Model conditions and parallel maps without an execution-engine-specific node.",
-      icon: "git-branch",
-      color: "purple",
-      order: 40,
-    },
-    editor: { kind: "default" },
-    runtime: { generator: "generic" },
-    default_implementation: {},
-  },
-  {
-    id: "core.subpipeline",
-    version: 1,
-    base_type: "subpipeline",
-    family: "subpipeline",
-    enabled: true,
-    palette: {
-      label: "Subpipeline",
-      description: "Reuse another pipeline as one composable component.",
-      icon: "boxes",
-      color: "cyan",
-      order: 50,
-    },
-    editor: { kind: "default" },
-    runtime: { generator: "generic" },
-    default_implementation: {},
-  },
-];
+// Generated from the backend manifest; scripts/sync_shared.py --check enforces parity.
+const CORE_FALLBACK_DEFINITIONS = coreManifest.definitions.map((definition) => nodeDefinitionSchema.parse(definition)).filter((definition) => definition.enabled);
 
 let definitionsPromise: Promise<NodeDefinition[]> | null = null;
 let definitionsById = new Map(
