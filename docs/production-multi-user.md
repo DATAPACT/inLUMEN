@@ -52,7 +52,7 @@ Keycloak user therefore does not move or duplicate their data.
 4. Start the stack:
 
    ```sh
-   docker compose --env-file .env.production -f docker-compose-prod.yml up -d --build
+   docker compose --env-file .env.production -f docker-compose-prod.yml up -d
    ```
 
 5. Check startup and the one-shot database migration:
@@ -121,7 +121,9 @@ quotas and a global chat concurrency limit are separate features.
 
 `AUTH_ENABLED=false` is deliberately a single shared local identity, not a
 multi-user mode. The gateway records the selected mode in PostgreSQL and
-refuses to start if a deployment's setting changes. This prevents a browser or
+allows changes automatically only when `APP_ENV=development` (the default).
+Other environments refuse to start if a deployment's setting changes without
+an explicit migration override. Production always requires authentication. This prevents a browser or
 operator from accidentally treating local data as account data (or vice versa).
 
 Use a distinct Compose project and distinct PostgreSQL, Neo4j, MinIO, and
@@ -225,3 +227,22 @@ the private network. `INLUMEN_PRIVATE_NETWORK` can preserve its existing name.
 Always use `docker compose --env-file .env.production -f docker-compose-prod.yml`.
 No Compose override is required. `expose` entries are container metadata, not
 host port mappings; the file has no `ports` entries.
+
+### Application image builds
+
+Production Compose builds the backend, migration, runner, codegen, and frontend
+images from this checkout by default. Plain `up` therefore does not try to pull
+the local application image names from Docker Hub. Build layers remain cached.
+Infrastructure images continue to use their configured registry images.
+
+For deployment from prebuilt registry images, configure the `INLUMEN_*_IMAGE`
+overrides and set `INLUMEN_APP_PULL_POLICY=always`.
+
+Application containers have configurable memory/PID limits and bounded logs
+(three 20 MB files per service). The frontend health check verifies Nginx's
+`/healthz` endpoint; backend readiness remains a separate check. These limits
+apply to the API/services, while isolated Dagster workers retain their own
+resource allocation limits. Set `INLUMEN_BACKEND_MEM_LIMIT`,
+`INLUMEN_RUNNER_MEM_LIMIT`, `INLUMEN_CODEGEN_MEM_LIMIT`, and
+`INLUMEN_FRONTEND_MEM_LIMIT` in `.env.production` when workload measurements
+justify different budgets.

@@ -1,7 +1,7 @@
 /**
  * Master switch for Keycloak authentication.
  * Controlled via AUTH_ENABLED in the root .env; Docker Compose exposes the same
- * value to Vite as VITE_AUTH_ENABLED. Standalone frontend/dev setups can still
+ * value to Vite as VITE_AUTH_ENABLED (not a separate Compose setting). Standalone frontend/dev setups can still
  * set VITE_AUTH_ENABLED directly in frontend/.env.
  *
  * true  — frontend listens for postMessage tokens and injects Authorization headers;

@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from auth_middleware import validate_production_auth_configuration
 from neo4j_api import _scope_cypher, _validate_workspace_cypher, _workspace_label
@@ -34,6 +34,42 @@ class WorkspaceIsolationTests(unittest.TestCase):
         self.assertIn(f":{_workspace_label('workspace-a')}", first)
         self.assertIn(f":{_workspace_label('workspace-b')}", second)
         self.assertNotEqual(first, second)
+
+
+    def test_label_check_requires_both_tokens_for_owned_labels(self):
+        from neo4j_api import _WorkspaceQueryRunner, _label_exists
+
+        workspace = "new-workspace"
+        own_label = _workspace_label(workspace)
+        other_label = _workspace_label("other-workspace")
+        for labels, expected in (
+            ([], False),
+            (["PIPELINE", other_label], False),
+            ([own_label], False),
+            (["PIPELINE", own_label], True),
+        ):
+            with self.subTest(labels=labels):
+                runner = Mock()
+                runner.run.return_value.single.return_value = {"labels": labels}
+                session = _WorkspaceQueryRunner(runner, workspace)
+                self.assertEqual(_label_exists(session, "PIPELINE"), expected)
+
+    def test_empty_workspace_poll_skips_pipeline_query(self):
+        from neo4j_api import app, _WorkspaceQueryRunner, neo4j_get_pipeline_updated_at
+
+        runner = Mock()
+        runner.run.return_value.single.return_value = {
+            "labels": ["PIPELINE", _workspace_label("other-workspace")]
+        }
+        session = _WorkspaceQueryRunner(runner, "new-workspace")
+        with app.test_request_context(), patch("neo4j_api.driver") as driver:
+            driver.session.return_value.__enter__.return_value = session
+            response, status = neo4j_get_pipeline_updated_at.__wrapped__()
+        self.assertEqual(status, 200)
+        self.assertEqual(response.get_json(), {"updated_at": None})
+        runner.run.assert_called_once_with(
+            "CALL db.labels() YIELD label RETURN collect(label) AS labels"
+        )
 
     def test_raw_cypher_rejects_unscoped_nodes(self):
         with self.assertRaises(ValueError):

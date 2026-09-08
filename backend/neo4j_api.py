@@ -239,7 +239,19 @@ def health():
 def _label_exists(session, label_name: str) -> bool:
     result = session.run("CALL db.labels() YIELD label RETURN collect(label) AS labels").single()
     labels = result["labels"] if result and result["labels"] else []
-    return label_name in labels
+    if label_name not in labels:
+        return False
+    # Scoped reads require both label tokens. A platform label may exist only
+    # in another workspace; querying an unseen workspace token emits warnings
+    # on every poll even though an empty result is expected.
+    if label_name in _WORKSPACE_OWNED_LABELS:
+        workspace_id = (
+            session._workspace_id
+            if isinstance(session, _WorkspaceQueryRunner)
+            else current_workspace_id()
+        )
+        return _workspace_label(workspace_id) in labels
+    return True
 
 
 def _default_pipeline_version_name(session) -> str:

@@ -143,18 +143,20 @@ def ensure_schema() -> None:
 
 
 def validate_auth_mode_continuity(auth_enabled: bool) -> None:
-    """Reject accidental reuse of durable data under another auth mode.
+    """Record identity mode, allowing routine switches in development.
 
-    ``AUTH_ENABLED=false`` is a single shared local identity, whereas true is
-    a set of private identities.  Mixing them against one database is both
-    confusing and unsafe, so an operator must explicitly acknowledge a planned
-    transition with ``INLUMEN_ALLOW_AUTH_MODE_SWITCH=true``.
+    Local and account workspaces stay separate; this updates only the mode
+    marker, never workspace ownership. Other environments require an explicit
+    migration override. Production auth validation separately forbids local mode.
     """
     if not _database_url():
         return
     ensure_schema()
     requested = "keycloak" if auth_enabled else "local"
-    allow_switch = os.getenv("INLUMEN_ALLOW_AUTH_MODE_SWITCH", "").strip().lower() == "true"
+    development = os.getenv("APP_ENV", "development").strip().lower() == "development"
+    allow_switch = development or (
+        os.getenv("INLUMEN_ALLOW_AUTH_MODE_SWITCH", "").strip().lower() == "true"
+    )
     with _connect() as connection, connection.cursor() as cursor:
         cursor.execute(
             "SELECT setting_value FROM application_runtime_settings "

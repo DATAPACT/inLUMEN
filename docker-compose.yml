@@ -9,8 +9,6 @@ volumes:
   codegen_state:
   runner_state:
   postgres_data:
-  inlumen_model_store:
-    name: ${INLUMEN_MODEL_STORE_VOLUME:-inlumen_model_store}
 
 services:
   postgres:
@@ -124,7 +122,6 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio-datapact}
       API_AUTH_TOKEN: ${API_AUTH_TOKEN:-}
       AUTH_ENABLED: ${AUTH_ENABLED:-false}
-      INLUMEN_ALLOW_AUTH_MODE_SWITCH: ${INLUMEN_ALLOW_AUTH_MODE_SWITCH:-false}
       APP_ENV: development
       DATABASE_URL: postgresql://${POSTGRES_USER:-inlumen}:${POSTGRES_PASSWORD:-inlumen}@postgres:5432/${POSTGRES_DB:-inlumen}
       KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-}
@@ -219,7 +216,6 @@ services:
     volumes:
       - ./codegen/app:/app/app
       - codegen_state:/app/state
-      - inlumen_model_store:/models
       - /var/run/docker.sock:/var/run/docker.sock
       - ${CODEGEN_VALIDATION_HOST_WORKDIR:-/tmp/inlumen-codegen-workspaces}:${CODEGEN_VALIDATION_WORKDIR:-/tmp/inlumen-codegen-workspaces}
     environment:
@@ -234,7 +230,7 @@ services:
       CODEGEN_PIPELINE_CACHE_MAX_ENTRIES: ${CODEGEN_PIPELINE_CACHE_MAX_ENTRIES:-32}
       CODEGEN_ALLOW_DETERMINISTIC_FALLBACK: "false"
       CODEGEN_DEPENDENCY_INSTALL_TIMEOUT_SECONDS: ${CODEGEN_DEPENDENCY_INSTALL_TIMEOUT_SECONDS:-600}
-      INLUMEN_MODEL_ROOT: /models
+      # Dagster workers create persistent per-workspace caches on demand.
       INLUMEN_MODEL_STORE_VOLUME: ${INLUMEN_MODEL_STORE_VOLUME:-inlumen_model_store}
       CODEGEN_INPUT_FILE_BASE_URL: ${CODEGEN_INPUT_FILE_BASE_URL:-http://backend:${INLUMEN_API_PORT:-5000}/api/files/content}
       CODEGEN_INPUT_FILE_ALLOW_INSECURE_HTTP: ${CODEGEN_INPUT_FILE_ALLOW_INSECURE_HTTP:-true}
@@ -272,7 +268,8 @@ services:
       NODE_ENV: development
       VITE_INLUMEN_API_PORT: ${INLUMEN_API_PORT:-5000}
       VITE_INLUMEN_API_URL: ${VITE_INLUMEN_API_URL:-${INLUMEN_API_PUBLIC_URL:-}}
-      VITE_AUTH_ENABLED: ${VITE_AUTH_ENABLED:-${AUTH_ENABLED:-false}}
+      # Keep browser and gateway identity modes in sync.
+      VITE_AUTH_ENABLED: ${AUTH_ENABLED:-false}
       VITE_KEYCLOAK_URL: ${VITE_KEYCLOAK_URL:-http://localhost:8081}
       VITE_KEYCLOAK_REALM: ${VITE_KEYCLOAK_REALM:-inlumen}
       VITE_KEYCLOAK_CLIENT_ID: ${VITE_KEYCLOAK_CLIENT_ID:-inlumen-frontend}

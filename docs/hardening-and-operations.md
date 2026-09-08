@@ -49,9 +49,8 @@ Authentication mode changes select different workspaces: local mode uses
 `local-workspace`; Keycloak mode uses the authenticated account's workspace.
 Switching modes does not move or erase drawings. Legacy adoption only attaches
 entities with **no workspace label** to the local workspace. Already owned
-entities must never be adopted, even when local mode starts again. A planned
-development-mode switch still requires `INLUMEN_ALLOW_AUTH_MODE_SWITCH=true`;
-production continues to require authentication. To recover an older drawing
+entities must never be adopted, even when local mode starts again. In development, changing `AUTH_ENABLED` is sufficient to switch modes;
+production continues to require authentication and enforce the transition guard. To recover an older drawing
 that exists only in local mode, back it up and explicitly identify its owner
 before copying it into that user's workspace; do not relabel all local data as
 belonging to whichever user logs in first.

@@ -67,7 +67,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         throw new SessionInitializationError('Signed in, but the server returned an invalid workspace session. Contact your administrator.');
       }
       if (payload.user.id === 'local-user' || workspaceId === 'local-workspace') {
-        throw new SessionInitializationError('Authentication configuration mismatch: Keycloak is enabled in the browser but the server returned a local workspace. Align AUTH_ENABLED and VITE_AUTH_ENABLED, then reload.');
+        throw new SessionInitializationError('Authentication configuration mismatch: Keycloak is enabled in the browser but the server returned a local workspace. Recreate backend and frontend with the same root AUTH_ENABLED setting, then reload.');
       }
       if (!mounted || loggingOut) return;
       setAuthToken(token);

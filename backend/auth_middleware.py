@@ -61,7 +61,7 @@ def validate_production_auth_configuration() -> None:
 
 
 def validate_auth_mode_configuration() -> None:
-    """Keep a persistent deployment from silently changing identity models."""
+    """Apply the environment-specific identity-mode transition policy."""
     validate_auth_mode_continuity(is_auth_enabled())
 
 
@@ -222,7 +222,7 @@ def require_auth(f):
             if request.headers.get("Authorization"):
                 return jsonify({
                     "error": "Authentication configuration mismatch",
-                    "detail": "The browser sent an authenticated request but the server is in local mode. Align AUTH_ENABLED and VITE_AUTH_ENABLED, then reload.",
+                    "detail": "The browser sent an authenticated request but the server is in local mode. Recreate backend and frontend with the same root AUTH_ENABLED setting, then reload.",
                 }), 409
             g.inlumen_principal = local_principal()
             g.inlumen_is_application_admin = os.getenv("APP_ENV", "development").strip().lower() != "production"

@@ -1,5 +1,11 @@
 name: inlumen
 
+x-app-logging: &app-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "3"
+
 networks:
   datapact_network:
     name: ${INLUMEN_PRIVATE_NETWORK:-datapact_network}
@@ -13,8 +19,6 @@ volumes:
   neo4j_logs:
   minio_data:
   runner_artifacts:
-  inlumen_model_store:
-    name: ${INLUMEN_MODEL_STORE_VOLUME:-inlumen_model_store}
 
 services:
   postgres:
@@ -80,6 +84,7 @@ services:
     build:
       context: ./backend
     image: ${INLUMEN_BACKEND_IMAGE:-inlumen-backend:local}
+    pull_policy: ${INLUMEN_APP_PULL_POLICY:-build}
     restart: "no"
     depends_on:
       postgres:
@@ -97,9 +102,13 @@ services:
       - datapact_network
 
   runner:
+    mem_limit: ${INLUMEN_RUNNER_MEM_LIMIT:-1G}
+    pids_limit: ${INLUMEN_APP_PIDS_LIMIT:-512}
+    logging: *app-logging
     build:
       context: ./runner
     image: ${INLUMEN_RUNNER_IMAGE:-inlumen-runner-service:local}
+    pull_policy: ${INLUMEN_APP_PULL_POLICY:-build}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -132,9 +141,13 @@ services:
       - datapact_network
 
   codegen:
+    mem_limit: ${INLUMEN_CODEGEN_MEM_LIMIT:-2G}
+    pids_limit: ${INLUMEN_APP_PIDS_LIMIT:-512}
+    logging: *app-logging
     build:
       context: ./codegen
     image: ${INLUMEN_CODEGEN_IMAGE:-inlumen-codegen-service:local}
+    pull_policy: ${INLUMEN_APP_PULL_POLICY:-build}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -142,7 +155,6 @@ services:
     expose:
       - "8010"
     volumes:
-      - inlumen_model_store:/models
       - /var/run/docker.sock:/var/run/docker.sock
       - ${CODEGEN_VALIDATION_HOST_WORKDIR:-/var/lib/inlumen/codegen-workspaces}:${CODEGEN_VALIDATION_WORKDIR:-/var/lib/inlumen/codegen-workspaces}
     environment:
@@ -157,7 +169,7 @@ services:
       CODEGEN_PIPELINE_CACHE_MAX_ENTRIES: ${CODEGEN_PIPELINE_CACHE_MAX_ENTRIES:-32}
       CODEGEN_ALLOW_DETERMINISTIC_FALLBACK: "false"
       CODEGEN_DEPENDENCY_INSTALL_TIMEOUT_SECONDS: ${CODEGEN_DEPENDENCY_INSTALL_TIMEOUT_SECONDS:-600}
-      INLUMEN_MODEL_ROOT: /models
+      # Dagster workers create persistent per-workspace caches on demand.
       INLUMEN_MODEL_STORE_VOLUME: ${INLUMEN_MODEL_STORE_VOLUME:-inlumen_model_store}
       CODEGEN_INPUT_FILE_BASE_URL: http://backend:5000/api/files/content
       CODEGEN_INPUT_FILE_ALLOW_INSECURE_HTTP: "true"
@@ -171,9 +183,13 @@ services:
       - datapact_network
 
   backend:
+    mem_limit: ${INLUMEN_BACKEND_MEM_LIMIT:-2G}
+    pids_limit: ${INLUMEN_APP_PIDS_LIMIT:-512}
+    logging: *app-logging
     build:
       context: ./backend
     image: ${INLUMEN_BACKEND_IMAGE:-inlumen-backend:local}
+    pull_policy: ${INLUMEN_APP_PULL_POLICY:-build}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -224,6 +240,9 @@ services:
       - datapact_network
 
   frontend:
+    mem_limit: ${INLUMEN_FRONTEND_MEM_LIMIT:-256M}
+    pids_limit: ${INLUMEN_APP_PIDS_LIMIT:-512}
+    logging: *app-logging
     build:
       context: ./frontend
       dockerfile: Dockerfile.prod
@@ -234,12 +253,19 @@ services:
         VITE_KEYCLOAK_REALM: ${VITE_KEYCLOAK_REALM:-inlumen}
         VITE_KEYCLOAK_CLIENT_ID: ${VITE_KEYCLOAK_CLIENT_ID:-inlumen-frontend}
     image: ${INLUMEN_FRONTEND_IMAGE:-inlumen-frontend:local}
+    pull_policy: ${INLUMEN_APP_PULL_POLICY:-build}
     restart: unless-stopped
     depends_on:
       backend:
         condition: service_healthy
     expose:
       - "8080"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "--timeout=3", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
     networks:
       datapact_network: {}
       tunnel_network:

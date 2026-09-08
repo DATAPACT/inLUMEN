@@ -209,7 +209,12 @@ The sample contains the public backend URL and API tokens, with Keycloak configu
 
 The browser uses `INLUMEN_API_PUBLIC_URL`. The backend reaches codegen privately as `http://codegen:8010` and the runner as `http://runner:8020`, including when the Compose project runs on a VM behind Cloudflare; the frontend never calls either private service directly.
 
-Set `AUTH_ENABLED=false` only for a local shared workspace; set it `true` for Keycloak. Advanced deployments can still override any Compose variable directly; for example, a separately hosted codegen service can set `INLUMEN_CODEGEN_SERVICE_URL`.
+Set `AUTH_ENABLED=false` only for a local shared workspace; set it `true` for Keycloak.
+This is the only auth-mode setting needed in the root `.env`: Compose derives
+the browser setting automatically. After changing it, run
+`docker compose up -d backend frontend` to recreate both services. Development allows switching modes with existing databases; local and account
+workspaces remain separate. Production still requires authentication and applies
+the [auth-mode transition guard](production-multi-user.md#auth-mode-changes). Advanced deployments can still override any Compose variable directly; for example, a separately hosted codegen service can set `INLUMEN_CODEGEN_SERVICE_URL`.
 
 Step 4: Run the following command to build the docker containers:
 ```
@@ -370,6 +375,13 @@ mounts that volume read-only for node execution. The isolated Dagster code
 service then runs with Hugging Face and Transformers offline modes enabled, so a
 pipeline run cannot stall on a model-hub download. Set `HF_TOKEN` in the shell
 that launches `docker compose up`; it is used only by model prefetch.
+
+In-app Dagster runs also prefetch missing reviewed Hugging Face model revisions
+before local inference. Their persistent caches are created on demand as
+`<INLUMEN_MODEL_STORE_VOLUME>-ws-<workspace digest>` and reused by subsequent
+runs in that workspace. The main codegen service does not need a model-volume
+mount. The unsuffixed `inlumen_model_store` volume belongs to standalone exported
+bundles; deleting it causes those bundles to download their models again.
 
 The Run tab uses the durable background execution control plane described in
 [ADR 0002](adr/0002-native-background-execution.md). Each run freezes the saved
