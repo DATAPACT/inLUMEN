@@ -64,7 +64,7 @@ close an issue.
 | Issue | Evidence and next action | Release priority |
 | --- | --- | --- |
 | [#116 — Condition runtime environment](https://github.com/DATAPACT/inLUMEN/issues/116) | Still reproducible in static discovery on current main; details below. Keep open, remove legacy workspace handling from the generated Flow runtime, and add coverage for discovery and startup. | Blocking defect. |
-| [#102 — Subpipeline problems](https://github.com/DATAPACT/inLUMEN/issues/102) | Saved reusable pipelines, a Manage UI, version references, and normalization tests already exist. Reproduce save/reload, attach a saved version, and two-level nesting on current main; check validation and cycle rejection. Record exactly which operation still fails. | Blocking verification for advertised reuse. Fix confirmed failures or explicitly restrict unsupported nesting before release. Optional empty-node UX is separate. |
+| [#102 — Subpipeline problems](https://github.com/DATAPACT/inLUMEN/issues/102) | Real database checks confirm save/reload and attachment, including saving a parent containing another reusable version. Nested references are not recursively resolved, and a nonexistent nested version is accepted on save. See the verification below. | Fix nested-reference resolution and validation, or explicitly restrict unsupported nesting before release. Optional empty-node UX is separate. |
 | [#104 — Node name/ID in Properties](https://github.com/DATAPACT/inLUMEN/issues/104) | Header still shows only the structural kind. Add the selected node's label and stable ID, including a fallback for an unnamed node; update immediately on selection. | Small, useful next change; not a release blocker. |
 | [#5 — Overview refresh](https://github.com/DATAPACT/inLUMEN/issues/5) | Fetch depends on tab, active version, and callback identity; there is no explicit graph-revision dependency. Reproduce while keeping Overview open, then refresh on committed changes without overwriting metadata edits. | Near-term correctness fix; block only if a reproduced failure affects saved data or the documented workflow. |
 | [#99 — Propose parameter names](https://github.com/DATAPACT/inLUMEN/issues/99) | Static discovery and read-only requirement display already exist. The inspector explicitly says it does not create parameters or store values. Remaining work is an editable suggestion flow, preserving manual Add and secret handling. | Assign to Stabilization & workflow; nonblocking enhancement. Do not close as already implemented. |
@@ -115,6 +115,49 @@ the exported run-spec requirements, and a real Condition pipeline startup.
 Close only after the fix is merged and its checks pass. This review reproduced
 the discovery defect and ran the existing pass-through test; it did not launch
 a complete pipeline or modify runtime code.
+
+Follow-up implementation: [PR #121](https://github.com/DATAPACT/inLUMEN/pull/121)
+removes the legacy handling and adds the missing regressions. The new tests
+failed on the old source and passed with the fix. An isolated local Dagster
+1.13.12 materialization also passed startup and file pass-through using the
+generated ShellCommand with no legacy environment variables. The PR remains
+separate from this documentation proposal; issue closure depends on its merge.
+
+### #102 verification and remaining scope
+
+Follow-up on 2026-09-08 used a disposable Neo4j 5 Community container and the
+Flask adapter's real save, load, sync, and attach routes. The tested subpipeline
+code is unchanged from reviewed main; the only application change in that
+checkout was the separate Flow-runtime fix in PR #121. No existing application
+database, browser workspace, or LLM provider was used.
+
+| Check | Observed result |
+| --- | --- |
+| Save a simple Source-to-Destination graph as reusable version A; load A by its pipeline/version IDs. | Passed; the graph and public interface were retained. |
+| Save version B with Source → Subpipeline referencing A → Destination; load B. | Passed; the nested immutable reference was retained. |
+| Put a Subpipeline referencing B on the main graph, attach B through the endpoint, then reload the graph. | Passed for attachment. B has `resolved_graph`; its nested reference to A has neither `resolved_graph` nor a resolution error. The overall graph is reported valid. |
+| Change the nested reference to a nonexistent version ID and save another reusable pipeline. | Incorrectly accepted with HTTP 200. |
+| Attempt to save a graph with a connection cycle. | Rejected with HTTP 422. |
+
+Reproduce with explicitly typed matching ports (the probe used `Text`) through
+`/neo4j_reusable_pipelines`, `/neo4j_reusable_pipeline_version`,
+`/neo4j_sync_graph`, `/neo4j_attach_reusable_pipeline_version`, and
+`/neo4j_get_graph`. The unresolved inner graph matters because the codegen
+[subpipeline task profile](../codegen/app/task_profiles.py) expects the pinned
+graph in `node.subpipeline.resolved_graph`. This probe establishes missing
+runtime context; it does not claim a measured generated-pipeline failure.
+
+The next focused implementation should resolve pinned nested references within
+the requesting workspace and validate their existence. Cover multiple levels,
+missing versions, recursive reference cycles, and excessive nesting without
+unbounded recursion. Keep persisted versions immutable; resolve graphs for
+consumption without writing transient resolved copies back into saved versions.
+Verify the same behavior for save, attach, and reload. Keep #102 open until that
+scope and a browser save/reopen workflow are verified.
+
+Existing frontend subpipeline and graph-validation tests also passed (19 tests
+across three files). Those unit tests do not establish browser behavior. The
+disposable database and its volumes were removed after verification.
 
 ## Release gates
 
