@@ -182,23 +182,24 @@ These tests use local HTTP fixtures and Chromium to exercise concurrent isolated
 sessions, workspace denial, repeated rounds, preflight and HTTP524 handling.
 They incur no LLM charges and do not establish real VM/Keycloak capacity.
 
-## Existing Cloudflare connector (single Compose file)
+## Shared Cloudflare connector (single application Compose file)
 
-The production file supports either its own connector or an existing one, with no
-host port publishing. For a new connector keep `COMPOSE_PROFILES=standalone-tunnel`
-from `.env.production.example` and set its tunnel token. For an existing connector,
-set these in `.env.production` instead:
+Cloudflare runs as separate shared infrastructure. Start that stack before
+inLUMEN so its Docker network exists, then set the actual network name in
+`.env.production`:
 
 ```dotenv
-COMPOSE_PROFILES=
 INLUMEN_TUNNEL_NETWORK=cloudflare_default
-INLUMEN_TUNNEL_NETWORK_EXTERNAL=true
 ```
 
-Use the existing connector's actual Docker network name. Route the hostname to
-`http://inlumen-frontend:8080`. No token is needed in this file for an existing
-connector. Only the frontend joins the tunnel network; application services use
+Route the hostname to `http://inlumen-frontend:8080`. The inLUMEN stack contains
+no connector and needs no tunnel token, profile, or external-network toggle.
+Remove obsolete `COMPOSE_PROFILES=standalone-tunnel`,
+`CLOUDFLARE_TUNNEL_TOKEN`, `CLOUDFLARED_IMAGE`, and
+`INLUMEN_TUNNEL_NETWORK_EXTERNAL` entries from inLUMEN's environment file when
+upgrading. Keep the tunnel token in the shared Cloudflare stack's environment.
+
+Only the frontend joins the external tunnel network; application services use
 the private network. `INLUMEN_PRIVATE_NETWORK` can preserve its existing name.
 Always use `docker compose --env-file .env.production -f docker-compose-prod.yml`.
-No Compose override is required. `expose` entries are container metadata, not
-host port mappings; the file has no `ports` entries.
+No Compose override is required. No application host ports are published.

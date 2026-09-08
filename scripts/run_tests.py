@@ -112,7 +112,6 @@ def checks_for(component: str) -> list[Check]:
                     "VITE_KEYCLOAK_URL": "https://identity.example",
                     "INLUMEN_PUBLIC_URL": "https://inlumen.example",
                     "INLUMEN_SECRET_ENCRYPTION_KEY": "test-only-compose-value",
-                    "CLOUDFLARE_TUNNEL_TOKEN": "compose-tunnel-token",
                 },
             ),
         ]

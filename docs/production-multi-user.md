@@ -47,8 +47,10 @@ Keycloak user therefore does not move or duplicate their data.
    Neo4j, MinIO, backend, runner, and codegen ports closed to the Internet.
 2. Copy `.env.production.example` to `.env.production`, replace every sample
    secret, and pin infrastructure image versions or digests tested in staging.
-3. Create a remotely managed Cloudflare Tunnel and route the public inLUMEN
-   hostname to `http://inlumen-frontend:8080`. Put its token in `.env.production`.
+3. Start the shared Cloudflare connector in its own stack. Set
+   `INLUMEN_TUNNEL_NETWORK` to its existing Docker network and route the public
+   inLUMEN hostname to `http://inlumen-frontend:8080`. Keep the tunnel token only
+   in the shared connector stack.
 4. Start the stack:
 
    ```sh
@@ -207,26 +209,28 @@ See [the VM load-test guide](vm-load-test.md) for deploying the feature branch
 without merging main, creating dedicated Keycloak test users, and running
 automated concurrent pipeline-design scenarios.
 
-## Existing Cloudflare connector (single Compose file)
+## Shared Cloudflare connector (single application Compose file)
 
-The production file supports either its own connector or an existing one, with no
-host port publishing. For a new connector keep `COMPOSE_PROFILES=standalone-tunnel`
-from `.env.production.example` and set its tunnel token. For an existing connector,
-set these in `.env.production` instead:
+Cloudflare runs as separate shared infrastructure. Start that stack before
+inLUMEN so its Docker network exists, then set the actual network name in
+`.env.production`:
 
 ```dotenv
-COMPOSE_PROFILES=
 INLUMEN_TUNNEL_NETWORK=cloudflare_default
-INLUMEN_TUNNEL_NETWORK_EXTERNAL=true
 ```
 
-Use the existing connector's actual Docker network name. Route the hostname to
-`http://inlumen-frontend:8080`. No token is needed in this file for an existing
-connector. Only the frontend joins the tunnel network; application services use
+Route the hostname to `http://inlumen-frontend:8080`. The inLUMEN stack contains
+no connector and needs no tunnel token, profile, or external-network toggle.
+Remove obsolete `COMPOSE_PROFILES=standalone-tunnel`,
+`CLOUDFLARE_TUNNEL_TOKEN`, `CLOUDFLARED_IMAGE`, and
+`INLUMEN_TUNNEL_NETWORK_EXTERNAL` entries from inLUMEN's environment file when
+upgrading. Keep the tunnel token in the shared Cloudflare stack's environment.
+
+Only the frontend joins the external tunnel network; application services use
 the private network. `INLUMEN_PRIVATE_NETWORK` can preserve its existing name.
 Always use `docker compose --env-file .env.production -f docker-compose-prod.yml`.
-No Compose override is required. `expose` entries are container metadata, not
-host port mappings; the file has no `ports` entries.
+No Compose override is required. No application host ports are published.
+
 
 ### Application image builds
 
@@ -246,3 +250,27 @@ resource allocation limits. Set `INLUMEN_BACKEND_MEM_LIMIT`,
 `INLUMEN_RUNNER_MEM_LIMIT`, `INLUMEN_CODEGEN_MEM_LIMIT`, and
 `INLUMEN_FRONTEND_MEM_LIMIT` in `.env.production` when workload measurements
 justify different budgets.
+
+### Routing more applications through the shared connector
+
+In the VM's separate `cloudflare/docker-compose.yml`, the connector's `default`
+network is `cloudflare_default`. Its additional `keycloak` network is a local
+Compose key referring to the external `keycloak_default` network. This allows
+it to reach Keycloak directly; it does not restrict which apps the tunnel serves.
+
+For another app on the shared ingress network:
+
+1. Attach only its frontend/reverse proxy to external `cloudflare_default`,
+   alongside that app's private network. Keep databases off the ingress network.
+2. Give the frontend a unique network alias, such as `reports-frontend`.
+3. Add a public hostname route in the existing Cloudflare tunnel, for example
+   `reports.example.com` to `http://reports-frontend:8080` (use its actual port).
+4. Start the app's own Compose stack. No new tunnel token, host port mapping,
+   or connector service is required.
+
+Applications sharing ingress can communicate with one another on that network.
+For stronger separation, give each app a dedicated ingress network and attach
+the shared connector to each. For Keycloak, a dedicated ingress network shared
+only by Keycloak and the connector would also remove the connector's network
+access to `keycloak-postgres`. Configure that as a separate infrastructure change
+so existing authentication routes remain available.
