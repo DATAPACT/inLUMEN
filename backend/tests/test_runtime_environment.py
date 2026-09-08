@@ -13,6 +13,13 @@ from runtime_environment import (
 
 
 class RuntimeEnvironmentTest(unittest.TestCase):
+    def test_legacy_workspace_access_in_user_scripts_remains_required(self):
+        values = discover_runtime_environment(
+            'import os\noutput_dir = os.environ["INLUMEN_OUTPUT_DIR"]\n'
+        )
+        self.assertEqual(["INLUMEN_OUTPUT_DIR"], [item["name"] for item in values])
+        self.assertTrue(values[0]["required"])
+
     def test_required_and_optional_environment_are_distinguished(self):
         values = discover_runtime_environment(
             '''import os

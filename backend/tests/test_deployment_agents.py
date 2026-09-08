@@ -15,6 +15,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from async_runtime import run_async  # noqa: E402
+from deployment_artifacts import build_deployment_bundle_files  # noqa: E402
+from runtime_environment import discover_runtime_environment  # noqa: E402
 
 try:
     from deployment_agents import (  # noqa: E402
@@ -299,6 +301,24 @@ class DeploymentAgentsTest(unittest.TestCase):
         )
         self.assertIn("value.risk_score > 0.8", flow_artifact["manifest"]["adapter"]["parameters"]["expression"])
 
+        bundle = build_deployment_bundle_files(
+            graph, result, targets={"argo": True, "dagster": True},
+        )
+        run_spec = json.loads(next(
+            item["content"] for item in bundle["files"]
+            if item["path"] == "run-spec.json"
+        ))
+        flow_node = next(node for node in run_spec["nodes"] if node["id"] == "5")
+        self.assertEqual([], flow_node["runtime_environment"])
+
+    def test_control_flow_requires_only_standard_workspace_environment(self):
+        for template in ("Condition", "Parallel Map"):
+            with self.subTest(template=template):
+                source = _control_flow_main_source({
+                    "kind": "flow", "template": template, "parameters": {},
+                })
+                self.assertEqual([], discover_runtime_environment(source))
+
     def test_control_flow_runtime_passes_through_filesystem_inputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -323,7 +343,7 @@ class DeploymentAgentsTest(unittest.TestCase):
                     "PIPELINE_INPUT_DIR": str(input_dir),
                     "PIPELINE_OUTPUT_DIR": str(output_dir),
                 },
-                clear=False,
+                clear=True,
             ):
                 namespace["main"]()
 
