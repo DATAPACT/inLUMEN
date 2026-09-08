@@ -1270,16 +1270,9 @@ FLOW_SPEC = json.loads({embedded_spec!r})
 
 
 def _runtime_directories():
-    input_dir = os.getenv("PIPELINE_INPUT_DIR")
-    output_dir = os.getenv("PIPELINE_OUTPUT_DIR")
-    if input_dir and output_dir:
-        return Path(input_dir), Path(output_dir)
-
-    # Compatibility with the legacy Dagster launcher.
-    input_manifest = os.getenv("INLUMEN_INPUT_MANIFEST")
     return (
-        Path(input_manifest).parent if input_manifest else Path.cwd(),
-        Path(os.environ["INLUMEN_OUTPUT_DIR"]),
+        Path(os.environ["PIPELINE_INPUT_DIR"]),
+        Path(os.environ["PIPELINE_OUTPUT_DIR"]),
     )
 
 
@@ -1307,16 +1300,7 @@ def _copy_inputs(input_dir: Path, output_dir: Path):
 def main():
     input_dir, output_dir = _runtime_directories()
     output_dir.mkdir(parents=True, exist_ok=True)
-    outputs = _copy_inputs(input_dir, output_dir)
-
-    output_manifest = os.getenv("INLUMEN_OUTPUT_MANIFEST")
-    if output_manifest:
-        manifest_path = Path(output_manifest)
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        manifest_path.write_text(
-            json.dumps({{"schema_version": "inlumen.output-manifest@1", "outputs": outputs}}, indent=2),
-            encoding="utf-8",
-        )
+    _copy_inputs(input_dir, output_dir)
 
 
 if __name__ == "__main__":
