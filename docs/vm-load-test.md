@@ -1,17 +1,19 @@
-# Deploy this branch and test concurrent pipeline design
+# Deploy a candidate and test concurrent pipeline design
 
-Use `codex/multi-user-production-architecture` throughout. No merge into `main`
-is needed. Use a dedicated staging VM and synthetic test accounts/data for the
-first run. The load generator runs on a separate machine, so its browsers do not
+Select an exact candidate commit or release tag from the repository. Use a
+dedicated staging VM and synthetic test accounts/data for the first run.
+The load generator runs on a separate machine, so its browsers do not
 consume the application VM's CPU and memory.
 
-## 1. Deploy the branch
+## 1. Deploy the candidate
 
-Install Docker Engine, its Compose plugin and Git on the VM, then:
+Install Docker Engine, its Compose plugin and Git on the VM. Replace
+`CANDIDATE_REF` below with the selected commit SHA or release tag:
 
 ```sh
-git clone --single-branch --branch codex/multi-user-production-architecture https://github.com/DATAPACT/inLUMEN.git
+git clone https://github.com/DATAPACT/inLUMEN.git
 cd inLUMEN
+git checkout --detach CANDIDATE_REF
 git rev-parse HEAD
 cp .env.production.example .env.production
 chmod 600 .env.production
@@ -28,9 +30,14 @@ web origins (`https://HOST`), preserving existing entries. Keycloak's issuer mus
 be reachable from both browsers and the VM. Assign `inlumen-admin` only to your
 application administrator; the username `admin` alone does not grant permission.
 
-Create a Cloudflare Tunnel public hostname pointing to `http://inlumen-frontend:8080`
-and set its token in `.env.production`. The Compose tunnel container joins the
-application network. No database or application origin ports need publishing.
+Start the separate shared Cloudflare connector stack and set
+`INLUMEN_TUNNEL_NETWORK` in `.env.production` to its existing Docker network
+(for example, `cloudflare_default`). Configure the tunnel's public hostname to
+route to `http://inlumen-frontend:8080`. The application frontend joins that
+network; the inLUMEN Compose file does not run a connector or accept a tunnel
+token. Keep the token in the shared connector stack. No database or application
+origin ports need publishing. See the
+[shared ingress instructions](production-multi-user.md#shared-cloudflare-connector-single-application-compose-file).
 If Cloudflare Access protects the hostname, the load browsers also need an
 approved Access login; this runner automates the Keycloak form only.
 
@@ -57,8 +64,9 @@ Log in once as administrator, open **Settings → Manage shared LLM**, save the
 provider/model/key, and enable sharing. Verify one ordinary user can select
 **Application-provided LLM** and design a pipeline manually.
 
-For subsequent branch updates, use `git pull --ff-only` in the clean VM checkout,
-record the new SHA, and repeat the Compose build/start. Back up persistent data
+For a subsequent candidate, run `git fetch origin --tags` in the clean VM
+checkout, then `git checkout --detach CANDIDATE_REF` with the new commit or tag.
+Record the SHA and repeat the Compose build/start. Back up persistent data
 before updates; do not run `down -v` against data you want to retain.
 
 ## 2. Prepare the load generator and test users
