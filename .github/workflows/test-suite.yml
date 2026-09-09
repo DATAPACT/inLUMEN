@@ -128,7 +128,14 @@ jobs:
           docker run -d --name integration-minio -p 19000:9000 \
             -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
             minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e server /data
-          curl --fail --retry 20 --retry-connrefused --retry-delay 1 http://localhost:19000/minio/health/ready
+          # Docker can accept the connection before MinIO starts serving HTTP,
+          # producing a connection reset rather than connection refused.
+          if ! curl --fail --silent --show-error --retry 20 --retry-all-errors \
+            --retry-delay 1 --retry-max-time 60 --connect-timeout 2 --max-time 5 \
+            http://localhost:19000/minio/health/ready; then
+            docker logs integration-minio
+            exit 1
+          fi
       - run: cd backend && python -m unittest discover -s tests -p 'test_*integration.py'
       - run: cd backend && python -m unittest discover -s tests -p test_agent_workspace_queries.py
       - run: python scripts/test_postgres_workers.py runner
