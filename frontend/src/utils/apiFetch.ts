@@ -28,11 +28,20 @@ export const apiFetch = (url: string, init?: RequestInit): Promise<Response> => 
   if (_workspaceId) headers.set('X-InLumen-Workspace-Id', _workspaceId);
   const path = new URL(url, window.location.origin).pathname;
   const mutation = !['GET', 'HEAD', 'OPTIONS'].includes((init?.method || 'GET').toUpperCase());
-  const graph = /^\/api\/(graph\/|pipeline\/(graph|history\/restore|versions))/.test(path);
+  const graph = /^\/api\/(graph\/|pipeline\/(graph|history\/restore|versions|overview)(\/|$)|reusable-pipelines(\/|$)|nodes\/[^/]+\/files(\/text)?$)/.test(path);
   const send = () => fetch(url, (AUTH_ENABLED && _token) || _workspaceId || headers.has("If-Match") ? { ...init, headers } : init);
   if (mutation && graph) return graphWrite((revision) => {
     if (revision) headers.set('If-Match', revision);
     return send();
+  }, {
+    readGraph: () => {
+      const readHeaders = new Headers(headers);
+      readHeaders.delete('If-Match');
+      return fetch(new URL('/api/pipeline/graph', new URL(url, window.location.origin)), { headers: readHeaders });
+    },
+    preservesGraph: path === '/api/reusable-pipelines',
+    // Rejected attachments belong to the upload form; no graph write occurred.
+    validationStatuses: /^\/api\/nodes\/[^/]+\/files(\/text)?$/.test(path) ? [400, 404, 413, 415, 422] : undefined,
   });
   return send();
 };

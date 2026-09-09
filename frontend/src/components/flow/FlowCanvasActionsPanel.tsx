@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 type FlowCanvasActionsPanelProps = {
   fileInputRef: React.RefObject<HTMLInputElement>;
   onSave: () => void;
+  saveStatus?: React.ReactNode;
   onUndo: () => void;
   onRedo: () => void;
   onExportJson: () => void;
@@ -25,6 +26,7 @@ type FlowCanvasActionsPanelProps = {
 export const FlowCanvasActionsPanel = ({
   fileInputRef,
   onSave,
+  saveStatus,
   onUndo,
   onRedo,
   onExportJson,
@@ -41,12 +43,13 @@ export const FlowCanvasActionsPanel = ({
   isHistoryRestoring = false,
 }: FlowCanvasActionsPanelProps) => (
   <>
-    <Panel position="top-center" className="mt-2 max-w-[calc(100vw-1rem)]">
-      <div className="flex flex-nowrap items-center gap-1 rounded-xl border border-border/80 bg-card/85 p-1.5 text-xs shadow-xl shadow-black/10 backdrop-blur-md">
+    <Panel position="top-center" className="mt-2 w-max max-w-[calc(100%_-_1.5rem)]">
+      <div className="flex flex-wrap items-center gap-1 rounded-xl border border-border/80 bg-card/85 p-1.5 text-xs shadow-xl shadow-black/10 backdrop-blur-md [&_button:hover]:bg-muted [&_button:hover]:text-foreground">
       <Button size="sm" variant="outline" onClick={onSave} className="flex h-7 items-center gap-1 px-2.5">
         <Save className="h-3.5 w-3.5" />
         Save
       </Button>
+      {saveStatus}
       <Button
         size="sm"
         variant="ghost"

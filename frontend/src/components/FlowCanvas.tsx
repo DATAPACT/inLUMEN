@@ -1,5 +1,5 @@
 import { GraphSaveStatus } from '@/components/flow/GraphSaveStatus';
-import { clearPersistenceError, reportPersistenceError, getPersistenceState, graphReadTicket, acknowledgeGraphRead } from '@/features/flow/persistenceState';
+import { clearPersistenceError, reportPersistenceError, getPersistenceState, graphReadTicket, acknowledgeGraphRead, persistenceEpoch } from '@/features/flow/persistenceState';
 import { readStoredArray, releaseDraftProtection } from '@/utils/workspaceStorage';
 import { getWorkspaceStorage } from '@/utils/workspaceStorage';
 import React, { useState, useCallback, useRef, useEffect, forwardRef, useImperativeHandle, useMemo } from 'react';
@@ -508,6 +508,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   workspaceResetKey = 0,
 }, ref) => {
   const [workspaceStorage] = useState(() => getWorkspaceStorage());
+  const [previousDraft, setPreviousDraft] = useState(() => workspaceStorage.getItem('ai-flow-recovery-draft'));
+  const downloadedDraftSignatureRef = useRef<string | null>(null);
   const [nodes, setNodes] = useState<Node[]>(() => {
     return readStoredArray<Node>(workspaceStorage, 'ai-flow-nodes', (value): value is Node => !!value && typeof value === 'object' && typeof (value as Node).id === 'string' && !!(value as Node).position && !!(value as Node).data);
   });
@@ -563,6 +565,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     requestGraphViewportFit({ duration: ASSISTANT_GRAPH_FIT_DURATION });
   }, [currentGraphLayoutSignature, followAssistantDrawing, requestGraphViewportFit]);
   const lastSeenUpdatedAtRef = useRef<string | null>(null);
+  const graphSettingsRef = useRef<Record<string, unknown>>({});
   const refreshCooldownUntilRef = useRef<number>(0);
   const syncBackoffUntilRef = useRef<number>(0);
   const syncFailureLoggedRef = useRef(false);
@@ -801,6 +804,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   }, [createHistorySnapshot, syncHistoryAvailability]);
 
   const applyGraph = useCallback((data: unknown, normalizedGraph?: NormalizedGraph) => {
+    if (!acknowledgeGraphRead(data)) throw new Error('A newer graph is already loaded.');
     const g = normalizedGraph ?? normalizeGraph(data);
     const pipeline = data && typeof data === "object"
       ? (data as { pipeline?: { active_version_uid?: unknown; active_version_name?: unknown; description?: unknown } }).pipeline
@@ -814,10 +818,10 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     if (typeof pipeline?.description === "string") {
       onPipelineDescriptionChange?.(pipeline.description);
     }
-    acknowledgeGraphRead(data);
     setNodes(g.nodes);
     setEdges(g.edges);
     lastSeenUpdatedAtRef.current = g.updated_at;
+    graphSettingsRef.current = g.settings ?? {};
     nodeId = getNextNumericNodeId(g.nodes, nodeId);
 
     const selectedNodeId = selectedNodeIdRef.current;
@@ -830,10 +834,10 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     return g;
   }, [onActiveVersionChange, onActiveVersionNameChange, onNodeSelect, onPipelineDescriptionChange]);
 
-  const fetchGraphAndApply = useCallback(async () => {
+  const fetchGraphAndApply = useCallback(async (recovering = false) => {
     const ticket = graphReadTicket();
     const data = await fetchPipelineGraph();
-    if (ticket !== graphReadTicket() || getPersistenceState().pending || getPersistenceState().error) {
+    if (ticket !== graphReadTicket() || getPersistenceState().pending || (!recovering && getPersistenceState().error)) {
       throw new Error('Graph refresh paused to preserve unsaved edits.');
     }
     return applyGraph(data);
@@ -1266,6 +1270,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     const viewport = reactFlowInstance?.toObject().viewport ?? { x: 0, y: 0, zoom: 1 };
     return {
       updated_at: lastSeenUpdatedAtRef.current,
+      settings: graphSettingsRef.current,
       nodes: nodes.map((node) => {
         const data = { ...(node.data || {}) };
         delete data.file_buckets;
@@ -1510,6 +1515,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
   const onNodesChangeInternal = useCallback(
     (changes: NodeChange[]) => {
+      // ReactFlow also emits position events when a click starts/ends a drag
+      // without moving. Selection and drag bookkeeping are not graph edits.
+      const positionChanged = (change: NodeChange) => {
+        if (change.type !== 'position' || !change.position) return false;
+        const current = nodes.find((node) => node.id === change.id);
+        return current && (current.position.x !== change.position.x || current.position.y !== change.position.y);
+      };
       const hasGraphEdit = changes.some((change) => (
         change.type !== 'select'
         && change.type !== 'dimensions'
@@ -1518,7 +1530,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       if (hasGraphEdit) {
         pushHistorySnapshot();
       }
-      if (changes.some((change) => change.type !== 'select' && change.type !== 'dimensions')) {
+      if (hasGraphEdit || changes.some(positionChanged)) {
         onCanvasEdited?.();
       }
       const removedNodeIds = changes
@@ -1532,7 +1544,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
       setNodes((currentNodes) => applyNodeChanges(changes, currentNodes));
       for (const change of changes) {
-        if (change.type === 'position' && change.position && !change.dragging) {
+        if (change.type === 'position' && change.position && !change.dragging && positionChanged(change)) {
           pushHistorySnapshot(undefined, { coalesceKey: 'keyboard-position' });
           markLocalWrite(800);
           const moved = nodes.find((node) => node.id === change.id);
@@ -2109,11 +2121,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         advanced: showPortDetails,
         validationByNode: designValidation.byNode,
       }}>
-      <GraphSaveStatus onDownload={() => {
-        const blob = new Blob([JSON.stringify({ nodes, edges }, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a'); link.href = url; link.download = 'inlumen-draft.json'; link.click(); URL.revokeObjectURL(url);
-      }} onReload={() => { clearPersistenceError(); return fetchGraphAndApply().then(() => { releaseDraftProtection(); clearPersistenceError(); }).catch(reportPersistenceError); }} />
       <ReactFlow
         nodes={displayedNodes}
         edges={displayedEdges}
@@ -2131,16 +2138,14 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         onNodeDragStop={(_, node) => {
           const dragStartSnapshot = dragStartSnapshotRef.current;
           dragStartSnapshotRef.current = null;
-          if (dragStartSnapshot) {
-            const finalNodes = nodes.map((currentNode) => (
-              currentNode.id === node.id
-                ? { ...currentNode, position: node.position }
-                : currentNode
-            ));
-            if (dragStartSnapshot.signature !== graphHistorySignature(finalNodes, edges)) {
-              pushHistorySnapshot(dragStartSnapshot);
-            }
-          }
+          if (!dragStartSnapshot) return;
+          const finalNodes = nodes.map((currentNode) => (
+            currentNode.id === node.id
+              ? { ...currentNode, position: node.position }
+              : currentNode
+          ));
+          if (dragStartSnapshot.signature === graphHistorySignature(finalNodes, edges)) return;
+          pushHistorySnapshot(dragStartSnapshot);
           onCanvasEdited?.();
           markLocalWrite(800);
           void updateNodePositionInBackend(node).catch(reportPersistenceError);
@@ -2184,6 +2189,35 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         <FlowCanvasActionsPanel
           fileInputRef={fileInputRef}
           onSave={openSaveVersionDialog}
+          saveStatus={<GraphSaveStatus
+            onDownload={() => {
+              const draft = createSerializableFlow();
+              downloadJsonFile(draft, 'inlumen-draft.json');
+              downloadedDraftSignatureRef.current = graphHistorySignature(nodes, edges);
+            }}
+            onDownloadPrevious={previousDraft ? () => downloadJsonFile(JSON.parse(previousDraft), 'inlumen-draft.json') : undefined}
+            onRetry={async () => {
+              clearPersistenceError();
+              await rebuildBackendFromFlow(nodes, edges, graphSettingsRef.current);
+              onCanvasEdited?.();
+            }}
+            onReload={async () => {
+              const epoch = persistenceEpoch();
+              const draft = JSON.stringify(createSerializableFlow());
+              workspaceStorage.setItem('ai-flow-recovery-draft', draft);
+              const retainedLocally = workspaceStorage.getItem('ai-flow-recovery-draft') === draft;
+              if (!retainedLocally && downloadedDraftSignatureRef.current !== graphHistorySignature(nodes, edges)) {
+                throw new Error('Could not keep a local copy. Download your draft before reloading.');
+              }
+              if (retainedLocally) setPreviousDraft(draft);
+              await fetchGraphAndApply(true);
+              // Keep queued autosaves blocked until React exposes the loaded graph.
+              await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+              if (epoch !== persistenceEpoch()) return;
+              releaseDraftProtection();
+              clearPersistenceError();
+            }}
+          />}
           onUndo={() => { void undoGraphChange(); }}
           onRedo={() => { void redoGraphChange(); }}
           onExportJson={exportFlow}

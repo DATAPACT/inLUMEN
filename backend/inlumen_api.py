@@ -358,6 +358,12 @@ def _proxy(
 ) -> LocalApiResponse:
     include_content_type = files is None and form is None and json_payload is None
     body = None if json_payload is not None else data if data is not None else request.get_data()
+    headers = _forward_headers(include_content_type=include_content_type)
+    if adapter_request is dispatch_graph_request and "If-Match" in headers:
+        # One file action can attach a file, update its artifact and record an
+        # event. Only our successful writes advance this request's condition;
+        # a read or rejected write must not acknowledge somebody else's edit.
+        headers["If-Match"] = getattr(g, "graph_write_etag", headers["If-Match"])
     upstream = adapter_request(
         backend_path,
         method=method or request.method,
@@ -366,11 +372,13 @@ def _proxy(
         json_payload=json_payload,
         files=files,
         form=form,
-        headers=_forward_headers(include_content_type=include_content_type),
+        headers=headers,
     )
     if adapter_request is dispatch_graph_request and upstream.headers.get("ETag"):
         # Preserve revisions when routes rebuild JSON to include cleanup results.
         g.graph_response_etag = upstream.headers["ETag"]
+        if upstream.ok and (method or request.method).upper() not in {"GET", "HEAD", "OPTIONS"}:
+            g.graph_write_etag = upstream.headers["ETag"]
     return upstream
 
 
@@ -3138,18 +3146,34 @@ def pipeline_generation_run(run_id: str):
         return _json_error(502, "pipeline generation run lookup failed", str(exc))
 
 
+def _file_mutation_precondition():
+    """Reject an already-stale file action before touching object storage."""
+    expected = request.headers.get("If-Match")
+    if not expected:
+        return None
+    graph_response = _proxy(dispatch_graph_request, "neo4j_get_graph", method="GET", params={}, data=b"")
+    if not graph_response.ok:
+        return _response_from_upstream(graph_response)
+    if graph_response.headers.get("ETag") != expected:
+        return jsonify({"code": "graph_conflict", "error": "The saved graph has changed."}), 409
+    g.file_mutation_graph = _upstream_json(graph_response)
+    return None
+
+
 def _file_owner_node_type(node_id: str) -> tuple[str, Any | None]:
     """Resolve the live graph type before accepting a node file mutation."""
-    graph_response = _proxy(
-        dispatch_graph_request,
-        "neo4j_get_graph",
-        method="GET",
-        params={},
-        data=b"",
-    )
-    if not graph_response.ok:
-        return "", graph_response
-    graph = _upstream_json(graph_response)
+    graph = getattr(g, "file_mutation_graph", None)
+    if graph is None:
+        graph_response = _proxy(
+            dispatch_graph_request,
+            "neo4j_get_graph",
+            method="GET",
+            params={},
+            data=b"",
+        )
+        if not graph_response.ok:
+            return "", graph_response
+        graph = _upstream_json(graph_response)
     nodes = graph.get("nodes") if isinstance(graph, dict) else []
     for node in nodes if isinstance(nodes, list) else []:
         if not isinstance(node, dict):
@@ -3164,6 +3188,9 @@ def _file_owner_node_type(node_id: str) -> tuple[str, Any | None]:
 def node_files(node_id: str):
     if request.method == "OPTIONS":
         return _preflight_response()
+    precondition_error = _file_mutation_precondition()
+    if precondition_error is not None:
+        return precondition_error
 
     if request.method == "POST":
         uploaded = request.files.get("file")
@@ -3342,6 +3369,9 @@ def node_files(node_id: str):
 def node_text_file(node_id: str):
     if request.method == "OPTIONS":
         return _preflight_response()
+    precondition_error = _file_mutation_precondition()
+    if precondition_error is not None:
+        return precondition_error
     data = _request_json()
     filename = str(data.get("filename") or "").strip()
     content = data.get("content")
