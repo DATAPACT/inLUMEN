@@ -6,10 +6,9 @@ type Props = {
   onDownload: () => void;
   onReload: () => Promise<void>;
   onRetry: () => Promise<void>;
-  onDownloadPrevious?: () => void;
 };
 
-export function GraphSaveStatus({ onDownload, onReload, onRetry, onDownloadPrevious }: Props) {
+export function GraphSaveStatus({ onDownload, onReload, onRetry }: Props) {
   const [recovering, setRecovering] = useState(false);
   const state = useSyncExternalStore(subscribePersistence, getPersistenceState);
   const recover = async (action: () => Promise<void>) => {
@@ -28,6 +27,5 @@ export function GraphSaveStatus({ onDownload, onReload, onRetry, onDownloadPrevi
       <Button size="sm" variant="ghost" className="h-7 px-2" onClick={onDownload}>Download draft</Button>
       <Button size="sm" variant="ghost" className="h-7 px-2" title="Keep a local copy of this draft and load the saved graph" disabled={state.pending > 0 || recovering} onClick={() => { void recover(onReload); }}>Reload saved graph</Button>
     </>}
-    {!state.error && onDownloadPrevious && <Button size="sm" variant="ghost" className="h-7 px-2" title="Download the local recovery copy retained before reloading the saved pipeline" onClick={onDownloadPrevious}>Download recovery copy</Button>}
   </div>;
 }

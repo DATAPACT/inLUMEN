@@ -508,7 +508,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   workspaceResetKey = 0,
 }, ref) => {
   const [workspaceStorage] = useState(() => getWorkspaceStorage());
-  const [previousDraft, setPreviousDraft] = useState(() => workspaceStorage.getItem('ai-flow-recovery-draft'));
   const downloadedDraftSignatureRef = useRef<string | null>(null);
   const [nodes, setNodes] = useState<Node[]>(() => {
     return readStoredArray<Node>(workspaceStorage, 'ai-flow-nodes', (value): value is Node => !!value && typeof value === 'object' && typeof (value as Node).id === 'string' && !!(value as Node).position && !!(value as Node).data);
@@ -2195,7 +2194,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
               downloadJsonFile(draft, 'inlumen-draft.json');
               downloadedDraftSignatureRef.current = graphHistorySignature(nodes, edges);
             }}
-            onDownloadPrevious={previousDraft ? () => downloadJsonFile(JSON.parse(previousDraft), 'inlumen-draft.json') : undefined}
             onRetry={async () => {
               clearPersistenceError();
               await rebuildBackendFromFlow(nodes, edges, graphSettingsRef.current);
@@ -2209,7 +2207,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
               if (!retainedLocally && downloadedDraftSignatureRef.current !== graphHistorySignature(nodes, edges)) {
                 throw new Error('Could not keep a local copy. Download your draft before reloading.');
               }
-              if (retainedLocally) setPreviousDraft(draft);
               await fetchGraphAndApply(true);
               // Keep queued autosaves blocked until React exposes the loaded graph.
               await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));

@@ -6,17 +6,13 @@ import { GraphSaveStatus } from './GraphSaveStatus';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-it('identifies the retained draft as a downloadable recovery copy while saved', async () => {
+it('shows no recovery button when the pipeline is saved', async () => {
   resetPersistence();
   const container = document.createElement('div');
   const root = createRoot(container);
-  const download = vi.fn();
-  await act(async () => root.render(<GraphSaveStatus onDownload={vi.fn()} onReload={vi.fn()} onRetry={vi.fn()} onDownloadPrevious={download} />));
+  await act(async () => root.render(<GraphSaveStatus onDownload={vi.fn()} onReload={vi.fn()} onRetry={vi.fn()} />));
   expect(container.querySelector('[data-save-state]')?.getAttribute('data-save-state')).toBe('saved');
-  const button = container.querySelector('button')!;
-  expect(button.textContent).toBe('Download recovery copy');
-  expect(button.title).toContain('before reloading');
-  await act(async () => button.click());
-  expect(download).toHaveBeenCalledOnce();
+  expect(container.querySelector('button')).toBeNull();
+  expect(container.textContent).toBe('');
   await act(async () => root.unmount());
 });
