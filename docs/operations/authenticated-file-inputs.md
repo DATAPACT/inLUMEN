@@ -103,3 +103,29 @@ docker compose --env-file .env.production -f docker-compose-prod.yml ps
 The VM fetch configuration only tracks `main`, so the initial checkout required `git switch --no-track -c codex/fix-authenticated-file-inputs origin/codex/fix-authenticated-file-inputs` after the explicit fetch above. Subsequent updates can use the shown switch and fast-forward merge.
 
 If the fix is merged before a later deployment, update `main` to the reviewed merge commit instead of switching to this branch. Retain the existing `.env.production`; defaults work without adding keys. Rebuild/recreate all three services together. Reload the browser to clear a persistence block left by an earlier failed save. Use a new isolated workspace for the post-deployment smoke check and start a new generation run for any pre-upgrade job that lacks staged input bytes.
+
+## Follow-up: Dagster execution permissions and recovery-copy label
+
+The live checks above covered codegen sample execution, not the Run pipeline Dagster worker. A subsequent real audio run exposed a separate failure: exported bundles contain `outputs/<node>/.gitkeep`, so extraction creates root-owned node directories. Only the mount root was made writable. The worker (UID 65532) could not create `outputs/<node>/<run-id>`.
+
+Worker preparation now makes every directory within the job's dedicated outputs/workspaces mounts writable, rejecting symbolic links before changing permissions. Input mounts remain read-only and execution retains UID 65532, a read-only root filesystem, dropped capabilities, and no-new-privileges. No configuration changes are needed.
+
+The toolbar's “Previous draft” was an optional download of a retained browser recovery copy, not an indication that the current graph was stale. It is now labelled “Download recovery copy”, with explanatory hover text; the recovery data is preserved.
+
+Regression coverage includes a Linux subprocess that fails before preparation and writes successfully afterward as UID 65532, rejection of links to outside directories, and an opt-in real Docker Dagster materialization that reads an attached file and writes under pre-existing node directories. The integration test requires a directory shared at the same absolute path by the test container and Docker host:
+
+```sh
+mkdir -p /tmp/inlumen-permission-tests
+docker run --rm \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /tmp/inlumen-permission-tests:/tmp/inlumen-permission-tests \
+  -v "$PWD/codegen/app:/app/app:ro" \
+  -v "$PWD/codegen/tests:/repo/codegen/tests:ro" \
+  -v "$PWD/contracts:/repo/contracts:ro" \
+  -e PYTHONPATH=/app -e RUN_DAGSTER_PERMISSION_INTEGRATION=1 \
+  -e DAGSTER_TEST_SHARED_DIR=/tmp/inlumen-permission-tests \
+  inlumen-codegen-service:local sh -c \
+  'uv pip install --python /app/.venv/bin/python pytest && python -m pytest /repo/codegen/tests/test_deployment_validation.py -q -p no:cacheprovider'
+```
+
+For this follow-up, rebuild and recreate `codegen frontend` with the production compose commands above. Backend/runner images do not change. Failed historical runs retain their recorded failure; start a new run to use the fix. The isolated fixture does not establish that the user's speech/transcription models or entire audio pipeline succeed.

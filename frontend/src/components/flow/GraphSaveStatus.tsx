@@ -28,6 +28,6 @@ export function GraphSaveStatus({ onDownload, onReload, onRetry, onDownloadPrevi
       <Button size="sm" variant="ghost" className="h-7 px-2" onClick={onDownload}>Download draft</Button>
       <Button size="sm" variant="ghost" className="h-7 px-2" title="Keep a local copy of this draft and load the saved graph" disabled={state.pending > 0 || recovering} onClick={() => { void recover(onReload); }}>Reload saved graph</Button>
     </>}
-    {!state.error && onDownloadPrevious && <Button size="sm" variant="ghost" className="h-7 px-2" onClick={onDownloadPrevious}>Previous draft</Button>}
+    {!state.error && onDownloadPrevious && <Button size="sm" variant="ghost" className="h-7 px-2" title="Download the local recovery copy retained before reloading the saved pipeline" onClick={onDownloadPrevious}>Download recovery copy</Button>}
   </div>;
 }
