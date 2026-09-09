@@ -61,6 +61,7 @@ async function moveNode(page: Page, direction: 'ArrowRight' | 'ArrowDown') {
   const node = page.locator('.react-flow__node').first();
   await node.focus();
   await node.press('Enter');
+  await expect(node).toHaveClass(/selected/);
   await node.press(direction);
 }
 
@@ -111,6 +112,9 @@ test('two editing tabs preserve competing drafts and recover inline', async ({ p
   await open(second);
   await moveNode(page, 'ArrowRight');
   await expect.poll(() => server.graph().nodes[0].position.x).toBeGreaterThan(150);
+  // Finish the first tab's debounced version save before the second tab recovers.
+  await expect.poll(() => server.writes.filter(path => path === '/api/pipeline/versions/active').length).toBe(1);
+  await expect(saveStatus(page)).toHaveAttribute('data-save-state', 'saved');
   const savedPosition = server.graph().nodes[0].position;
   await moveNode(second, 'ArrowDown');
   await expect(saveStatus(second).getByText('Couldn’t save', { exact: true })).toBeVisible();
@@ -145,6 +149,8 @@ test('unavailable draft storage does not discard edits and allows a downloaded b
   await open(second);
   await moveNode(page, 'ArrowRight');
   await expect.poll(() => server.graph().nodes[0].position.x).toBeGreaterThan(150);
+  await expect.poll(() => server.writes.filter(path => path === '/api/pipeline/versions/active').length).toBe(1);
+  await expect(saveStatus(page)).toHaveAttribute('data-save-state', 'saved');
   await moveNode(second, 'ArrowDown');
   await expect(saveStatus(second).getByText('Couldn’t save', { exact: true })).toBeVisible();
   await saveStatus(second).getByRole('button', { name: 'Reload saved graph' }).click();
