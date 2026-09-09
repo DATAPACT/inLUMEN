@@ -107,15 +107,14 @@ describe("Project JSON Pipeline IR", () => {
     expect(restored.nodes[0].data).not.toHaveProperty("source_config");
   });
 
-  it("round-trips a pinned reusable-pipeline reference and interface", () => {
+  it.each([false, true])("round-trips a reusable reference and interface (legacy version: %s)", (legacy) => {
     const reusable = conversationUnderstandingSubpipeline();
     const definition = {
       version: 2 as const,
       reference: {
         pipeline_uid: "conversation-pipeline",
         pipeline_name: "Conversation Understanding",
-        version_uid: "conversation-v1",
-        version_name: "Version 1",
+        ...(legacy ? { version_uid: "conversation-v1", version_name: "Version 1" } : {}),
       },
       interface: reusable.interface,
       resolved_graph: reusable.graph,
@@ -139,18 +138,19 @@ describe("Project JSON Pipeline IR", () => {
       version: 2,
       reference: {
         pipeline_uid: "conversation-pipeline",
-        version_uid: "conversation-v1",
+        ...(legacy ? { version_uid: "conversation-v1" } : {}),
       },
       interface: {
         inputs: [{ id: "audio", internal: { node: "conversation-input", port: "audio" } }],
       },
     });
 
+    if (!legacy) expect(document.pipeline.nodes[0].subpipeline?.reference).not.toHaveProperty("version_uid");
     const restored = projectDocumentToGraph(document);
     expect(restored.nodes[0].data.subpipeline).not.toHaveProperty("graph");
     expect(restored.nodes[0].data.subpipeline.reference).toMatchObject({
       pipeline_uid: "conversation-pipeline",
-      version_uid: "conversation-v1",
+      ...(legacy ? { version_uid: "conversation-v1" } : {}),
     });
     expect(restored.nodes[0].data.subpipeline.interface.outputs[0]).toMatchObject({
       id: "conversation_analysis",

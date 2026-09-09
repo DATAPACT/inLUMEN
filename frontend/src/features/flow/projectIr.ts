@@ -110,14 +110,16 @@ const graphToPipelineIr = (graph: NormalizedGraph): PipelineIr => ({
       parameters: objectValue(data.param || data.parameters),
       ...(kind === "task" ? { implementation } : {}),
       ...(files.length > 0 ? { sample_data: files } : {}),
-      ...(kind === "subpipeline" && reference.pipeline_uid && reference.version_uid ? {
+      ...(kind === "subpipeline" && reference.pipeline_uid ? {
         subpipeline: {
           version: 2 as const,
           reference: {
             pipeline_uid: String(reference.pipeline_uid),
             pipeline_name: String(reference.pipeline_name || ""),
-            version_uid: String(reference.version_uid),
-            version_name: String(reference.version_name || ""),
+            ...(reference.version_uid ? {
+              version_uid: String(reference.version_uid),
+              version_name: String(reference.version_name || ""),
+            } : {}),
           },
           interface: subpipelineData.interface as SubpipelineInterface,
         },

@@ -23,6 +23,7 @@ from deployment_artifacts import (
     build_argo_workflow_yaml,
     build_dagster_project_files,
     build_deployment_bundle_files,
+    extract_pipeline_steps,
 )
 from model_plans import FASTER_WHISPER_PLAN
 
@@ -38,6 +39,21 @@ def dockerfile_content():
         'CMD ["python", "/app/main.py"]',
         "",
     ])
+
+
+class SubpipelineExecutionDepthTest(unittest.TestCase):
+    def test_export_and_run_preparation_reject_unresolved_and_nested_subpipelines(self):
+        for definition in (
+            {"resolution_error": "Referenced reusable pipeline version was not found."},
+            {"resolved_graph": {"nodes": [{"id": "nested", "type": "subpipeline"}]}},
+            {"graph": {"nodes": [{"id": "nested", "data": {"type": "subpipeline"}}]}},
+        ):
+            for graph in (
+                {"nodes": [{"id": "parent", "data": {"type": "subpipeline", "subpipeline": definition}}]},
+                {"step_rows": [{"step": {"flow_id": "parent", "type": "subpipeline", "subpipeline_json": json.dumps(definition)}}]},
+            ):
+                with self.assertRaises(DeploymentArtifactValidationError):
+                    extract_pipeline_steps(graph)
 
 
 def node_manifest_content(implementation_plan=None):

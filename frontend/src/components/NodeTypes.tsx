@@ -232,7 +232,7 @@ export const CustomNode: React.FC<NodeProps> = ({ id, data, selected }) => {
 
       {visualType === 'subpipeline' && data.subpipeline?.reference && (
         <div className="mt-2 rounded-md border border-cyan-400/15 bg-cyan-950/20 px-2 py-1.5 text-[9px] text-cyan-200">
-          References {data.subpipeline.reference.pipeline_name || 'reusable pipeline'} · {data.subpipeline.reference.version_name || 'pinned version'}
+          References {data.subpipeline.reference.pipeline_name || 'reusable pipeline'}
         </div>
       )}
 

@@ -2452,6 +2452,7 @@ def reusable_pipelines():
 
 
 @app.route("/api/reusable-pipelines/version", methods=["GET", "OPTIONS"])
+@app.route("/api/reusable-pipelines/definition", methods=["GET", "OPTIONS"])
 @require_auth
 def reusable_pipeline_version():
     return _proxy_response(dispatch_graph_request, "neo4j_reusable_pipeline_version")

@@ -8,6 +8,16 @@ import {
   type NodePorts,
 } from "@/features/nodes/nodeSchema";
 
+export const SUBPIPELINE_DEPTH_ERROR =
+  "Only one subpipeline level is supported. A reusable pipeline cannot contain a Subpipeline component.";
+
+export const reusablePipelineNestingError = (graph: unknown): string => {
+  const nodes = (graph as { nodes?: Node[] } | null)?.nodes;
+  return Array.isArray(nodes) && nodes.some((node) =>
+    normalizeType(node?.data?.type ?? node?.type) === "subpipeline"
+  ) ? SUBPIPELINE_DEPTH_ERROR : "";
+};
+
 export type SubpipelinePortBinding = NodePort & {
   internal: { node: string; port: string };
 };
@@ -20,8 +30,8 @@ export type SubpipelineInterface = {
 export type SubpipelineReference = {
   pipeline_uid: string;
   pipeline_name: string;
-  version_uid: string;
-  version_name: string;
+  version_uid?: string;
+  version_name?: string;
 };
 
 export type SubpipelineDefinition = {
@@ -41,7 +51,6 @@ export type ReusablePipelineDraft = {
 export type ReusablePipelineSaveDraft = ReusablePipelineDraft & {
   name: string;
   description: string;
-  versionName: string;
 };
 
 const clonePort = (port: NodePort): NodePort => ({

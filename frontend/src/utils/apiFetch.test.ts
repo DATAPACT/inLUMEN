@@ -121,3 +121,20 @@ it('does not freeze canvas saves when the upload form rejects an attachment', as
     expect(getPersistenceState().error).toBeNull();
   } finally { mock.mockRestore(); }
 });
+
+it.each(['/api/reusable-pipelines', '/api/reusable-pipelines/attach'])('keeps reusable validation failures local to the form: %s', async (path) => {
+  vi.resetModules();
+  const { apiFetch } = await import('@/utils/apiFetch');
+  const { captureGraphRevision, resetPersistence, getPersistenceState } = await import('@/features/flow/persistenceState');
+  resetPersistence();
+  captureGraphRevision(new Response('{}', { headers: { ETag: '"10"' } }));
+  const mock = vi.spyOn(globalThis, 'fetch')
+    .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Only one subpipeline level is supported.' }), { status: 422 }))
+    .mockResolvedValueOnce(new Response('{}', { headers: { ETag: '"11"' } }));
+  try {
+    expect((await apiFetch(path, { method: 'POST' })).status).toBe(422);
+    expect((await apiFetch('/api/graph/nodes/1/properties', { method: 'POST' })).ok).toBe(true);
+    expect(new Headers(mock.mock.calls[1][1]?.headers).get('If-Match')).toBe('"10"');
+    expect(getPersistenceState().error).toBeNull();
+  } finally { mock.mockRestore(); }
+});

@@ -1277,8 +1277,7 @@ const Index = () => {
                   onOverviewUpdated={handleOverviewUpdated}
                   activeChatbotConfig={activeConfig}
                   workspaceResetKey={workspaceResetKey}
-                  getCurrentPipelineGraph={() => flowCanvasRef.current?.getCurrentGraph() || { nodes: [], edges: [] }}
-                  replaceCurrentPipelineGraph={(graph) => flowCanvasRef.current?.replaceCurrentGraph(graph)}
+                  getCurrentPipelineGraph={() => flowCanvasRef.current?.getCurrentVersionGraph() || { nodes: [], edges: [] }}
                   currentPipelineName={activeVersionName}
                   currentPipelineDescription={activePipelineDescription}
                   onGenerateRuntimeCode={() => flowCanvasRef.current?.openCodeGeneration()}

@@ -6,25 +6,19 @@ import type {
 } from "@/features/flow/subpipeline";
 import { apiFetch } from "@/utils/apiFetch";
 
-export type ReusablePipelineVersionSummary = {
-  uid: string;
-  name: string;
-  interface: SubpipelineInterface;
-  node_count: number;
-  edge_count: number;
-  created_at?: string | null;
-  updated_at?: string | null;
-};
-
 export type ReusablePipelineSummary = {
   uid: string;
   name: string;
   description: string;
-  active_version_uid: string;
-  versions: ReusablePipelineVersionSummary[];
+  interface: SubpipelineInterface;
+  node_count: number;
+  edge_count: number;
+  unavailable_reason?: string;
+  created_at?: string | null;
+  updated_at?: string | null;
 };
 
-export type ReusablePipelineVersion = {
+export type ReusablePipelineDefinition = {
   reference: SubpipelineReference;
   description?: string;
   interface: SubpipelineInterface;
@@ -40,7 +34,7 @@ export type SubpipelineCompatibilityConflict = {
   candidates: Array<string | { id: string; name: string; type: string }>;
 };
 
-export type ReusablePipelineAttachment = ReusablePipelineVersion & {
+export type ReusablePipelineAttachment = ReusablePipelineDefinition & {
   ports: { inputs: Array<Record<string, unknown>>; outputs: Array<Record<string, unknown>> };
   compatibility: {
     compatible: boolean;
@@ -71,40 +65,35 @@ export const fetchReusablePipelines = async (): Promise<ReusablePipelineSummary[
   return Array.isArray(payload?.pipelines) ? payload.pipelines : [];
 };
 
-export const fetchReusablePipelineVersion = async (
+export const fetchReusablePipeline = async (
   pipelineUid: string,
-  versionUid: string,
-): Promise<ReusablePipelineVersion> => {
-  const query = new URLSearchParams({ pipeline_uid: pipelineUid, version_uid: versionUid });
+  legacyVersionUid?: string,
+): Promise<ReusablePipelineDefinition> => {
+  const query = new URLSearchParams({ pipeline_uid: pipelineUid });
+  if (legacyVersionUid) query.set("version_uid", legacyVersionUid);
   const response = await apiFetch(
-    `${INLUMEN_API_URL}/api/reusable-pipelines/version?${query.toString()}`,
+    `${INLUMEN_API_URL}/api/reusable-pipelines/definition?${query.toString()}`,
     { method: "GET" },
   );
-  if (!response.ok) throw new Error(await responseError(response, "Failed to load reusable pipeline version"));
+  if (!response.ok) throw new Error(await responseError(response, "Failed to load reusable pipeline"));
   return response.json();
 };
 
 export const saveReusablePipeline = async ({
-  pipelineUid,
   name,
   description,
-  versionName,
   graph,
 }: {
-  pipelineUid?: string;
   name: string;
   description: string;
-  versionName: string;
   graph: NormalizedGraph;
-}): Promise<ReusablePipelineVersion> => {
+}): Promise<ReusablePipelineDefinition> => {
   const response = await apiFetch(`${INLUMEN_API_URL}/api/reusable-pipelines`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      pipeline_uid: pipelineUid || undefined,
       name,
       description,
-      version_name: versionName,
       graph,
     }),
   });
@@ -129,14 +118,12 @@ export const deleteReusablePipeline = async (pipelineUid: string): Promise<void>
 const reusablePipelineAttachment = async ({
   flowId,
   pipelineUid,
-  versionUid,
   dryRun,
   inputMapping,
   outputMapping,
 }: {
   flowId: string;
   pipelineUid: string;
-  versionUid: string;
   dryRun: boolean;
   inputMapping?: Record<string, string>;
   outputMapping?: Record<string, string>;
@@ -147,26 +134,23 @@ const reusablePipelineAttachment = async ({
     body: JSON.stringify({
       flow_id: flowId,
       pipeline_uid: pipelineUid,
-      version_uid: versionUid,
       dry_run: dryRun,
       input_mapping: inputMapping,
       output_mapping: outputMapping,
     }),
   });
-  if (!response.ok) throw new Error(await responseError(response, "Failed to attach reusable pipeline version"));
+  if (!response.ok) throw new Error(await responseError(response, "Failed to attach reusable pipeline"));
   return response.json();
 };
 
 export const previewReusablePipelineAttachment = (args: {
   flowId: string;
   pipelineUid: string;
-  versionUid: string;
 }) => reusablePipelineAttachment({ ...args, dryRun: true });
 
-export const attachReusablePipelineVersion = (args: {
+export const attachReusablePipeline = (args: {
   flowId: string;
   pipelineUid: string;
-  versionUid: string;
   inputMapping?: Record<string, string>;
   outputMapping?: Record<string, string>;
 }) => reusablePipelineAttachment({ ...args, dryRun: false });

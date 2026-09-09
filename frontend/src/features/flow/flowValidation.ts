@@ -10,7 +10,7 @@ import {
   type NodeFileReference,
 } from "@/features/nodes/nodeSchema";
 import { findTemplateForType } from "@/features/nodes/templateCatalog";
-import { normalizeSubpipelineInterface } from "@/features/flow/subpipeline";
+import { normalizeSubpipelineInterface, reusablePipelineNestingError, SUBPIPELINE_DEPTH_ERROR } from "@/features/flow/subpipeline";
 import { taskImplementationMigrationError } from "@/features/nodes/propertyPanelPolicy";
 
 export type ValidationCategory =
@@ -97,7 +97,7 @@ const FILE_SOURCE_TEMPLATES = new Set(["file", "folder", "user upload"]);
 export const validateGraph = (
   nodes: Node[],
   edges: Edge[],
-  options: { mode?: GraphValidationMode; requireRuntime?: boolean } = {},
+  options: { mode?: GraphValidationMode; requireRuntime?: boolean; reusable?: boolean } = {},
 ): GraphValidationReport => {
   const issues: ValidationIssue[] = [];
   const wiringSeverity: ValidationIssue["severity"] = options.mode === "draft" ? "warning" : "error";
@@ -278,14 +278,21 @@ export const validateGraph = (
 
     if (kind === "subpipeline") {
       const subpipeline = objectValue(data.subpipeline);
+      if (options.reusable || reusablePipelineNestingError(subpipeline.resolved_graph)
+        || reusablePipelineNestingError(subpipeline.graph)) {
+        add({
+          severity: "error", category: "configuration", code: "subpipeline-depth-exceeded",
+          nodeId, message: SUBPIPELINE_DEPTH_ERROR,
+        });
+      }
       const reference = objectValue(subpipeline.reference);
-      if (!String(reference.pipeline_uid || "").trim() || !String(reference.version_uid || "").trim()) {
+      if (!String(reference.pipeline_uid || "").trim()) {
         add({
           severity: "error",
           category: "configuration",
           code: "missing-subpipeline-reference",
           nodeId,
-          message: "Select or create a saved reusable pipeline version.",
+          message: "Select or create a saved reusable pipeline.",
         });
       }
       if (String(subpipeline.resolution_error || "").trim()) {

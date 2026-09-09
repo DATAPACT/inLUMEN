@@ -14,6 +14,7 @@ class GraphSaveError extends Error {
 
 export const subscribePersistence = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 export const getPersistenceState = () => state;
+export const getGraphRevision = () => revision;
 export const resetPersistence = () => {
   generation += 1;
   revision = null;

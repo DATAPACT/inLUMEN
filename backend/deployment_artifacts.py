@@ -13,6 +13,7 @@ from node_ports import normalize_node_ports
 from node_secrets import runtime_secret_name
 from runtime_environment import discover_runtime_environment, merge_runtime_environment
 from step_types import normalize_step_type
+from subpipeline_reference import reusable_pipeline_nesting_error
 from workspace_storage import node_bucket_name
 
 try:
@@ -428,6 +429,20 @@ def _files_from_step_data(data: dict, flow_id: str) -> List[dict]:
     return file_refs
 
 
+def _validate_subpipeline_depth(data: dict) -> None:
+    if normalize_step_type(data.get("type")) != "subpipeline":
+        return
+    definition = data.get("subpipeline")
+    if not isinstance(definition, dict):
+        definition = _json_object(data.get("subpipeline_json"))
+    error = str(definition.get("resolution_error") or "").strip() or next((
+        message for key in ("resolved_graph", "graph")
+        if (message := reusable_pipeline_nesting_error(definition.get(key)))
+    ), "")
+    if error:
+        raise DeploymentArtifactValidationError("Subpipeline cannot be executed", [error])
+
+
 def extract_pipeline_steps(pipeline_graph: Optional[dict], files: Any = None) -> List[dict]:
     """Return normalized steps with file refs from either Neo4j graph export shape."""
     normalized_files = normalize_file_refs(files)
@@ -446,6 +461,7 @@ def extract_pipeline_steps(pipeline_graph: Optional[dict], files: Any = None) ->
         if not flow_id:
             continue
         step_type = normalize_step_type(step_data.get("type"))
+        _validate_subpipeline_depth(step_data)
         files_for_step = row.get("files") or []
         steps_by_id[flow_id] = {
             "flow_id": flow_id,
@@ -502,6 +518,7 @@ def extract_pipeline_steps(pipeline_graph: Optional[dict], files: Any = None) ->
         if not flow_id:
             continue
         step_type = normalize_step_type(data.get("type"))
+        _validate_subpipeline_depth(data)
 
         param = data.get("param") if isinstance(data.get("param"), dict) else {}
         if not param and isinstance(data.get("param_json"), str):

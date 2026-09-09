@@ -894,7 +894,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     pushHistorySnapshot();
     onCanvasEdited?.();
     markLocalWrite(1500);
-    await rebuildBackendFromFlow(graph.nodes, graph.edges);
+    await rebuildBackendFromFlow(graph.nodes, graph.edges, graph.settings);
     selectedNodeIdRef.current = null;
     onNodeSelect(null);
     requestGraphViewportFit();

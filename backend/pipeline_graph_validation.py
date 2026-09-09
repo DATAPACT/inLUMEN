@@ -7,7 +7,7 @@ from typing import Any
 
 from node_ports import ports_for_template
 from pipeline_agent.contract import missing_connector_parameters
-from subpipeline_reference import subpipeline_reference
+from subpipeline_reference import SUBPIPELINE_DEPTH_ERROR, reusable_pipeline_nesting_error, subpipeline_reference
 from step_types import normalize_step_type
 
 
@@ -263,12 +263,20 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
 
         if kind == "subpipeline":
             subpipeline = _subpipeline(data)
+            if _nested_depth >= 1 or any(
+                reusable_pipeline_nesting_error(subpipeline.get(key))
+                for key in ("resolved_graph", "graph")
+            ):
+                issues.append(_issue(
+                    "configuration", "subpipeline-depth-exceeded", SUBPIPELINE_DEPTH_ERROR,
+                    node_id=node_id,
+                ))
             reference = subpipeline_reference(subpipeline)
-            if not reference["pipeline_uid"] or not reference["version_uid"]:
+            if not reference["pipeline_uid"]:
                 issues.append(_issue(
                     "configuration",
                     "missing-subpipeline-reference",
-                    "Subpipeline must reference a saved reusable pipeline version.",
+                    "Subpipeline must reference a saved reusable pipeline.",
                     node_id=node_id,
                 ))
             if str(subpipeline.get("resolution_error") or "").strip():

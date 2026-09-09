@@ -1,0 +1,53 @@
+{
+  "nodes": [
+    {
+      "id": "orders",
+      "type": "custom",
+      "position": {"x": 80, "y": 160},
+      "data": {
+        "type": "source",
+        "label": "Orders CSV",
+        "description": "Upload orders.csv from this example.",
+        "template_label": "File",
+        "ports": {"inputs": [], "outputs": [{"id": "data", "name": "orders", "type": "Table", "required": true}]},
+        "param": {},
+        "files": []
+      }
+    },
+    {
+      "id": "summary",
+      "type": "custom",
+      "position": {"x": 380, "y": 160},
+      "data": {
+        "type": "task",
+        "label": "Summarize orders",
+        "description": "Read orders.csv and write summary.json using the supplied main.py.",
+        "template_label": "Custom Logic",
+        "implementation": {"kind": "python"},
+        "ports": {
+          "inputs": [{"id": "input", "name": "orders", "type": "Table", "required": true}],
+          "outputs": [{"id": "output", "name": "summary", "type": "JSON", "required": true}]
+        },
+        "param": {},
+        "files": []
+      }
+    },
+    {
+      "id": "result",
+      "type": "custom",
+      "position": {"x": 680, "y": 160},
+      "data": {
+        "type": "destination",
+        "label": "Summary JSON",
+        "description": "Capture the summary as a downloadable file.",
+        "template_label": "File",
+        "ports": {"inputs": [{"id": "data", "name": "summary", "type": "JSON", "required": true}], "outputs": []},
+        "param": {"filename": "summary.json"}
+      }
+    }
+  ],
+  "edges": [
+    {"id": "orders-summary", "source": "orders", "sourceHandle": "data", "target": "summary", "targetHandle": "input"},
+    {"id": "summary-result", "source": "summary", "sourceHandle": "output", "target": "result", "targetHandle": "data"}
+  ]
+}

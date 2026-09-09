@@ -25,6 +25,7 @@ from subpipeline_reference import (
     normalize_reusable_pipeline_graph,
     plan_subpipeline_port_migration,
     public_ports_for_interface,
+    reusable_pipeline_nesting_error,
 )
 
 
@@ -391,11 +392,23 @@ def build_pipeline_editor_tools(
     def _cypher_string(value: object) -> str:
         return str(value or "").replace("\\", "\\\\").replace("'", "\\'")
 
+    def _reusable_contract(reusable):
+        graph_json = reusable.get("graph_json")
+        if graph_json:
+            graph = normalize_reusable_pipeline_graph(json.loads(graph_json))
+            error = reusable_pipeline_nesting_error(graph)
+            if error:
+                raise ValueError(error)
+            interface = derive_subpipeline_interface(graph)
+            return interface, public_ports_for_interface(interface)
+        return (json.loads(reusable.get("interface_json") or "{}"),
+                json.loads(reusable.get("public_ports_json") or "{}"))
+
     async def _resolve_subpipeline_for_creation(
         data: dict[str, Any],
         label: str,
     ) -> dict[str, Any]:
-        """Resolve a saved version before a parent Subpipeline node exists."""
+        """Resolve a saved pipeline before a parent Subpipeline node exists."""
 
         def optional_id(name: str) -> str:
             value = str(data.get(name) or "").strip()
@@ -429,16 +442,22 @@ def build_pipeline_editor_tools(
         elif version_name:
             version_filter = f"toLower(trim(rv.name)) = toLower(trim('{escaped_version_name}'))"
         else:
-            version_filter = "rv.uid = rp.active_version_uid"
+            version_filter = "true"
 
         lookup = await run_query(f"""
-        MATCH (rp:PIPELINE {{status:'reusable'}})-[:HAS_VERSION]->(rv:PIPELINE_VERSION)
-        WHERE {pipeline_filter} AND {version_filter}
+        MATCH (rp:PIPELINE {{status:'reusable'}})
+        WHERE {pipeline_filter}
+        OPTIONAL MATCH (rp)-[:HAS_VERSION]->(rv:PIPELINE_VERSION)
+        WHERE {version_filter}
+        WITH rp, rv ORDER BY CASE WHEN rv.uid = rp.active_version_uid THEN 0 ELSE 1 END, rv.created_at DESC
+        WITH rp, head(collect(rv)) AS rv
+        WHERE rp.graph_json IS NOT NULL OR rv IS NOT NULL
         RETURN {{
           pipeline_uid:rp.uid, pipeline_name:rp.name,
           version_uid:rv.uid, version_name:rv.name,
-          interface_json:rv.interface_json,
-          public_ports_json:rv.public_ports_json
+          graph_json:coalesce(rp.graph_json, rv.graph_json),
+          interface_json:coalesce(rp.interface_json, rv.interface_json),
+          public_ports_json:coalesce(rp.public_ports_json, rv.public_ports_json)
         }} AS reusable_pipeline
         ORDER BY CASE WHEN toLower(trim(rp.name)) = toLower(trim('{escaped_pipeline_name}')) THEN 0 ELSE 1 END,
                  rp.name
@@ -451,20 +470,19 @@ def build_pipeline_editor_tools(
         ]
         if not matches:
             raise ValueError(
-                f"No saved reusable pipeline version matched '{pipeline_name}'. "
-                "Call list_reusable_pipelines and use its pipeline/version identifiers."
+                f"No saved reusable pipeline matched '{pipeline_name}'. "
+                "Call list_reusable_pipelines and use its pipeline identifier."
             )
         if len(matches) > 1 and not pipeline_uid:
             raise ValueError(
                 f"Reusable pipeline name '{pipeline_name}' is ambiguous. "
-                "Pass reusable_pipeline_uid and reusable_version_uid from list_reusable_pipelines."
+                "Pass reusable_pipeline_uid from list_reusable_pipelines."
             )
         reusable = matches[0]
         try:
-            interface = json.loads(reusable.get("interface_json") or "{}")
-            public_ports = json.loads(reusable.get("public_ports_json") or "{}")
+            interface, public_ports = _reusable_contract(reusable)
         except (TypeError, ValueError) as exc:
-            raise ValueError("Saved reusable pipeline version has an invalid public contract") from exc
+            raise ValueError("Saved reusable pipeline has an invalid public contract") from exc
         inputs = public_ports.get("inputs") if isinstance(public_ports, dict) else None
         outputs = public_ports.get("outputs") if isinstance(public_ports, dict) else None
         input_ids = [
@@ -479,7 +497,7 @@ def build_pipeline_editor_tools(
         ]
         if not isinstance(interface, dict) or not input_ids or not output_ids:
             raise ValueError(
-                "Saved reusable pipeline version must expose at least one public input and output"
+                "Saved reusable pipeline must expose at least one public input and output"
             )
         reference = {
             "pipeline_uid": str(reusable.get("pipeline_uid") or ""),
@@ -509,9 +527,7 @@ def build_pipeline_editor_tools(
           "source_port": "required when the explicit predecessor has multiple outputs",
           "allow_fan_out": false,
           "reusable_pipeline_name": "required for Subpipeline unless uid is supplied",
-          "reusable_pipeline_uid": "optional saved reusable pipeline uid",
-          "reusable_version_uid": "optional immutable version uid",
-          "reusable_version_name": "optional version name; active version is the default"
+          "reusable_pipeline_uid": "optional saved reusable pipeline uid"
         }
         Do not provide parameters, credentials, secret names, model choices, or
         implementation metadata. Source and Destination always use the default
@@ -1081,36 +1097,33 @@ def build_pipeline_editor_tools(
             raise RuntimeError(f"configure_flow_step failed: {exc}") from exc
 
     async def list_reusable_pipelines(params: str) -> str:
-        """Lists separately saved reusable pipelines and their immutable versions.
+        """Lists immutable reusable pipelines without user-facing versions.
 
         params JSON: {}
         """
         _ = json.loads(params) if params else {}
         query = """
-        MATCH (p:PIPELINE {status:'reusable'})-[:HAS_VERSION]->(v:PIPELINE_VERSION)
+        MATCH (p:PIPELINE {status:'reusable'})
+        OPTIONAL MATCH (p)-[:HAS_VERSION]->(v:PIPELINE_VERSION)
+        WITH p, v ORDER BY CASE WHEN v.uid = p.active_version_uid THEN 0 ELSE 1 END, v.created_at DESC
+        WITH p, head(collect(v)) AS v
         RETURN {
-          pipeline_uid: p.uid,
-          pipeline_name: p.name,
-          description: p.description,
-          active_version_uid: p.active_version_uid,
-          version_uid: v.uid,
-          version_name: v.name,
-          interface_json: v.interface_json,
-          node_count: v.node_count,
-          edge_count: v.edge_count
+          pipeline_uid: p.uid, pipeline_name: p.name, description: p.description,
+          interface_json: coalesce(p.interface_json, v.interface_json),
+          node_count: coalesce(p.node_count, v.node_count),
+          edge_count: coalesce(p.edge_count, v.edge_count)
         } AS reusable_pipeline
-        ORDER BY p.name, v.created_at DESC;
+        ORDER BY p.name;
         """
         return repr(await run_query(query, "list_reusable_pipelines"))
 
     async def create_reusable_pipeline(params: str) -> str:
-        """Creates a distinct reusable PIPELINE and immutable version.
+        """Creates a distinct immutable reusable PIPELINE.
 
         params JSON:
         {
           "name": "Conversation Understanding",
           "description": "Reusable transcription and conversation analysis.",
-          "version_name": "Version 1",
           "graph": {"nodes": ["complete React Flow-shaped nodes"], "edges": ["connections"]}
         }
 
@@ -1118,14 +1131,13 @@ def build_pipeline_editor_tools(
         Destination boundaries. It is still a high-level design: do not include
         runtime parameters, credentials, environment names, or implementation
         metadata. Port ids and data contracts are inferred and frozen when the
-        version is saved; expert-supplied typed ports remain supported. Source
+        pipeline is saved; expert-supplied typed ports remain supported. Source
         and Destination ports become the public contract.
         """
         try:
             data = json.loads(params)
             name = str(data.get("name") or "").strip()
             description = str(data.get("description") or "").strip()
-            version_name = str(data.get("version_name") or "Version 1").strip() or "Version 1"
             graph = data.get("graph") if isinstance(data.get("graph"), dict) else {}
             if not name:
                 raise ValueError("create_reusable_pipeline requires name")
@@ -1140,6 +1152,9 @@ def build_pipeline_editor_tools(
                 if any(
                     node_data.get(field)
                     for field in (
+                        "files",
+                        "file_buckets",
+                        "generated_artifact",
                         "implementation",
                         "param",
                         "parameters",
@@ -1148,11 +1163,14 @@ def build_pipeline_editor_tools(
                     )
                 ):
                     raise ValueError(
-                        "Reusable pipeline design must not include implementations, "
+                        "Reusable pipeline design must not include attachments or implementations, "
                         "runtime parameters, credentials, environment names, or secrets."
                     )
             graph = normalize_reusable_pipeline_graph(graph)
-            validation = validate_pipeline_graph(graph)
+            nesting_error = reusable_pipeline_nesting_error(graph)
+            if nesting_error:
+                raise ValueError(nesting_error)
+            validation = validate_pipeline_graph(graph, _nested_depth=1)
             if not validation.get("valid"):
                 messages = [
                     str(issue.get("message") or "Invalid graph")
@@ -1170,7 +1188,6 @@ def build_pipeline_editor_tools(
             MATCH (existing:PIPELINE {{status:'reusable'}})
             WHERE toLower(trim(coalesce(existing.name, ''))) = toLower(trim('{escaped_name}'))
             RETURN {{pipeline_uid:existing.uid,
-                     version_uid:existing.active_version_uid,
                      pipeline_name:existing.name}} AS reusable_pipeline
             LIMIT 1;
             """, "find_reusable_pipeline_by_name")
@@ -1178,14 +1195,13 @@ def build_pipeline_editor_tools(
             if isinstance(duplicate_rows, list) and duplicate_rows:
                 raise ValueError(
                     "A reusable pipeline with this name already exists. "
-                    "Call list_reusable_pipelines and pin its saved version instead."
+                    "Call list_reusable_pipelines and use the saved pipeline instead."
                 )
 
             def escaped_json(value: Any) -> str:
                 return json.dumps(value, ensure_ascii=True, sort_keys=True).replace("\\", "\\\\").replace("'", "\\'")
 
             escaped_description = description.replace("\\", "\\\\").replace("'", "\\'")
-            escaped_version_name = version_name.replace("\\", "\\\\").replace("'", "\\'")
             graph_json = escaped_json(graph)
             interface_json = escaped_json(interface)
             public_ports_json = escaped_json(public_ports)
@@ -1193,23 +1209,15 @@ def build_pipeline_editor_tools(
             CREATE (p:PIPELINE {{
               uid: randomUUID(), name:'{escaped_name}', label:'{escaped_name}',
               description:'{escaped_description}', status:'reusable',
-              created_at:datetime(), updated_at:datetime()
-            }})
-            CREATE (v:PIPELINE_VERSION {{
-              uid:randomUUID(), name:'{escaped_version_name}', version:'{escaped_version_name}',
-              version_index:1, is_main:false, description:'{escaped_description}',
               graph_json:'{graph_json}', interface_json:'{interface_json}',
               public_ports_json:'{public_ports_json}',
               node_count:{len(graph.get('nodes') or [])}, edge_count:{len(graph.get('edges') or [])},
-              file_count:0, created_at:datetime(), updated_at:datetime()
+              created_at:datetime(), updated_at:datetime()
             }})
-            MERGE (p)-[:HAS_VERSION]->(v)
-            SET p.active_version_uid = v.uid
             RETURN {{
               pipeline_uid:p.uid, pipeline_name:p.name,
-              version_uid:v.uid, version_name:v.name,
-              interface_json:v.interface_json,
-              public_ports_json:v.public_ports_json
+              interface_json:p.interface_json,
+              public_ports_json:p.public_ports_json
             }} AS reusable_pipeline;
             """
             return repr(await run_query(query, "create_reusable_pipeline"))
@@ -1217,16 +1225,15 @@ def build_pipeline_editor_tools(
             raise RuntimeError(f"create_reusable_pipeline failed: {exc}") from exc
 
     async def configure_subpipeline_step(params: str) -> str:
-        """Pins an existing parent Subpipeline step to a saved reusable pipeline version.
+        """Attaches an existing parent Subpipeline step to an immutable reusable pipeline.
 
         params JSON:
         {
           "flow_id": "parent Subpipeline step flow_id",
-          "pipeline_uid": "saved reusable pipeline uid",
-          "version_uid": "immutable reusable pipeline version uid"
+          "pipeline_uid": "saved reusable pipeline uid"
         }
 
-        The public contract is loaded from the saved version. Never pass or embed
+        The public contract is loaded from the saved pipeline. Never pass or embed
         a graph in this call.
         """
         try:
@@ -1240,28 +1247,33 @@ def build_pipeline_editor_tools(
 
             flow_id = valid_id("flow_id")
             pipeline_uid = valid_id("pipeline_uid")
-            version_uid = valid_id("version_uid")
+            version_uid = valid_id("version_uid") if data.get("version_uid") else ""
             lookup = await run_query(f"""
-            MATCH (rp:PIPELINE {{uid:'{pipeline_uid}', status:'reusable'}})-[:HAS_VERSION]->(rv:PIPELINE_VERSION {{uid:'{version_uid}'}})
+            MATCH (rp:PIPELINE {{uid:'{pipeline_uid}', status:'reusable'}})
+            OPTIONAL MATCH (rp)-[:HAS_VERSION]->(rv:PIPELINE_VERSION)
+            WHERE '{version_uid}' = '' OR rv.uid = '{version_uid}'
+            WITH rp, rv ORDER BY CASE WHEN rv.uid = rp.active_version_uid THEN 0 ELSE 1 END, rv.created_at DESC
+            WITH rp, head(collect(rv)) AS rv
+            WHERE rp.graph_json IS NOT NULL OR rv IS NOT NULL
             RETURN {{
               pipeline_uid:rp.uid, pipeline_name:rp.name,
               version_uid:rv.uid, version_name:rv.name,
-              interface_json:rv.interface_json,
-              public_ports_json:rv.public_ports_json
+              graph_json:coalesce(rp.graph_json, rv.graph_json),
+              interface_json:coalesce(rp.interface_json, rv.interface_json),
+              public_ports_json:coalesce(rp.public_ports_json, rv.public_ports_json)
             }} AS reusable_pipeline;
             """, "resolve_reusable_pipeline")
             decoded = json.loads(lookup) if isinstance(lookup, str) else lookup
             rows = decoded if isinstance(decoded, list) else []
             reusable = rows[0].get("reusable_pipeline") if rows and isinstance(rows[0], dict) else None
             if not isinstance(reusable, dict):
-                raise ValueError("Reusable pipeline version was not found")
+                raise ValueError("Reusable pipeline was not found")
             try:
-                interface = json.loads(reusable.get("interface_json") or "{}")
-                public_ports = json.loads(reusable.get("public_ports_json") or "{}")
+                interface, public_ports = _reusable_contract(reusable)
             except (TypeError, ValueError) as exc:
-                raise ValueError("Reusable pipeline version has an invalid public contract") from exc
+                raise ValueError("Reusable pipeline has an invalid public contract") from exc
             if not isinstance(interface, dict) or not isinstance(public_ports, dict):
-                raise ValueError("Reusable pipeline version has no public contract")
+                raise ValueError("Reusable pipeline has no public contract")
             reference = {
                 "pipeline_uid": pipeline_uid,
                 "pipeline_name": str(reusable.get("pipeline_name") or ""),
@@ -1276,16 +1288,19 @@ def build_pipeline_editor_tools(
             input_ids = [str(port.get("id") or "") for port in public_ports.get("inputs", []) if isinstance(port, dict)]
             output_ids = [str(port.get("id") or "") for port in public_ports.get("outputs", []) if isinstance(port, dict)]
             if not input_ids or not output_ids:
-                raise ValueError("Reusable pipeline version requires public inputs and outputs")
+                raise ValueError("Reusable pipeline requires public inputs and outputs")
 
             parent_lookup = await run_query(f"""
             MATCH (:PIPELINE {{status:'design'}})-[:HAS_STEP]->(step:STEP {{flow_id:'{flow_id}'}})
             WHERE step.type = 'subpipeline'
             OPTIONAL MATCH (:STEP)-[incoming:FLOWS_TO]->(step)
             OPTIONAL MATCH (step)-[outgoing:FLOWS_TO]->(:STEP)
-            RETURN {{current_ports_json:step.ports_json,
-                     connected_inputs:collect(DISTINCT incoming.target_port),
-                     connected_outputs:collect(DISTINCT outgoing.source_port)}} AS subpipeline_context;
+            WITH step.ports_json AS current_ports_json,
+                 collect(DISTINCT incoming.target_port) AS connected_inputs,
+                 collect(DISTINCT outgoing.source_port) AS connected_outputs
+            RETURN {{current_ports_json:current_ports_json,
+                     connected_inputs:connected_inputs,
+                     connected_outputs:connected_outputs}} AS subpipeline_context;
             """, "inspect_subpipeline_contract")
             decoded_parent = json.loads(parent_lookup) if isinstance(parent_lookup, str) else parent_lookup
             parent_rows = decoded_parent if isinstance(decoded_parent, list) else []
@@ -1308,7 +1323,7 @@ def build_pipeline_editor_tools(
                     for item in migration["conflicts"]
                 )
                 raise ValueError(
-                    "The selected reusable version has an ambiguous connection migration. "
+                    "The selected reusable pipeline has an ambiguous connection migration. "
                     "Use disconnect_steps to remove the affected edges, configure the Subpipeline, "
                     f"then reconnect explicit compatible ports. {conflicts}"
                 )
@@ -1370,7 +1385,6 @@ def build_pipeline_editor_tools(
           "description": "step description",
           "template": "optional Task or Flow template name",
           "reusable_pipeline_uid": "required when inserting a Subpipeline",
-          "reusable_version_uid": "required when inserting a Subpipeline",
           "before_flow_id": "required target flow_id",
           "after_flow_id": "optional source flow_id for between-step insertion"
         }
