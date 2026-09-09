@@ -1515,6 +1515,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
   const onNodesChangeInternal = useCallback(
     (changes: NodeChange[]) => {
+      // ReactFlow also emits position events when a click starts/ends a drag
+      // without moving. Selection and drag bookkeeping are not graph edits.
+      const positionChanged = (change: NodeChange) => {
+        if (change.type !== 'position' || !change.position) return false;
+        const current = nodes.find((node) => node.id === change.id);
+        return current && (current.position.x !== change.position.x || current.position.y !== change.position.y);
+      };
       const hasGraphEdit = changes.some((change) => (
         change.type !== 'select'
         && change.type !== 'dimensions'
@@ -1523,7 +1530,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       if (hasGraphEdit) {
         pushHistorySnapshot();
       }
-      if (changes.some((change) => change.type !== 'select' && change.type !== 'dimensions')) {
+      if (hasGraphEdit || changes.some(positionChanged)) {
         onCanvasEdited?.();
       }
       const removedNodeIds = changes
@@ -1537,7 +1544,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
       setNodes((currentNodes) => applyNodeChanges(changes, currentNodes));
       for (const change of changes) {
-        if (change.type === 'position' && change.position && !change.dragging) {
+        if (change.type === 'position' && change.position && !change.dragging && positionChanged(change)) {
           pushHistorySnapshot(undefined, { coalesceKey: 'keyboard-position' });
           markLocalWrite(800);
           const moved = nodes.find((node) => node.id === change.id);
@@ -2131,16 +2138,14 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         onNodeDragStop={(_, node) => {
           const dragStartSnapshot = dragStartSnapshotRef.current;
           dragStartSnapshotRef.current = null;
-          if (dragStartSnapshot) {
-            const finalNodes = nodes.map((currentNode) => (
-              currentNode.id === node.id
-                ? { ...currentNode, position: node.position }
-                : currentNode
-            ));
-            if (dragStartSnapshot.signature !== graphHistorySignature(finalNodes, edges)) {
-              pushHistorySnapshot(dragStartSnapshot);
-            }
-          }
+          if (!dragStartSnapshot) return;
+          const finalNodes = nodes.map((currentNode) => (
+            currentNode.id === node.id
+              ? { ...currentNode, position: node.position }
+              : currentNode
+          ));
+          if (dragStartSnapshot.signature === graphHistorySignature(finalNodes, edges)) return;
+          pushHistorySnapshot(dragStartSnapshot);
           onCanvasEdited?.();
           markLocalWrite(800);
           void updateNodePositionInBackend(node).catch(reportPersistenceError);

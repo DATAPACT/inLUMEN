@@ -33,7 +33,7 @@ test('editor recovers from a conflicting save and remains keyboard accessible', 
   expect((await download).suggestedFilename()).toBe('inlumen-draft.json');
   conflict = false;
   await page.getByRole('button', { name: 'Reload saved graph' }).click();
-  await expect(page.getByText('Saved', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Pipeline save status')).toHaveAttribute('data-save-state', 'saved');
   const node = page.locator('.react-flow__node').first();
   await node.focus();
   await node.press('Enter');
@@ -90,7 +90,7 @@ test('agent changes refresh the revision before autosave and the next canvas edi
   await expect(page.getByText('Agent updated source', { exact: true }).first()).toBeVisible();
   await expect.poll(() => writes.length).toBeGreaterThan(0);
   expect(writes[0]).toBe('"2"');
-  await expect(page.getByText('Saved', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Pipeline save status')).toHaveAttribute('data-save-state', 'saved');
   const count = writes.length;
   const node = page.locator('.react-flow__node').first();
   await node.focus();

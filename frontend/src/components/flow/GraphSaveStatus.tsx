@@ -18,11 +18,11 @@ export function GraphSaveStatus({ onDownload, onReload, onRetry, onDownloadPrevi
     try { await action(); } catch (error) { if (epoch === persistenceEpoch()) reportPersistenceError(error); }
     finally { setRecovering(false); }
   };
-  return <div className="flex flex-wrap items-center gap-1 text-xs" aria-label="Pipeline save status">
-    <span className={state.error ? 'px-1 text-[hsl(var(--danger-text))]' : 'px-1 text-muted-foreground'} role="status" aria-live="polite" title={state.error || undefined}>
-      {recovering || state.pending ? 'Saving…' : state.error ? 'Couldn’t save' : 'Saved'}
-    </span>
+  return <div className="flex flex-wrap items-center gap-1 text-xs" aria-label="Pipeline save status" data-save-state={state.error ? 'error' : recovering || state.pending ? 'saving' : 'saved'}>
     {state.error && <>
+      <span className="px-1 text-[hsl(var(--danger-text))]" role="status" aria-live="polite" title={state.error}>
+        {recovering ? 'Recovering…' : 'Couldn’t save'}
+      </span>
       <span className="sr-only">{state.error}</span>
       {!state.conflict && <Button size="sm" variant="ghost" className="h-7 px-2" disabled={state.pending > 0 || recovering} onClick={() => { void recover(onRetry); }}>Retry save</Button>}
       <Button size="sm" variant="ghost" className="h-7 px-2" onClick={onDownload}>Download draft</Button>
