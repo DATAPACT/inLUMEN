@@ -565,6 +565,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     requestGraphViewportFit({ duration: ASSISTANT_GRAPH_FIT_DURATION });
   }, [currentGraphLayoutSignature, followAssistantDrawing, requestGraphViewportFit]);
   const lastSeenUpdatedAtRef = useRef<string | null>(null);
+  const graphSettingsRef = useRef<Record<string, unknown>>({});
   const refreshCooldownUntilRef = useRef<number>(0);
   const syncBackoffUntilRef = useRef<number>(0);
   const syncFailureLoggedRef = useRef(false);
@@ -820,6 +821,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     setNodes(g.nodes);
     setEdges(g.edges);
     lastSeenUpdatedAtRef.current = g.updated_at;
+    graphSettingsRef.current = g.settings ?? {};
     nodeId = getNextNumericNodeId(g.nodes, nodeId);
 
     const selectedNodeId = selectedNodeIdRef.current;
@@ -1268,6 +1270,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     const viewport = reactFlowInstance?.toObject().viewport ?? { x: 0, y: 0, zoom: 1 };
     return {
       updated_at: lastSeenUpdatedAtRef.current,
+      settings: graphSettingsRef.current,
       nodes: nodes.map((node) => {
         const data = { ...(node.data || {}) };
         delete data.file_buckets;
@@ -2190,7 +2193,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
             onDownloadPrevious={previousDraft ? () => downloadJsonFile(JSON.parse(previousDraft), 'inlumen-draft.json') : undefined}
             onRetry={async () => {
               clearPersistenceError();
-              await rebuildBackendFromFlow(nodes, edges);
+              await rebuildBackendFromFlow(nodes, edges, graphSettingsRef.current);
               onCanvasEdited?.();
             }}
             onReload={async () => {

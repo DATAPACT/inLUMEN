@@ -1,11 +1,11 @@
 import { test, expect, type BrowserContext, type Page } from '@playwright/test';
 
-type Graph = { nodes: Array<{ id: string; type: string; position: { x: number; y: number }; data: { type: string; label: string } }>; edges: unknown[]; updated_at: string };
+type Graph = { nodes: Array<{ id: string; type: string; position: { x: number; y: number }; data: { type: string; label: string } }>; edges: unknown[]; settings: Record<string, unknown>; updated_at: string };
 
 async function savedPipeline(context: BrowserContext, mode: 'metadata' | 'network' | 'concurrent') {
   let revision = 1;
   let injectFailure = mode !== 'concurrent';
-  let graph: Graph = { nodes: [{ id: '1', type: 'custom', position: { x: 150, y: 150 }, data: { type: 'source', label: 'Input records' } }], edges: [], updated_at: 'initial' };
+  let graph: Graph = { nodes: [{ id: '1', type: 'custom', position: { x: 150, y: 150 }, data: { type: 'source', label: 'Input records' } }], edges: [], settings: { locale: 'en', retries: 2 }, updated_at: 'initial' };
   const positions: Array<string | undefined> = [];
   await context.route('**/api/**', async route => {
     const request = route.request();
@@ -30,7 +30,7 @@ async function savedPipeline(context: BrowserContext, mode: 'metadata' | 'networ
       }
       const body = request.postDataJSON();
       if (path.endsWith('/position')) graph.nodes[0].position = { x: body.x, y: body.y };
-      if (body.graph) graph = { ...graph, nodes: body.graph.nodes, edges: body.graph.edges };
+      if (body.graph) graph = { ...graph, nodes: body.graph.nodes, edges: body.graph.edges, settings: body.graph.settings ?? {} };
       revision++;
       await route.fulfill({ json: { ok: true, version: { uid: 'main', name: 'Main' } }, headers: { ETag: `"${revision}"` } });
     } else if (path === '/api/pipeline/graph') {
@@ -70,13 +70,14 @@ test('metadata-only revision drift recovers automatically and persists after reo
   await expect(page.getByText(/Another session changed/)).toHaveCount(0);
   const position = server.graph().nodes[0].position;
   expect(position.x).toBeGreaterThan(150);
+  expect(server.graph().settings).toEqual({ locale: 'en', retries: 2 });
   await page.reload();
   await expect(page.locator('.react-flow__node').first()).toHaveCSS('transform', `matrix(1, 0, 0, 1, ${position.x}, ${position.y})`);
   await expect(page.locator('.react-flow__panel.top.center').getByLabel('Pipeline save status')).toBeVisible();
   await page.screenshot({ path: 'test-results/save-status-desktop.png', fullPage: true, animations: 'disabled' });
 });
 
-test('a transient failure can retry the current draft without reloading', async ({ page, context }) => {
+test('a transient failure can retry the current draft and settings without reloading', async ({ page, context }) => {
   const server = await savedPipeline(context, 'network');
   await open(page);
   await moveNode(page, 'ArrowRight');
@@ -86,6 +87,7 @@ test('a transient failure can retry the current draft without reloading', async 
   await expect(saveStatus(page).getByText('Saved', { exact: true })).toBeVisible();
   const position = server.graph().nodes[0].position;
   expect(position.x).toBeGreaterThan(150);
+  expect(server.graph().settings).toEqual({ locale: 'en', retries: 2 });
   await page.reload();
   await expect(page.locator('.react-flow__node').first()).toHaveCSS('transform', `matrix(1, 0, 0, 1, ${position.x}, ${position.y})`);
 });
