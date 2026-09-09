@@ -73,6 +73,7 @@ import {
 import { ChatbotConfigForm } from '@/components/ChatbotConfigForm';
 import { ApplicationLLMSettings } from '@/components/ApplicationLLMSettings';
 import { useAuthSession } from '@/context/authSession';
+import { canManageApplicationLLM } from '@/utils/applicationAdmin';
 
 const CHAT_SESSION_KEY = "chat-session-id";
 const CHAT_TRANSCRIPT_KEY = "inlumen-chat-transcript";
@@ -229,7 +230,8 @@ const Index = () => {
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSharedLLMSettingsOpen, setIsSharedLLMSettingsOpen] = useState(false);
-  const { session } = useAuthSession();
+  const { session, authEnabled } = useAuthSession();
+  const canManageSharedLLM = canManageApplicationLLM(authEnabled, session);
   const flowCanvasRef = useRef<FlowCanvasRef>(null);
   const libraryPanelRef = useRef<ImperativePanelHandle>(null);
   const rightPanelRef = useRef<ImperativePanelHandle>(null);
@@ -1498,7 +1500,7 @@ const Index = () => {
                 <Key className="h-4 w-4 text-emerald-500" />
                 LLM configuration
               </div>
-              {session?.is_application_admin && (
+              {canManageSharedLLM && (
                 <Button variant="outline" className="mb-3 w-full" onClick={() => {
                   setIsSettingsOpen(false);
                   setIsSharedLLMSettingsOpen(true);
@@ -1621,7 +1623,7 @@ const Index = () => {
         </DialogContent>
       </Dialog>
 
-      {isSharedLLMSettingsOpen && session?.is_application_admin && <ApplicationLLMSettings
+      {isSharedLLMSettingsOpen && canManageSharedLLM && <ApplicationLLMSettings
         onClose={() => setIsSharedLLMSettingsOpen(false)}
         onSaved={() => { void loadConfigurations(); }}
       />}
