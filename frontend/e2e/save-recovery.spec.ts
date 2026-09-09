@@ -1,6 +1,6 @@
 import { test, expect, type BrowserContext, type Page } from '@playwright/test';
 
-type Graph = { nodes: Array<{ id: string; type: string; position: { x: number; y: number }; data: { type: string; label: string } }>; edges: unknown[]; settings: Record<string, unknown>; updated_at: string };
+type Graph = { nodes: Array<{ id: string; type: string; position: { x: number; y: number }; data: { type: string; label: string; files?: unknown[] } }>; edges: unknown[]; settings: Record<string, unknown>; updated_at: string };
 
 async function savedPipeline(context: BrowserContext, mode: 'metadata' | 'network' | 'concurrent') {
   let revision = 1;
@@ -11,7 +11,16 @@ async function savedPipeline(context: BrowserContext, mode: 'metadata' | 'networ
     const request = route.request();
     const path = new URL(request.url()).pathname;
     const mutation = request.method() !== 'GET';
-    if (mutation && (path.startsWith('/api/graph/') || path === '/api/pipeline/graph' || path === '/api/pipeline/versions/active')) {
+    if (mutation && path === '/api/nodes/1/files') {
+      const expected = request.headers()['if-match'];
+      if (expected && expected !== `"${revision}"`) {
+        await route.fulfill({ status: 409, json: { code: 'graph_conflict', revision }, headers: { ETag: `"${revision}"` } });
+        return;
+      }
+      graph.nodes[0].data.files = request.method() === 'POST' ? [{ filename: 'input.csv', bucket: 'files-step-id-1', role: 'data' }] : [];
+      revision++;
+      await route.fulfill({ json: { file: {}, graph: {} }, headers: { ETag: `"${revision}"` } });
+    } else if (mutation && (path.startsWith('/api/graph/') || path === '/api/pipeline/graph' || path === '/api/pipeline/versions/active')) {
       if (path.endsWith('/position')) {
         positions.push(request.headers()['if-match']);
         if (injectFailure) {
@@ -30,6 +39,7 @@ async function savedPipeline(context: BrowserContext, mode: 'metadata' | 'networ
       }
       const body = request.postDataJSON();
       if (path.endsWith('/position')) graph.nodes[0].position = { x: body.x, y: body.y };
+      if (path.endsWith('/properties')) Object.assign(graph.nodes[0].data, body.properties);
       if (body.graph) graph = { ...graph, nodes: body.graph.nodes, edges: body.graph.edges, settings: body.graph.settings ?? {} };
       revision++;
       await route.fulfill({ json: { ok: true, version: { uid: 'main', name: 'Main' } }, headers: { ETag: `"${revision}"` } });
@@ -144,4 +154,30 @@ test('unavailable draft storage does not discard edits and allows a downloaded b
   await download;
   await saveStatus(second).getByRole('button', { name: 'Reload saved graph' }).click();
   await expect(saveStatus(second).getByText('Saved', { exact: true })).toBeVisible();
+});
+
+
+test('uploading and removing a source input file keeps subsequent edits saved', async ({ page, context }) => {
+  const server = await savedPipeline(context, 'concurrent');
+  await open(page);
+  await page.locator('.react-flow__node').first().click();
+  const chooser = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: 'Upload Input Files', exact: true }).click();
+  await (await chooser).setFiles({ name: 'input.csv', mimeType: 'text/csv', buffer: Buffer.from('name,value\nexample,1\n') });
+  await expect(page.getByRole('button', { name: 'Preview input.csv', exact: true })).toBeVisible();
+  await moveNode(page, 'ArrowRight');
+  await expect.poll(() => server.graph().nodes[0].position.x).toBeGreaterThan(150);
+  await expect(saveStatus(page).getByText('Saved', { exact: true })).toBeVisible();
+  await page.reload();
+  await page.locator('.react-flow__node').first().click();
+  await expect(page.getByRole('button', { name: 'Preview input.csv', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Remove input.csv', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Preview input.csv', exact: true })).toHaveCount(0);
+  await moveNode(page, 'ArrowDown');
+  await expect.poll(() => server.graph().nodes[0].position.y).toBeGreaterThan(150);
+  await expect(saveStatus(page).getByText('Saved', { exact: true })).toBeVisible();
+  await page.reload();
+  await page.locator('.react-flow__node').first().click();
+  await expect(page.getByRole('button', { name: 'Preview input.csv', exact: true })).toHaveCount(0);
+  expect(server.graph().nodes[0].data.files).toEqual([]);
 });

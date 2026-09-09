@@ -63,6 +63,7 @@ type WriteOptions = {
   readGraph?: () => Promise<Response>;
   // Catalog-only mutations advance the workspace revision without editing the canvas.
   preservesGraph?: boolean;
+  validationStatuses?: readonly number[];
 };
 
 export const graphWrite = (send: (revision: string | null) => Promise<Response>, options: WriteOptions = {}): Promise<Response> => {
@@ -102,7 +103,7 @@ export const graphWrite = (send: (revision: string | null) => Promise<Response>,
       }
       // Validation/business conflicts (for example a duplicate version name)
       // belong to the calling form and must not freeze unrelated canvas saves.
-      if (response.status === 409) return response;
+      if (response.status === 409 || options.validationStatuses?.includes(response.status)) return response;
       if (!response.ok) {
         const detail = (typeof problem?.error === 'string' ? problem.error : await response.clone().text()).slice(0, 500);
         throw new GraphSaveError(`Changes could not be saved (${response.status}). ${detail} Try saving again.`, false, epoch);
