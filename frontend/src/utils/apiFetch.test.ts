@@ -59,3 +59,24 @@ describe("apiFetch", () => {
     expect(headers.get("X-InLumen-Workspace-Id")).toBe("workspace-123");
   });
 });
+
+it('serializes Overview and reusable-catalog updates with canvas saves', async () => {
+  vi.resetModules();
+  const { apiFetch } = await import('@/utils/apiFetch');
+  const { captureGraphRevision, resetPersistence } = await import('@/features/flow/persistenceState');
+  resetPersistence();
+  captureGraphRevision(new Response('{}', { headers: { ETag: '"1"' } }));
+  const seen: (string | null)[] = [];
+  const mock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+    seen.push(new Headers(init?.headers).get('If-Match'));
+    return new Response('{}', { headers: { ETag: `"${seen.length + 1}"` } });
+  });
+  try {
+    await Promise.all([
+      apiFetch('/api/pipeline/overview', { method: 'POST', body: '{}' }),
+      apiFetch('/api/reusable-pipelines', { method: 'POST', body: '{}' }),
+      apiFetch('/api/graph/nodes/position', { method: 'POST', body: '{}' }),
+    ]);
+    expect(seen).toEqual(['"1"', '"2"', '"3"']);
+  } finally { mock.mockRestore(); }
+});

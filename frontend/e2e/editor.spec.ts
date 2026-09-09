@@ -8,7 +8,7 @@ test('editor recovers from a conflicting save and remains keyboard accessible', 
     const url = new URL(route.request().url());
     if ((url.pathname.startsWith('/api/graph/') || url.pathname === '/api/pipeline/graph') && route.request().method() === 'POST') {
       writes.push({ path: url.pathname, revision: route.request().headers()["if-match"] });
-      await route.fulfill({ status: conflict ? 409 : 200, json: { ok: true }, headers: { ETag: '"2"' } });
+      await route.fulfill({ status: conflict ? 409 : 200, json: conflict ? { code: 'graph_conflict' } : { ok: true }, headers: { ETag: '"2"' } });
     } else if (url.pathname === '/api/pipeline/graph') {
       await route.fulfill({ json: { nodes: [{ id: '1', type: 'source', position: { x: 150, y: 150 }, data: { type: 'source', label: 'Input records' } }], edges: [], updated_at: '2026-01-01' }, headers: { ETag: '"1"' } });
     } else if (url.pathname === '/api/pipeline/versions/active') {
@@ -26,14 +26,14 @@ test('editor recovers from a conflicting save and remains keyboard accessible', 
     name: 'pipeline.json', mimeType: 'application/json',
     buffer: Buffer.from(JSON.stringify({ nodes: [], edges: [] })),
   });
-  await expect(page.getByText(/Not saved:/)).toBeVisible();
+  await expect(page.getByText('Couldn’t save', { exact: true })).toBeVisible();
   expect(writes[0].revision).toBe('"1"');
   const download = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Download draft' }).click();
   expect((await download).suggestedFilename()).toBe('inlumen-draft.json');
   conflict = false;
   await page.getByRole('button', { name: 'Reload saved graph' }).click();
-  await expect(page.getByText('Changes saved', { exact: true })).toBeVisible();
+  await expect(page.getByText('Saved', { exact: true })).toBeVisible();
   const node = page.locator('.react-flow__node').first();
   await node.focus();
   await node.press('Enter');
@@ -62,7 +62,7 @@ test('agent changes refresh the revision before autosave and the next canvas edi
       const expected = route.request().headers()['if-match'];
       writes.push(expected);
       if (expected !== `"${revision}"`) {
-        await route.fulfill({ status: 409, json: { error: 'stale' } });
+        await route.fulfill({ status: 409, json: { code: 'graph_conflict' } });
         return;
       }
       revision++;
@@ -90,12 +90,12 @@ test('agent changes refresh the revision before autosave and the next canvas edi
   await expect(page.getByText('Agent updated source', { exact: true }).first()).toBeVisible();
   await expect.poll(() => writes.length).toBeGreaterThan(0);
   expect(writes[0]).toBe('"2"');
-  await expect(page.getByText('Changes saved', { exact: true })).toBeVisible();
+  await expect(page.getByText('Saved', { exact: true })).toBeVisible();
   const count = writes.length;
   const node = page.locator('.react-flow__node').first();
   await node.focus();
   await node.press('Enter');
   await node.press('ArrowRight');
   await expect.poll(() => writes.length).toBeGreaterThan(count);
-  await expect(page.getByText(/Not saved:/)).toHaveCount(0);
+  await expect(page.getByText('Couldn’t save', { exact: true })).toHaveCount(0);
 });
