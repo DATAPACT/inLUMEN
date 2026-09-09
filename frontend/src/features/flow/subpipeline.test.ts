@@ -9,6 +9,19 @@ import {
 } from "@/features/flow/subpipeline";
 
 describe("Subpipeline contracts", () => {
+  it("allows one level in the main graph but rejects reuse of a graph containing a subpipeline", () => {
+    const child = conversationUnderstandingSubpipeline();
+    const node = { id: "reuse", position: { x: 0, y: 0 }, data: {
+      type: "subpipeline", ports: publicPortsForSubpipeline(child),
+      subpipeline: { reference: { pipeline_uid: "p", version_uid: "v" }, interface: child.interface, resolved_graph: child.graph },
+    } };
+    const depthIssues = (reusable: boolean) => validateGraph([node], [], { mode: "draft", reusable }).issues
+      .filter((issue) => issue.code === "subpipeline-depth-exceeded");
+    expect(depthIssues(false)).toHaveLength(0);
+    expect(depthIssues(true)).toHaveLength(1);
+    node.data.subpipeline.resolved_graph = { nodes: [node], edges: [], updated_at: null };
+    expect(depthIssues(false)).toHaveLength(1);
+  });
   it("builds a valid standalone Conversation Understanding pipeline", () => {
     const definition = conversationUnderstandingSubpipeline();
 

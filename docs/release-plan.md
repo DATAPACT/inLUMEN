@@ -6,6 +6,50 @@ This is a proposed development plan, not a release announcement. GitHub issue
 states and milestone assignments have not been changed by this review.
 Issues #59 and #9 are excluded from scope and release completion criteria.
 
+### Development follow-up (2026-09-09)
+
+The historical review below records the evidence available on September 8.
+PR #121 has since merged and #116 is closed. PR #123 also merged the
+save-conflict recovery fixes; this change starts from `ce4dca0`.
+
+The accepted #102 scope is now **one subpipeline level**. A reusable pipeline
+cannot contain another Subpipeline; recursive expansion is outside scope.
+Save and attachment reject nesting, the catalog marks legacy nested definitions
+unavailable for insertion, and graph reload returns a resolution error instead
+of expanding them. Compatibility reads retain old saved definitions without
+rewriting them. Runtime preparation rejects these resolution errors.
+The general palette no longer creates empty Subpipeline nodes; users save the
+first reusable pipeline through the empty catalog guidance, then drag saved items.
+Reusable pipelines are immutable and have no user-facing versions, edit action,
+or update action. Definition changes require saving a new item with a different
+name. Legacy pinned references remain readable. Creation preserves full file
+metadata and copies attachments into independent snapshots, correcting the
+filename-only export that caused main-canvas autosave failures. A read-only
+viewer is available from catalog cards, Manage, and the Subpipeline inspector;
+it supports pan, zoom, and component details without changing either canvas.
+
+Properties now shows the selected node's label and ID (#104). Overview refreshes
+after committed graph revisions and preserves description/version drafts while
+responses arrive (#5). The supplied-code
+[prototype walkthrough](prototype-quickstart.md) includes design JSON, Python,
+sample input, and the expected output. These are development changes, not a
+Beta 3 release or evidence that all release gates are complete.
+
+Local verification for this follow-up: backend suite (321 tests, 9 environment
+dependent skips), codegen (118 tests), runner (21 tests), frontend (152 unit
+tests, type checking, lint, and build), both Compose configurations, shared-file
+consistency, and 17 browser tests passed. The eight real-Neo4j integration checks
+passed against a disposable database, including reusable save/attach/reload,
+missing-pipeline attachment rejection, legacy recursive-reference handling,
+and rejection of edits to legacy reusable definitions. The attachment regression
+uses real disposable MinIO storage and verifies survival after source removal.
+The pipeline assistant also creates, lists, and attaches reusable pipelines
+without version identifiers against the real database.
+The frontend dependency audit reported no vulnerabilities. The supplied-code
+example also executed successfully in a real Dagster container; the walkthrough
+includes a reproduction command. These local results must be repeated as needed
+on the final candidate; live deployment and recovery gates below remain open.
+
 ## Release decision
 
 Publish the next accepted candidate as **inLUMEN Prototype Beta 3**,

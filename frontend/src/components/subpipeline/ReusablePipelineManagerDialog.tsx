@@ -1,3 +1,4 @@
+import { ReusablePipelineViewerDialog } from "./ReusablePipelineViewerDialog";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -11,7 +12,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -25,12 +25,11 @@ import {
 } from "@/components/ui/dialog";
 import { normalizeGraph, type NormalizedGraph } from "@/features/flow/flowGraph";
 import { validateGraph } from "@/features/flow/flowValidation";
+import { reusablePipelineNestingError } from "@/features/flow/subpipeline";
 import {
   deleteReusablePipeline,
-  fetchReusablePipelineVersion,
   saveReusablePipeline,
   type ReusablePipelineSummary,
-  type ReusablePipelineVersionSummary,
 } from "@/features/flow/subpipelinePersistence";
 
 type Props = {
@@ -39,22 +38,14 @@ type Props = {
   onOpenChange: (open: boolean) => void;
   onRefresh: () => Promise<ReusablePipelineSummary[]>;
   getCurrentGraph?: () => unknown;
-  replaceCurrentGraph?: (graph: unknown) => Promise<unknown> | unknown;
   currentPipelineName?: string;
   currentPipelineDescription?: string;
 };
 
 type CurrentCanvasDraft = {
-  pipelineUid?: string;
   name: string;
   description: string;
-  versionName: string;
   graph: NormalizedGraph;
-};
-
-type VersionToEdit = {
-  pipeline: ReusablePipelineSummary;
-  version: ReusablePipelineVersionSummary;
 };
 
 export function ReusablePipelineManagerDialog({
@@ -63,29 +54,25 @@ export function ReusablePipelineManagerDialog({
   onOpenChange,
   onRefresh,
   getCurrentGraph,
-  replaceCurrentGraph,
   currentPipelineName,
   currentPipelineDescription,
 }: Props) {
+  const [pipelineToView, setPipelineToView] = useState<ReusablePipelineSummary | null>(null);
   const [pipelineToDelete, setPipelineToDelete] = useState<ReusablePipelineSummary | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [currentCanvasDraft, setCurrentCanvasDraft] = useState<CurrentCanvasDraft | null>(null);
   const [currentCanvasError, setCurrentCanvasError] = useState("");
   const [isSavingCurrentCanvas, setIsSavingCurrentCanvas] = useState(false);
-  const [versionToEdit, setVersionToEdit] = useState<VersionToEdit | null>(null);
-  const [isLoadingVersion, setIsLoadingVersion] = useState(false);
 
-  const prepareCurrentCanvas = (pipeline?: ReusablePipelineSummary) => {
+  const prepareCurrentCanvas = () => {
     const graph = normalizeGraph(getCurrentGraph?.() || {});
     setCurrentCanvasDraft({
-      pipelineUid: pipeline?.uid,
-      name: pipeline?.name || (
+      name: (
         currentPipelineName?.trim() && currentPipelineName.trim() !== "Main"
           ? currentPipelineName.trim()
           : "Reusable Pipeline"
       ),
-      description: pipeline?.description || currentPipelineDescription?.trim() || "",
-      versionName: pipeline ? `Version ${pipeline.versions.length + 1}` : "Version 1",
+      description: currentPipelineDescription?.trim() || "",
       graph,
     });
     setCurrentCanvasError("");
@@ -94,19 +81,20 @@ export function ReusablePipelineManagerDialog({
   const saveCurrentCanvas = async () => {
     if (!currentCanvasDraft) return;
     const name = currentCanvasDraft.name.trim();
-    const versionName = currentCanvasDraft.versionName.trim();
-    if (!name || !versionName) {
-      setCurrentCanvasError("Pipeline name and version name are required.");
+    if (!name) {
+      setCurrentCanvasError("Pipeline name is required.");
       return;
     }
     if (currentCanvasDraft.graph.nodes.length === 0) {
       setCurrentCanvasError("Add components to the main canvas before saving it for reuse.");
       return;
     }
+    const nestingError = reusablePipelineNestingError(currentCanvasDraft.graph);
+    if (nestingError) { setCurrentCanvasError(nestingError); return; }
     const validation = validateGraph(
       currentCanvasDraft.graph.nodes,
       currentCanvasDraft.graph.edges,
-      { mode: "complete", requireRuntime: false },
+      { mode: "complete", requireRuntime: false, reusable: true },
     );
     if (!validation.valid) {
       const firstError = validation.issues.find((issue) => issue.severity === "error");
@@ -117,16 +105,14 @@ export function ReusablePipelineManagerDialog({
       setIsSavingCurrentCanvas(true);
       setCurrentCanvasError("");
       const saved = await saveReusablePipeline({
-        pipelineUid: currentCanvasDraft.pipelineUid,
         name,
         description: currentCanvasDraft.description.trim(),
-        versionName,
         graph: currentCanvasDraft.graph,
       });
       await onRefresh();
       setCurrentCanvasDraft(null);
-      toast.success(currentCanvasDraft.pipelineUid ? "Reusable pipeline version saved" : "Current canvas saved for reuse", {
-        description: `${saved.reference.pipeline_name} · ${saved.reference.version_name}`,
+      toast.success("Current canvas saved for reuse", {
+        description: saved.reference.pipeline_name,
       });
     } catch (error) {
       setCurrentCanvasError(error instanceof Error ? error.message : "Failed to save the current canvas.");
@@ -152,43 +138,20 @@ export function ReusablePipelineManagerDialog({
     }
   };
 
-  const editVersionOnMainCanvas = async () => {
-    if (!versionToEdit || !replaceCurrentGraph) return;
-    try {
-      setIsLoadingVersion(true);
-      const loaded = await fetchReusablePipelineVersion(
-        versionToEdit.pipeline.uid,
-        versionToEdit.version.uid,
-      );
-      await replaceCurrentGraph(loaded.graph);
-      setVersionToEdit(null);
-      onOpenChange(false);
-      toast.success("Reusable pipeline loaded on the main canvas", {
-        description: `${loaded.reference.pipeline_name} · ${loaded.reference.version_name}. Edit it there, then save a new version.`,
-      });
-    } catch (error) {
-      toast.error("Could not load reusable pipeline", {
-        description: error instanceof Error ? error.message : "Unknown error",
-      });
-    } finally {
-      setIsLoadingVersion(false);
-    }
-  };
-
   return (
     <>
-      <Dialog open={open && !currentCanvasDraft} onOpenChange={onOpenChange}>
+      <Dialog open={open && !currentCanvasDraft && !pipelineToView} onOpenChange={onOpenChange}>
         <DialogContent className="max-h-[86vh] max-w-3xl overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Reusable pipelines</DialogTitle>
             <DialogDescription>
-              Design on the main canvas, save it here, then attach the saved version from a Subpipeline component.
+              Design on the main canvas, save it here, then drag the saved pipeline from Reusable pipelines into another pipeline. Reusable pipelines cannot contain Subpipeline components.
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-2 rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground sm:grid-cols-3">
             <p><strong className="text-foreground">1. Design</strong><br />Build and test the pipeline on the main canvas.</p>
-            <p><strong className="text-foreground">2. Save</strong><br />Create an immutable reusable version here.</p>
-            <p><strong className="text-foreground">3. Attach</strong><br />Select it from a Subpipeline component.</p>
+            <p><strong className="text-foreground">2. Save</strong><br />Save a reusable pipeline that cannot be edited.</p>
+            <p><strong className="text-foreground">3. Reuse</strong><br />Drag the saved pipeline from the Lab into another pipeline.</p>
           </div>
           <div className="flex justify-end">
             <Button onClick={() => prepareCurrentCanvas()} disabled={!getCurrentGraph}>
@@ -211,14 +174,7 @@ export function ReusablePipelineManagerDialog({
                       </p>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={!getCurrentGraph}
-                        onClick={() => prepareCurrentCanvas(pipeline)}
-                      >
-                        Save current as new version
-                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => setPipelineToView(pipeline)}>View pipeline</Button>
                       <Button
                         size="sm"
                         variant="destructive"
@@ -228,33 +184,12 @@ export function ReusablePipelineManagerDialog({
                       </Button>
                     </div>
                   </div>
-                  <div className="mt-4 space-y-2">
-                    {pipeline.versions.map((version) => (
-                      <div
-                        key={version.uid}
-                        className="flex items-center justify-between gap-3 rounded-md bg-muted/50 p-3"
-                      >
-                        <div className="min-w-0 text-sm">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium">{version.name}</span>
-                            {pipeline.active_version_uid === version.uid && <Badge variant="secondary">Latest</Badge>}
-                          </div>
-                          <div className="mt-1 text-xs text-muted-foreground">
-                            {version.interface.inputs.length} input{version.interface.inputs.length === 1 ? "" : "s"}
-                            {" · "}{version.interface.outputs.length} output{version.interface.outputs.length === 1 ? "" : "s"}
-                            {" · "}{version.node_count} components
-                          </div>
-                        </div>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={!replaceCurrentGraph}
-                          onClick={() => setVersionToEdit({ pipeline, version })}
-                        >
-                          Edit on main canvas
-                        </Button>
-                      </div>
-                    ))}
+                  <div className="mt-4 flex items-center justify-between gap-3 rounded-md bg-muted/50 p-3">
+                    <div className="min-w-0 text-xs text-muted-foreground">
+                      {pipeline.interface.inputs.length} inputs · {pipeline.interface.outputs.length} outputs · {pipeline.node_count} components
+                      {pipeline.unavailable_reason && <p className="mt-1 text-destructive">{pipeline.unavailable_reason}</p>}
+                    </div>
+
                   </div>
                 </section>
               ))}
@@ -272,30 +207,21 @@ export function ReusablePipelineManagerDialog({
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>
-              {currentCanvasDraft?.pipelineUid ? "Save current canvas as a new version" : "Save current canvas for reuse"}
+              Save current canvas for reuse
             </DialogTitle>
             <DialogDescription>
-              This saves the graph currently shown on the main canvas. No separate pipeline editor is needed.
+              This saves the graph and attached files currently shown on the main canvas. Saved reusable pipelines cannot be edited. To change the definition, save a new reusable pipeline with a different name.
             </DialogDescription>
           </DialogHeader>
           {currentCanvasDraft && (
             <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-3">
                 <div className="space-y-2">
                   <Label htmlFor="current-canvas-pipeline-name">Name</Label>
                   <Input
                     id="current-canvas-pipeline-name"
                     value={currentCanvasDraft.name}
-                    disabled={Boolean(currentCanvasDraft.pipelineUid)}
                     onChange={(event) => setCurrentCanvasDraft((current) => current && ({ ...current, name: event.target.value }))}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="current-canvas-version-name">Version</Label>
-                  <Input
-                    id="current-canvas-version-name"
-                    value={currentCanvasDraft.versionName}
-                    onChange={(event) => setCurrentCanvasDraft((current) => current && ({ ...current, versionName: event.target.value }))}
                   />
                 </div>
               </div>
@@ -337,6 +263,11 @@ export function ReusablePipelineManagerDialog({
         </DialogContent>
       </Dialog>
 
+      <ReusablePipelineViewerDialog
+        reference={open && pipelineToView ? { pipeline_uid: pipelineToView.uid, pipeline_name: pipelineToView.name } : null}
+        onClose={() => setPipelineToView(null)}
+      />
+
       <AlertDialog open={Boolean(pipelineToDelete)} onOpenChange={(nextOpen) => {
         if (!nextOpen && !isDeleting) setPipelineToDelete(null);
       }}>
@@ -344,7 +275,7 @@ export function ReusablePipelineManagerDialog({
           <AlertDialogHeader>
             <AlertDialogTitle>Delete reusable pipeline?</AlertDialogTitle>
             <AlertDialogDescription>
-              This removes “{pipelineToDelete?.name}” and all of its immutable versions. Deletion is blocked while any parent pipeline references it.
+              This removes “{pipelineToDelete?.name}”. Deletion is blocked while any parent pipeline references it.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -362,30 +293,7 @@ export function ReusablePipelineManagerDialog({
         </AlertDialogContent>
       </AlertDialog>
 
-      <AlertDialog open={Boolean(versionToEdit)} onOpenChange={(nextOpen) => {
-        if (!nextOpen && !isLoadingVersion) setVersionToEdit(null);
-      }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Load this version on the main canvas?</AlertDialogTitle>
-            <AlertDialogDescription>
-              The current main canvas will be replaced with “{versionToEdit?.pipeline.name} · {versionToEdit?.version.name}”. You can use Undo to restore the previous canvas.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={isLoadingVersion}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              disabled={isLoadingVersion || !replaceCurrentGraph}
-              onClick={(event) => {
-                event.preventDefault();
-                void editVersionOnMainCanvas();
-              }}
-            >
-              {isLoadingVersion ? "Loading…" : "Load on main canvas"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+
     </>
   );
 }

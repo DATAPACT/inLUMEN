@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { getGraphRevision, subscribePersistence } from '@/features/flow/persistenceState';
 
 import { apiFetch } from '@/utils/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
@@ -38,6 +39,7 @@ import {
   getNodeDefinitionIcon,
 } from '@/features/nodes/registry/iconRegistry';
 import type { NodeDefinition } from '@/features/nodes/registry/types';
+import { ReusablePipelineViewerDialog } from '@/components/subpipeline/ReusablePipelineViewerDialog';
 import { ReusablePipelineManagerDialog } from '@/components/subpipeline/ReusablePipelineManagerDialog';
 import { PipelineRunPanel } from '@/components/runs/PipelineRunPanel';
 import { publicPortsForSubpipeline } from '@/features/flow/subpipeline';
@@ -81,7 +83,6 @@ interface SidebarProps {
   activeChatbotConfig?: ChatbotConfig;
   workspaceResetKey?: number;
   getCurrentPipelineGraph?: () => unknown;
-  replaceCurrentPipelineGraph?: (graph: unknown) => Promise<unknown> | unknown;
   currentPipelineName?: string;
   currentPipelineDescription?: string;
   onGenerateRuntimeCode?: () => void;
@@ -259,20 +260,22 @@ export function Sidebar({
   activeChatbotConfig,
   workspaceResetKey = 0,
   getCurrentPipelineGraph,
-  replaceCurrentPipelineGraph,
   currentPipelineName,
   currentPipelineDescription,
   onGenerateRuntimeCode,
   onImportRuntimePackages,
 }: SidebarProps) {
-  // --- overview state (fetched when Overview tab is opened)
-  const [overviewData, setOverviewData] = useState<Partial<PipelineOverview> | null>(null);
+  // Keep fetched metadata tied to the version it describes.
+  const overviewContext = `${workspaceResetKey}:${activeVersionUid}`;
+  const [overviewData, setOverviewData] = useState<(Partial<PipelineOverview> & { context: string }) | null>(null);
   const [overviewError, setOverviewError] = useState<string>("");
   const [isLoadingOverview, setIsLoadingOverview] = useState(false);
   const [overviewVersionDraft, setOverviewVersionDraft] = useState("");
   const [overviewDescriptionDraft, setOverviewDescriptionDraft] = useState("");
   const [isSavingOverview, setIsSavingOverview] = useState(false);
   const [overviewSaveError, setOverviewSaveError] = useState("");
+  const graphRevision = useSyncExternalStore(subscribePersistence, getGraphRevision);
+  const previousOverview = useRef({ context: "", version: "", description: "" });
 
   // --- Deployment artifact state
   const [isGeneratingDeployment, setIsGeneratingDeployment] = useState(false);
@@ -288,6 +291,7 @@ export function Sidebar({
   );
   const [reusablePipelines, setReusablePipelines] = useState<ReusablePipelineSummary[]>([]);
   const [reusablePipelineError, setReusablePipelineError] = useState("");
+  const [reusablePipelineToView, setReusablePipelineToView] = useState<ReusablePipelineSummary | null>(null);
   const [isReusablePipelineManagerOpen, setIsReusablePipelineManagerOpen] = useState(false);
 
   const refreshReusablePipelineCatalog = async () => {
@@ -315,6 +319,8 @@ export function Sidebar({
 
   useEffect(() => {
     let cancelled = false;
+    setReusablePipelineToView(null);
+    setIsReusablePipelineManagerOpen(false);
     const loadCatalog = () => {
       fetchReusablePipelines()
         .then((pipelines) => {
@@ -503,7 +509,7 @@ export function Sidebar({
     return await bundleRes.json();
   };
 
-  // fetch overview properties when opening Overview tab
+  // Refresh after committed edits as well as when opening Overview.
   const fetchPipelineOverview = async (): Promise<PipelineOverviewResponse> => {
     const res = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/overview`, { method: "GET" });
     if (!res.ok) {
@@ -523,6 +529,7 @@ export function Sidebar({
         const data = await fetchPipelineOverview();
         if (isCancelled) return;
         setOverviewData({
+          context: overviewContext,
           version: data?.version ?? "",
           description: data?.description ?? "",
           createdAt: data?.created_at ?? "",
@@ -546,7 +553,7 @@ export function Sidebar({
     return () => {
       isCancelled = true;
     };
-  }, [activeTab, activeVersionUid, onOverviewUpdated]);
+  }, [activeTab, onOverviewUpdated, graphRevision, overviewContext]);
 
   const handleGenerateDeploymentArtifact = async (target: "argo" | "dagster") => {
     try {
@@ -638,15 +645,21 @@ export function Sidebar({
   // Choose fetched overview first, fall back to prop if still pass it in
   const overview = {
     ...pipelineOverview,
-    ...overviewData,
+    ...(overviewData?.context === overviewContext ? overviewData : {}),
   } as PipelineOverview;
   const isMainVersion = activeVersionUid === MAIN_PIPELINE_VERSION_UID;
   const runtimeArtifactGroups = groupRuntimeArtifactDownloads(runtimeArtifactDownloads);
 
   useEffect(() => {
-    setOverviewVersionDraft(overview?.version ?? "");
-    setOverviewDescriptionDraft(overview?.description ?? "");
-  }, [overview?.description, overview?.version]);
+    const context = overviewContext;
+    const previous = previousOverview.current;
+    const version = overview?.version ?? "";
+    const description = overview?.description ?? "";
+    // A response may arrive while the user types. Only replace untouched fields.
+    setOverviewVersionDraft(current => previous.context !== context || current === previous.version ? version : current);
+    setOverviewDescriptionDraft(current => previous.context !== context || current === previous.description ? description : current);
+    previousOverview.current = { context, version, description };
+  }, [overview?.description, overview?.version, overviewContext]);
 
   const handleOverviewMetadataSave = async () => {
     const nextVersion = isMainVersion
@@ -671,11 +684,11 @@ export function Sidebar({
       setOverviewVersionDraft(savedVersion);
       setOverviewDescriptionDraft(savedDescription);
       setOverviewData((current) => ({
-        ...current,
+        context: overviewContext,
         version: savedVersion,
         description: savedDescription,
-        lastUpdate: saved.updated_at ?? current?.lastUpdate ?? "",
-        createdAt: saved.created_at ?? current?.createdAt ?? "",
+        lastUpdate: saved.updated_at ?? (current?.context === overviewContext ? current.lastUpdate : "") ?? "",
+        createdAt: saved.created_at ?? (current?.context === overviewContext ? current.createdAt : "") ?? "",
       }));
       onOverviewUpdated?.({
         version: savedVersion,
@@ -723,7 +736,7 @@ export function Sidebar({
                 Pipeline Components
               </h3>
               <div className="space-y-5">
-                {groupNodeDefinitions(nodeDefinitions).map(([family, definitions]) => (
+                {groupNodeDefinitions(nodeDefinitions.filter((definition) => definition.base_type !== "subpipeline")).map(([family, definitions]) => (
                   <div key={family} className="space-y-2">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                       {FAMILY_LABELS[family] ?? family}
@@ -777,21 +790,25 @@ export function Sidebar({
                     </p>
                   )}
                   {reusablePipelines.length === 0 && !reusablePipelineError && (
-                    <p className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">
-                      Saved reusable pipelines appear here. Use Manage to save the current canvas.
-                    </p>
+                    <div className="space-y-2 rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                      <p>No reusable pipelines yet.</p>
+                      <p>Build a pipeline with Source and Destination boundaries on the canvas, then save it for reuse. Saved pipelines can be dragged from here into another pipeline.</p>
+                      <Button type="button" variant="outline" size="sm" onClick={() => setIsReusablePipelineManagerOpen(true)}>
+                        Save a pipeline for reuse
+                      </Button>
+                    </div>
                   )}
-                  {reusablePipelines.flatMap((pipeline) => pipeline.versions.map((version) => {
+                  {reusablePipelines.map((pipeline) => {
                     const definition = {
                       label: pipeline.name,
-                      description: pipeline.description || `Pinned reusable pipeline · ${version.name}`,
+                      description: pipeline.description || "Reusable pipeline",
                       type: "subpipeline" as const,
                       definition_id: "core.subpipeline",
                       definition_version: 1,
                       implementation: {},
                       template_label: "Subpipeline",
                       template: { id: "core.subpipeline", name: "Subpipeline" },
-                      ports: publicPortsForSubpipeline({ interface: version.interface }),
+                      ports: publicPortsForSubpipeline({ interface: pipeline.interface }),
                       param: {},
                       configuration_status: "valid" as const,
                       subpipeline: {
@@ -799,19 +816,20 @@ export function Sidebar({
                         reference: {
                           pipeline_uid: pipeline.uid,
                           pipeline_name: pipeline.name,
-                          version_uid: version.uid,
-                          version_name: version.name,
                         },
-                        interface: version.interface,
+                        interface: pipeline.interface,
                         expanded: false,
                       },
                     };
                     return (
                       <div
-                        key={`${pipeline.uid}::${version.uid}`}
-                        draggable
-                        onDragStart={(event) => onDragStart(event, { type: "custom", data: definition })}
-                        className="flex cursor-move items-start gap-3 rounded-md border border-cyan-400/20 p-2.5 transition-colors hover:bg-muted/50"
+                        key={pipeline.uid}
+                        draggable={!pipeline.unavailable_reason}
+                        onDragStart={(event) => {
+                          if (pipeline.unavailable_reason) { event.preventDefault(); return; }
+                          onDragStart(event, { type: "custom", data: definition });
+                        }}
+                        className={cn("flex items-start gap-3 rounded-md border border-cyan-400/20 p-2.5 transition-colors", pipeline.unavailable_reason ? "opacity-60" : "cursor-move hover:bg-muted/50")}
                       >
                         <div className="rounded-md bg-cyan-500/10 p-1.5 text-cyan-600 dark:text-cyan-300">
                           <LayoutGrid className="h-4 w-4" />
@@ -819,12 +837,16 @@ export function Sidebar({
                         <div className="min-w-0">
                           <h4 className="truncate text-sm font-medium">{pipeline.name}</h4>
                           <p className="mt-0.5 text-xs text-muted-foreground">
-                            {version.name} · {version.interface.inputs.length} in / {version.interface.outputs.length} out
+                            {pipeline.interface.inputs.length} in / {pipeline.interface.outputs.length} out
                           </p>
+                          <Button type="button" variant="ghost" size="sm" className="mt-1 h-7 px-0" draggable={false}
+                            onDragStart={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                            onClick={() => setReusablePipelineToView(pipeline)}>View pipeline</Button>
+                          {pipeline.unavailable_reason && <p className="mt-1 text-xs text-destructive">{pipeline.unavailable_reason}</p>}
                         </div>
                       </div>
                     );
-                  }))}
+                  })}
                 </div>
               </div>
             </div>
@@ -1120,13 +1142,17 @@ export function Sidebar({
         )}
       </ScrollArea>
     </div>
+    <ReusablePipelineViewerDialog
+      key={`reusable-viewer-${workspaceResetKey}`}
+      reference={reusablePipelineToView ? { pipeline_uid: reusablePipelineToView.uid, pipeline_name: reusablePipelineToView.name } : null}
+      onClose={() => setReusablePipelineToView(null)}
+    />
     <ReusablePipelineManagerDialog
       open={isReusablePipelineManagerOpen}
       pipelines={reusablePipelines}
       onOpenChange={setIsReusablePipelineManagerOpen}
       onRefresh={refreshReusablePipelineCatalog}
       getCurrentGraph={getCurrentPipelineGraph}
-      replaceCurrentGraph={replaceCurrentPipelineGraph}
       currentPipelineName={currentPipelineName}
       currentPipelineDescription={currentPipelineDescription}
     />

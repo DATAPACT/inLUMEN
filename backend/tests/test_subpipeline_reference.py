@@ -3,13 +3,45 @@ import unittest
 from pipeline_graph_validation import validate_pipeline_graph
 from subpipeline_reference import (
     derive_subpipeline_interface,
+    hydrate_reusable_file_references,
     missing_explicit_port_contracts,
     normalize_reusable_pipeline_graph,
     plan_subpipeline_port_migration,
+    reusable_pipeline_nesting_error,
 )
 
 
 class SubpipelineReferenceTest(unittest.TestCase):
+    def test_recovers_lost_file_pointers_without_overwriting_manual_edits(self):
+        import copy
+        pointer = {"filename": "main.py", "snapshot_bucket": "files-step-id-task", "snapshot_object": ".generated/abc/main.py"}
+        data = {"files": ["main.py"], "generated_artifact": {"status": "current", "files": [pointer]}}
+        graph = {"nodes": [{"data": data}]}
+        for status, modified in (("stale", False), ("current", True)):
+            candidate = copy.deepcopy(graph)
+            artifact = candidate['nodes'][0]['data']['generated_artifact']
+            artifact.update(status=status, provenance={"user_modified": modified})
+            self.assertEqual(hydrate_reusable_file_references(candidate)['nodes'][0]['data']['files'], ['main.py'])
+        recovered = hydrate_reusable_file_references(graph)
+        self.assertEqual(recovered['nodes'][0]['data']['files'], [pointer])
+        recovered['nodes'][0]['data']['files'][0] = {**pointer, 'snapshot_object': 'manual/main.py'}
+        self.assertEqual(hydrate_reusable_file_references(recovered)['nodes'][0]['data']['files'][0]['snapshot_object'], 'manual/main.py')
+
+    def test_depth_limit_rejects_nested_bodies_without_following_references(self):
+        for node in ({"type": "subpipeline", "id": "nested"},
+                     {"id": "nested", "data": {"type": "subpipeline"}}):
+            graph = {"nodes": [node], "edges": []}
+            self.assertIn("Only one subpipeline level", reusable_pipeline_nesting_error(graph))
+            report = validate_pipeline_graph(graph, _nested_depth=1)
+            self.assertIn("subpipeline-depth-exceeded", [issue['code'] for issue in report['issues']])
+
+    def test_resolved_or_legacy_nested_graphs_cannot_bypass_validation(self):
+        for graph_key in ('resolved_graph', 'graph'):
+            node = {"id": "outer", "data": {"type": "subpipeline", "subpipeline": {
+                graph_key: {"nodes": [{"id": "inner", "type": "subpipeline"}]}}}}
+            report = validate_pipeline_graph({"nodes": [node], "edges": []})
+            self.assertIn('subpipeline-depth-exceeded', [issue['code'] for issue in report['issues']])
+
     def test_port_migration_keeps_stable_compatible_ids(self):
         previous = {"inputs": [{"id": "audio", "type": "Audio"}], "outputs": []}
         following = {"inputs": [{"id": "audio", "type": "Audio"}], "outputs": []}

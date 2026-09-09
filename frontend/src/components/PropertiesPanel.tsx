@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { ReusablePipelineViewerDialog } from '@/components/subpipeline/ReusablePipelineViewerDialog';
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -83,12 +84,12 @@ import {
   type SubpipelineReference,
 } from '@/features/flow/subpipeline';
 import {
-  attachReusablePipelineVersion,
+  attachReusablePipeline,
   fetchReusablePipelines,
   previewReusablePipelineAttachment,
   type ReusablePipelineAttachment,
   type ReusablePipelineSummary,
-  type ReusablePipelineVersion,
+  type ReusablePipelineDefinition,
 } from '@/features/flow/subpipelinePersistence';
 
 type NodeParamMap = Record<string, unknown>;
@@ -237,7 +238,8 @@ export function PropertiesPanel({
   );
   const [ports, setPorts] = useState<NodePorts>(() => normalizeNodePorts(undefined, nodeType));
   const [reusablePipelines, setReusablePipelines] = useState<ReusablePipelineSummary[]>([]);
-  const [selectedReusableVersion, setSelectedReusableVersion] = useState("");
+  const [isReusableViewerOpen, setIsReusableViewerOpen] = useState(false);
+  const [selectedReusablePipeline, setSelectedReusablePipeline] = useState("");
   const [isLoadingReusablePipelines, setIsLoadingReusablePipelines] = useState(false);
   const [pendingAttachment, setPendingAttachment] = useState<ReusablePipelineAttachment | null>(null);
   const [isAttachmentReviewOpen, setIsAttachmentReviewOpen] = useState(false);
@@ -450,7 +452,6 @@ export function PropertiesPanel({
   }, [selectedNode?.id]);
 
   const selectedSubpipelinePipelineUid = selectedNode?.data.subpipeline?.reference?.pipeline_uid || "";
-  const selectedSubpipelineVersionUid = selectedNode?.data.subpipeline?.reference?.version_uid || "";
 
   useEffect(() => {
     if (nodeType !== "subpipeline" || !selectedNode?.id) return;
@@ -460,10 +461,8 @@ export function PropertiesPanel({
       .then((pipelines) => {
         if (cancelled) return;
         setReusablePipelines(pipelines);
-        setSelectedReusableVersion(
-          selectedSubpipelinePipelineUid && selectedSubpipelineVersionUid
-            ? `${selectedSubpipelinePipelineUid}::${selectedSubpipelineVersionUid}`
-            : "",
+        setSelectedReusablePipeline(
+          selectedSubpipelinePipelineUid,
         );
       })
       .catch((error) => {
@@ -479,7 +478,6 @@ export function PropertiesPanel({
     nodeType,
     selectedNode?.id,
     selectedSubpipelinePipelineUid,
-    selectedSubpipelineVersionUid,
   ]);
 
   const handleLabelChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -546,8 +544,8 @@ export function PropertiesPanel({
     pushNodeUpdate({ param: next, secret_params: secretParamKeys });
   };
 
-  const applyReusablePipelineVersion = (
-    version: ReusablePipelineVersion,
+  const applyReusablePipelineDefinition = (
+    version: ReusablePipelineDefinition,
     options: { persist?: boolean } = {},
   ) => {
     const stableDefinition: SubpipelineDefinition = {
@@ -559,7 +557,7 @@ export function PropertiesPanel({
     };
     const nextPorts = publicPortsForSubpipeline(stableDefinition);
     setPorts(nextPorts);
-    setSelectedReusableVersion(`${version.reference.pipeline_uid}::${version.reference.version_uid}`);
+    setSelectedReusablePipeline(version.reference.pipeline_uid);
     if (options.persist !== false) {
       pushNodeUpdate({ ports: nextPorts, subpipeline: stableDefinition });
     } else if (selectedNode) {
@@ -591,26 +589,24 @@ export function PropertiesPanel({
   };
 
   const attachSelectedReusablePipeline = async () => {
-    const [pipelineUid, versionUid] = selectedReusableVersion.split("::");
-    if (!selectedNode || !pipelineUid || !versionUid) return;
+    const pipelineUid = selectedReusablePipeline;
+    if (!selectedNode || !pipelineUid) return;
     try {
       setIsLoadingReusablePipelines(true);
       const preview = await previewReusablePipelineAttachment({
         flowId: selectedNode.id,
         pipelineUid,
-        versionUid,
       });
       if (preview.compatibility.conflicts.length === 0) {
-        const attached = await attachReusablePipelineVersion({
+        const attached = await attachReusablePipeline({
           flowId: selectedNode.id,
           pipelineUid,
-          versionUid,
-          inputMapping: preview.compatibility.input_mapping,
+            inputMapping: preview.compatibility.input_mapping,
           outputMapping: preview.compatibility.output_mapping,
         });
-        applyReusablePipelineVersion(attached, { persist: false });
+        applyReusablePipelineDefinition(attached, { persist: false });
         toast.success("Reusable pipeline attached", {
-          description: `${attached.reference.pipeline_name} · ${attached.reference.version_name}`,
+          description: attached.reference.pipeline_name,
         });
         return;
       }
@@ -619,7 +615,7 @@ export function PropertiesPanel({
       setAttachmentOutputMapping(preview.compatibility.output_mapping);
       setIsAttachmentReviewOpen(true);
     } catch (error) {
-      toast.error("Could not attach reusable pipeline version", {
+      toast.error("Could not attach reusable pipeline", {
         description: error instanceof Error ? error.message : "Unknown error",
       });
     } finally {
@@ -631,21 +627,20 @@ export function PropertiesPanel({
     if (!selectedNode || !pendingAttachment) return;
     try {
       setIsAttachingReusablePipeline(true);
-      const attached = await attachReusablePipelineVersion({
+      const attached = await attachReusablePipeline({
         flowId: selectedNode.id,
         pipelineUid: pendingAttachment.reference.pipeline_uid,
-        versionUid: pendingAttachment.reference.version_uid,
         inputMapping: attachmentInputMapping,
         outputMapping: attachmentOutputMapping,
       });
-      applyReusablePipelineVersion(attached, { persist: false });
+      applyReusablePipelineDefinition(attached, { persist: false });
       setIsAttachmentReviewOpen(false);
       setPendingAttachment(null);
-      toast.success("Subpipeline version updated", {
-        description: `${attached.reference.pipeline_name} · ${attached.reference.version_name}`,
+      toast.success("Subpipeline updated", {
+        description: attached.reference.pipeline_name,
       });
     } catch (error) {
-      toast.error("Could not update Subpipeline version", {
+      toast.error("Could not update Subpipeline", {
         description: error instanceof Error ? error.message : "Unknown error",
       });
     } finally {
@@ -1284,8 +1279,12 @@ export function PropertiesPanel({
     <div className={cn("w-full border-l border-border bg-card text-card-foreground flex flex-col h-full", className)}>
       <div className="p-4 border-b border-border">
         <div className="flex items-center justify-between">
-          <div>
+          <div className="min-w-0">
             <h2 className="text-lg font-semibold">Properties</h2>
+            {selectedNode && <>
+              <p className="mt-1 break-words text-sm font-medium">{label.trim() || `Untitled ${getStepTypeLabel(nodeType)}`}</p>
+              <p className="break-all text-xs text-muted-foreground">ID: {selectedNode.id}</p>
+            </>}
             <p className="text-xs text-muted-foreground mt-1">
               {selectedNode ? `${getStepTypeLabel(nodeType)} details` : "Select a node to edit"}
             </p>
@@ -1590,53 +1589,53 @@ export function PropertiesPanel({
               <>
                 <InspectorSection
                   title="Referenced Pipeline"
-                  description="This component invokes a separately saved, versioned pipeline."
+                  description="This component invokes a saved reusable pipeline. Its definition cannot be edited."
                 >
                   <div className="rounded-md border border-cyan-400/20 bg-cyan-500/5 p-3 text-xs">
                     <div className="font-medium text-cyan-600 dark:text-cyan-300">
                       {selectedNode.data.subpipeline?.reference?.pipeline_name || 'No reusable pipeline attached'}
                     </div>
                     <div className="mt-1 text-muted-foreground">
-                      {selectedNode.data.subpipeline?.reference?.version_name
-                        ? `${selectedNode.data.subpipeline.reference.version_name} · `
-                        : ''}
                       {ports.inputs.length} input{ports.inputs.length === 1 ? '' : 's'} · {ports.outputs.length} output{ports.outputs.length === 1 ? '' : 's'}
                     </div>
                     {selectedNode.data.subpipeline?.resolution_error && (
                       <div className="mt-2 text-red-500">{selectedNode.data.subpipeline.resolution_error}</div>
                     )}
                   </div>
+                  <Button type="button" variant="outline" size="sm"
+                    disabled={!selectedSubpipelinePipelineUid}
+                    onClick={() => setIsReusableViewerOpen(true)}>View pipeline</Button>
                   <div className="space-y-2">
-                    <Label htmlFor="reusable-pipeline-version">Saved pipeline version</Label>
+                    <Label htmlFor="reusable-pipeline-selection">Reusable pipeline</Label>
                     <select
-                      id="reusable-pipeline-version"
+                      id="reusable-pipeline-selection"
                       className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-                      value={selectedReusableVersion}
+                      value={selectedReusablePipeline}
                       disabled={isLoadingReusablePipelines}
-                      onChange={(event) => setSelectedReusableVersion(event.target.value)}
+                      onChange={(event) => setSelectedReusablePipeline(event.target.value)}
                     >
                       <option value="">Select a reusable pipeline…</option>
-                      {reusablePipelines.flatMap((pipeline) => pipeline.versions.map((version) => (
-                        <option key={`${pipeline.uid}::${version.uid}`} value={`${pipeline.uid}::${version.uid}`}>
-                          {pipeline.name} · {version.name}
+                      {reusablePipelines.map((pipeline) => (
+                        <option key={pipeline.uid} value={pipeline.uid} disabled={Boolean(pipeline.unavailable_reason)}>
+                          {pipeline.name}{pipeline.unavailable_reason ? " · Unavailable (nested subpipeline)" : ""}
                         </option>
-                      )))}
+                      ))}
                     </select>
                     <Button
                       type="button"
                       size="sm"
-                      disabled={!selectedReusableVersion || isLoadingReusablePipelines}
+                      disabled={!selectedReusablePipeline || isLoadingReusablePipelines}
                       onClick={() => { void attachSelectedReusablePipeline(); }}
                     >
-                      {isLoadingReusablePipelines ? "Attaching…" : "Use selected version"}
+                      {isLoadingReusablePipelines ? "Attaching…" : "Use selected pipeline"}
                     </Button>
                   </div>
                   <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-                    Create and update reusable pipelines from <strong className="text-foreground">Library → Reusable pipelines → Manage</strong> using the normal main canvas.
+                    Create reusable pipelines from <strong className="text-foreground">Lab → Reusable pipelines → Manage</strong> using the main canvas. Reusable pipelines cannot contain another Subpipeline.
                   </div>
                   {selectedNode.data.subpipeline?.graph && !selectedNode.data.subpipeline?.reference && (
                     <p role="alert" className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
-                      This component contains a legacy embedded pipeline. Rebuild it on the main canvas, save it for reuse, then select the saved version here. The embedded metadata remains preserved.
+                      This component contains a legacy embedded pipeline. Rebuild it on the main canvas, save it for reuse, then select the saved pipeline here. The embedded metadata remains preserved.
                     </p>
                   )}
                   <div className="flex justify-end">
@@ -1666,19 +1665,23 @@ export function PropertiesPanel({
         </div>
       )}
 
+      <ReusablePipelineViewerDialog
+        reference={isReusableViewerOpen ? selectedNode?.data.subpipeline?.reference || null : null}
+        onClose={() => setIsReusableViewerOpen(false)}
+      />
       <AlertDialog open={isAttachmentReviewOpen} onOpenChange={setIsAttachmentReviewOpen}>
         <AlertDialogContent className="max-w-2xl">
           <AlertDialogHeader>
-            <AlertDialogTitle>Review Subpipeline version change</AlertDialogTitle>
+            <AlertDialogTitle>Review Subpipeline change</AlertDialogTitle>
             <AlertDialogDescription>
-              The reusable pipeline version and every affected connection will be updated together.
+              This component’s reference and every affected connection will be updated together.
             </AlertDialogDescription>
           </AlertDialogHeader>
           {pendingAttachment && (
             <div className="max-h-[55vh] space-y-4 overflow-y-auto text-sm">
               <div className="rounded-md border p-3">
                 <div className="font-medium">
-                  {pendingAttachment.reference.pipeline_name} · {pendingAttachment.reference.version_name}
+                  {pendingAttachment.reference.pipeline_name}
                 </div>
                 <div className="mt-1 text-xs text-muted-foreground">
                   Available connections: {pendingAttachment.interface.inputs.length} input{pendingAttachment.interface.inputs.length === 1 ? "" : "s"}
@@ -1741,7 +1744,7 @@ export function PropertiesPanel({
                 void confirmReusablePipelineAttachment();
               }}
             >
-              {isAttachingReusablePipeline ? "Updating version…" : "Use this version"}
+              {isAttachingReusablePipeline ? "Updating pipeline…" : "Use this pipeline"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

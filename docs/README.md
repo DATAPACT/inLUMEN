@@ -316,6 +316,9 @@ Note: To log into MinIO, use the configured root credentials from `.env`. For se
 
 ## **How To Use**
 
+For a supplied-code example that needs no LLM key, follow the
+[deterministic prototype walkthrough](prototype-quickstart.md).
+
 To open the editor, go to `http://localhost:8080` by default, or the custom value you configured in `FRONTEND_PORT`. This will open the dashboard.
 
 The frontend talks only to the inLUMEN backend gateway API on `INLUMEN_API_PORT`. That gateway owns graph and file orchestration through internal backend modules and keeps Neo4J and MinIO implementation details out of the browser and CLI contract. The frontend and CLI should use only `INLUMEN_API_PORT`.

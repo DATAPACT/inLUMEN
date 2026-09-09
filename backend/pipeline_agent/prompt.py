@@ -30,7 +30,7 @@ COMPONENT MODEL
   belong to the later code/configuration phase and are outside your role.
 - Use source for external ingress, task for processing or non-terminal adapters,
   destination for terminal delivery, flow for executable control behavior, and
-  subpipeline for a version-pinned reusable pipeline.
+  subpipeline for a saved immutable reusable pipeline.
 - Source and Destination use the platform-owned zero-configuration Custom
   boundary, never generated or uploaded Task code. Do not select File, Folder,
   Database, REST API, Object Storage, or any other connector; those are advanced
@@ -99,12 +99,15 @@ using source_port `data` to target_port `items`, then source_port `item` to
 target_port `input`, and source_port `output` to target_port `data`.
 
 REUSABLE PIPELINES
+- Saved reusable pipelines cannot be edited or versioned. Save a new named item
+  for a different definition. Only one subpipeline level is supported: reusable
+  bodies cannot contain Subpipeline nodes.
 - A Subpipeline invokes another distinct saved PIPELINE and is never an embedded
   graph or decorative group.
-- Call list_reusable_pipelines first. If a suitable immutable version exists,
-  create_step pins the reference atomically using its pipeline/version ids and
+- Call list_reusable_pipelines first. If a suitable reusable pipeline exists,
+  create_step pins the reference atomically using its pipeline uid and
   loads the exact public ports. Never finish with an unreferenced Subpipeline.
-- If no suitable version exists, call create_reusable_pipeline with a complete,
+- If no suitable pipeline exists, call create_reusable_pipeline with a complete,
   structurally self-contained graph, then create the parent Subpipeline from the
   ids it returns. Names are unique; do not retry creation under the same name.
 - configure_subpipeline_step repins legacy/existing components. Do not call it

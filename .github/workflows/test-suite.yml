@@ -111,6 +111,10 @@ jobs:
     env:
       TEST_POSTGRES_URL: postgresql://postgres:integration-password@localhost:5432/postgres
       RUN_NEO4J_INTEGRATION: "1"
+      RUN_MINIO_INTEGRATION: "1"
+      MINIO_ENDPOINT: localhost:19000
+      MINIO_ROOT_USER: integration-user
+      MINIO_ROOT_PASSWORD: integration-password
       NEO4J_URI: bolt://localhost:7687
       NEO4J_AUTH: neo4j/integration-password
     steps:
@@ -119,6 +123,12 @@ jobs:
         with:
           python-version: "3.11"
       - run: python -m pip install --require-hashes -r backend/requirements.lock
+      - name: Start disposable attachment storage
+        run: |
+          docker run -d --name integration-minio -p 19000:9000 \
+            -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
+            minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e server /data
+          curl --fail --retry 20 --retry-connrefused --retry-delay 1 http://localhost:19000/minio/health/ready
       - run: cd backend && python -m unittest discover -s tests -p 'test_*integration.py'
       - run: cd backend && python -m unittest discover -s tests -p test_agent_workspace_queries.py
       - run: python scripts/test_postgres_workers.py runner

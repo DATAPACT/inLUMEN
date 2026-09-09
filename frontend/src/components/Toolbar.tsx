@@ -181,7 +181,7 @@ export function Toolbar({
                   <p>This action cannot be undone. It will permanently:</p>
                   <ul className="list-disc space-y-1 pl-5">
                     <li>empty the Main pipeline canvas,</li>
-                    <li>delete every saved and reusable pipeline version,</li>
+                    <li>delete every saved pipeline version and reusable pipeline,</li>
                     <li>remove all pipeline files and generated packages,</li>
                     <li>cancel active runs and delete all run history and outputs,</li>
                     <li>clear the current chat session, and</li>

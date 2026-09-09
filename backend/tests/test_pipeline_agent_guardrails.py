@@ -1457,7 +1457,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
     @patch("pipeline_agent.team.AssistantAgent")
     @patch("pipeline_agent.team.select_model_client")
     @patch("pipeline_agent.tools.run_neo4j_query", new_callable=AsyncMock)
-    def test_create_reusable_pipeline_creates_separate_versioned_pipeline(
+    def test_create_reusable_pipeline_creates_one_immutable_definition(
         self,
         run_query,
         select_model_client,
@@ -1495,10 +1495,10 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
 
         query = run_query.await_args.args[0]
         self.assertIn("status:'reusable'", query)
-        self.assertIn("CREATE (v:PIPELINE_VERSION", query)
+        self.assertNotIn("CREATE (v:PIPELINE_VERSION", query)
         self.assertIn("interface_json", query)
         self.assertIn("public_ports_json", query)
-        self.assertIn("HAS_VERSION", query)
+        self.assertNotIn("HAS_VERSION", query)
         self.assertEqual("find_reusable_pipeline_by_name", run_query.await_args_list[0].args[1])
         self.assertEqual("create_reusable_pipeline", run_query.await_args.args[1])
 

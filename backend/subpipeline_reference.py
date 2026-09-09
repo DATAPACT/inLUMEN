@@ -422,6 +422,43 @@ def normalize_reusable_pipeline_graph(graph: Any) -> dict[str, Any]:
     return _infer_normalized_port_contracts(normalized)
 
 
+SUBPIPELINE_DEPTH_ERROR = (
+    "Only one subpipeline level is supported. A reusable pipeline cannot contain a Subpipeline component."
+)
+
+
+def hydrate_reusable_file_references(graph: dict) -> dict:
+    """Recover snapshot pointers lost by the old filename-only agent export."""
+    for node in graph.get("nodes", []):
+        data = _node_data(node)
+        artifact = data.get("generated_artifact")
+        artifact = artifact if isinstance(artifact, dict) else {}
+        files = artifact.get("files")
+        generated = {item.get("filename"): item for item in files if isinstance(item, dict)} if isinstance(files, list) else {}
+        provenance = _json_object(artifact.get("provenance"))
+        current = artifact.get("status", "current") == "current" and not provenance.get("user_modified")
+        for key in ("files", "file_buckets"):
+            if isinstance(data.get(key), list):
+                recovered = []
+                for item in data[key]:
+                    filename = item if isinstance(item, str) else item.get('filename') if isinstance(item, dict) else None
+                    missing_pointer = isinstance(item, str) or isinstance(item, dict) and not item.get('snapshot_object')
+                    if current and missing_pointer and filename in generated:
+                        item = {**(item if isinstance(item, dict) else {}), **generated[filename]}
+                    recovered.append(item)
+                data[key] = recovered
+    return graph
+
+
+def reusable_pipeline_nesting_error(graph: Any) -> str:
+    """Check the reusable body without following references or recursive graphs."""
+    nodes = graph.get("nodes", []) if isinstance(graph, dict) else []
+    return SUBPIPELINE_DEPTH_ERROR if isinstance(nodes, list) and any(
+        normalize_step_type(_node_data(node).get("type"), default="task") == "subpipeline"
+        for node in nodes
+    ) else ""
+
+
 def derive_subpipeline_interface(graph: Any) -> dict[str, list[dict[str, Any]]]:
     """Derive a reusable pipeline's public contract from boundary components."""
     nodes = graph.get("nodes") if isinstance(graph, dict) and isinstance(graph.get("nodes"), list) else []
@@ -601,7 +638,7 @@ def persisted_subpipeline_definition(value: Any) -> dict[str, Any]:
     candidate = dict(value) if isinstance(value, dict) else {}
     candidate.pop("resolved_graph", None)
     reference = subpipeline_reference(candidate)
-    if reference["pipeline_uid"] and reference["version_uid"]:
+    if reference["pipeline_uid"]:
         candidate.pop("graph", None)
         candidate["version"] = 2
     elif isinstance(candidate.get("graph"), dict):

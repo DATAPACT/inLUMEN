@@ -40,8 +40,8 @@ export const apiFetch = (url: string, init?: RequestInit): Promise<Response> => 
       return fetch(new URL('/api/pipeline/graph', new URL(url, window.location.origin)), { headers: readHeaders });
     },
     preservesGraph: path === '/api/reusable-pipelines',
-    // Rejected attachments belong to the upload form; no graph write occurred.
-    validationStatuses: /^\/api\/nodes\/[^/]+\/files(\/text)?$/.test(path) ? [400, 404, 413, 415, 422] : undefined,
+    // Rejected files and reusable pipelines belong to their forms; no graph write occurred.
+    validationStatuses: /^\/api\/(nodes\/[^/]+\/files(\/text)?|reusable-pipelines(\/.*)?)$/.test(path) ? [400, 404, 413, 415, 422] : undefined,
   });
   return send();
 };
