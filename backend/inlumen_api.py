@@ -38,6 +38,7 @@ from attachment_validation import attachment_input_errors, read_attachment_probe
 from auth_middleware import (
     current_principal,
     is_application_admin,
+    is_auth_enabled,
     require_auth,
     validate_auth_mode_configuration,
     validate_production_auth_configuration,
@@ -88,7 +89,7 @@ from workspace_store import (
     create_workspace,
     list_workspaces,
 )
-from workspace_storage import node_bucket_name
+from workspace_storage import node_bucket_name, bucket_belongs_to_workspace
 
 
 INLUMEN_API_PORT = get_service_port("INLUMEN_API_PORT", 5000)
@@ -647,8 +648,13 @@ def _node_file_entries(
             "content_type": content_type,
             **_file_kind_and_format(filename),
         }
+        if isinstance(item, dict) and item.get("snapshot_bucket") and item.get("snapshot_object"):
+            entry["snapshot_bucket"] = item["snapshot_bucket"]
+            entry["snapshot_object"] = item["snapshot_object"]
         if include_samples:
-            entry.update(_sample_file_descriptor(bucket, filename, entry))
+            entry.update(_sample_file_descriptor(
+                entry.get("snapshot_bucket", bucket), entry.get("snapshot_object", filename), entry
+            ))
         entries.append(entry)
     return entries
 
@@ -1079,7 +1085,59 @@ def _prepare_codegen_request(
         raw_config.pop("apiKey", None)
         raw_config.pop("credential_id", None)
         raw_config.pop("config_id", None)
+    if is_auth_enabled():
+        _stage_codegen_inputs(request_payload.get("context"))
     return request_payload
+
+
+def _stage_codegen_inputs(context: Any) -> None:
+    """Transfer authorized bytes once; durable jobs retry without user credentials.
+
+    Context descriptors are built server-side from the current workspace graph.
+    Only attached files are transported, never locations supplied by codegen.
+    """
+    limit = int(os.getenv("INLUMEN_CODEGEN_INPUT_MAX_BYTES", str(50 * 1024 * 1024)))
+    total_limit = int(os.getenv("INLUMEN_CODEGEN_INPUT_TOTAL_MAX_BYTES", str(100 * 1024 * 1024)))
+    cache: dict[tuple[str, str], dict[str, Any]] = {}
+    total = 0
+
+    def visit(value: Any) -> None:
+        nonlocal total
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+        elif isinstance(value, dict):
+            if value.get("filename") and value.get("bucket"):
+                bucket = str(value.get("snapshot_bucket") or value["bucket"])
+                name = str(value.get("snapshot_object") or value["filename"])
+                if not bucket_belongs_to_workspace(value["bucket"]) or not bucket_belongs_to_workspace(bucket):
+                    raise ValueError("Validation inputs must remain within the current workspace")
+                key = (bucket, name)
+                if key not in cache:
+                    response = _proxy(dispatch_object_request, "minio_read_file", method="GET",
+                                      params={"bucket_name": bucket, "filename": name, "max_bytes": limit}, data=b"")
+                    if not response.ok:
+                        raise ValueError("Attached validation input could not be read")
+                    content = response.content
+                    if len(content) > limit:
+                        raise ValueError("Attached validation inputs exceed the configured transport limit")
+                    cache[key] = {"content_base64": base64.b64encode(content).decode("ascii"),
+                                  "content_sha256": hashlib.sha256(content).hexdigest()}
+                total += len(cache[key]["content_base64"])
+                if total > total_limit:
+                    raise ValueError("Attached validation inputs exceed the configured transport limit")
+                value["sample"] = {**(value.get("sample") or {}), **cache[key]}
+                return
+            for item in value.values():
+                visit(item)
+    if not isinstance(context, dict):
+        return
+    # Never traverse arbitrary node parameters or user-authored metadata.
+    graph = context.get("graph") or {}
+    for node in graph.get("nodes", []):
+        visit(node.get("files", []))
+    visit((context.get("target_node") or {}).get("files", []))
+    visit(context.get("available_inputs", []))
 
 
 def _codegen_llm_api_key(payload: dict[str, Any] | None) -> str:
@@ -3308,6 +3366,7 @@ def node_files(node_id: str):
             )
 
         return jsonify({
+            "file_reference": {"filename": uploaded.filename, "bucket": node_bucket_name(node_id), **({"role": file_role} if file_role else {})},
             "file": _upstream_json(storage_response),
             "graph": _upstream_json(graph_response),
             **(
@@ -3377,14 +3436,18 @@ def node_text_file(node_id: str):
     filename = str(data.get("filename") or "").strip()
     content = data.get("content")
     container_id = str(data.get("container_id") or node_id).strip()
+    if container_id != node_id:
+        return _json_error(400, "container_id must be the node ID, not a bucket name")
+    node_type, graph_error = _file_owner_node_type(node_id)
+    if graph_error is not None:
+        return _response_from_upstream(graph_error)
+    if not node_type:
+        return _json_error(404, "Node was not found in the current graph")
     if not filename:
         return _json_error(400, "filename is required")
     if not isinstance(content, str):
         return _json_error(400, "content must be a string")
     if filename.lower() in USER_TASK_RUNTIME_FILENAMES:
-        node_type, graph_error = _file_owner_node_type(node_id)
-        if graph_error is not None:
-            return _response_from_upstream(graph_error)
         if node_type != "task":
             return _json_error(
                 422,
@@ -3433,6 +3496,7 @@ def node_text_file(node_id: str):
     if not storage_response.ok:
         return _response_from_upstream(storage_response)
     return jsonify({
+        "file_reference": {"filename": filename, "bucket": node_bucket_name(node_id)},
         "file": _upstream_json(storage_response),
         **(
             {"generated_artifact": generated_artifact}

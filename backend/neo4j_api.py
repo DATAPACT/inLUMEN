@@ -1422,13 +1422,17 @@ def neo4j_resolve_file():
     container = str(request.args.get("container_id") or "")
     filename = str(request.args.get("filename") or "")
     bucket = node_bucket_name(container)
+    if container.startswith(("files-", "pipeline-snapshots-", "pipeline-version-file-snapshots")):
+        if not bucket_belongs_to_workspace(container):
+            return jsonify({"error": "File was not found"}), 404
+        bucket = container
     with driver.session() as session:
         record = session.run("""
             MATCH (f:FILE {filename:$filename})
             WHERE f.bucket=$bucket OR f.bucket=$container
             RETURN f.snapshot_bucket AS bucket, f.snapshot_object AS object LIMIT 1
         """, filename=filename, bucket=bucket, container=container).single()
-    return jsonify({"bucket": record["bucket"] if record else None, "object": record["object"] if record else None})
+    return jsonify({"bucket": (record["bucket"] if record else None) or bucket, "object": (record["object"] if record else None) or filename})
 
 
 # Adds (or updates) a FILE node once a file is added

@@ -481,7 +481,9 @@ def write_sample_inputs(
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
             sample_path = existing_sample_file(file_item.sample)
-            if sample_path is not None:
+            if file_item.sample and file_item.sample.content_base64 is not None:
+                write_embedded_media(path, file_item)
+            elif sample_path is not None:
                 shutil.copy2(sample_path, path)
             elif write_embedded_media(path, file_item) or fetch_configured_input(path, file_item):
                 pass
@@ -509,10 +511,13 @@ def write_sample_inputs(
 
 
 def write_embedded_media(path: Path, file_item: FileDescriptor) -> bool:
-    data_uri = file_item.sample.data_uri if file_item.sample else None
-    if not data_uri or not data_uri.startswith("data:") or "," not in data_uri:
-        return False
-    _, encoded = data_uri.split(",", 1)
+    sample = file_item.sample
+    encoded = sample.content_base64 if sample else None
+    if encoded is None:
+        data_uri = sample.data_uri if sample else None
+        if not data_uri or not data_uri.startswith("data:") or "," not in data_uri:
+            return False
+        _, encoded = data_uri.split(",", 1)
     try:
         content = base64.b64decode(encoded, validate=True)
     except (ValueError, base64.binascii.Error) as exc:
@@ -522,11 +527,20 @@ def write_embedded_media(path: Path, file_item: FileDescriptor) -> bool:
         raise RuntimeError(
             f"Embedded sample {file_item.filename} exceeds {max_bytes} bytes"
         )
+    if sample and sample.content_sha256:
+        import hashlib
+        if hashlib.sha256(content).hexdigest() != sample.content_sha256:
+            raise RuntimeError("Validation input integrity check failed")
     path.write_bytes(content)
     return True
 
 
 def fetch_configured_input(path: Path, file_item: FileDescriptor) -> bool:
+    from .security import EXECUTION_WORKSPACE
+    # Authenticated workspaces must receive bytes authorized by the backend.
+    # Never substitute a preview or try a shared credential on the user API.
+    if EXECUTION_WORKSPACE.get() != "local-workspace" and file_item.bucket:
+        raise RuntimeError("Authenticated validation input was not staged; start a new generation run")
     base_url = os.getenv(INPUT_FILE_BASE_URL_ENV, "").strip()
     if not base_url or not file_item.bucket:
         return False

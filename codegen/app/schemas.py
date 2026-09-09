@@ -70,6 +70,9 @@ def is_output_node_kind(value: str) -> bool:
 
 
 class FileSample(BaseModel):
+    # Full validation bytes are durable job input, not model prompt material.
+    content_base64: str | None = Field(default=None, repr=False)
+    content_sha256: str | None = None
     rows: list[dict[str, Any]] = Field(default_factory=list)
     text: str | None = None
     omitted_bytes: int = 0

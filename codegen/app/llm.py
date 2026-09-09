@@ -239,6 +239,15 @@ packages. Use only allowed packages; do not use subprocess, sockets, eval,
 exec, os.system, or undeclared network access."""
 
 
+def without_validation_bytes(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: without_validation_bytes(item) for key, item in value.items()
+                if key != "content_base64"}
+    if isinstance(value, list):
+        return [without_validation_bytes(item) for item in value]
+    return value
+
+
 async def generate_node_payload(
     config: LLMConfig,
     request: GenerateNodeScriptRequest,
@@ -253,7 +262,7 @@ async def generate_node_payload(
     return await generate_json(
         config,
         system_prompt=NODE_SYSTEM_PROMPT,
-        user_prompt=json.dumps(prompt, ensure_ascii=False),
+        user_prompt=json.dumps(without_validation_bytes(prompt), ensure_ascii=False),
         usage_callback=usage_callback,
     )
 
@@ -276,7 +285,7 @@ async def repair_node_payload(
     return await generate_json(
         config,
         system_prompt=NODE_SYSTEM_PROMPT,
-        user_prompt=json.dumps(prompt, ensure_ascii=False),
+        user_prompt=json.dumps(without_validation_bytes(prompt), ensure_ascii=False),
         usage_callback=usage_callback,
     )
 
@@ -295,7 +304,7 @@ async def generate_pipeline_payload(
     return await generate_json(
         config,
         system_prompt=PIPELINE_SYSTEM_PROMPT,
-        user_prompt=json.dumps(prompt, ensure_ascii=False),
+        user_prompt=json.dumps(without_validation_bytes(prompt), ensure_ascii=False),
         usage_callback=usage_callback,
     )
 
@@ -319,6 +328,6 @@ async def repair_pipeline_payload(
     return await generate_json(
         config,
         system_prompt=PIPELINE_SYSTEM_PROMPT,
-        user_prompt=json.dumps(prompt, ensure_ascii=False),
+        user_prompt=json.dumps(without_validation_bytes(prompt), ensure_ascii=False),
         usage_callback=usage_callback,
     )

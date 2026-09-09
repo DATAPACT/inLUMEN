@@ -5,7 +5,6 @@ import {
   ChatbotConfig,
 } from '@/services/chatbotService';
 import {
-  getNodeFileBucket,
   getNodeFileName,
   NodeFileReference,
   NodeFileRole,
@@ -140,10 +139,8 @@ export const readNodeFile = async (nodeId: string, file: NodeFileReference) => {
     throw new Error("Cannot read a file without a filename.");
   }
 
-  const bucket = getNodeFileBucket(file, nodeId);
-  const bucketId = bucket.replace(/^files-step-id-/i, "");
   const params = new URLSearchParams({
-    container_id: bucketId,
+    container_id: nodeId,
     filename: fileName,
   });
   const res = await apiFetch(`${INLUMEN_API_URL}/api/files/content?${params.toString()}`, {
@@ -166,13 +163,11 @@ export const updateNodeTextFile = async (
     throw new Error("Cannot update a file without a filename.");
   }
 
-  const bucket = getNodeFileBucket(file, nodeId);
-  const bucketId = bucket.replace(/^files-step-id-/i, "");
   const res = await apiFetch(`${INLUMEN_API_URL}/api/nodes/${encodeURIComponent(nodeId)}/files/text`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      container_id: bucketId,
+      container_id: nodeId,
       filename: fileName,
       content,
     }),

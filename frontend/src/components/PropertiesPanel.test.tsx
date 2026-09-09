@@ -3,11 +3,39 @@ import { createRoot } from "react-dom/client";
 import type { Node } from "reactflow";
 import { describe, expect, it, vi } from "vitest";
 
+import { apiFetch } from "@/utils/apiFetch";
+
+vi.mock("@/utils/apiFetch", () => ({ apiFetch: vi.fn() }));
+
 import { PropertiesPanel, type PropertyNodeData } from "@/components/PropertiesPanel";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 describe("PropertiesPanel", () => {
+  it("uses canonical upload and replacement references without retaining old snapshots", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const onNodeUpdate = vi.fn();
+    const bucket = "files-ws-opaque-1-hash";
+    await act(async () => root.render(<PropertiesPanel selectedNode={{
+      id: "1", type: "custom", position: { x: 0, y: 0 },
+      data: { type: "source", label: "Input", files: [] },
+    }} onNodeUpdate={onNodeUpdate} />));
+    for (const content of ["first", "replacement"]) {
+      vi.mocked(apiFetch).mockResolvedValueOnce(new Response(JSON.stringify({
+        file_reference: { filename: "input.csv", bucket, role: "data" },
+      })));
+      const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+      Object.defineProperty(input, "files", { configurable: true, value: [new File([content], "input.csv")] });
+      await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
+      const update = onNodeUpdate.mock.lastCall!;
+      expect(JSON.stringify(update)).toContain(bucket);
+      expect(JSON.stringify(update)).not.toContain("files-step-id");
+      expect(container.textContent?.match(/input.csv/g)).toHaveLength(1);
+    }
+    await act(async () => root.unmount());
+  });
+
   it("renders an uploaded Source file without crashing", async () => {
     const container = document.createElement("div");
     const root = createRoot(container);

@@ -364,9 +364,9 @@ const getSnapshotFileRef = (file: unknown, nodeIdValue: string) => {
     if (!filename) return null;
     const bucket = typeof entry.bucket === "string" && entry.bucket.trim()
       ? entry.bucket.trim()
-      : `files-step-id-${nodeIdValue}`.toLowerCase();
+      : undefined;
     const role = entry.role === "code" || entry.role === "data" ? entry.role : undefined;
-    return { filename, bucket, ...(role ? { role } : {}),
+    return { filename, ...(bucket ? { bucket } : {}), ...(role ? { role } : {}),
       ...(typeof entry.snapshot_bucket === "string" && typeof entry.snapshot_object === "string"
         ? { snapshot_bucket: entry.snapshot_bucket, snapshot_object: entry.snapshot_object } : {}) };
   }

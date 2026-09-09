@@ -118,13 +118,16 @@ def get_object(bucket_name, object_name, prefix = None, version_id=None):
     # Tested
     return response
 
-def read_object_bytes(bucket_name, object_name, prefix = None, version_id=None):
+def read_object_bytes(bucket_name, object_name, prefix = None, version_id=None, max_bytes=None):
     '''
         Read object data from given bucket into bytes.
     '''
     response = get_object(bucket_name, object_name, prefix=prefix, version_id=version_id)
     try:
-        return response.read()
+        content = response.read(max_bytes + 1) if max_bytes is not None else response.read()
+        if max_bytes is not None and len(content) > max_bytes:
+            raise ValueError("File exceeds the configured read limit")
+        return content
     finally:
         response.close()
         response.release_conn()

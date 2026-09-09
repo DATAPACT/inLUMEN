@@ -70,7 +70,11 @@ def minio_read_file():
     if not filename:
         return jsonify({'status': 400, 'error': 'filename is required'}), 400
     try:
-        content = read_object_bytes(bucket_id, filename)
+        max_bytes = request.args.get('max_bytes', type=int)
+        if max_bytes is not None and max_bytes < 1:
+            return jsonify({'error': 'max_bytes must be positive'}), 400
+        content = (read_object_bytes(bucket_id, filename, max_bytes=max_bytes)
+                   if max_bytes is not None else read_object_bytes(bucket_id, filename))
     except Exception as e:
         return jsonify({'status': 500, 'error': 'Failed to read file from MinIO', 'details': str(e)}), 500
     content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'

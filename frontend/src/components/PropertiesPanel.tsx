@@ -39,7 +39,6 @@ import {
   normalizeSecretParamKeys,
   isSensitiveParameterName,
   withoutSensitiveParameterValues,
-  getNodeFileBucket,
   getNodeFileName,
   getNodeFileRole,
   isBrowserFile,
@@ -136,14 +135,15 @@ const normalizeFileReferences = (value: unknown): NodeFileReference[] => {
 };
 
 const uploadedFileReference = (
-  nodeId: string,
-  fileName: string,
+  result: { file_reference?: NodeFileReference } | null,
   role: NodeFileRole,
-): NodeFileReference => ({
-  filename: fileName,
-  bucket: `files-step-id-${nodeId}`.toLowerCase(),
-  role,
-});
+): NodeFileReference => {
+  const ref = result?.file_reference;
+  if (!ref || typeof ref !== "object" || !("bucket" in ref) || !ref.bucket || !getNodeFileName(ref)) {
+    throw new Error("The backend did not return a canonical file reference.");
+  }
+  return { filename: getNodeFileName(ref), bucket: ref.bucket, role };
+};
 
 const withNodeFileRole = (
   file: NodeFileReference,
@@ -693,7 +693,7 @@ export function PropertiesPanel({
         if (uploadResult?.generated_artifact) {
           latestGeneratedArtifact = uploadResult.generated_artifact as GeneratedArtifact;
         }
-        const uploadedRef = uploadedFileReference(selectedNode.id, f.name, role);
+        const uploadedRef = uploadedFileReference(uploadResult, role);
         const idx = nameToIndex.get(f.name);
         if (idx != null) {
           uploadedFiles[idx] = uploadedRef;
@@ -830,8 +830,7 @@ export function PropertiesPanel({
           updatedGeneratedArtifact = uploadResult.generated_artifact as GeneratedArtifact;
         }
         updatedFiles[previewFileIndex] = uploadedFileReference(
-          selectedNode.id,
-          currentFileName,
+          uploadResult,
           currentFileRole,
         );
         setPreviewFile(newFile);
@@ -840,11 +839,7 @@ export function PropertiesPanel({
         if (updateResult?.generated_artifact) {
           updatedGeneratedArtifact = updateResult.generated_artifact as GeneratedArtifact;
         }
-        updatedFiles[previewFileIndex] = {
-          filename: currentFileName,
-          bucket: getNodeFileBucket(currentFile, selectedNode.id),
-          role: currentFileRole,
-        };
+        updatedFiles[previewFileIndex] = uploadedFileReference(updateResult, currentFileRole);
       }
 
       setFiles(updatedFiles);
