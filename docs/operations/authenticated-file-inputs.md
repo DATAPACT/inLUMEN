@@ -129,3 +129,13 @@ docker run --rm \
 ```
 
 For this follow-up, rebuild and recreate `codegen frontend` with the production compose commands above. Backend/runner images do not change. Failed historical runs retain their recorded failure; start a new run to use the fix. The isolated fixture does not establish that the user's speech/transcription models or entire audio pipeline succeed.
+
+Follow-up deployment verification (2026-09-09, source commit `a1fc0dc`):
+
+- Codegen: 125 unit tests passed, 3 opt-in tests skipped; the targeted suite with the real Docker Dagster test enabled passed all 17 tests. Frontend: 157 tests, typecheck, and production build passed.
+- Pushed the branch and rebuilt/recreated only codegen and frontend on the VM. All seven services were healthy; no pipeline or generation jobs were active before restart.
+- Submitted a synthetic bundle through the deployed authenticated `/v1/validate/deployment-bundle` endpoint from the backend, using its existing service credential and a unique disposable workspace scope. No browser credentials entered the bundle or persisted result.
+- Dagster executed as UID 65532, read the exact fixture input, wrote beneath pre-existing node output/workspace directories, and returned the expected output. Re-submission returned the identical durable receipt. Missing authentication returned 401, a missing workspace header returned 400, and cross-workspace receipt retrieval returned 404.
+- Test execution `permission-smoke-3617f71efd7b4c0492d2ff42826244eb` completed. Removed only its completed receipt; temporary bundle directories were automatically cleaned. No existing user pipeline, uploaded file, or failed run was modified.
+- A separate signed-in Chrome tab showed the new recovery-copy label after reload. An already-cached page may continue showing the old label until refreshed.
+- This verifies the deployed Dagster execution service with a synthetic fixture; it does not claim a new successful run of the user's full audio/model pipeline or a complete browser-to-runner workflow.
