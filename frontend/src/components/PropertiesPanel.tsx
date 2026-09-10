@@ -283,6 +283,8 @@ export function PropertiesPanel({
     .map((file, index) => ({ file, index }))
     .filter(({ file }) => getNodeFileRole(file) === "data");
   const activeNodeIdRef = useRef<string | null>(selectedNode?.id ?? null);
+  const latestSelectedNodeRef = useRef(selectedNode);
+  latestSelectedNodeRef.current = selectedNode;
   const locallyProducedNodeDataRef = useRef(new WeakSet<object>());
   const onNodeUpdateRef = useRef(onNodeUpdate);
 
@@ -319,9 +321,12 @@ export function PropertiesPanel({
 
   // Enforce type-specific rules before persisting into node.data
   const pushNodeUpdate = (patch: Partial<PropertyNodeData>) => {
-    if (!selectedNode) return;
+    const currentNode = latestSelectedNodeRef.current;
+    if (!selectedNode || currentNode?.id !== selectedNode.id) return;
 
-    const next: PropertyNodeData = { ...selectedNode.data, ...patch, type: nodeType };
+    // File requests finish asynchronously. Merge their patch into the current
+    // node, so completion cannot restore properties captured before an edit.
+    const next: PropertyNodeData = { ...currentNode.data, ...patch, type: nodeType };
 
     // Content is boundary metadata only for sources and destinations.
     if (!typeHasContent(nodeType)) {
@@ -349,7 +354,8 @@ export function PropertiesPanel({
 
     // 1) update local reactflow node
     locallyProducedNodeDataRef.current.add(next);
-    onNodeUpdate(selectedNode.id, next);
+    latestSelectedNodeRef.current = { ...currentNode, data: next };
+    onNodeUpdateRef.current(selectedNode.id, next);
 
     // 2) update backend state (only allowed props)
     const backendProps = pickBackendUpdatableProps(selectedNode.id, next, nodeType);
@@ -709,7 +715,7 @@ export function PropertiesPanel({
         });
       }
     }
-    if (changedCount > 0) {
+    if (changedCount > 0 && latestSelectedNodeRef.current?.id === selectedNode.id) {
       setFiles(uploadedFiles);
       pushNodeUpdate({
         files: uploadedFiles,

@@ -36,6 +36,34 @@ describe("PropertiesPanel", () => {
     await act(async () => root.unmount());
   });
 
+  it("keeps edits made while a file upload is pending", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const onNodeUpdate = vi.fn();
+    const original: Node<PropertyNodeData> = {
+      id: "1", type: "custom", position: { x: 0, y: 0 },
+      data: { type: "source", label: "Before upload", files: [] },
+    };
+    let finishUpload!: (response: Response) => void;
+    const pending = new Promise<Response>(resolve => { finishUpload = resolve; });
+    vi.mocked(apiFetch).mockImplementation(async (_url, init) =>
+      init?.body instanceof FormData ? pending : Response.json({ names: [] }));
+    await act(async () => root.render(<PropertiesPanel selectedNode={original} onNodeUpdate={onNodeUpdate} />));
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    Object.defineProperty(input, "files", { configurable: true, value: [new File(["value\n1\n"], "input.csv")] });
+    await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
+    const edited = { ...original, data: { ...original.data, label: "Typed during upload", description: "New description" } };
+    await act(async () => root.render(<PropertiesPanel selectedNode={edited} onNodeUpdate={onNodeUpdate} />));
+    await act(async () => finishUpload(Response.json({ file_reference: {
+      filename: "input.csv", bucket: "files-ws-isolated-1", role: "data",
+    } })));
+    expect(onNodeUpdate.mock.lastCall?.[1]).toMatchObject({
+      label: "Typed during upload", description: "New description",
+      files: [{ filename: "input.csv", bucket: "files-ws-isolated-1", role: "data" }],
+    });
+    await act(async () => root.unmount());
+  });
+
   it("renders an uploaded Source file without crashing", async () => {
     const container = document.createElement("div");
     const root = createRoot(container);
