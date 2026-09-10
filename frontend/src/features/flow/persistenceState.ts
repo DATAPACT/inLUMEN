@@ -30,8 +30,14 @@ export const reportPersistenceError = (error: unknown) => {
 export const persistenceEpoch = () => generation;
 export const graphReadTicket = () => `${generation}:${writeGeneration}`;
 const responseRevision = (response: Response) => {
-  const incoming = response.headers.get('ETag');
-  return incoming && /^"\d+"$/.test(incoming) ? incoming : null;
+  // Compression proxies may weaken HTTP ETags. The application revision is
+  // independent of representation encoding and must survive that transformation.
+  const explicit = response.headers.get('X-InLumen-Graph-Revision');
+  if (explicit !== null) return /^\d+$/.test(explicit) ? `"${explicit}"` : null;
+  // Compatibility with older servers: only our numeric graph validator is
+  // accepted, never an arbitrary weak ETag or an object-storage checksum.
+  const match = /^(?:W\/)?"(\d+)"$/.exec(response.headers.get('ETag') ?? '');
+  return match ? `"${match[1]}"` : null;
 };
 export const captureGraphRevision = (response: Response, epoch = generation) => {
   const incoming = responseRevision(response);

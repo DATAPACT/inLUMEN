@@ -21,7 +21,7 @@ async function savedPipeline(context: BrowserContext, mode: 'metadata' | 'networ
       }
       graph.nodes[0].data.files = request.method() === 'POST' ? [{ filename: 'input.csv', bucket: 'files-step-id-1', role: 'data' }] : [];
       revision++;
-      await route.fulfill({ json: { file: {}, graph: {} }, headers: { ETag: `"${revision}"` } });
+      await route.fulfill({ json: { file: {}, graph: {}, file_reference: { filename: 'input.csv', bucket: 'files-step-id-1', role: 'data' } }, headers: { ETag: `"${revision}"` } });
     } else if (mutation && (path.startsWith('/api/graph/') || path === '/api/pipeline/graph' || path === '/api/pipeline/versions/active')) {
       if (path.endsWith('/position')) {
         positions.push(request.headers()['if-match']);
@@ -127,9 +127,7 @@ test('two editing tabs preserve competing drafts and recover inline', async ({ p
   const retained = await second.evaluate(() => JSON.parse(localStorage.getItem('ai-flow-recovery-draft')!));
   expect(retained.nodes[0].position.y).toBeGreaterThan(150);
   expect(retained.nodes[0].position.x).toBe(150);
-  const download = second.waitForEvent('download');
-  await saveStatus(second).getByRole('button', { name: 'Previous draft' }).click();
-  expect((await download).suggestedFilename()).toBe('inlumen-draft.json');
+  await expect(saveStatus(second).getByRole('button')).toHaveCount(0);
   await moveNode(second, 'ArrowDown');
   await expect.poll(() => server.graph().nodes[0].position.y).toBeGreaterThan(savedPosition.y);
   await expect(saveStatus(second)).toHaveAttribute('data-save-state', 'saved');

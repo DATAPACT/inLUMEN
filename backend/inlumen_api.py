@@ -251,6 +251,9 @@ app.add_url_rule(
 def apply_cors(response):
     if getattr(g, "graph_response_etag", None):
         response.headers["ETag"] = g.graph_response_etag
+        # Keep the graph revision when this gateway rebuilds a storage/cleanup
+        # response. Unlike ETag, this header is unaffected by proxy compression.
+        response.headers["X-InLumen-Graph-Revision"] = g.graph_response_etag.strip('"')
     return add_cors_headers(response, request.headers.get("Origin"))
 
 

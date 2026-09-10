@@ -226,6 +226,7 @@ def graph_revision_headers(response):
     revision = getattr(g, "graph_revision", conflict)
     if revision is not None:
         response.headers["ETag"] = f'"{revision}"'
+        response.headers["X-InLumen-Graph-Revision"] = str(revision)
     return response
 
 

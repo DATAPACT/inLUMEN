@@ -138,3 +138,38 @@ it.each(['/api/reusable-pipelines', '/api/reusable-pipelines/attach'])('keeps re
     expect(getPersistenceState().error).toBeNull();
   } finally { mock.mockRestore(); }
 });
+
+it.each([false, true])('keeps authenticated saves and uploads synchronized through compressed responses (dedicated revision: %s)', async (dedicatedHeader) => {
+  vi.resetModules();
+  vi.stubEnv('VITE_AUTH_ENABLED', 'true');
+  const { apiFetch, setAuthToken, setActiveWorkspaceId } = await import('@/utils/apiFetch');
+  const { rememberGraphRead, acknowledgeGraphRead, persistenceEpoch, getPersistenceState } = await import('@/features/flow/persistenceState');
+  setAuthToken('test-session');
+  setActiveWorkspaceId('isolated-workspace');
+  let serverRevision = 10;
+  const graph = { nodes: [], edges: [] };
+  const wireResponse = (compressed: boolean) => Response.json(graph, { headers: {
+    ETag: `${compressed ? 'W/' : ''}"${serverRevision}"`,
+    ...(dedicatedHeader ? { 'X-InLumen-Graph-Revision': String(serverRevision) } : {}),
+  } });
+  const initial = wireResponse(true);
+  rememberGraphRead(graph, initial, persistenceEpoch());
+  acknowledgeGraphRead(graph);
+  const mock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+    const headers = new Headers(init?.headers);
+    expect(headers.get('Authorization')).toBe('Bearer test-session');
+    expect(headers.get('X-InLumen-Workspace-Id')).toBe('isolated-workspace');
+    if (headers.get('If-Match') !== `"${serverRevision}"`) {
+      return Response.json({ code: 'graph_conflict' }, { status: 409 });
+    }
+    serverRevision++;
+    return wireResponse(serverRevision !== 12);
+  });
+  try {
+    for (const path of ['/api/graph/nodes', '/api/graph/nodes/position', '/api/pipeline/versions/active', '/api/nodes/1/files', '/api/pipeline/versions/active', '/api/nodes/1/files/text', '/api/pipeline/versions/active']) {
+      expect((await apiFetch(path, { method: 'POST' })).ok).toBe(true);
+    }
+    expect(serverRevision).toBe(17);
+    expect(getPersistenceState().error).toBeNull();
+  } finally { mock.mockRestore(); vi.unstubAllEnvs(); }
+});

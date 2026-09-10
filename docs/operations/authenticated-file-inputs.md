@@ -139,3 +139,13 @@ Follow-up deployment verification (2026-09-09, source commit `a1fc0dc`):
 - Test execution `permission-smoke-3617f71efd7b4c0492d2ff42826244eb` completed. Removed only its completed receipt; temporary bundle directories were automatically cleaned. No existing user pipeline, uploaded file, or failed run was modified.
 - A separate signed-in Chrome tab showed the new recovery-copy label after reload. An already-cached page may continue showing the old label until refreshed.
 - This verifies the deployed Dagster execution service with a synthetic fixture; it does not claim a new successful run of the user's full audio/model pipeline or a complete browser-to-runner workflow.
+
+## Follow-up: compressed revision headers (2026-09-10)
+
+A fresh production pipeline exposed another save failure: HTTP 409 on upload. The public proxy rewrites numeric ETags such as `"109"` to `W/"109"` when compressing responses. The browser previously ignored weak ETags, so it could keep an earlier revision after a successful save and reject its own later upload. An isolated authenticated production request confirmed weak ETags on graph reads and graph writes. This was not a file-bucket or authentication failure.
+
+Graph responses now include `X-InLumen-Graph-Revision`, exposed through CORS and preserved by the gateway when rebuilding responses. The browser prefers this numeric application revision and sends the existing strong numeric `If-Match` precondition. For older servers it also recognizes the numeric ETag after compression; arbitrary validators are rejected. Genuine stale writes still fail rather than overwriting someone else's changes. No configuration change or authentication relaxation is required.
+
+Regression tests cover authenticated create/position/snapshot/upload/edit/save sequences with alternating weak and strong ETags, the dedicated header with an unrelated representation ETag, invalid validators, and gateway revision preservation. The real authenticated file workflow now sends revision preconditions on every write and checks the dedicated response header. Earlier file workflow coverage omitted those preconditions and missed the production proxy transformation.
+
+Rebuild and recreate `backend frontend` for this change using the production compose commands above. Codegen and runner do not change. Refresh an old browser tab only after preserving any unsaved draft.

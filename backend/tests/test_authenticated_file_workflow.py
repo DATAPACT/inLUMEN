@@ -72,6 +72,12 @@ class AuthenticatedFileWorkflowTests(unittest.TestCase):
 
     def ok(self, response):
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        revision = response.headers.get("X-InLumen-Graph-Revision")
+        self.assertIsNotNone(revision, "Graph responses must expose an encoding-independent revision")
+        if revision is not None:
+            self.assertEqual(response.headers["ETag"], f'"{revision}"')
+            self.assertIn("X-InLumen-Graph-Revision", response.headers["Access-Control-Expose-Headers"])
+            self.headers["If-Match"] = f'"{revision}"'
         return response.get_json()
 
     def test_upload_replace_edit_save_reload_stage_and_reject_unauthorized(self):
