@@ -1,9 +1,8 @@
 # Beta 3 compatibility and data preservation
 
-## Proposed release policy
+## Release policy
 
-Beta 3 is a **fresh-install-only evaluation release**. This policy is proposed
-for release review; it does not certify an in-place upgrade from Beta 2.
+Beta 3 is a **fresh-install-only evaluation release**. An in-place upgrade from Beta 2 is not certified.
 Use a separate checkout, Compose project, network, ports, storage, and secrets.
 Do not attach Beta 2 databases to Beta 3 or switch authentication modes to
 make old data appear. Keep the old installation available until the reconstructed

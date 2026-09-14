@@ -6,27 +6,62 @@ design → save/reopen → run → inspect → download workflow.
 
 ## Start a local evaluation installation
 
-Use a fresh checkout for this walkthrough. Docker Compose and a running Docker
-daemon are required; the first build needs network access. Follow the
-[installation guide](README.md#how-to-install) to create `.env` from
-`.env.example`. Set `AUTH_ENABLED=false`, set
-`INLUMEN_API_PUBLIC_URL=http://localhost:5000`, and replace the three service-token
-placeholders with distinct random values. This topology uses a shared local
-workspace. The [multi-user guide](production-multi-user.md) describes the
-separate Keycloak topology.
+Use a fresh checkout on a controlled local evaluation machine with Docker
+Compose and a running Docker daemon. Initial builds require network access.
+Beta 3 is fresh-install-only; first read the
+[preservation limits](operations/beta3-compatibility.md) if you have existing data.
+Do not run these commands over an existing installation's storage. The default
+Compose file has fixed container/network names and ports, so a second simultaneous
+installation needs explicitly isolated names, ports and storage.
 
-From the repository root:
+Select an exact reviewed commit from [release acceptance](https://github.com/DATAPACT/inLUMEN/issues/129).
+After publication, the release tag `v1.0.0-beta.3` can be used instead. Run:
 
 ```sh
+# Set this to the exact reviewed commit SHA, or the published release tag.
+INLUMEN_REF=REPLACE_WITH_REVIEWED_COMMIT_SHA
+git clone https://github.com/DATAPACT/inLUMEN.git inlumen-beta3
+cd inlumen-beta3
+git checkout --detach "$INLUMEN_REF"
 git rev-parse HEAD
+python3 - <<'PYCONFIG'
+from pathlib import Path
+import secrets
+p = Path('.env')
+if p.exists():
+    raise SystemExit('Refusing to replace an existing .env')
+settings = {
+    'AUTH_ENABLED': 'false',
+    'INLUMEN_API_PUBLIC_URL': 'http://localhost:5000',
+    'API_AUTH_TOKEN': secrets.token_urlsafe(32),
+    'INLUMEN_CODEGEN_SERVICE_API_KEY': secrets.token_urlsafe(32),
+    'INLUMEN_RUNNER_SERVICE_API_KEY': secrets.token_urlsafe(32),
+}
+lines = Path('.env.example').read_text().splitlines()
+with p.open('x') as f:
+    p.chmod(0o600)
+    for line in lines:
+        key = line.split('=', 1)[0]
+        f.write(f'{key}={settings[key]}\n' if key in settings else line + '\n')
+PYCONFIG
 docker compose up -d --build
 docker compose ps
 curl --fail http://localhost:5000/ready
 ```
 
-Record the commit printed by the first command with your results. This is a
-development walkthrough; released instructions must pin the accepted candidate
-tag or SHA. Open [the local editor](http://localhost:8080).
+The configuration command uses Python 3 from the host and refuses to overwrite
+an existing `.env`. It creates three distinct service tokens without printing
+them. Open [the local editor](http://localhost:8080) after readiness succeeds.
+If readiness is still starting, inspect `docker compose logs backend runner
+codegen` and retry the readiness request. This development topology uses one
+shared local workspace and is intended for a controlled host, not public access.
+The [multi-user guide](production-multi-user.md) covers the separate Keycloak
+production topology.
+
+A source archive can be extracted instead of cloning. Run the configuration and
+Compose commands from its root and retain its filename/checksum; `git` commands
+require a checkout. No local Node installation is required for the container
+workflow; native frontend development requires Node 22.12+ and `npm ci`.
 
 ## Import, attach, and save
 
@@ -152,7 +187,7 @@ the [release plan](release-plan.md).
 
 See the [real authentication and recovery record](operations/beta3-auth-recovery.md)
 for two-user Keycloak login, API isolation, and representative same-revision data
-restoration. The [proposed compatibility policy](operations/beta3-compatibility.md)
+restoration. The [compatibility policy](operations/beta3-compatibility.md)
 describes fresh installation and preservation limits; no Beta 2 upgrade or
 concurrent-user capacity is certified. Final release acceptance remains tracked
 in [issue #129](https://github.com/DATAPACT/inLUMEN/issues/129).
