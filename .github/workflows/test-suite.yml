@@ -127,7 +127,7 @@ jobs:
         run: |
           docker run -d --name integration-minio -p 19000:9000 \
             -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
-            minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e server /data
+            quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e server /data
           # Docker can accept the connection before MinIO starts serving HTTP,
           # producing a connection reset rather than connection refused.
           if ! curl --fail --silent --show-error --retry 20 --retry-all-errors \

@@ -17,7 +17,7 @@ export function GraphSaveStatus({ onDownload, onReload, onRetry }: Props) {
     try { await action(); } catch (error) { if (epoch === persistenceEpoch()) reportPersistenceError(error); }
     finally { setRecovering(false); }
   };
-  return <div className="flex flex-wrap items-center gap-1 text-xs" aria-label="Pipeline save status" data-save-state={state.error ? 'error' : recovering || state.pending ? 'saving' : 'saved'}>
+  return <div role="group" className="flex flex-wrap items-center gap-1 text-xs" aria-label="Pipeline save status" data-save-state={state.error ? 'error' : recovering || state.pending ? 'saving' : 'saved'}>
     {state.error && <>
       <span className="px-1 text-[hsl(var(--danger-text))]" role="status" aria-live="polite" title={state.error}>
         {recovering ? 'Recovering…' : 'Couldn’t save'}

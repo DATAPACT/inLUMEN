@@ -163,3 +163,9 @@ Verification/deployment results for `64a86b3` and `7b73d1d`:
 - Delayed one real upload response in the isolated tab, typed a newer node name, then released the response. The name survived upload completion, reached the server, and survived reload. The delay wrapper and test page were removed at test completion.
 - A genuinely stale write returned 409; a cross-workspace file read returned 404; missing and expired authentication returned 401.
 - Removed the disposable workspace, its graph/version data, and its two file/snapshot buckets. The user's four-node graph matched the downloaded draft's nodes, positions, and connections. Refreshed the original tab to the fixed frontend and confirmed its saved state and all four nodes. The rejected personal audio upload was not retried automatically; its file remains unattached. A draft backup was retained in the user's Downloads folder.
+
+## Merge verification (2026-09-14)
+
+PR checks exposed a Docker Hub pull denial for the pinned MinIO image. CI and the production compose default now use `quay.io/minio/minio` with the identical SHA-256 digest; this changes the registry, not the MinIO version or data format. Existing `MINIO_IMAGE` overrides still take precedence.
+
+The browser accessibility check also caught a missing `group` role on the named save-status container. The read-only viewer test now waits for node visibility and compares the node transform across a drag, avoiding an unrelated initial visibility-style change. All 17 browser tests passed locally after these corrections.

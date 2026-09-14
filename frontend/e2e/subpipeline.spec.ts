@@ -106,14 +106,15 @@ test('reusable pipelines can be inspected without editing or saving either canva
   await expect(viewer.getByLabel('Component details')).toContainText('data.txt');
   await expect(viewer.getByLabel('Component details')).toContainText('Text · Required');
   const node = viewer.locator('.react-flow__node').filter({ hasText: 'Input text' });
-  const position = await node.getAttribute('style');
+  await expect(node).toBeVisible();
+  const position = await node.evaluate(element => getComputedStyle(element).transform);
   const box = await node.boundingBox();
   if (!box) throw new Error('Viewer node is not visible');
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
   await page.mouse.move(box.x + box.width / 2 + 80, box.y + box.height / 2 + 60, { steps: 5 });
   await page.mouse.up();
-  await expect(node).toHaveAttribute('style', position!);
+  await expect(node).toHaveCSS('transform', position);
   await node.focus();
   await page.keyboard.press('Delete');
   await page.keyboard.press('Backspace');
