@@ -2654,7 +2654,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
                               {run.created_at ? new Date(run.created_at).toLocaleString() : `Run ${generationRunId(run).slice(0, 8)}`}
                             </span>
                           </span>
-                          <span className="shrink-0 text-xs text-muted-foreground">{generationStatusLabel(effectiveGenerationStatus(run))}</span>
+                          <span className="shrink-0 text-xs text-muted-foreground">{generationStatusLabel(effectiveGenerationStatus(run))}
+                            {run.duration_ms != null && <span className="block">{formatGenerationDuration(run.duration_ms)}</span>}
+                          </span>
                         </button>
                       ))}
                     </div>
@@ -2744,6 +2746,20 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
                       <p className="text-xs text-muted-foreground">Provider-reported usage</p>
                     </div>
                   </div>
+                  {generationCompleted && (
+                    <div className="mt-4 grid grid-cols-2 gap-2 text-sm">
+                      <div className="rounded-md bg-background/60 p-3">
+                        <p className="text-xs text-muted-foreground">Generation duration</p>
+                        <p className="font-semibold">{generationJob.duration_ms == null ? "Unavailable" : formatGenerationDuration(generationJob.duration_ms)}</p>
+                        <p className="text-xs text-muted-foreground">{generationJob.timing_interrupted ? "Interrupted; completion time unknown" : "Worker time, including validation and repairs"}</p>
+                      </div>
+                      <div className="rounded-md bg-background/60 p-3">
+                        <p className="text-xs text-muted-foreground">Queue time</p>
+                        <p className="font-semibold">{generationJob.queue_duration_ms == null ? "Unavailable" : formatGenerationDuration(generationJob.queue_duration_ms)}</p>
+                        <p className="text-xs text-muted-foreground">Before the worker starts; excluded from duration</p>
+                      </div>
+                    </div>
+                  )}
                   {generationSucceeded && (
                     <div className="mt-4 grid grid-cols-2 gap-2 text-sm">
                       <div className="rounded-md bg-background/60 p-3">

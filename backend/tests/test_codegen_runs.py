@@ -54,6 +54,27 @@ class CodegenRunStoreTests(unittest.TestCase):
             [record["run_id"] for record in store.list(limit=10)],
         )
 
+    def test_duration_survives_gateway_snapshot_and_store_reopen(self):
+        measurement = {
+            "started_at": "2026-09-14T10:00:02Z",
+            "finished_at": "2026-09-14T10:00:12Z",
+            "duration_ms": 10000,
+            "queue_duration_ms": 2000,
+            "timing_interrupted": False,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.sqlite3")
+            first = CodegenRunStore(path)
+            first.put({"run_id": "measured", "status": "valid",
+                       "remote_job": inlumen_api._codegen_job_snapshot({
+                           **measurement, "result": {"nodes": []},
+                       })})
+            second = CodegenRunStore(path)
+            summary = inlumen_api._codegen_run_summary(second.get("measured"))
+            for key, value in measurement.items():
+                self.assertEqual(value, summary[key])
+            self.assertNotIn("result", summary)
+
     def test_workspace_cleanup_clears_gateway_and_private_service_history(self):
         store = CodegenRunStore(":memory:")
         store.put({"run_id": "old-run", "status": "valid"})

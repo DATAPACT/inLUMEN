@@ -164,7 +164,7 @@ describe("PropertiesPanel", () => {
     await act(async () => root.unmount());
   });
 
-  it("shows detected environment variables as read-only script warnings", async () => {
+  it("adds detected environment variables without inventing values or duplicating parameters", async () => {
     const container = document.createElement("div");
     const root = createRoot(container);
     await act(async () => {
@@ -198,9 +198,27 @@ describe("PropertiesPanel", () => {
     expect(container.textContent).toContain("Required");
     expect(container.textContent).toContain("Optional");
     expect(container.textContent).toContain("Sensitive");
-    expect(container.textContent).toContain("does not create parameters or store values");
+    expect(container.textContent).toContain("Click a variable to add it to Runtime parameters");
     expect(container.textContent).toContain("The pipeline assistant never fills this section");
     expect(container.textContent).toContain("No parameters added");
+    document.body.appendChild(container);
+    const add = container.querySelector('[aria-label="Add API_ENDPOINT to Runtime parameters"]') as HTMLButtonElement;
+    await act(async () => add.click());
+    const value = container.querySelector('#parameter-API_ENDPOINT') as HTMLInputElement;
+    expect(value.value).toBe("");
+    expect(document.activeElement).toBe(value);
+    expect(add.disabled).toBe(true);
+    expect(add.textContent).toContain("Added");
+    await act(async () => add.click());
+    expect(container.querySelectorAll('#parameter-API_ENDPOINT')).toHaveLength(1);
+    await act(async () => (container.querySelector('[aria-label="Add API_KEY to Runtime parameters"]') as HTMLButtonElement).click());
+    const secret = container.querySelector('#parameter-API_KEY') as HTMLInputElement;
+    expect(secret.type).toBe("password");
+    expect(secret.value).toBe("");
+    expect(document.activeElement).toBe(secret);
+    await act(async () => (container.querySelector('[aria-label="Remove parameter API_ENDPOINT"]') as HTMLButtonElement).click());
+    expect(add.disabled).toBe(false);
     await act(async () => root.unmount());
+    container.remove();
   });
 });

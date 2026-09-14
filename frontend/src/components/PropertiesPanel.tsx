@@ -233,6 +233,7 @@ export function PropertiesPanel({
     () => new Set(),
   );
   const [newParameterName, setNewParameterName] = useState("");
+  const parameterToFocus = useRef<string | null>(null);
   const [revealedSecretParams, setRevealedSecretParams] = useState<Set<string>>(
     () => new Set(),
   );
@@ -988,8 +989,8 @@ export function PropertiesPanel({
     }
   };
 
-  const addParameter = () => {
-    const name = newParameterName.trim();
+  const addParameter = (suggestedName?: string, sensitive = false) => {
+    const name = (suggestedName ?? newParameterName).trim();
     if (!name) return;
     if (!USER_PARAMETER_NAME_PATTERN.test(name)) {
       toast.error("Use a simple parameter name", {
@@ -997,17 +998,18 @@ export function PropertiesPanel({
       });
       return;
     }
-    if (name in param) {
+    if (Object.prototype.hasOwnProperty.call(param, name) || secretParamKeys.includes(name)) {
       toast.error(`Parameter ${name} already exists.`);
       return;
     }
     const next = { ...param, [name]: "" };
-    const nextSecrets = isSensitiveParameterName(name)
+    const nextSecrets = sensitive || isSensitiveParameterName(name)
       ? Array.from(new Set([...secretParamKeys, name]))
       : secretParamKeys;
     setParam(next);
     setSecretParamKeys(nextSecrets);
-    setNewParameterName("");
+    if (suggestedName === undefined) setNewParameterName("");
+    parameterToFocus.current = name;
     pushNodeUpdate({ param: next, secret_params: nextSecrets });
   };
 
@@ -1110,7 +1112,7 @@ export function PropertiesPanel({
   )
     ? selectedNode.data.generated_artifact.runtime_environment.filter((item) => (
         item && typeof item === "object" && String(item.name || "").trim()
-      ))
+      )).map((item) => ({ ...item, name: String(item.name).trim() }))
     : [];
   const designValidationIssues = selectedNode?.data.validation_issues || [];
   const visibleDesignValidationIssues = designValidationIssues.filter((issue) => (
@@ -1209,6 +1211,12 @@ export function PropertiesPanel({
             </div>
             <div className="relative">
               <Input
+                ref={(input) => {
+                  if (input && parameterToFocus.current === key) {
+                    input.focus();
+                    parameterToFocus.current = null;
+                  }
+                }}
                 id={`parameter-${key}`}
                 type={isSecret && !isRevealed ? "password" : "text"}
                 value={isSecret
@@ -1256,7 +1264,7 @@ export function PropertiesPanel({
           <Button
             type="button"
             variant="outline"
-            onClick={addParameter}
+            onClick={() => addParameter()}
             disabled={!newParameterName.trim()}
           >
             <Plus className="mr-1.5 h-4 w-4" />
@@ -1507,14 +1515,18 @@ export function PropertiesPanel({
               <InspectorSection
                 id="inspector-runtime-environment"
                 title="Environment variables detected"
-                description="Read-only requirements discovered from the attached Python script. This does not create parameters or store values."
+                description="Click a variable to add it to Runtime parameters, then enter its value."
                 status={runtimeEnvironment.some((item) => item.required) ? "warning" : undefined}
               >
                 <div className="space-y-2">
                   {runtimeEnvironment.map((item) => (
-                    <div
+                    <button
+                      type="button"
+                      onClick={() => addParameter(item.name, item.secret)}
+                      disabled={Object.prototype.hasOwnProperty.call(param, item.name) || secretParamKeys.includes(item.name)}
+                      aria-label={`Add ${item.name} to Runtime parameters`}
                       key={String(item.name)}
-                      className="flex items-start justify-between gap-3 rounded-md border border-amber-500/25 bg-amber-500/5 p-2"
+                      className="flex w-full flex-col items-start gap-2 rounded-md border border-amber-500/25 bg-amber-500/5 p-2 text-left transition-colors hover:bg-amber-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-60"
                     >
                       <div className="min-w-0">
                         <p className="truncate font-mono text-xs font-medium">{item.name}</p>
@@ -1524,13 +1536,16 @@ export function PropertiesPanel({
                       </div>
                       <div className="flex shrink-0 gap-1">
                         <Badge variant="outline" className="text-[10px]">
+                          {Object.prototype.hasOwnProperty.call(param, item.name) || secretParamKeys.includes(item.name) ? "Added" : "+ Add"}
+                        </Badge>
+                        <Badge variant="outline" className="text-[10px]">
                           {item.required ? "Required" : "Optional"}
                         </Badge>
                         {item.secret && (
                           <Badge variant="outline" className="text-[10px]">Sensitive</Badge>
                         )}
                       </div>
-                    </div>
+                    </button>
                   ))}
                 </div>
               </InspectorSection>
