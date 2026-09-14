@@ -1,0 +1,24 @@
+[
+  {
+    "user": "alice",
+    "snapshot_entries_identical": 32
+  },
+  {
+    "user": "bob",
+    "snapshot_entries_identical": 32
+  },
+  {
+    "retained_key_decryption": true
+  },
+  {
+    "new_workspace": "0f42f829-1161-4a78-acfa-7b399aa455c1",
+    "run_id": "b5284d11dd6144f680214f973848138a",
+    "status": "succeeded",
+    "output": {
+      "order_count": 3,
+      "total_amount": "49.75"
+    },
+    "files_reattached": 2,
+    "credentials_reentered": true
+  }
+]

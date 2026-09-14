@@ -1,0 +1,11 @@
+{
+  "inlumen_beta3_auth_codegen_state": "inlumen-beta3-restored-20260914-0",
+  "inlumen_beta3_auth_frontend_node_modules": "inlumen-beta3-restored-20260914-1",
+  "inlumen_beta3_auth_minio_data": "inlumen-beta3-restored-20260914-2",
+  "inlumen_beta3_auth_neo4j_data": "inlumen-beta3-restored-20260914-3",
+  "inlumen_beta3_auth_neo4j_import": "inlumen-beta3-restored-20260914-4",
+  "inlumen_beta3_auth_neo4j_logs": "inlumen-beta3-restored-20260914-5",
+  "inlumen_beta3_auth_neo4j_plugins": "inlumen-beta3-restored-20260914-6",
+  "inlumen_beta3_auth_postgres_data": "inlumen-beta3-restored-20260914-7",
+  "inlumen_beta3_auth_runner_state": "inlumen-beta3-restored-20260914-8"
+}

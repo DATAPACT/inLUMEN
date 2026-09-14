@@ -1,0 +1,60 @@
+{
+  "project": "inlumen_beta3_auth",
+  "images": [
+    "sha256:11464c281cf5b11f3073c5b316684b01fd5169475298189a7069916e2c505f9e",
+    "sha256:6c15479fcbcde08242a4d170270dc7b70003c1d6894ce4169472e3bd549f985a",
+    "sha256:3c425745df08abca38d03db5761953797c6a26ddecf619b7ec22d6a70e165480",
+    "sha256:442e629c7239a2ac61c81d634e0392c9b75248473a0f9ba5dbb0e85d34d2e19c",
+    "sha256:0624e22e9c90fda1b74797f4c3e82911ccbb0005614bdb3739e76823b665f61d",
+    "sha256:8f08aee614800a237906bd48114d733e5ac5bfac4ccdf731f141b0e880d7a253",
+    "sha256:ff80089083d7365046af7f03d949a2defa14e0b09e14bd5b8f08a242291be8b2",
+    "sha256:c397ba43d7fe72a62933720d0526d1651422cdeec56295a02c302f7211d10f72"
+  ],
+  "volumes": [
+    {
+      "name": "inlumen_beta3_auth_codegen_state",
+      "archive": "volume-0.tar.gz",
+      "sha256": "453d46279c88b34ae6bf808765d140ed908a21d1d8540a604fb1601ec4d4e39e"
+    },
+    {
+      "name": "inlumen_beta3_auth_frontend_node_modules",
+      "archive": "volume-1.tar.gz",
+      "sha256": "22afa4893fb5b68608bc8160608920aea66a71818caf0d79beec6d521dab7d2c"
+    },
+    {
+      "name": "inlumen_beta3_auth_minio_data",
+      "archive": "volume-2.tar.gz",
+      "sha256": "cb6feff6ec6cb7176f479e05c8998deca9c9f806cd2323b1a1616811e3bd574f"
+    },
+    {
+      "name": "inlumen_beta3_auth_neo4j_data",
+      "archive": "volume-3.tar.gz",
+      "sha256": "f4888da646ba23e25d1a7bae3d922e54a4193acdf6805da3e72575a317a31080"
+    },
+    {
+      "name": "inlumen_beta3_auth_neo4j_import",
+      "archive": "volume-4.tar.gz",
+      "sha256": "1d7ea544dfbf13a85c70e27828ac747dc2eb826567186768e3ffff60e91f44aa"
+    },
+    {
+      "name": "inlumen_beta3_auth_neo4j_logs",
+      "archive": "volume-5.tar.gz",
+      "sha256": "04403994ae70c4a723330bb8498df4facdf0837763b64779f7e1c0c6a22fe12b"
+    },
+    {
+      "name": "inlumen_beta3_auth_neo4j_plugins",
+      "archive": "volume-6.tar.gz",
+      "sha256": "b216d12ab72875fbc45af1ba41d0e1d17662ef84f40345c84ac4793a683ff93a"
+    },
+    {
+      "name": "inlumen_beta3_auth_postgres_data",
+      "archive": "volume-7.tar.gz",
+      "sha256": "bd08e4579e93bc0b1f056f2518e4c25363770226b3d12666c6d47fe9361a76d4"
+    },
+    {
+      "name": "inlumen_beta3_auth_runner_state",
+      "archive": "volume-8.tar.gz",
+      "sha256": "f3ff51103e25d0658ccca88f1a944cfe3090f9b6204636f249d521fa3b388f36"
+    }
+  ]
+}

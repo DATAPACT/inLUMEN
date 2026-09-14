@@ -1,0 +1,69 @@
+{
+  "source_sha": "1f39ecbe455f1ffae1cbb81bb2d1ab112cfeb9a3",
+  "keycloak_image": "quay.io/keycloak/keycloak:26.7.3@sha256:29be7252db0a106f1cd2ac17b9a56ff2668073da645638a38b9fc67deeb2d6c4",
+  "users": {
+    "alice": {
+      "user_id": "84cedbcf-a465-416b-aa26-3fd7532f9201",
+      "workspace_id": "8b2a2a29-2d0d-4dcd-a055-5a3f23fc5a02",
+      "run_id": "c60cb5599c7e4ce8930f9bd42ff39808",
+      "status": "succeeded",
+      "output": {
+        "order_count": 3,
+        "total_amount": "49.75"
+      },
+      "input_sha256": "ac594b9d31f3f05da2c1fa81cbf8c8e374415814fbf27d63652e30f4d6a18196",
+      "bundle_sha256": "acb67d1014eb59f7ea7c9c16e3e628babda29a06e8c53fdb1222695fefbf8124",
+      "bundle_entries": 32,
+      "saved_versions": [
+        {
+          "uid": "main",
+          "name": "Main"
+        },
+        {
+          "uid": "83db6efa-6350-4190-a414-0f1b5692a1e3",
+          "name": "alice private summary"
+        },
+        {
+          "uid": "15347dc8-55c7-48ed-b68e-decb72c1da10",
+          "name": "alice private summary"
+        }
+      ]
+    },
+    "bob": {
+      "user_id": "77a6a0c2-fd01-4114-a824-32412ad40667",
+      "workspace_id": "a18d986a-b56f-4337-ae52-9e5fbfcf9f50",
+      "run_id": "45a925c2a24444c395c498b45677c869",
+      "status": "succeeded",
+      "output": {
+        "order_count": 1,
+        "total_amount": "7.00"
+      },
+      "input_sha256": "9d0bd8011e0a25928153690a33342f083438598ab4bad34bf9102de6c96fdcae",
+      "bundle_sha256": "145ef6b04062fb95d8549bdee53a75a8688c9fde89922791ca66506d996f23e5",
+      "bundle_entries": 32,
+      "saved_versions": [
+        {
+          "uid": "main",
+          "name": "Main"
+        },
+        {
+          "uid": "70577943-181b-47c0-9fdf-8fa86a257b72",
+          "name": "bob private summary"
+        }
+      ]
+    }
+  },
+  "browser_checks": [
+    "Alice Keycloak authorization-code/PKCE login, own graph and saved versions",
+    "Alice sign-out followed by Bob login in same browser profile",
+    "Bob own graph, saved version and completed run only",
+    "Bob authenticated graph and saved version visible after restored application starts"
+  ],
+  "limitations": [
+    "Development topology with loopback HTTP Keycloak; no production ingress/TLS check",
+    "External Keycloak container retained, not restored",
+    "No model cache fixture or interrupted active job",
+    "Reconstruction used graph/file APIs, not browser JSON import or Beta 2 export",
+    "No LLM requests, load benchmark, Beta 2 upgrade, or whole-host recovery"
+  ]
+}
