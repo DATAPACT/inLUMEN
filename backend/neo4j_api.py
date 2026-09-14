@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, g, has_request_context
+from flask import Flask, request, jsonify, g, has_request_context, Response
 from neo4j import GraphDatabase
 from auth_middleware import current_workspace_id, is_auth_enabled, require_auth
 import uuid
@@ -41,6 +41,8 @@ from subpipeline_reference import (
 )
 from workspace_storage import node_bucket_name, version_snapshot_bucket, bucket_belongs_to_workspace
 from graph_document import validate_graph_document
+from project_package import build_package, parse_package, MAX_BYTES
+from runtime_environment import runtime_environment_from_files
 from workspace_store import LOCAL_WORKSPACE_ID
 
 NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD = get_neo4j_settings()
@@ -3158,10 +3160,136 @@ def neo4j_restore_graph_history():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/neo4j_project_package', methods=['GET', 'POST', 'OPTIONS'])
+@require_auth
+def neo4j_project_package():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    try:
+        if request.method == 'GET':
+            def read_attachment(node_id, ref, remaining):
+                bucket = ref.get('snapshot_bucket') or ref.get('bucket') or node_bucket_name(node_id)
+                object_name = ref.get('snapshot_object') or ref.get('filename') or ref.get('name')
+                if not bucket_belongs_to_workspace(bucket):
+                    raise ValueError('Attachment does not belong to this workspace')
+                return read_object_bytes(bucket, object_name, max_bytes=remaining)
+
+            with driver.session() as session:
+                content = build_package(_get_graph_document(session), read_attachment)
+            return Response(content, mimetype='application/zip', headers={
+                'Content-Disposition': 'attachment; filename="inlumen-project.zip"',
+            })
+
+        # Bound the body before buffering it, including requests without Content-Length.
+        if request.content_length is not None and request.content_length > MAX_BYTES:
+            return jsonify({'error': 'Package exceeds 50 MB'}), 413
+        payload = request.stream.read(MAX_BYTES + 1)
+        manifest, blobs, preview = parse_package(payload)
+        for definition in manifest['definitions'].values():
+            graph = definition['graph']
+            report = validate_pipeline_graph(graph, _nested_depth=1)
+            interface = derive_subpipeline_interface(graph)
+            if not report['valid'] or not interface['inputs'] or not interface['outputs']:
+                raise ValueError('Reusable pipeline requires a valid graph with Source and Destination boundaries')
+        if request.args.get('preview') == 'true':
+            return jsonify(preview), 200
+        if not request.headers.get('If-Match'):
+            return jsonify({'error': 'Refresh the design before importing a package'}), 428
+
+        # New node and definition identities keep existing credentials and files isolated.
+        graph = manifest['graph']
+        mapping = {node['id']: str(uuid.uuid4()) for node in graph['nodes']}
+        for node in graph['nodes']:
+            node['id'] = mapping[node['id']]
+        for index, edge in enumerate(graph['edges']):
+            edge.update(id=f'package-edge-{index}', source=mapping[str(edge['source'])], target=mapping[str(edge['target'])])
+        definitions = manifest['definitions']
+        imported = {key: str(uuid.uuid4()) for key in definitions}
+        snapshot_bucket = version_snapshot_bucket()
+        import_id = str(uuid.uuid4())
+
+        with driver.session() as session:
+            # The revision lock is acquired before storage staging; an outdated import
+            # writes nothing. Immutable objects cannot damage an existing attachment.
+            if blobs:
+                create_bucket(snapshot_bucket)
+            objects = {}
+            with tempfile.TemporaryDirectory(prefix='inlumen-package-') as directory:
+                for index, (path, content) in enumerate(blobs.items()):
+                    local_path = os.path.join(directory, str(index))
+                    with open(local_path, 'wb') as stream:
+                        stream.write(content)
+                    object_name = f'package/{import_id}/{path}'
+                    upload_object(snapshot_bucket, object_name, local_path)
+                    objects[path] = object_name
+            for document in [graph] + [definition['graph'] for definition in definitions.values()]:
+                for node in document['nodes']:
+                    code = []
+                    for ref in node['data']['files']:
+                        path = ref.pop('path')
+                        if ref['role'] == 'code':
+                            code.append({'filename': ref['filename'], 'content': blobs[path].decode('utf-8', errors='replace')})
+                        ref.update(bucket=node_bucket_name(node['id']), snapshot_bucket=snapshot_bucket,
+                                   snapshot_object=objects[path])
+                    if code:
+                        node['data']['generated_artifact'] = {
+                            'status': 'current', 'generator': 'user-upload',
+                            'files': [dict(ref) for ref in node['data']['files'] if ref['role'] == 'code'],
+                            'runtime_environment': runtime_environment_from_files(code),
+                            'provenance': {'origin': 'package-import', 'user_modified': True},
+                        }
+            names = {str(record['pipeline_name'] or '').strip().lower() for record in _reusable_pipeline_records(session)}
+            for key, definition in definitions.items():
+                name = str(definition.get('name') or 'Reusable pipeline').strip()[:200]
+                if name.lower() in names:
+                    name = f'{name} (import {imported[key][:8]})'
+                names.add(name.lower())
+                definition['name'] = name
+                document = definition['graph']
+                interface = derive_subpipeline_interface(document)
+                session.run("""
+                    CREATE (p:PIPELINE {uid:$uid, status:'reusable', name:$name, label:$name,
+                        description:$description, graph_json:$graph_json, interface_json:$interface_json,
+                        public_ports_json:$ports_json, node_count:$node_count, edge_count:$edge_count,
+                        created_at:datetime(), updated_at:datetime()})
+                """, uid=imported[key], name=name, description=str(definition.get('description') or '')[:10000], graph_json=json.dumps(document),
+                    interface_json=json.dumps(interface), ports_json=json.dumps(public_ports_for_interface(interface)),
+                    node_count=len(document['nodes']), edge_count=len(document['edges'])).consume()
+            for node in graph['nodes']:
+                key = node['data'].pop('package_definition', None)
+                if key is not None:
+                    definition = definitions[key]
+                    node['data']['subpipeline'] = {
+                        'version': 2, 'reference': {'pipeline_uid': imported[key], 'pipeline_name': definition['name']},
+                        'interface': derive_subpipeline_interface(definition['graph']), 'expanded': False,
+                    }
+            result = _sync_graph_to_session(session, graph, version_name=MAIN_VERSION_NAME, active_version_uid=MAIN_VERSION_UID)
+            session.run("""
+                MATCH (p:PIPELINE {uid:$uid})
+                SET p.name=$name, p.label=$name, p.description=$description
+            """, uid=result['pipeline_uid'], name=preview['name'], description=str(manifest.get('description') or '')[:10000]).consume()
+        return jsonify({**preview, 'imported': True}), 200
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 422
+    except Exception:
+        # A failed/uncertain transaction may leave unreferenced immutable objects.
+        # Never delete potentially committed files after an ambiguous commit result.
+        app.logger.exception('Project package operation failed')
+        return jsonify({'error': 'Package operation failed. Check that all attachments and storage are available.'}), 500
+
+
 @app.route('/neo4j_get_graph', methods=['GET'])
 @require_auth
 def neo4j_get_graph():
     print("[neo4j_api.py] Received request to get graph (ReactFlow export-like).")
+    try:
+        with driver.session() as session:
+            return jsonify(_get_graph_document(session)), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+def _get_graph_document(session):
     query = """
     MATCH (candidate:PIPELINE {status:'design'})
     OPTIONAL MATCH (candidate)-[:HAS_STEP]->(candidateStep:STEP)
@@ -3220,201 +3348,197 @@ def neo4j_get_graph():
       }) AS flows
     """
 
-    try:
-        with driver.session() as session:
-            if not _label_exists(session, "PIPELINE"):
-                return jsonify({
-                    "updated_at": None,
-                    "nodes": [],
-                    "edges": [],
-                    "viewport": {"x": 0, "y": 0, "zoom": 1}
-                }), 200
-            record = session.run(query).single()
-            if not record:
-                return jsonify({
-                    "updated_at": None,
-                    "nodes": [],
-                    "edges": [],
-                    "viewport": {"x": 0, "y": 0, "zoom": 1}
-                }), 200
+    if not _label_exists(session, "PIPELINE"):
+        return {
+            "updated_at": None,
+            "nodes": [],
+            "edges": [],
+            "viewport": {"x": 0, "y": 0, "zoom": 1}
+        }
+    record = session.run(query).single()
+    if not record:
+        return {
+            "updated_at": None,
+            "nodes": [],
+            "edges": [],
+            "viewport": {"x": 0, "y": 0, "zoom": 1}
+        }
 
-            updated_at = record["updated_at"]
-            pipeline = record["pipeline"] or {}
-            settings = {}
-            if isinstance(pipeline, dict):
-                settings_json = pipeline.get("settings_json")
-                if isinstance(settings_json, str) and settings_json.strip():
-                    try:
-                        parsed_settings = json.loads(settings_json)
-                        settings = parsed_settings if isinstance(parsed_settings, dict) else {}
-                    except Exception:
-                        settings = {}
-                pipeline["design_pipeline_count"] = record["design_pipeline_count"]
-                pipeline["step_count"] = record["pipeline_step_count"]
-                if pipeline.get("last_run_id"):
-                    pipeline["last_run"] = {
-                        "run_id": pipeline.get("last_run_id"),
-                        "status": pipeline.get("last_run_status"),
-                        "engine": pipeline.get("last_run_engine"),
-                        "snapshot_sha256": pipeline.get(
-                            "last_run_snapshot_sha256"
-                        ),
-                        "started_at": pipeline.get("last_run_started_at"),
-                        "finished_at": pipeline.get("last_run_finished_at"),
-                        "duration_ms": pipeline.get("last_run_duration_ms"),
-                        "output_count": pipeline.get("last_run_output_count"),
-                        "error": pipeline.get("last_run_error"),
-                    }
-                active_version_uid = pipeline.get("active_version_uid")
-                if isinstance(active_version_uid, str) and active_version_uid.strip():
-                    active_version_record = session.run("""
-                    MATCH (:PIPELINE {status:'design'})-[:HAS_VERSION]->(v:PIPELINE_VERSION {uid: $active_version_uid})
-                    RETURN v.name AS name
-                    """, active_version_uid=active_version_uid.strip()).single()
-                    pipeline["active_version_name"] = active_version_record["name"] if active_version_record else None
-            step_rows = record["step_rows"] or []
-            flows = record["flows"] or []
-
-            nodes = []
-            for row in step_rows:
-                s = row.get("step") if row else None
-                if s is None:
-                    continue
-
-                props = dict(s.items())
-                flow_id = props.get("flow_id")
-                if flow_id is None:
-                    continue
-
-                node_id = str(flow_id)
-
-                # position
-                try:
-                    x = float(props.get("x", 0) or 0)
-                except Exception:
-                    x = 0.0
-                try:
-                    y = float(props.get("y", 0) or 0)
-                except Exception:
-                    y = 0.0
-
-                step_kind = normalize_step_type(props.get("type"), default="task")
-
-                files_for_step = row.get("files") or []
-                # filenames list (simple)
-                filenames = [
-                    f.get("filename")
-                    for f in files_for_step
-                    if isinstance(f, dict) and f.get("filename")
-                ]
-
-                data = {
-                    "label": props.get("label", ""),
-                    "description": props.get("description", ""),
-                    "type": step_kind,
-                    "template_label": props.get("template_label", ""),
-                    "ports": normalize_node_ports(props.get("ports_json"), step_kind),
-
-                    # add files so polling doesn't wipe them
-                    "files": filenames,
-
-                    # optional richer info (bucket + added_at)
-                    "file_buckets": files_for_step,
-                }
-
-                if step_kind == "destination" and "content" in props:
-                    data["content"] = props.get("content") or ""
-                if "has_files" in props:
-                    data["has_files"] = props.get("has_files")
-                if "endpoint" in props:
-                    data["endpoint"] = props.get("endpoint")
-                if "database" in props:
-                    data["database"] = props.get("database")
-                if "param_json" in props:
-                    param_json = props.get("param_json")
-                    data["param_json"] = param_json
-                    try:
-                        parsed_param = json.loads(param_json) if isinstance(param_json, str) else {}
-                    except Exception:
-                        parsed_param = {}
-                    data["param"] = parsed_param if isinstance(parsed_param, dict) else {}
-                    data["secret_params"] = normalize_secret_param_keys(
-                        props.get("secret_params_json"),
-                        data["param"],
-                    )
-                data.update(definition_data_from_properties(props))
-                if step_kind == "subpipeline" and isinstance(data.get("subpipeline"), dict):
-                    subpipeline = dict(data["subpipeline"])
-                    reference = subpipeline.get("reference")
-                    reference = reference if isinstance(reference, dict) else {}
-                    referenced_pipeline_uid = str(reference.get("pipeline_uid") or "").strip()
-                    if referenced_pipeline_uid:
-                        records = _reusable_pipeline_records(session, referenced_pipeline_uid, reference.get("version_uid") or None)
-                        subpipeline.pop("resolution_error", None)
-                        subpipeline.pop("resolved_graph", None)
-                        if records:
-                            referenced = records[0]
-                            resolved_graph = _reusable_graph(referenced)
-                            subpipeline["reference"] = {**reference, "pipeline_uid": referenced_pipeline_uid, "pipeline_name": referenced['pipeline_name'] or ''}
-                            subpipeline["interface"] = derive_subpipeline_interface(resolved_graph)
-                            nesting_error = reusable_pipeline_nesting_error(resolved_graph)
-                            if nesting_error:
-                                subpipeline["resolution_error"] = nesting_error
-                            else:
-                                subpipeline["resolved_graph"] = resolved_graph
-                        else:
-                            subpipeline["resolution_error"] = "Referenced reusable pipeline was not found."
-                    data["subpipeline"] = subpipeline
-
-                nodes.append({
-                    "id": node_id,
-                    "type": "custom",
-                    "position": {"x": x, "y": y},
-                    "data": data,
-                })
-
-            edges = []
-            node_connection_profiles_by_id = {
-                node["id"]: (
-                    node["data"]["type"],
-                    node["data"].get("template_label") or "",
-                )
-                for node in nodes
+    updated_at = record["updated_at"]
+    pipeline = record["pipeline"] or {}
+    settings = {}
+    if isinstance(pipeline, dict):
+        settings_json = pipeline.get("settings_json")
+        if isinstance(settings_json, str) and settings_json.strip():
+            try:
+                parsed_settings = json.loads(settings_json)
+                settings = parsed_settings if isinstance(parsed_settings, dict) else {}
+            except Exception:
+                settings = {}
+        pipeline["design_pipeline_count"] = record["design_pipeline_count"]
+        pipeline["step_count"] = record["pipeline_step_count"]
+        if pipeline.get("last_run_id"):
+            pipeline["last_run"] = {
+                "run_id": pipeline.get("last_run_id"),
+                "status": pipeline.get("last_run_status"),
+                "engine": pipeline.get("last_run_engine"),
+                "snapshot_sha256": pipeline.get(
+                    "last_run_snapshot_sha256"
+                ),
+                "started_at": pipeline.get("last_run_started_at"),
+                "finished_at": pipeline.get("last_run_finished_at"),
+                "duration_ms": pipeline.get("last_run_duration_ms"),
+                "output_count": pipeline.get("last_run_output_count"),
+                "error": pipeline.get("last_run_error"),
             }
-            for f in flows:
-                src = f.get("source") if isinstance(f, dict) else None
-                tgt = f.get("target") if isinstance(f, dict) else None
-                if src is None or tgt is None:
-                    continue
-                src = str(src)
-                tgt = str(tgt)
-                source_profile = node_connection_profiles_by_id.get(src, ("task", ""))
-                target_profile = node_connection_profiles_by_id.get(tgt, ("task", ""))
-                source_port = f.get("source_port") or default_output_port_id(*source_profile)
-                target_port = f.get("target_port") or default_input_port_id(*target_profile)
-                edges.append({
-                    "id": (
-                        f"reactflow__edge-{src}-{source_port or 'default'}-"
-                        f"{tgt}-{target_port or 'default'}"
-                    ),
-                    "source": src,
-                    "target": tgt,
-                    "sourceHandle": source_port or None,
-                    "targetHandle": target_port or None,
-                })
+        active_version_uid = pipeline.get("active_version_uid")
+        if isinstance(active_version_uid, str) and active_version_uid.strip():
+            active_version_record = session.run("""
+            MATCH (:PIPELINE {status:'design'})-[:HAS_VERSION]->(v:PIPELINE_VERSION {uid: $active_version_uid})
+            RETURN v.name AS name
+            """, active_version_uid=active_version_uid.strip()).single()
+            pipeline["active_version_name"] = active_version_record["name"] if active_version_record else None
+    step_rows = record["step_rows"] or []
+    flows = record["flows"] or []
 
-            return jsonify({
-                "updated_at": updated_at,
-                "pipeline": pipeline,
-                "settings": settings,
-                "nodes": nodes,
-                "edges": edges,
-                "viewport": {"x": 0, "y": 0, "zoom": 1}
-            }), 200
+    nodes = []
+    for row in step_rows:
+        s = row.get("step") if row else None
+        if s is None:
+            continue
 
-    except Exception as e:
-        print("[neo4j_api.py] Error executing neo4j_get_graph:", e)
-        return jsonify({"error": str(e)}), 500
+        props = dict(s.items())
+        flow_id = props.get("flow_id")
+        if flow_id is None:
+            continue
+
+        node_id = str(flow_id)
+
+        # position
+        try:
+            x = float(props.get("x", 0) or 0)
+        except Exception:
+            x = 0.0
+        try:
+            y = float(props.get("y", 0) or 0)
+        except Exception:
+            y = 0.0
+
+        step_kind = normalize_step_type(props.get("type"), default="task")
+
+        files_for_step = row.get("files") or []
+        # filenames list (simple)
+        filenames = [
+            f.get("filename")
+            for f in files_for_step
+            if isinstance(f, dict) and f.get("filename")
+        ]
+
+        data = {
+            "label": props.get("label", ""),
+            "description": props.get("description", ""),
+            "type": step_kind,
+            "template_label": props.get("template_label", ""),
+            "ports": normalize_node_ports(props.get("ports_json"), step_kind),
+
+            # add files so polling doesn't wipe them
+            "files": filenames,
+
+            # optional richer info (bucket + added_at)
+            "file_buckets": files_for_step,
+        }
+
+        if step_kind == "destination" and "content" in props:
+            data["content"] = props.get("content") or ""
+        if "has_files" in props:
+            data["has_files"] = props.get("has_files")
+        if "endpoint" in props:
+            data["endpoint"] = props.get("endpoint")
+        if "database" in props:
+            data["database"] = props.get("database")
+        if "param_json" in props:
+            param_json = props.get("param_json")
+            data["param_json"] = param_json
+            try:
+                parsed_param = json.loads(param_json) if isinstance(param_json, str) else {}
+            except Exception:
+                parsed_param = {}
+            data["param"] = parsed_param if isinstance(parsed_param, dict) else {}
+            data["secret_params"] = normalize_secret_param_keys(
+                props.get("secret_params_json"),
+                data["param"],
+            )
+        data.update(definition_data_from_properties(props))
+        if step_kind == "subpipeline" and isinstance(data.get("subpipeline"), dict):
+            subpipeline = dict(data["subpipeline"])
+            reference = subpipeline.get("reference")
+            reference = reference if isinstance(reference, dict) else {}
+            referenced_pipeline_uid = str(reference.get("pipeline_uid") or "").strip()
+            if referenced_pipeline_uid:
+                records = _reusable_pipeline_records(session, referenced_pipeline_uid, reference.get("version_uid") or None)
+                subpipeline.pop("resolution_error", None)
+                subpipeline.pop("resolved_graph", None)
+                if records:
+                    referenced = records[0]
+                    resolved_graph = _reusable_graph(referenced)
+                    subpipeline["description"] = referenced['description'] or ''
+                    subpipeline["reference"] = {**reference, "pipeline_uid": referenced_pipeline_uid, "pipeline_name": referenced['pipeline_name'] or ''}
+                    subpipeline["interface"] = derive_subpipeline_interface(resolved_graph)
+                    nesting_error = reusable_pipeline_nesting_error(resolved_graph)
+                    if nesting_error:
+                        subpipeline["resolution_error"] = nesting_error
+                    else:
+                        subpipeline["resolved_graph"] = resolved_graph
+                else:
+                    subpipeline["resolution_error"] = "Referenced reusable pipeline was not found."
+            data["subpipeline"] = subpipeline
+
+        nodes.append({
+            "id": node_id,
+            "type": "custom",
+            "position": {"x": x, "y": y},
+            "data": data,
+        })
+
+    edges = []
+    node_connection_profiles_by_id = {
+        node["id"]: (
+            node["data"]["type"],
+            node["data"].get("template_label") or "",
+        )
+        for node in nodes
+    }
+    for f in flows:
+        src = f.get("source") if isinstance(f, dict) else None
+        tgt = f.get("target") if isinstance(f, dict) else None
+        if src is None or tgt is None:
+            continue
+        src = str(src)
+        tgt = str(tgt)
+        source_profile = node_connection_profiles_by_id.get(src, ("task", ""))
+        target_profile = node_connection_profiles_by_id.get(tgt, ("task", ""))
+        source_port = f.get("source_port") or default_output_port_id(*source_profile)
+        target_port = f.get("target_port") or default_input_port_id(*target_profile)
+        edges.append({
+            "id": (
+                f"reactflow__edge-{src}-{source_port or 'default'}-"
+                f"{tgt}-{target_port or 'default'}"
+            ),
+            "source": src,
+            "target": tgt,
+            "sourceHandle": source_port or None,
+            "targetHandle": target_port or None,
+        })
+
+    return {
+        "updated_at": updated_at,
+        "pipeline": pipeline,
+        "settings": settings,
+        "nodes": nodes,
+        "edges": edges,
+        "viewport": {"x": 0, "y": 0, "zoom": 1}
+    }
+
 
 @app.route('/neo4j_delete_node/<uid>', methods=['DELETE', 'OPTIONS'])
 @require_auth

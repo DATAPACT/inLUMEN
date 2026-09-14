@@ -2315,6 +2315,20 @@ def pipeline_graph():
     return _proxy_response(dispatch_graph_request, "neo4j_get_graph")
 
 
+@app.route("/api/pipeline/package", methods=["GET", "POST", "OPTIONS"])
+@require_auth
+def pipeline_package():
+    from project_package import MAX_BYTES
+    if request.method == "POST":
+        if request.content_length is not None and request.content_length > MAX_BYTES:
+            return _json_error(413, "Package exceeds 50 MB")
+        body = request.stream.read(MAX_BYTES + 1)
+        if len(body) > MAX_BYTES:
+            return _json_error(413, "Package exceeds 50 MB")
+        return _response_from_upstream(_proxy(dispatch_graph_request, "neo4j_project_package", data=body))
+    return _proxy_response(dispatch_graph_request, "neo4j_project_package")
+
+
 def _pipeline_runner_error_response(exc: PipelineRunnerError):
     return _json_error(exc.status_code, str(exc), exc.details)
 

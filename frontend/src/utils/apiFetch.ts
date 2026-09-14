@@ -26,11 +26,12 @@ export const apiFetch = (url: string, init?: RequestInit): Promise<Response> => 
   const headers = new Headers(init?.headers);
   if (AUTH_ENABLED && _token) headers.set('Authorization', `Bearer ${_token}`);
   if (_workspaceId) headers.set('X-InLumen-Workspace-Id', _workspaceId);
-  const path = new URL(url, window.location.origin).pathname;
+  const parsedUrl = new URL(url, window.location.origin);
+  const path = parsedUrl.pathname;
   const mutation = !['GET', 'HEAD', 'OPTIONS'].includes((init?.method || 'GET').toUpperCase());
-  const graph = /^\/api\/(graph\/|pipeline\/(graph|history\/restore|versions|overview)(\/|$)|reusable-pipelines(\/|$)|nodes\/[^/]+\/files(\/text)?$)/.test(path);
+  const graph = /^\/api\/(graph\/|pipeline\/(graph|package|history\/restore|versions|overview)(\/|$)|reusable-pipelines(\/|$)|nodes\/[^/]+\/files(\/text)?$)/.test(path);
   const send = () => fetch(url, (AUTH_ENABLED && _token) || _workspaceId || headers.has("If-Match") ? { ...init, headers } : init);
-  if (mutation && graph) return graphWrite((revision) => {
+  if (mutation && graph && !(path === '/api/pipeline/package' && parsedUrl.searchParams.get('preview') === 'true')) return graphWrite((revision) => {
     if (revision) headers.set('If-Match', revision);
     return send();
   }, {
@@ -41,7 +42,7 @@ export const apiFetch = (url: string, init?: RequestInit): Promise<Response> => 
     },
     preservesGraph: path === '/api/reusable-pipelines',
     // Rejected files and reusable pipelines belong to their forms; no graph write occurred.
-    validationStatuses: /^\/api\/(nodes\/[^/]+\/files(\/text)?|reusable-pipelines(\/.*)?)$/.test(path) ? [400, 404, 413, 415, 422] : undefined,
+    validationStatuses: path === '/api/pipeline/package' ? [400, 413, 415, 422, 428] : /^\/api\/(nodes\/[^/]+\/files(\/text)?|reusable-pipelines(\/.*)?)$/.test(path) ? [400, 404, 413, 415, 422] : undefined,
   });
   return send();
 };

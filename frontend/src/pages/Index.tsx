@@ -1309,6 +1309,7 @@ const Index = () => {
                   pipelinePrompt={pipelineHighLevelPrompt || activePipelineDescription}
                   onVersionSaved={handleVersionSaved}
                   onCanvasEdited={scheduleActiveVersionSnapshot}
+                  onBeforePackage={flushActiveVersionSnapshot}
                   onActiveVersionChange={updateActiveVersion}
                   onActiveVersionNameChange={handleActiveVersionNameChange}
                   onPipelineDescriptionChange={setActivePipelineDescription}
