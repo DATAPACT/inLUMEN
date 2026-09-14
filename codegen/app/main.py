@@ -124,6 +124,20 @@ def require_generation_model(
         )
 
 
+def timestamp_duration_ms(start: str | None, finish: str) -> int | None:
+    """Missing or invalid historical timestamps are not measured durations."""
+    if not start:
+        return None
+    try:
+        seconds = (
+            datetime.fromisoformat(finish.replace("Z", "+00:00"))
+            - datetime.fromisoformat(start.replace("Z", "+00:00"))
+        ).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    return round(seconds * 1000) if seconds >= 0 else None
+
+
 def update_pipeline_job(run_id: str, **updates: Any) -> None:
     if run_id in PIPELINE_GENERATION_PURGED_RUN_IDS:
         return
@@ -140,7 +154,22 @@ def update_pipeline_job(run_id: str, **updates: Any) -> None:
             "updated_at": now,
         },
     )
+    previous_status = job.get("status")
     job.update(updates)
+    if job.get("status") == "running" and previous_status == "queued":
+        job["started_at"] = now
+        job["queue_duration_ms"] = timestamp_duration_ms(job.get("created_at"), now)
+    if (
+        job.get("status") in {"valid", "invalid", "failed", "cancelled"}
+        and previous_status not in {"valid", "invalid", "failed", "cancelled"}
+    ):
+        job["finished_at"] = now
+        job["duration_ms"] = (
+            None if job.get("timing_interrupted")
+            else timestamp_duration_ms(job.get("started_at"), now)
+        )
+        if not job.get("started_at") and not job.get("timing_interrupted"):
+            job["queue_duration_ms"] = timestamp_duration_ms(job.get("created_at"), now)
     job["updated_at"] = now
     PIPELINE_JOB_STORE.save(job)
 
@@ -330,6 +359,8 @@ def recover_interrupted_pipeline_jobs(*, refresh: bool = False) -> None:
             continue
         if not GENERATION_LEASES.claim(run_id, workspace):
             continue
+        # A restart cannot establish when the worker actually stopped.
+        job["timing_interrupted"] = True
         mark_pipeline_job_failed(
             run_id,
             "Code generation was interrupted by a service restart. Resume this run "

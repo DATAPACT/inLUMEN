@@ -258,6 +258,12 @@ def test_matching_valid_pipeline_run_uses_cache(monkeypatch) -> None:
     assert first_body["status"] == "valid"
     assert second_body["status"] == "valid"
     assert len(calls) == 1
+    for body in (first_body, second_body):
+        assert body["started_at"] is not None
+        assert body["finished_at"] is not None
+        assert body["duration_ms"] >= 0
+        assert body["queue_duration_ms"] >= 0
+    assert second_body["started_at"] >= first_body["finished_at"]
     assert {step["stage"] for step in second_body["generation_run"]["steps"]} == {
         "validated_cache_hit"
     }
@@ -290,3 +296,73 @@ def test_interrupted_durable_job_becomes_resumable_failure() -> None:
     assert recovered["status"] == "failed"
     assert "service restart" in recovered["error"]
     assert recovered["request"].context.pipeline["name"] == "restart-test"
+    with TestClient(main.app) as client:
+        response = client.post("/v1/generate/pipeline-scripts/runs/interrupted-run/resume", json={})
+        assert response.status_code == 202
+        resumed = wait_for_terminal_job(client, response.json()["run_id"])
+    assert resumed["status"] == "valid"
+    assert resumed["resumed_from_run_id"] == "interrupted-run"
+    assert resumed["duration_ms"] >= 0
+    assert resumed["timing_interrupted"] is False
+    assert main.PIPELINE_JOB_STORE.get("interrupted-run")["duration_ms"] is None
+
+
+@pytest.mark.parametrize("status", ["valid", "invalid", "failed", "cancelled"])
+def test_duration_is_fixed_and_survives_store_reopen(monkeypatch, tmp_path, status):
+    from app.job_store import PipelineJobStore
+    path = str(tmp_path / "timing.sqlite3")
+    monkeypatch.setattr(main, "PIPELINE_JOB_STORE", PipelineJobStore(path))
+    clock = ["2026-09-14T10:00:00Z"]
+    monkeypatch.setattr(main, "utc_now_iso", lambda: clock[0])
+    main.update_pipeline_job("measured", status="queued")
+    clock[0] = "2026-09-14T10:00:02Z"
+    main.update_pipeline_job("measured", status="running")
+    clock[0] = "2026-09-14T10:00:05Z"
+    main.update_pipeline_job("measured", status="running")
+    clock[0] = "2026-09-14T10:00:12Z"
+    main.update_pipeline_job("measured", status=status)
+    clock[0] = "2026-09-14T10:01:00Z"
+    main.update_pipeline_job("measured", error="cleanup does not extend duration")
+    reopened = PipelineJobStore(path)
+    main.PIPELINE_GENERATION_JOBS.clear()
+    monkeypatch.setattr(main, "PIPELINE_JOB_STORE", reopened)
+    with TestClient(main.app) as client:
+        body = client.get("/v1/generate/pipeline-scripts/runs/measured").json()
+        assert body["duration_ms"] == 10000
+        assert body["queue_duration_ms"] == 2000
+        assert body["started_at"] == "2026-09-14T10:00:02Z"
+        assert body["finished_at"] == "2026-09-14T10:00:12Z"
+        assert client.get("/v1/generate/pipeline-scripts/runs").json()[0]["duration_ms"] == 10000
+
+
+def test_queued_cancellation_has_no_worker_duration(monkeypatch):
+    clock = ["2026-09-14T10:00:00Z"]
+    monkeypatch.setattr(main, "utc_now_iso", lambda: clock[0])
+    main.update_pipeline_job("queued-cancel", status="queued")
+    clock[0] = "2026-09-14T10:00:03Z"
+    main.mark_pipeline_job_cancelled("queued-cancel")
+    job = main.PIPELINE_JOB_STORE.get("queued-cancel")
+    assert job["duration_ms"] is None
+    assert job["queue_duration_ms"] == 3000
+    assert job.get("started_at") is None
+
+
+def test_restart_does_not_invent_worker_completion_time(monkeypatch):
+    main.update_pipeline_job("interrupted", status="queued")
+    main.update_pipeline_job("interrupted", status="running")
+    main.recover_interrupted_pipeline_jobs()
+    job = main.PIPELINE_JOB_STORE.get("interrupted")
+    assert job["status"] == "failed"
+    assert job["timing_interrupted"] is True
+    assert job["duration_ms"] is None
+    assert job["finished_at"] is not None
+
+
+def test_legacy_job_does_not_derive_duration_from_updated_at():
+    from app.schemas import PipelineGenerationJobResponse
+    job = PipelineGenerationJobResponse.model_validate({
+        "run_id": "legacy", "status": "valid",
+        "created_at": "2026-09-14T10:00:00Z", "updated_at": "2026-09-14T11:00:00Z",
+    })
+    assert job.duration_ms is None
+    assert job.queue_duration_ms is None

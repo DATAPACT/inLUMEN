@@ -348,6 +348,11 @@ class PipelineGenerationJobResponse(BaseModel):
     error: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
+    queue_duration_ms: int | None = Field(default=None, ge=0)
+    timing_interrupted: bool = False
 
 
 class DeploymentBundleValidationRequest(BaseModel):

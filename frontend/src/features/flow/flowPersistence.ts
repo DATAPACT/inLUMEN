@@ -186,6 +186,11 @@ export type PipelineGenerationJob = {
   };
   created_at?: string | null;
   updated_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+  queue_duration_ms?: number | null;
+  timing_interrupted?: boolean;
 };
 
 export type ExternalRuntimePrompt = {
