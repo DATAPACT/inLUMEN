@@ -276,7 +276,40 @@ class CodegenServiceClientTest(unittest.TestCase):
         self.assertTrue(second_hash.startswith("sha256:"))
         self.assertNotEqual(first_hash, second_hash)
 
-    def test_pipeline_codegen_defaults_to_quality_runtime_and_seven_repairs(self):
+    def test_repair_options_match_live_codegen_schema(self):
+        # Validate against the receiving service, not a copied numeric assertion.
+        import importlib.util
+        schema_path = Path(__file__).resolve().parents[2] / "codegen" / "app" / "schemas.py"
+        spec = importlib.util.spec_from_file_location("codegen_contract_schema", schema_path)
+        schema = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = schema
+        spec.loader.exec_module(schema)
+        graph = {"nodes": [{"id": "1", "data": {"type": "source", "label": "Input"}}], "edges": []}
+        for supplied, expected in [(None, 6), (0, 0), (4, 4), (7, 6), (999, 6), (-1, 0), ("bad", 6)]:
+            with self.subTest(supplied=supplied):
+                payload, _ = inlumen_api._build_pipeline_codegen_payload(graph, {"repair_attempts": supplied})
+                options = schema.GenerationOptions.model_validate(payload["options"])
+                self.assertEqual(expected, options.repair_attempts)
+                resume = schema.ResumePipelineGenerationRunRequest.model_validate({
+                    "repair_attempts": inlumen_api._normalize_codegen_repair_attempts(supplied),
+                })
+                self.assertEqual(expected, resume.repair_attempts)
+
+    def test_node_generation_uses_the_bounded_repair_default(self):
+        from unittest.mock import MagicMock
+        with patch.dict(os.environ, {"AUTH_ENABLED": "false", "APP_ENV": "development"}), \
+             patch.object(inlumen_api, "_proxy", return_value=MagicMock()), \
+             patch.object(inlumen_api, "_upstream_json", return_value={}), \
+             patch.object(inlumen_api, "_build_codegen_context", return_value={"target_node": {"type": "task"}}), \
+             patch.object(inlumen_api, "_post_codegen_request", return_value={
+                 "generated_artifact": {"validation_report": {"status": "invalid"}},
+             }) as post:
+            response = inlumen_api.app.test_client().post("/api/nodes/example/generate-script", json={})
+        # The invalid fake result prevents persistence; inspect the actual outbound request.
+        self.assertEqual(422, response.status_code)
+        self.assertEqual(6, post.call_args.args[0]["options"]["repair_attempts"])
+
+    def test_pipeline_codegen_defaults_to_quality_runtime_and_six_repairs(self):
         payload, metadata = inlumen_api._build_pipeline_codegen_payload(
             {
                 "nodes": [
@@ -294,7 +327,7 @@ class CodegenServiceClientTest(unittest.TestCase):
             {},
         )
 
-        self.assertEqual(7, payload["options"]["repair_attempts"])
+        self.assertEqual(6, payload["options"]["repair_attempts"])
         constraints = payload["context"]["runtime_constraints"]
         self.assertTrue(constraints["allow_unlisted_model_packages"])
         self.assertTrue(constraints["network_allowed"])
