@@ -366,6 +366,27 @@ if not result.success:
 """
 
 
+def _prepare_worker_directories(root: Path) -> None:
+    """Make only this job's writable directories accessible to UID 65532.
+
+    Exported bundles include per-node output directories (with .gitkeep).
+    Preparing just the mount root leaves those extracted directories unwritable.
+    Never follow links from a bundle into another job or the control plane.
+    """
+    if root.is_symlink():
+        raise ValueError("Worker directory must not be a symbolic link")
+    root.mkdir(parents=True, exist_ok=True)
+    directories = [root]
+    for parent, names, files in os.walk(root, followlinks=False):
+        for name in names + files:
+            entry = Path(parent) / name
+            if entry.is_symlink():
+                raise ValueError("Worker directory must not contain symbolic links")
+        directories.extend(Path(parent) / name for name in names)
+    for directory in directories:
+        directory.chmod(0o777)
+
+
 def _isolated_dagster_execution(
     project_root: Path,
     *,
@@ -394,8 +415,8 @@ def _isolated_dagster_execution(
     workspace_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     input_dir.mkdir(parents=True, exist_ok=True)
-    workspace_dir.chmod(0o777)
-    output_dir.chmod(0o777)
+    _prepare_worker_directories(workspace_dir)
+    _prepare_worker_directories(output_dir)
     report: dict[str, Any] = {
         "project_root": str(project_root),
         "package_manager": "container-image",

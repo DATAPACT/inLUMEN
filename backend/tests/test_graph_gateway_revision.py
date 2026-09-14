@@ -21,6 +21,7 @@ class GraphGatewayRevisionTests(unittest.TestCase):
                     response = client.delete(path, headers={'If-Match': '"11"'})
                     self.assertEqual(response.status_code, 200, response.json)
                     self.assertEqual(response.headers['ETag'], '"12"')
+                    self.assertEqual(response.headers['X-InLumen-Graph-Revision'], '12')
                     self.assertIn('storage_cleanup', response.json)
 
     def test_sequential_graph_writes_use_only_the_last_successful_write_revision(self):
@@ -52,6 +53,7 @@ class GraphGatewayRevisionTests(unittest.TestCase):
                 headers={'If-Match': '"11"'}, data={'file': (io.BytesIO(b'name,value\nexample,1\n'), 'input.csv'), 'role': 'data'})
             self.assertEqual(response.status_code, 200, response.json)
             self.assertEqual(response.headers['ETag'], '"12"')
+            self.assertEqual(response.headers['X-InLumen-Graph-Revision'], '12')
 
     def test_stale_file_mutations_are_rejected_before_object_storage_changes(self):
         graph = LocalApiResponse(content=b'{"nodes": [], "edges": []}', status_code=200, headers={'ETag': '"12"'})
@@ -65,4 +67,5 @@ class GraphGatewayRevisionTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 409)
                     self.assertEqual(response.json['code'], 'graph_conflict')
                     self.assertEqual(response.headers['ETag'], '"12"')
+                    self.assertEqual(response.headers['X-InLumen-Graph-Revision'], '12')
             storage.assert_not_called()

@@ -1,5 +1,8 @@
 import hashlib
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +10,7 @@ from unittest import mock
 
 from app.deployment_validation import (
     _read_run_output_files,
+    _prepare_worker_directories,
     repair_deployment_bundle,
     validate_dagster_project,
     validate_deployment_bundle,
@@ -428,3 +432,83 @@ class DeploymentInputContractValidationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkerDirectoryPermissionsTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0,
+                         "Requires Linux root to exercise the worker UID")
+    def test_nonroot_worker_can_create_run_under_exported_node_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            root.chmod(0o755)
+            for mount in ("outputs", "workspaces"):
+                node = root / mount / "node-1-audio-upload"
+                node.mkdir(parents=True, mode=0o755)
+                (node / ".gitkeep").touch()
+                script = "from pathlib import Path; import sys; p=Path(sys.argv[1]); p.mkdir(); (p/'result.txt').write_text('done')"
+                command = [sys.executable, "-c", script, str(node / "run-id")]
+                before = subprocess.run(command, user=65532, group=65532, capture_output=True)
+                self.assertNotEqual(before.returncode, 0)
+                self.assertIn(b"PermissionError", before.stderr)
+                _prepare_worker_directories(root / mount)
+                after = subprocess.run(command, user=65532, group=65532, capture_output=True)
+                self.assertEqual(after.returncode, 0, after.stderr.decode())
+                self.assertEqual((node / "run-id/result.txt").read_text(), "done")
+
+    def test_rejects_links_without_changing_external_permissions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            outside = root / "outside"
+            outside.mkdir(mode=0o700)
+            outputs = root / "outputs"
+            outputs.mkdir()
+            (outputs / "node").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                _prepare_worker_directories(outputs)
+            self.assertEqual(outside.stat().st_mode & 0o777, 0o700)
+
+@unittest.skipUnless(os.getenv("RUN_DAGSTER_PERMISSION_INTEGRATION") == "1",
+                     "Opt-in Docker Dagster execution test")
+class DagsterPermissionIntegrationTest(unittest.TestCase):
+    def test_materializes_with_preexisting_output_directories(self):
+        from app.deployment_validation import _isolated_dagster_execution
+        # This directory must be mounted at the same path in the control plane
+        # and Docker host, just like CODEGEN_DEPLOYMENT_VALIDATION_WORKDIR.
+        with tempfile.TemporaryDirectory(dir=os.environ["DAGSTER_TEST_SHARED_DIR"]) as temp_dir:
+            root = Path(temp_dir)
+            (root / "bundle-manifest.json").write_text('{}')
+            project = root / "dagster"
+            module = project / "src/inlumen_dagster_project"
+            module.mkdir(parents=True)
+            (module / "__init__.py").touch()
+            (module / "definitions.py").write_text('''
+from pathlib import Path
+import os
+import dagster as dg
+@dg.asset
+def attached_input(context):
+    assert os.getuid() == 65532
+    data = Path('/workspace/inputs/attached.txt').read_text()
+    for mount in ('outputs', 'workspaces'):
+        output = Path('/workspace') / mount / 'node-1-audio-upload' / context.run_id
+        output.mkdir()
+        (output / 'result.txt').write_text(data)
+    return data
+defs = dg.Definitions(assets=[attached_input])
+''')
+            (project / "Dockerfile").write_text('''FROM python:3.11-slim
+RUN pip install --no-cache-dir dagster==1.13.12
+COPY dagster/src /workspace/dagster/src
+ENV PYTHONPATH=/workspace/dagster/src
+''')
+            (root / "inputs").mkdir()
+            (root / "inputs/attached.txt").write_text('isolated attached input')
+            for mount in ('outputs', 'workspaces'):
+                node = root / mount / 'node-1-audio-upload'
+                node.mkdir(parents=True, mode=0o755)
+                (node / '.gitkeep').touch()
+            report = _isolated_dagster_execution(project, execution_id='permission-regression', timeout_seconds=600, runtime_secrets=None)
+            self.assertTrue(report['ok'], report)
+            results = list((root / 'outputs').glob('*/*/result.txt'))
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].read_text(), 'isolated attached input')

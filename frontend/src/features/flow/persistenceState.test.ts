@@ -126,3 +126,16 @@ it('rejects an older background graph before it can replace the current canvas',
   rememberGraphRead(stale, Response.json(stale, { headers: { ETag: '"2"' } }), persistenceEpoch());
   expect(acknowledgeGraphRead(stale)).toBe(false);
 });
+
+it('uses the dedicated graph revision instead of an encoding-specific ETag', async () => {
+  captureGraphRevision(new Response('{}', { headers: { ETag: 'W/"encoded-representation"', 'X-InLumen-Graph-Revision': '42' } }));
+  await graphWrite(async (etag) => {
+    expect(etag).toBe('"42"');
+    return new Response('{}');
+  });
+});
+
+it.each(['W/"object-checksum"', '"-1"', 'W/"1.5"'])('does not treat arbitrary validators as graph revisions: %s', async (etag) => {
+  captureGraphRevision(new Response('{}', { headers: { ETag: etag } }));
+  await graphWrite(async (revision) => { expect(revision).toBeNull(); return new Response('{}'); });
+});

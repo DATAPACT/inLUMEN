@@ -242,12 +242,13 @@ export const getNodeFileName = (file: NodeFileReference) => {
   return "";
 };
 
-export const getNodeFileBucket = (file: NodeFileReference, nodeId: string) => {
+// Only the backend can derive a bucket for the active workspace.
+export const getNodeFileBucket = (file: NodeFileReference, _nodeId: string) => {
   if (file && typeof file === "object" && !isBrowserFile(file)) {
     const bucket = file.bucket;
     if (typeof bucket === "string" && bucket.trim()) return bucket.trim();
   }
-  return `files-step-id-${nodeId}`.toLowerCase();
+  return undefined;
 };
 
 const CODE_FILE_PATTERN = /(^|\/)(dockerfile(?:\.[^/]*)?|makefile|requirements(?:\.[^/]*)?\.txt|node-manifest\.json|validation-report\.json|pyproject\.toml|package(?:-lock)?\.json|.*\.(?:py|pyi|sql|sh|bash|zsh|js|jsx|ts|tsx|java|c|cc|cpp|h|hpp|go|rs|rb|php|r|scala|kt|kts|swift|lua|pl|ex|exs))$/i;

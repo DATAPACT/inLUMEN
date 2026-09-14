@@ -96,7 +96,7 @@ describe("node schema compatibility", () => {
     expect(getNodeFileName("legacy.txt")).toBe("legacy.txt");
     expect(getNodeFileBucket({ filename: "x", bucket: " Custom-Bucket " }, "7"))
       .toBe("Custom-Bucket");
-    expect(getNodeFileBucket("legacy.txt", "7")).toBe("files-step-id-7");
+    expect(getNodeFileBucket("legacy.txt", "7")).toBeUndefined();
     expect(getNodeFileRole({ filename: "records.py", role: "data" })).toBe("data");
     expect(getNodeFileRole({ filename: "main.py" })).toBe("code");
     expect(getNodeFileRole("observations.csv")).toBe("data");

@@ -6,10 +6,9 @@ type Props = {
   onDownload: () => void;
   onReload: () => Promise<void>;
   onRetry: () => Promise<void>;
-  onDownloadPrevious?: () => void;
 };
 
-export function GraphSaveStatus({ onDownload, onReload, onRetry, onDownloadPrevious }: Props) {
+export function GraphSaveStatus({ onDownload, onReload, onRetry }: Props) {
   const [recovering, setRecovering] = useState(false);
   const state = useSyncExternalStore(subscribePersistence, getPersistenceState);
   const recover = async (action: () => Promise<void>) => {
@@ -18,7 +17,7 @@ export function GraphSaveStatus({ onDownload, onReload, onRetry, onDownloadPrevi
     try { await action(); } catch (error) { if (epoch === persistenceEpoch()) reportPersistenceError(error); }
     finally { setRecovering(false); }
   };
-  return <div className="flex flex-wrap items-center gap-1 text-xs" aria-label="Pipeline save status" data-save-state={state.error ? 'error' : recovering || state.pending ? 'saving' : 'saved'}>
+  return <div role="group" className="flex flex-wrap items-center gap-1 text-xs" aria-label="Pipeline save status" data-save-state={state.error ? 'error' : recovering || state.pending ? 'saving' : 'saved'}>
     {state.error && <>
       <span className="px-1 text-[hsl(var(--danger-text))]" role="status" aria-live="polite" title={state.error}>
         {recovering ? 'Recovering…' : 'Couldn’t save'}
@@ -28,6 +27,5 @@ export function GraphSaveStatus({ onDownload, onReload, onRetry, onDownloadPrevi
       <Button size="sm" variant="ghost" className="h-7 px-2" onClick={onDownload}>Download draft</Button>
       <Button size="sm" variant="ghost" className="h-7 px-2" title="Keep a local copy of this draft and load the saved graph" disabled={state.pending > 0 || recovering} onClick={() => { void recover(onReload); }}>Reload saved graph</Button>
     </>}
-    {!state.error && onDownloadPrevious && <Button size="sm" variant="ghost" className="h-7 px-2" onClick={onDownloadPrevious}>Previous draft</Button>}
   </div>;
 }

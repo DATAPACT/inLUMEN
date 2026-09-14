@@ -58,7 +58,7 @@ def add_cors_headers(response, request_origin: str | None = None):
     response.headers["Access-Control-Allow-Headers"] = (
         "Content-Type, Authorization, X-InLumen-Workspace-Id, If-Match, X-Request-ID"
     )
-    response.headers["Access-Control-Expose-Headers"] = "ETag, X-Request-ID, Retry-After"
+    response.headers["Access-Control-Expose-Headers"] = "ETag, X-InLumen-Graph-Revision, X-Request-ID, Retry-After"
     response.headers.add("Vary", "Origin")
     return response
 
