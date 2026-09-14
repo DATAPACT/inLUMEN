@@ -1,44 +1,72 @@
-# Beta 5 — Project portability
+# Beta 4 release plan
 
-Reviewed against GitHub on 2026-09-14. Beta 4 is published at
-`511ac57f700ab8fc4cb91925bb8458134892ec1b`; #99 and #100 are closed after user
-acceptance. Its [release plan](beta4-release-plan.md) and evidence remain historical.
-#103 is open and is the implementation scope of
-[v1.0.0-beta.5 — Project portability](https://github.com/DATAPACT/inLUMEN/milestone/7).
+Reviewed 2026-09-14 against GitHub and `main` at `a65dc709f4095b76466f3c2ce0c7cf5974eb44bc`.
+[Beta 3](https://github.com/DATAPACT/inLUMEN/releases/tag/v1.0.0-beta.3) is published;
+its milestone and acceptance issue #129 are closed. Preserve its tag and evidence.
+The [historical plan](beta3-release-plan.md) is retained for context only.
 
-## #103 — Import/export complete project packages
+## Accepted milestone
 
-From the canvas, export the saved design with its code, data attachments and
-referenced reusable pipelines. Import the archive into another workspace after
-previewing its contents and confirming canvas replacement. Preserve node labels,
-positions, ports, connections, runtime parameter names and non-secret values,
-implementation settings, and file bytes/roles. Import reusable definitions under
-fresh identities and resolve name collisions without changing existing definitions.
+[v1.0.0-beta.4 — Guided configuration & generation metrics](https://github.com/DATAPACT/inLUMEN/milestone/6).
+PR #134 merged at `6faf4b46fbe1adffda1664ab650b9e3bf60abdc3`. The user
+reviewed the PR, tested the tool, and confirmed both issues addressed on
+2026-09-14. #99 and #100 are closed.
 
-Secret runtime parameter values are omitted. Imported code is treated as supplied
-code, and environment-variable suggestions are rebuilt statically. Run history and
-generated validation/cost reports are not transferred. Existing JSON import/export,
-code ZIP upload and deployment export remain available for their original uses.
+### #99 — Click-to-add runtime parameters
 
-Contract and user workflow: [project packages](project-packages.md).
+Click a detected environment variable in the selected node's Inspector to add its
+name to Runtime parameters with an empty, focused value input. Keep required/optional
+and sensitivity information. Mark existing parameters Added and prevent duplicates
+or overwrites. Removing a parameter makes its suggestion available again. Preserve
+manual Add and secure secret storage. Never infer or generate parameter values.
+Existing code discovery remains the source of suggestions after generation, upload
+and edits. Verify normal and sensitive values, keyboard access, and save/reopen.
 
-## Acceptance and release gates
+### #100 — Durable generation duration
 
-- [ ] Review the implementation PR and confirm the package workflow in the tool.
-- [ ] Verify export/import into a fresh workspace, including code, binary/data
-  attachments, reusable definitions, parameter suggestions and blank secret values.
-- [ ] Verify malformed archives, missing/tampered files, stale revisions and storage
-  failures preserve the current canvas and reusable catalog.
-- [ ] Regression suites, browser checks, database/storage integration, typecheck,
-  lint, build and CI pass on the final candidate.
-- [ ] Repeat the deterministic execution/download walkthrough using an imported
-  package from the final source archive.
-- [ ] Record candidate SHA, release notes and evidence before publishing Beta 5.
+Persist server timestamps and duration with each background generation job. Queue
+time is request creation to worker start; generation duration is worker start to
+terminal result, including model calls, validation and repairs. Each resumed job
+is a separate attempt and has its own measurement. Cache hits measure the current
+job, not the original generation. Completed values remain fixed across progress
+updates, credential cleanup, history reads and service restarts.
 
-## Later milestones
+Show duration and queue time next to available cost/token metrics, and duration in
+recent history. Historical missing measurements are unavailable, never fabricated
+from mutable updated_at. A queued cancellation has queue time but no worker duration.
+After an interrupted worker is recovered, its finished_at records reconciliation;
+its actual completion time and duration are unknown. Preserve that distinction in
+UI. New fields are optional on reads and stored in existing JSON job payloads.
 
-#63 graph-change preview is next after portability, with explicit accept/cancel and
-stale-revision behavior. #92 tutorial and concrete usability items from #77 can
-follow. #72 agent efficiency and #98 artifact-to-design remain exploratory.
-#59 README format and #9 compliance agents remain outside these release gates.
-The eight remaining open issues are not all committed to Beta 5.
+## Release gates
+
+The remaining gates below are checked against the final source archive before
+publication. The published [release verification receipt](https://github.com/DATAPACT/inLUMEN/releases/download/v1.0.0-beta.4/release-verification.json)
+records their final outcomes and candidate SHA; the milestone records publication.
+
+- [x] #99 browser acceptance, including save/reopen and secret handling.
+- [x] #100 lifecycle and durable-store checks, gateway pass-through, browser history
+  after reload, and completed record retrieval after service restart.
+- [ ] Regression suites, typecheck, lint, build, shared-file consistency, database
+  integration and Compose checks pass; CI is green on the candidate commit.
+- [ ] Repeat the supported deterministic pipeline walkthrough on the candidate;
+  verify configuration, execution and downloads remain usable.
+- [ ] Record final candidate SHA, evidence, compatibility limits and release notes.
+- [ ] Prepare and review Beta 4 prerelease contents before publication.
+
+Implementation and checks: [verification record](operations/beta4-verification.md).
+Release copy: [release notes](beta4-release-notes.md).
+
+## Remaining backlog
+
+GitHub had 10 open issues at initial review; #99 and #100 are now closed,
+leaving eight open issues. #103 package portability is recommended as the next substantial milestone:
+specify and verify design-plus-code export/import into a fresh workspace, attachments,
+reusable references and credential exclusion. #63 graph previews follows with explicit
+accept/cancel and stale-revision behavior. #92 interactive tutorial and #77 UI
+refactoring remain uncommitted; split #77 into observable usability problems.
+#72 agent efficiency and #98 artifact-to-design remain exploratory. #59 README
+format and #9 compliance agents remain outside release completion criteria.
+
+Closed items #124, #122, #116, #114, #104, #102 and #101 are not carried forward.
+A release candidate or stable 1.0 requires its own agreed compatibility/support scope.

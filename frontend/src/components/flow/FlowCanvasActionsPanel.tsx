@@ -10,7 +10,6 @@ type FlowCanvasActionsPanelProps = {
   onUndo: () => void;
   onRedo: () => void;
   onExportJson: () => void;
-  onPackage: () => void;
   onImportClick: () => void;
   onImport: (event: React.ChangeEvent<HTMLInputElement>) => void;
   showPortDetails: boolean;
@@ -31,7 +30,6 @@ export const FlowCanvasActionsPanel = ({
   onUndo,
   onRedo,
   onExportJson,
-  onPackage,
   onImportClick,
   onImport,
   showPortDetails,
@@ -75,7 +73,6 @@ export const FlowCanvasActionsPanel = ({
         <Redo2 className="h-3.5 w-3.5" />
       </Button>
       <div className="mx-0.5 h-5 w-px bg-border" />
-      <Button size="sm" variant="ghost" onClick={onPackage} className="h-7 px-2">Package</Button>
       <Button size="sm" variant="ghost" onClick={onExportJson} className="flex h-7 items-center gap-1 px-2" title="Export project JSON">
         <Download className="h-3.5 w-3.5" />
         JSON

@@ -1,5 +1,4 @@
 import { GraphSaveStatus } from '@/components/flow/GraphSaveStatus';
-import { ProjectPackageDialog } from '@/components/flow/ProjectPackageDialog';
 import { clearPersistenceError, reportPersistenceError, getPersistenceState, graphReadTicket, acknowledgeGraphRead, persistenceEpoch } from '@/features/flow/persistenceState';
 import { readStoredArray, releaseDraftProtection } from '@/utils/workspaceStorage';
 import { getWorkspaceStorage } from '@/utils/workspaceStorage';
@@ -126,7 +125,6 @@ interface FlowCanvasProps {
   pipelinePrompt?: string;
   onVersionSaved?: (version: PipelineVersionSummary) => void;
   onCanvasEdited?: () => void;
-  onBeforePackage?: () => Promise<unknown>;
   onActiveVersionChange?: (versionUid: string) => void;
   onActiveVersionNameChange?: (versionName: string) => void;
   onPipelineDescriptionChange?: (description: string) => void;
@@ -502,7 +500,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   pipelinePrompt,
   onVersionSaved,
   onCanvasEdited,
-  onBeforePackage,
   onActiveVersionChange,
   onActiveVersionNameChange,
   onPipelineDescriptionChange,
@@ -1766,8 +1763,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     setIsSaveVersionOpen(true);
   };
 
-  const [isPackageOpen, setIsPackageOpen] = useState(false);
-
   const saveFlow = async () => {
     try {
       if (!reactFlowInstance) return;
@@ -2190,32 +2185,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           className="bg-card/70 border border-border rounded-md"
         />
 
-        <ProjectPackageDialog open={isPackageOpen} onOpenChange={setIsPackageOpen} onImported={async () => {
-          pushHistorySnapshot();
-          selectedNodeIdRef.current = null;
-          onNodeSelect(null);
-          try {
-            await syncFromBackend(undefined, { fitView: true });
-          } catch (error) {
-            reportPersistenceError(new Error('Package imported, but the canvas could not refresh. Reload the saved design before editing.'));
-            throw error;
-          }
-          onCanvasEdited?.();
-          toast.success('Project package imported');
-        }} />
         <FlowCanvasActionsPanel
-          onPackage={() => {
-            void (async () => {
-              try {
-                await onBeforePackage?.();
-                setIsPackageOpen(true);
-              } catch (error) {
-                toast.error('Could not save the current design before opening packages', {
-                  description: error instanceof Error ? error.message : undefined,
-                });
-              }
-            })();
-          }}
           fileInputRef={fileInputRef}
           onSave={openSaveVersionDialog}
           saveStatus={<GraphSaveStatus
@@ -2962,7 +2932,6 @@ export const WrappedFlowCanvas = ({
   pipelinePrompt,
   onVersionSaved,
   onCanvasEdited,
-  onBeforePackage,
   onActiveVersionChange,
   onActiveVersionNameChange,
   onPipelineDescriptionChange,
@@ -2983,7 +2952,6 @@ export const WrappedFlowCanvas = ({
       pipelinePrompt={pipelinePrompt}
       onVersionSaved={onVersionSaved}
       onCanvasEdited={onCanvasEdited}
-      onBeforePackage={onBeforePackage}
       onActiveVersionChange={onActiveVersionChange}
       onActiveVersionNameChange={onActiveVersionNameChange}
       onPipelineDescriptionChange={onPipelineDescriptionChange}

@@ -56,4 +56,4 @@ Values come from the job API, not a browser timer or mutable updated_at.
 
 No new upgrade, production deployment, identity-provider, concurrency or model
 quality claim is made. Final CI, integration checks and release packaging must be
-assessed on the accepted candidate. See the [release plan](../beta4-release-plan.md).
+assessed on the accepted candidate. See the [release plan](../release-plan.md).
