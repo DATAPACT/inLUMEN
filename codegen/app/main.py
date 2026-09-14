@@ -156,12 +156,16 @@ def update_pipeline_job(run_id: str, **updates: Any) -> None:
     )
     previous_status = job.get("status")
     job.update(updates)
-    if job.get("status") == "running" and previous_status == "queued":
+    if (
+        job.get("status") == "running" and previous_status == "queued"
+        and not job.get("started_at") and not job.get("finished_at")
+    ):
         job["started_at"] = now
         job["queue_duration_ms"] = timestamp_duration_ms(job.get("created_at"), now)
     if (
         job.get("status") in {"valid", "invalid", "failed", "cancelled"}
         and previous_status not in {"valid", "invalid", "failed", "cancelled"}
+        and not job.get("finished_at")
     ):
         job["finished_at"] = now
         job["duration_ms"] = (

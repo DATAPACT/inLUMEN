@@ -323,6 +323,9 @@ def test_duration_is_fixed_and_survives_store_reopen(monkeypatch, tmp_path, stat
     main.update_pipeline_job("measured", status=status)
     clock[0] = "2026-09-14T10:01:00Z"
     main.update_pipeline_job("measured", error="cleanup does not extend duration")
+    # A delayed progress callback cannot replace a measured completion timestamp.
+    main.update_pipeline_job("measured", status="running")
+    main.update_pipeline_job("measured", status=status)
     reopened = PipelineJobStore(path)
     main.PIPELINE_GENERATION_JOBS.clear()
     monkeypatch.setattr(main, "PIPELINE_JOB_STORE", reopened)
