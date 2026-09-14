@@ -1,0 +1,37 @@
+{
+  "source_sha": "efec43bbbd5627212d3fcd6a3b853d77e382a48e",
+  "archive_format": "git archive tar, gzip mtime=0",
+  "archive_sha256": "4a7378209451e0be3f31b7cd680bae572aee8d2a8beab7c73b35275a32428a3e",
+  "archive_bytes": 2537382,
+  "image_ids": {
+    "backend": "sha256:7fd1791fa454c99d4542cff0044920b3f865d1c0d55272a93d38e68abaf40e19",
+    "codegen": "sha256:04dac2ec015d99274713d9ec74fdaf00740abbbc1ef1fd573f92f23b9009fb99",
+    "runner": "sha256:b3318e16afbfec29940fca35f15d8006147a8b5c439161d0b31f33ecb27c138b",
+    "frontend": "sha256:077116ad3d31029f35883c3ecc59f8d97e4f66d49b70fc8c07220f973c22efe2",
+    "frontend-prod": "sha256:665d529fb9dc61cb19b9d0fa7a451a50e9f42be02d52bd9dc4bea5c96cbf2054"
+  },
+  "builds_passed": [
+    "backend",
+    "codegen",
+    "runner",
+    "frontend",
+    "frontend-prod"
+  ],
+  "cache": "Docker build cache enabled; build context solely extracted tracked source",
+  "checks": [
+    "Required locks, example assets, licenses and configuration templates present",
+    "No .env, node_modules or .git directory in archive",
+    "sync_shared --check",
+    "development and production Compose validation",
+    "quickstart env snippet and overwrite refusal",
+    "development image Vite 8.2.2 / Node 22.23.2",
+    "production nginx -t with backend hostname supplied"
+  ],
+  "private_vulnerability_reporting_enabled": true,
+  "limitations": [
+    "No no-cache rebuild claim",
+    "Production image built with default build arguments; no deployed Keycloak/TLS smoke test",
+    "No release tag or published asset created",
+    "Final acceptance must name final merged SHA and CI"
+  ]
+}
