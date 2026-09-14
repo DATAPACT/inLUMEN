@@ -60,9 +60,12 @@ Release copy: [release notes](beta4-release-notes.md).
 ## Remaining backlog
 
 GitHub had 10 open issues at initial review; #99 and #100 are now closed,
-leaving eight open issues. #103 package portability is recommended as the next substantial milestone:
-specify and verify design-plus-code export/import into a fresh workspace, attachments,
-reusable references and credential exclusion. #63 graph previews follows with explicit
+leaving eight open issues. The user clarified #103: add **Download code ZIP** beside
+**Upload code ZIP** in the Runtime code section. This is the focused scope of
+[Beta 5 — Runtime code exchange](https://github.com/DATAPACT/inLUMEN/milestone/7).
+Export attached Task code into one folder per Task, preserving file contents and
+compatibility with the existing uploader. Source data and the pipeline design are
+not included. There is no Package action in the top toolbar. #63 graph previews follows with explicit
 accept/cancel and stale-revision behavior. #92 interactive tutorial and #77 UI
 refactoring remain uncommitted; split #77 into observable usability problems.
 #72 agent efficiency and #98 artifact-to-design remain exploratory. #59 README
