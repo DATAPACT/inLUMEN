@@ -3,7 +3,11 @@
 Date: 2026-09-14. Implementation commit:
 `e5b1290a11e47eb21ccc465ffdd8914b2fe0bb68`. These checks ran against the
 working tree committed at that revision. Later documentation changes do not alter
-runtime behavior. Final release acceptance still needs a named candidate and CI.
+runtime behavior. Follow-up `9270d2a766bd303b9c5539d41ab289e041d12247` makes
+completed timing immutable even across delayed progress callbacks. Its lifecycle
+regression file passed all 12 tests. The earlier browser/export/restart records
+remain baseline evidence; CI evaluates the final PR head. Final release acceptance
+still needs a named candidate and CI.
 
 ## Results
 
