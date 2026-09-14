@@ -1,0 +1,87 @@
+{
+  "cancel_requested_at": null,
+  "created_at": "2026-09-14T12:26:59.260355Z",
+  "engine": "dagster",
+  "error": null,
+  "event_cursor": 14,
+  "execution_mode": "background",
+  "finished_at": "2026-09-14T12:28:05.211201Z",
+  "progress": {
+    "active_node_id": null,
+    "active_node_name": null,
+    "heartbeat_at": null,
+    "message": "All pipeline nodes completed successfully.",
+    "node_elapsed_seconds": null,
+    "phase": "completed",
+    "queue_position": null,
+    "resource_cpu": 1,
+    "resource_memory_bytes": 1073741824,
+    "resource_profile": "lightweight",
+    "resource_reason": "lightweight runtime dependencies"
+  },
+  "requested_by": "local-user",
+  "result": {
+    "created_at": "2026-09-14T12:26:59.260355Z",
+    "engine": "dagster",
+    "execution_mode": "background",
+    "finished_at": "2026-09-14T12:28:05.211201Z",
+    "outputs": [
+      {
+        "content_type": "text/csv",
+        "filename": "orders.csv",
+        "format": "csv",
+        "kind": "table",
+        "path": "outputs/node-orders-orders-csv/9ddb030f-68b7-40f8-85be-5effa3098804/data/orders.csv",
+        "sha256": "sha256:ac594b9d31f3f05da2c1fa81cbf8c8e374415814fbf27d63652e30f4d6a18196",
+        "size_bytes": 48
+      },
+      {
+        "content_type": "application/json",
+        "filename": "delivery-receipt.json",
+        "format": "json",
+        "kind": "json",
+        "path": "outputs/node-result-summary-json/9ddb030f-68b7-40f8-85be-5effa3098804/delivery-receipt.json",
+        "sha256": "sha256:a3b0d70707e53d91b5ae0ae12091735788fd9e14660b5d69140bffa935ce3927",
+        "size_bytes": 123
+      },
+      {
+        "content_type": "application/json",
+        "filename": "summary.json",
+        "format": "json",
+        "kind": "json",
+        "path": "outputs/node-result-summary-json/9ddb030f-68b7-40f8-85be-5effa3098804/summary.json",
+        "sha256": "sha256:8448e5747c820c396122e490f98f4d887b676fecfa57f70129c0fc658aea0c60",
+        "size_bytes": 50
+      },
+      {
+        "content_type": "application/json",
+        "filename": "summary.json",
+        "format": "json",
+        "kind": "json",
+        "path": "outputs/node-summary-summarize-orders/summary.json",
+        "sha256": "sha256:8448e5747c820c396122e490f98f4d887b676fecfa57f70129c0fc658aea0c60",
+        "size_bytes": 50
+      }
+    ],
+    "run_id": "1138433a8b774cd88f7cf241ada07220",
+    "schema_version": "inlumen.run-result@1",
+    "started_at": "2026-09-14T12:26:59.273322Z",
+    "status": "succeeded"
+  },
+  "run_id": "1138433a8b774cd88f7cf241ada07220",
+  "schema_version": "inlumen.pipeline-run@1",
+  "snapshot": {
+    "active_version_uid": "main",
+    "bundle_sha256": "sha256:4e719a38daeb58ef81f78b0d642a3ead09702f2127932364bdb58ce6e609a523",
+    "edge_count": 2,
+    "graph_sha256": "sha256:5263a0efaf9d9c1e7a58d5223585f6e0f4dda8b4eb690403b786f616517399d3",
+    "node_count": 3,
+    "pipeline_id": "57c45d27-8a74-48c2-a20c-7c8dc4beefda",
+    "pipeline_version": "Main",
+    "snapshot_id": "sha256:4e719a38daeb58ef81f78b0d642a3ead09702f2127932364bdb58ce6e609a523"
+  },
+  "started_at": "2026-09-14T12:26:59.273322Z",
+  "status": "succeeded",
+  "updated_at": "2026-09-14T12:28:05.211201Z",
+  "workspace_id": "local-workspace"
+}

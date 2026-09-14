@@ -1,0 +1,172 @@
+{
+  "codegen_service_url": "http://codegen:8010",
+  "files": [
+    {
+      "bucket": "files-step-id-summary",
+      "content_type": "text/x-python",
+      "filename": "main.py",
+      "role": "code",
+      "snapshot_bucket": "files-step-id-summary",
+      "snapshot_object": ".generated/f70a4ea4e00904359f80a1abe0cd3f3865bfe288159f562acb671daf6c3e6fd1/main.py"
+    },
+    {
+      "bucket": "files-step-id-summary",
+      "content_type": "text/plain",
+      "filename": "requirements.txt",
+      "role": "code",
+      "snapshot_bucket": "files-step-id-summary",
+      "snapshot_object": ".generated/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855/requirements.txt"
+    },
+    {
+      "bucket": "files-step-id-summary",
+      "content_type": "application/json",
+      "filename": "node-manifest.json",
+      "role": "code",
+      "snapshot_bucket": "files-step-id-summary",
+      "snapshot_object": ".generated/486b23477a21fc98972330c341d1e92de503fe87c8677109c6a78ea04277a307/node-manifest.json"
+    },
+    {
+      "bucket": "files-step-id-summary",
+      "content_type": "application/json",
+      "filename": "validation-report.json",
+      "role": "code",
+      "snapshot_bucket": "files-step-id-summary",
+      "snapshot_object": ".generated/f8fba42d85b06c3f1131f24bc47c012fd17332ab5be8c7c85909be3952e695ed/validation-report.json"
+    }
+  ],
+  "flow_id": "summary",
+  "generated_artifact": {
+    "configuration_hash": "sha256:23552b8aaff461171c205d5f4bde56161cd978284123bf5a5165cbb43ba754f8",
+    "data_contract": {
+      "context_path_env": "",
+      "contract_id": "inlumen.generic-node@1",
+      "input_manifest_env": "PIPELINE_INPUT_DIR",
+      "inputs": [
+        {
+          "columns": [
+            "order_id",
+            "amount"
+          ],
+          "description": "Available input file",
+          "filename": "orders.csv",
+          "format": "csv",
+          "kind": "table",
+          "name": "orders.csv",
+          "required_columns": [],
+          "schema": {},
+          "semantic_role": ""
+        }
+      ],
+      "output_dir_env": "PIPELINE_OUTPUT_DIR",
+      "output_manifest_env": "",
+      "outputs": [
+        {
+          "columns": [],
+          "description": "Generated node output.",
+          "filename": null,
+          "format": "json",
+          "kind": "json",
+          "name": "summarize_orders",
+          "required_columns": [],
+          "schema": {},
+          "semantic_role": ""
+        }
+      ]
+    },
+    "entrypoint": [
+      "python",
+      "/app/main.py"
+    ],
+    "file_hashes": {
+      "main.py": "sha256:f70a4ea4e00904359f80a1abe0cd3f3865bfe288159f562acb671daf6c3e6fd1",
+      "node-manifest.json": "sha256:486b23477a21fc98972330c341d1e92de503fe87c8677109c6a78ea04277a307",
+      "requirements.txt": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "validation-report.json": "sha256:f8fba42d85b06c3f1131f24bc47c012fd17332ab5be8c7c85909be3952e695ed"
+    },
+    "files": [
+      {
+        "bucket": "files-step-id-summary",
+        "content_type": "text/x-python",
+        "filename": "main.py",
+        "role": "code",
+        "snapshot_bucket": "files-step-id-summary",
+        "snapshot_object": ".generated/f70a4ea4e00904359f80a1abe0cd3f3865bfe288159f562acb671daf6c3e6fd1/main.py"
+      },
+      {
+        "bucket": "files-step-id-summary",
+        "content_type": "text/plain",
+        "filename": "requirements.txt",
+        "role": "code",
+        "snapshot_bucket": "files-step-id-summary",
+        "snapshot_object": ".generated/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855/requirements.txt"
+      },
+      {
+        "bucket": "files-step-id-summary",
+        "content_type": "application/json",
+        "filename": "node-manifest.json",
+        "role": "code",
+        "snapshot_bucket": "files-step-id-summary",
+        "snapshot_object": ".generated/486b23477a21fc98972330c341d1e92de503fe87c8677109c6a78ea04277a307/node-manifest.json"
+      },
+      {
+        "bucket": "files-step-id-summary",
+        "content_type": "application/json",
+        "filename": "validation-report.json",
+        "role": "code",
+        "snapshot_bucket": "files-step-id-summary",
+        "snapshot_object": ".generated/f8fba42d85b06c3f1131f24bc47c012fd17332ab5be8c7c85909be3952e695ed/validation-report.json"
+      }
+    ],
+    "generation_usage": {
+      "completion_tokens": 854,
+      "cost_usd": 0.0,
+      "prompt_tokens": 2065,
+      "request_count": 1,
+      "total_tokens": 2919,
+      "usage_reported_count": 1
+    },
+    "generator": "inlumen-codegen-service",
+    "generator_version": "0.1.0",
+    "provenance": {
+      "attached_at": "2026-09-14T12:22:37.176881Z",
+      "origin": "ai_generated",
+      "user_modified": false
+    },
+    "runtime_environment": [],
+    "status": "current",
+    "validation_report": {
+      "checks": [
+        "required_files_present",
+        "python_syntax",
+        "unsafe_import_scan",
+        "unsafe_call_scan",
+        "dependency_allowlist",
+        "manifest_json",
+        "planned_output_contract_alignment",
+        "reviewed_implementation_plan_alignment"
+      ],
+      "errors": [],
+      "status": "valid",
+      "warnings": [
+        "Generated by the configured coding model openai/gpt-oss-120b in 1 attempt(s)."
+      ]
+    }
+  },
+  "validation_report": {
+    "checks": [
+      "required_files_present",
+      "python_syntax",
+      "unsafe_import_scan",
+      "unsafe_call_scan",
+      "dependency_allowlist",
+      "manifest_json",
+      "planned_output_contract_alignment",
+      "reviewed_implementation_plan_alignment"
+    ],
+    "errors": [],
+    "status": "valid",
+    "warnings": [
+      "Generated by the configured coding model openai/gpt-oss-120b in 1 attempt(s)."
+    ]
+  }
+}

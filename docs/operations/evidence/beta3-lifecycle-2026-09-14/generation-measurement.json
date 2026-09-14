@@ -1,0 +1,9 @@
+{
+  "http_status": 200,
+  "elapsed_seconds": 6.062,
+  "provider": "openrouter",
+  "model": "openai/gpt-oss-120b",
+  "provider_only": [
+    "cerebras"
+  ]
+}

@@ -1749,6 +1749,14 @@ def _hydrate_reusable_codegen_node(
     }
 
 
+def _normalize_codegen_repair_attempts(value: Any = None) -> int:
+    # GenerationOptions and ResumePipelineGenerationRunRequest accept 0..6.
+    try:
+        return min(6, max(0, int(value))) if value is not None else 6
+    except (TypeError, ValueError, OverflowError):
+        return 6
+
+
 def _build_pipeline_codegen_payload(
     graph: dict[str, Any],
     payload: dict[str, Any],
@@ -1763,11 +1771,7 @@ def _build_pipeline_codegen_payload(
     validation_mode = str(payload.get("validation_mode") or "pipeline_sample").strip()
     if validation_mode not in {"static", "unit", "edge", "pipeline_sample"}:
         validation_mode = "pipeline_sample"
-    repair_attempts = payload.get("repair_attempts", 7)
-    try:
-        repair_attempts = max(0, int(repair_attempts))
-    except (TypeError, ValueError):
-        repair_attempts = 7
+    repair_attempts = _normalize_codegen_repair_attempts(payload.get("repair_attempts"))
     requested_generation_strategy = str(
         payload.get("generation_strategy") or "auto"
     ).strip()
@@ -2756,7 +2760,7 @@ def node_generate_script(node_id: str):
             "llm_config": payload.get("llm_config"),
             "options": {
                 "persist": False,
-                "repair_attempts": 7,
+                "repair_attempts": _normalize_codegen_repair_attempts(),
                 "include_sample_data": bool(payload.get("include_sample_data")),
                 "user_instruction": str(payload.get("user_instruction") or ""),
             },
@@ -3009,7 +3013,7 @@ def pipeline_generation_run_resume(run_id: str):
         resume_payload = {
             "llm_config": payload.get("llm_config"),
             "flow_id": str(payload.get("flow_id") or "").strip() or None,
-            "repair_attempts": payload.get("repair_attempts", 7),
+            "repair_attempts": _normalize_codegen_repair_attempts(payload.get("repair_attempts")),
             "user_instruction": combined_instruction,
         }
         codegen_run = _post_codegen_pipeline_run_resume_request(
@@ -3022,13 +3026,7 @@ def pipeline_generation_run_resume(run_id: str):
 
         metadata = dict(local_run.get("metadata") or {})
         options = dict(metadata.get("options") or {})
-        try:
-            options["repair_attempts"] = max(
-                int(options.get("repair_attempts") or 0),
-                int(resume_payload["repair_attempts"] or 7),
-            )
-        except (TypeError, ValueError):
-            options["repair_attempts"] = 7
+        options["repair_attempts"] = resume_payload["repair_attempts"]
         metadata["options"] = options
         metadata["generation_mode"] = "repair"
         now = _utc_now_iso()
