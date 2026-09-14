@@ -1,0 +1,51 @@
+[
+  {
+    "container": "/inlumen_beta3_frontend",
+    "image_id": "sha256:11464c281cf5b11f3073c5b316684b01fd5169475298189a7069916e2c505f9e",
+    "status": "running",
+    "health": null,
+    "restarts": 0
+  },
+  {
+    "container": "/inlumen_beta3_backend",
+    "image_id": "sha256:6c15479fcbcde08242a4d170270dc7b70003c1d6894ce4169472e3bd549f985a",
+    "status": "running",
+    "health": "healthy",
+    "restarts": 0
+  },
+  {
+    "container": "/inlumen_beta3_codegen",
+    "image_id": "sha256:442e629c7239a2ac61c81d634e0392c9b75248473a0f9ba5dbb0e85d34d2e19c",
+    "status": "running",
+    "health": "healthy",
+    "restarts": 0
+  },
+  {
+    "container": "/inlumen_beta3_runner",
+    "image_id": "sha256:3c425745df08abca38d03db5761953797c6a26ddecf619b7ec22d6a70e165480",
+    "status": "running",
+    "health": "healthy",
+    "restarts": 0
+  },
+  {
+    "container": "/inlumen_beta3_postgres",
+    "image_id": "sha256:ff80089083d7365046af7f03d949a2defa14e0b09e14bd5b8f08a242291be8b2",
+    "status": "running",
+    "health": "healthy",
+    "restarts": 0
+  },
+  {
+    "container": "/inlumen_beta3_neo4j",
+    "image_id": "sha256:c397ba43d7fe72a62933720d0526d1651422cdeec56295a02c302f7211d10f72",
+    "status": "running",
+    "health": "healthy",
+    "restarts": 0
+  },
+  {
+    "container": "/inlumen_beta3_minio",
+    "image_id": "sha256:8f08aee614800a237906bd48114d733e5ac5bfac4ccdf731f141b0e880d7a253",
+    "status": "running",
+    "health": null,
+    "restarts": 0
+  }
+]
