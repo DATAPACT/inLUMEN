@@ -1,0 +1,18 @@
+{
+  "source_commit": "e5b1290a11e47eb21ccc465ffdd8914b2fe0bb68",
+  "execution": "real Dagster container, supplied-code exported bundle",
+  "expected": {
+    "order_count": 3,
+    "total_amount": "49.75"
+  },
+  "observed": [
+    {
+      "order_count": 3,
+      "total_amount": "49.75"
+    },
+    {
+      "order_count": 3,
+      "total_amount": "49.75"
+    }
+  ]
+}

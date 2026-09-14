@@ -49,6 +49,9 @@ UI. New fields are optional on reads and stored in existing JSON job payloads.
 - [ ] Record final candidate SHA, evidence, compatibility limits and release notes.
 - [ ] Prepare and review Beta 4 prerelease contents before publication.
 
+Implementation and checks: [verification record](operations/beta4-verification.md).
+Release copy: [draft notes](beta4-release-notes.md).
+
 ## Remaining backlog
 
 GitHub had 10 open issues and no open PRs at review. #99 and #100 are assigned to

@@ -1,0 +1,24 @@
+{
+  "source_commit": "e5b1290a11e47eb21ccc465ffdd8914b2fe0bb68",
+  "kind": "isolated codegen HTTP process restart with SQLite and deterministic static generation; no LLM benchmark",
+  "before": {
+    "run_id": "a33c50a03b5245ebb456608aa23a5f80",
+    "status": "valid",
+    "created_at": "2026-09-14T14:36:26.397777Z",
+    "started_at": "2026-09-14T14:36:26.399566Z",
+    "finished_at": "2026-09-14T14:36:26.467208Z",
+    "duration_ms": 68,
+    "queue_duration_ms": 2,
+    "timing_interrupted": false
+  },
+  "after": {
+    "run_id": "a33c50a03b5245ebb456608aa23a5f80",
+    "status": "valid",
+    "created_at": "2026-09-14T14:36:26.397777Z",
+    "started_at": "2026-09-14T14:36:26.399566Z",
+    "finished_at": "2026-09-14T14:36:26.467208Z",
+    "duration_ms": 68,
+    "queue_duration_ms": 2,
+    "timing_interrupted": false
+  }
+}
