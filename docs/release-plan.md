@@ -8,8 +8,9 @@ The [historical plan](beta3-release-plan.md) is retained for context only.
 ## Accepted milestone
 
 [v1.0.0-beta.4 — Guided configuration & generation metrics](https://github.com/DATAPACT/inLUMEN/milestone/6).
-No release date is committed. Issues remain open until their implementation is
-merged and acceptance checks pass.
+PR #134 merged at `6faf4b46fbe1adffda1664ab650b9e3bf60abdc3`. The user
+reviewed the PR, tested the tool, and confirmed both issues addressed on
+2026-09-14. #99 and #100 are closed.
 
 ### #99 — Click-to-add runtime parameters
 
@@ -39,8 +40,12 @@ UI. New fields are optional on reads and stored in existing JSON job payloads.
 
 ## Release gates
 
-- [ ] #99 browser acceptance, including save/reopen and secret handling.
-- [ ] #100 lifecycle and durable-store checks, gateway pass-through, browser history
+The remaining gates below are checked against the final source archive before
+publication. The published [release verification receipt](https://github.com/DATAPACT/inLUMEN/releases/download/v1.0.0-beta.4/release-verification.json)
+records their final outcomes and candidate SHA; the milestone records publication.
+
+- [x] #99 browser acceptance, including save/reopen and secret handling.
+- [x] #100 lifecycle and durable-store checks, gateway pass-through, browser history
   after reload, and completed record retrieval after service restart.
 - [ ] Regression suites, typecheck, lint, build, shared-file consistency, database
   integration and Compose checks pass; CI is green on the candidate commit.
@@ -50,12 +55,12 @@ UI. New fields are optional on reads and stored in existing JSON job payloads.
 - [ ] Prepare and review Beta 4 prerelease contents before publication.
 
 Implementation and checks: [verification record](operations/beta4-verification.md).
-Release copy: [draft notes](beta4-release-notes.md).
+Release copy: [release notes](beta4-release-notes.md).
 
 ## Remaining backlog
 
-GitHub had 10 open issues and no open PRs at review. #99 and #100 are assigned to
-Beta 4. #103 package portability is recommended as the next substantial milestone:
+GitHub had 10 open issues at initial review; #99 and #100 are now closed,
+leaving eight open issues. #103 package portability is recommended as the next substantial milestone:
 specify and verify design-plus-code export/import into a fresh workspace, attachments,
 reusable references and credential exclusion. #63 graph previews follows with explicit
 accept/cancel and stale-revision behavior. #92 interactive tutorial and #77 UI
