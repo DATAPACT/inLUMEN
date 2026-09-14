@@ -12,6 +12,22 @@ import { PropertiesPanel, type PropertyNodeData } from "@/components/PropertiesP
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 describe("PropertiesPanel", () => {
+  it("identifies the selected node and updates the header when selection changes", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    for (const [id, label, expected] of [["source-a", "Input records", "Input records"], ["source-b", "", "Untitled Source"]]) {
+      await act(async () => root.render(<PropertiesPanel selectedNode={{
+        id, type: "custom", position: { x: 0, y: 0 },
+        data: { type: "source", label },
+      }} onNodeUpdate={vi.fn()} />));
+      const header = container.querySelector("h2")?.parentElement;
+      expect(header?.textContent).toContain(expected);
+      expect(header?.textContent).toContain(`ID: ${id}`);
+      if (id === "source-b") expect(header?.textContent).not.toContain("Input records");
+    }
+    await act(async () => root.unmount());
+  });
+
   it("uses canonical upload and replacement references without retaining old snapshots", async () => {
     const container = document.createElement("div");
     const root = createRoot(container);

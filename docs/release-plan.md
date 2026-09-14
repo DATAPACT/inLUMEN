@@ -6,6 +6,25 @@ This is a proposed development plan, not a release announcement. GitHub issue
 states and milestone assignments have not been changed by this review.
 Issues #59 and #9 are excluded from scope and release completion criteria.
 
+### Milestone reconciliation (2026-09-14)
+
+Issues #102, #104, and #5 are now closed after checking the implementations
+merged in PR #125 against the accepted scope below. #102 supports one reusable
+pipeline level; nested reusable definitions remain unsupported. Browser checks
+for creation, attachment, reopening, read-only inspection, and Overview refresh
+passed again on a branch based on `5cb7451`. A Properties header regression
+also verifies the selected name/ID and unnamed-node fallback across selections.
+The [CI run for `5cb7451`](https://github.com/DATAPACT/inLUMEN/actions/runs/34828273593)
+passed all six jobs, including real database and attachment integration checks.
+
+Issue #124 is the next focused fix: hide fallback LLM details when no saved or
+shared configuration exists, retain configuration controls, and verify personal
+creation/deletion and shared enable/disable transitions. It remains open pending
+merge. The subsequent [authenticated deployment verification](operations/authenticated-file-inputs.md)
+adds evidence beyond the September 9 baseline, but does not complete all release
+gates. The historical triage below describes the September 8 review, not today's
+open issue list. Beta 3 remains a proposed milestone and an unpublished release.
+
 ### Development follow-up (2026-09-09)
 
 The historical review below records the evidence available on September 8.
