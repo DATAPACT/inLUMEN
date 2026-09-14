@@ -101,10 +101,15 @@ User code will execute only in adapter-owned isolated containers without Docker
 daemon access. Secret values are injected ephemerally and must not appear in
 snapshots, events, logs, or results.
 
-Browser and gateway restarts do not affect runs. Runner restart reconciliation
-first requests termination of any container carrying the run identity and then
-marks the interrupted run failed with a stable recovery error rather than
-pretending that it completed.
+Browser and gateway restarts do not affect runs. With the current Dagster
+execution service, runner restart reconciliation waits for the previous worker
+lease to expire, claims the run, and polls its durable execution receipt. A
+completed receipt restores the result without resubmitting the pipeline. An
+interrupted or unrecoverable receipt produces an explicit unknown-outcome or
+recovery error; external effects must be checked before starting a new run.
+Legacy executors without receipt lookup instead request cancellation and mark
+the interrupted run failed. This does not promise recovery from every codegen
+service or host failure.
 
 ## Consequences
 

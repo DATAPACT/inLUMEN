@@ -1,0 +1,40 @@
+{
+  "cancel_requested_at": null,
+  "created_at": "2026-09-14T12:26:59.260355Z",
+  "engine": "dagster",
+  "error": null,
+  "event_cursor": 6,
+  "execution_mode": "background",
+  "finished_at": null,
+  "progress": {
+    "active_node_id": "node_summary_summarize_orders",
+    "active_node_name": "Node Summary Summarize Orders",
+    "heartbeat_at": null,
+    "message": "Dagster is executing pipeline nodes.",
+    "node_elapsed_seconds": null,
+    "phase": "running_pipeline",
+    "queue_position": null,
+    "resource_cpu": 1,
+    "resource_memory_bytes": 1073741824,
+    "resource_profile": "lightweight",
+    "resource_reason": "lightweight runtime dependencies"
+  },
+  "requested_by": "local-user",
+  "result": null,
+  "run_id": "1138433a8b774cd88f7cf241ada07220",
+  "schema_version": "inlumen.pipeline-run@1",
+  "snapshot": {
+    "active_version_uid": "main",
+    "bundle_sha256": "sha256:4e719a38daeb58ef81f78b0d642a3ead09702f2127932364bdb58ce6e609a523",
+    "edge_count": 2,
+    "graph_sha256": "sha256:5263a0efaf9d9c1e7a58d5223585f6e0f4dda8b4eb690403b786f616517399d3",
+    "node_count": 3,
+    "pipeline_id": "57c45d27-8a74-48c2-a20c-7c8dc4beefda",
+    "pipeline_version": "Main",
+    "snapshot_id": "sha256:4e719a38daeb58ef81f78b0d642a3ead09702f2127932364bdb58ce6e609a523"
+  },
+  "started_at": "2026-09-14T12:26:59.273322Z",
+  "status": "running",
+  "updated_at": "2026-09-14T12:27:03.362593Z",
+  "workspace_id": "local-workspace"
+}

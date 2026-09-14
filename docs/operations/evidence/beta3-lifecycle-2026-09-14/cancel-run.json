@@ -1,0 +1,50 @@
+{
+  "cancel_requested_at": "2026-09-14T12:24:20.920987Z",
+  "created_at": "2026-09-14T12:24:16.706656Z",
+  "engine": "dagster",
+  "error": null,
+  "event_cursor": 9,
+  "execution_mode": "background",
+  "finished_at": "2026-09-14T12:24:21.058837Z",
+  "progress": {
+    "active_node_id": null,
+    "active_node_name": null,
+    "heartbeat_at": null,
+    "message": "Pipeline execution was cancelled.",
+    "node_elapsed_seconds": null,
+    "phase": "cancelled",
+    "queue_position": null,
+    "resource_cpu": 1,
+    "resource_memory_bytes": 1073741824,
+    "resource_profile": "lightweight",
+    "resource_reason": "lightweight runtime dependencies"
+  },
+  "requested_by": "local-user",
+  "result": {
+    "created_at": "2026-09-14T12:24:16.706656Z",
+    "engine": "dagster",
+    "execution_mode": "background",
+    "finished_at": "2026-09-14T12:24:21.058837Z",
+    "outputs": [],
+    "run_id": "f507a6d45a10460d8a4557ef297fbc17",
+    "schema_version": "inlumen.run-result@1",
+    "started_at": "2026-09-14T12:24:16.723624Z",
+    "status": "cancelled"
+  },
+  "run_id": "f507a6d45a10460d8a4557ef297fbc17",
+  "schema_version": "inlumen.pipeline-run@1",
+  "snapshot": {
+    "active_version_uid": "main",
+    "bundle_sha256": "sha256:a487d7bd80e99c47075137ef29369c614dd04889d5e711f059343a56344d498a",
+    "edge_count": 2,
+    "graph_sha256": "sha256:3e8c600da3f04d664bfce0040b1847b9b3fa722798a22c63e86f55459224c551",
+    "node_count": 3,
+    "pipeline_id": "57c45d27-8a74-48c2-a20c-7c8dc4beefda",
+    "pipeline_version": "Main",
+    "snapshot_id": "sha256:a487d7bd80e99c47075137ef29369c614dd04889d5e711f059343a56344d498a"
+  },
+  "started_at": "2026-09-14T12:24:16.723624Z",
+  "status": "cancelled",
+  "updated_at": "2026-09-14T12:24:21.058837Z",
+  "workspace_id": "local-workspace"
+}
