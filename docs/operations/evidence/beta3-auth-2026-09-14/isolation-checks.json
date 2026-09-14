@@ -1,0 +1,127 @@
+[
+  {
+    "user": "alice",
+    "path": "/api/session",
+    "forged_workspace": true,
+    "status": 404
+  },
+  {
+    "user": "alice",
+    "path": "/api/pipeline/graph",
+    "forged_workspace": true,
+    "status": 404
+  },
+  {
+    "user": "alice",
+    "path": "/api/pipeline/versions",
+    "forged_workspace": true,
+    "status": 404
+  },
+  {
+    "user": "alice",
+    "path": "/api/pipeline-runs",
+    "forged_workspace": true,
+    "status": 404
+  },
+  {
+    "user": "alice",
+    "path": "/api/files/content?container_id=orders&filename=orders.csv",
+    "forged_workspace": true,
+    "status": 404
+  },
+  {
+    "user": "alice",
+    "path": "/api/files/content?container_id=files-ws-93157eff3fe3093e-orders-1c168adb&filename=orders.csv",
+    "status": 404
+  },
+  {
+    "user": "alice",
+    "path": "/api/pipeline-runs/45a925c2a24444c395c498b45677c869",
+    "status": 404
+  },
+  {
+    "user": "alice",
+    "path": "/api/pipeline-runs/45a925c2a24444c395c498b45677c869/events",
+    "status": 404
+  },
+  {
+    "user": "alice",
+    "path": "/api/pipeline-runs/45a925c2a24444c395c498b45677c869/bundle",
+    "status": 404
+  },
+  {
+    "user": "alice",
+    "path": "/api/pipeline-runs/45a925c2a24444c395c498b45677c869/outputs/outputs/node-result-summary-json/c3e5106e-e5f1-4419-8efe-01789443fa91/summary.json",
+    "status": 404
+  },
+  {
+    "user": "bob",
+    "path": "/api/session",
+    "forged_workspace": true,
+    "status": 404
+  },
+  {
+    "user": "bob",
+    "path": "/api/pipeline/graph",
+    "forged_workspace": true,
+    "status": 404
+  },
+  {
+    "user": "bob",
+    "path": "/api/pipeline/versions",
+    "forged_workspace": true,
+    "status": 404
+  },
+  {
+    "user": "bob",
+    "path": "/api/pipeline-runs",
+    "forged_workspace": true,
+    "status": 404
+  },
+  {
+    "user": "bob",
+    "path": "/api/files/content?container_id=orders&filename=orders.csv",
+    "forged_workspace": true,
+    "status": 404
+  },
+  {
+    "user": "bob",
+    "path": "/api/files/content?container_id=files-ws-907b6ecd237508d5-orders-1c168adb&filename=orders.csv",
+    "status": 404
+  },
+  {
+    "user": "bob",
+    "path": "/api/pipeline-runs/c60cb5599c7e4ce8930f9bd42ff39808",
+    "status": 404
+  },
+  {
+    "user": "bob",
+    "path": "/api/pipeline-runs/c60cb5599c7e4ce8930f9bd42ff39808/events",
+    "status": 404
+  },
+  {
+    "user": "bob",
+    "path": "/api/pipeline-runs/c60cb5599c7e4ce8930f9bd42ff39808/bundle",
+    "status": 404
+  },
+  {
+    "user": "bob",
+    "path": "/api/pipeline-runs/c60cb5599c7e4ce8930f9bd42ff39808/outputs/outputs/node-result-summary-json/96d464f3-2e46-4ddb-b354-495887ae8c0e/summary.json",
+    "status": 404
+  },
+  {
+    "user": "anonymous",
+    "path": "/api/session",
+    "status": 401
+  },
+  {
+    "user": "anonymous",
+    "path": "/api/pipeline/graph",
+    "status": 401
+  },
+  {
+    "user": "anonymous",
+    "path": "/api/pipeline-runs/c60cb5599c7e4ce8930f9bd42ff39808/outputs/outputs/node-result-summary-json/96d464f3-2e46-4ddb-b354-495887ae8c0e/summary.json",
+    "status": 401
+  }
+]

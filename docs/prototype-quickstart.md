@@ -147,3 +147,12 @@ database integration tests and a generated-bundle execution are separate checks.
 They do not establish live Keycloak login, two-user deployment isolation,
 restart recovery, or a full application restore. Those remain release gates in
 the [release plan](release-plan.md).
+
+## Beta 3 verification follow-ups
+
+See the [real authentication and recovery record](operations/beta3-auth-recovery.md)
+for two-user Keycloak login, API isolation, and representative same-revision data
+restoration. The [proposed compatibility policy](operations/beta3-compatibility.md)
+describes fresh installation and preservation limits; no Beta 2 upgrade or
+concurrent-user capacity is certified. Final release acceptance remains tracked
+in [issue #129](https://github.com/DATAPACT/inLUMEN/issues/129).
