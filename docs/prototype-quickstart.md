@@ -95,6 +95,12 @@ parent execution works.
 
 ## Troubleshooting and reset
 
+- **Frontend fails after an image update:** rebuild the frontend with
+  `docker compose build frontend`, refresh its dependency volume with
+  `docker compose run --rm --no-deps frontend npm ci`, then run
+  `docker compose up -d frontend`. This preserves application data. The
+  development image requires the same supported Node runtime as the production
+  build; Node 18 cannot start the current Vite version.
 - **Run is unavailable:** check `docker compose ps`, backend readiness, and the
   runner/codegen logs. Native execution requires their private service tokens
   and working Docker access.

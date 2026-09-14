@@ -79,6 +79,10 @@ jobs:
         run: npm ci --prefix frontend
       - name: Run frontend tests and checks
         run: python3 scripts/run_tests.py --component frontend
+      - name: Verify development container runtime
+        run: |
+          docker build -t inlumen-frontend:ci frontend
+          docker run --rm inlumen-frontend:ci npm exec vite -- --version
       - name: Audit frontend dependencies
         run: npm audit --prefix frontend --audit-level=moderate
       - name: Install test browser
