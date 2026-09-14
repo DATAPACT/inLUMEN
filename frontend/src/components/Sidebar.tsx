@@ -1,5 +1,8 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { getGraphRevision, subscribePersistence } from '@/features/flow/persistenceState';
+import { getGraphRevision, subscribePersistence, persistenceEpoch, getPersistenceState } from '@/features/flow/persistenceState';
+import { codeZipEntries } from '@/features/flow/codeZip';
+import { normalizeGraph } from '@/features/flow/flowGraph';
+import { readNodeFile } from '@/features/nodes/nodePersistence';
 
 import { apiFetch } from '@/utils/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
@@ -12,6 +15,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import {
   MAIN_PIPELINE_VERSION_UID,
+  fetchPipelineGraph,
   updatePipelineOverviewMetadata,
 } from '@/features/flow/flowPersistence';
 import {
@@ -279,6 +283,43 @@ export function Sidebar({
 
   // --- Deployment artifact state
   const [isGeneratingDeployment, setIsGeneratingDeployment] = useState(false);
+  const [isDownloadingCode, setIsDownloadingCode] = useState(false);
+  const [codeDownloadError, setCodeDownloadError] = useState('');
+  const downloadCodeZip = async () => {
+    setIsDownloadingCode(true);
+    setCodeDownloadError('');
+    const epoch = persistenceEpoch();
+    try {
+      if (getPersistenceState().pending || getPersistenceState().error) {
+        throw new Error('Wait for your changes to finish saving before downloading code.');
+      }
+      const entries = codeZipEntries(normalizeGraph(await fetchPipelineGraph()).nodes);
+      if (!entries.length) throw new Error('No Task code is attached yet. Generate or upload code first.');
+      const { default: JSZip } = await import('jszip');
+      const zip = new JSZip();
+      let bytes = 0;
+      for (const entry of entries) {
+        if (epoch !== persistenceEpoch()) throw new Error('The workspace changed. Try downloading again.');
+        const content = await (await readNodeFile(entry.nodeId, entry.file)).arrayBuffer();
+        bytes += content.byteLength;
+        if (bytes > 50 * 1024 * 1024) throw new Error('The code exceeds the 50 MB ZIP upload limit.');
+        zip.file(entry.path, content);
+      }
+      const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+      if (blob.size > 50 * 1024 * 1024) throw new Error('The code ZIP exceeds the 50 MB upload limit.');
+      if (epoch !== persistenceEpoch()) throw new Error('The workspace changed. Try downloading again.');
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'pipeline-code.zip';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      setCodeDownloadError(error instanceof Error ? error.message : 'Could not download code ZIP.');
+    } finally {
+      setIsDownloadingCode(false);
+    }
+  };
   const [runtimeArtifactDownloads, setRuntimeArtifactDownloads] = useState<RuntimeArtifactDownload[]>([]);
   const [yamlDownload, setYamlDownload] = useState<YamlDownload | null>(null);
   const [deploymentBundleDownload, setDeploymentBundleDownload] = useState<DeploymentBundleDownload | null>(null);
@@ -982,6 +1023,17 @@ export function Sidebar({
                   <PackageOpen className="mr-1.5 h-3.5 w-3.5 shrink-0" />
                   <span>Upload code ZIP</span>
                 </Button>
+                <Button
+                  variant="outline"
+                  className="h-9 w-full px-3 text-xs"
+                  onClick={() => { void downloadCodeZip(); }}
+                  disabled={isDownloadingCode}
+                  aria-label="Download code ZIP"
+                >
+                  <Download className="mr-1.5 h-3.5 w-3.5 shrink-0" />
+                  <span>{isDownloadingCode ? 'Downloading…' : 'Download code ZIP'}</span>
+                </Button>
+                {codeDownloadError && <p role="alert" className="text-xs text-destructive">{codeDownloadError}</p>}
               </div>
             </div>
             <PipelineRunPanel key={`pipeline-runs-${workspaceResetKey}`} />
