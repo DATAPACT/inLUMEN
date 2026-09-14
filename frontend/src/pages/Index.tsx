@@ -512,6 +512,7 @@ const Index = () => {
   };
 
   const activeConfig = selectedConfig || defaultConfig;
+  const hasActiveConfiguration = Boolean(activeConfig.id && configs.some((config) => config.id === activeConfig.id));
 
   const handleSendMessage = async () => {
     if (isProcessing) return;
@@ -1506,11 +1507,11 @@ const Index = () => {
                 }}>Manage shared LLM</Button>
               )}
               <p className="mb-3 text-xs text-muted-foreground">
-                {activeConfig.applicationProvided
+                {hasActiveConfiguration && activeConfig.applicationProvided
                   ? "Application-provided LLM · Managed by your administrator. No API key needed."
                   : "The design model powers Pipeline Chat; the code model generates runtime code."}
               </p>
-              <div className="mb-3 rounded-md bg-background/70 p-3 text-xs text-muted-foreground space-y-1">
+              {hasActiveConfiguration && <div className="mb-3 rounded-md bg-background/70 p-3 text-xs text-muted-foreground space-y-1">
                 <div>
                   <span className="font-medium text-foreground">Provider:</span>{" "}
                   {formatProviderLabel(activeConfig.provider)}
@@ -1527,12 +1528,12 @@ const Index = () => {
                   <span className="font-medium text-foreground">Base URL:</span>{" "}
                   {activeConfig.baseUrl}
                 </div>
-              </div>
+              </div>}
               <DropdownMenu open={isConfigMenuOpen} onOpenChange={setIsConfigMenuOpen}>
                 <DropdownMenuTrigger asChild>
                   <Button variant="outline" className="w-full justify-between">
                     <span className="min-w-0 truncate text-left">
-                      {formatConfigDescription(activeConfig)}
+                      {hasActiveConfiguration ? formatConfigDescription(activeConfig) : "No LLM configured"}
                     </span>
                     <ChevronDown className="h-4 w-4 shrink-0 opacity-60" />
                   </Button>

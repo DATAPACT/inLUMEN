@@ -40,6 +40,12 @@ test('admin saves, disables and re-enables the shared LLM without retaining its 
   const app = await authenticatedApp(page, true);
   const openAdmin = async () => {
     await app.getByRole('button', { name: 'Settings', exact: true }).click();
+    if (enabled) {
+      await expect(app.getByText('Code generation: shared-code', { exact: true })).toBeVisible();
+    } else {
+      await expect(app.getByRole('button', { name: 'No LLM configured', exact: true })).toBeVisible();
+      await expect(app.getByText('Provider:', { exact: true })).toHaveCount(0);
+    }
     await app.getByRole('button', { name: 'Manage shared LLM', exact: true }).click();
     await expect(app.getByRole('switch', { name: 'Enable for all users' })).toBeVisible();
   };
