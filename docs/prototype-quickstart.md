@@ -194,5 +194,5 @@ See the [real authentication and recovery record](operations/beta3-auth-recovery
 for two-user Keycloak login, API isolation, and representative same-revision data
 restoration. The [compatibility policy](operations/beta3-compatibility.md)
 describes fresh installation and preservation limits; no Beta 2 upgrade or
-concurrent-user capacity is certified. Final release acceptance remains tracked
-in [issue #129](https://github.com/DATAPACT/inLUMEN/issues/129).
+concurrent-user capacity is certified. Beta 3 acceptance issue #129 is historical;
+Beta 5 release gates are tracked in the [current release plan](release-plan.md).
