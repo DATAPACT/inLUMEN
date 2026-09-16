@@ -1,6 +1,6 @@
 # Beta 5 release plan
 
-Reviewed 2026-09-16 after merging PR #136. Beta 4 is published at
+Reviewed 2026-09-16 after publishing Beta 5. Beta 4 is published at
 [`v1.0.0-beta.4`](https://github.com/DATAPACT/inLUMEN/releases/tag/v1.0.0-beta.4);
 preserve its tag and evidence. The [Beta 3 plan](beta3-release-plan.md) is retained
 for history.
@@ -24,20 +24,28 @@ the top toolbar.
 
 ## Release gates
 
-Release checks apply to the final candidate source archive. The verification record
-will contain the exact source SHA, test outcomes, compatibility limits, and checksums.
+Release checks apply to the final candidate source archive. The
+[release verification receipt](https://github.com/DATAPACT/inLUMEN/releases/download/v1.0.0-beta.5/release-verification.json)
+records the exact source SHA, test outcomes, compatibility limits, and checksums.
 
 - [x] #103 implementation merged; unit and browser checks pass, including file
   contents, source-data exclusion, ZIP placement, and successful uploader matching.
 - [x] User acceptance of #103 on 2026-09-16.
-- [ ] Full regression suites, typecheck, lint, build, shared-file consistency,
-  database integration, Compose checks, and CI pass on the final candidate commit.
-- [ ] Repeat the supported deterministic pipeline walkthrough on the candidate;
-  verify configuration, execution, and downloads remain usable.
-- [ ] Build and inspect the final source archive and installation instructions;
-  record candidate SHA, runtime versions, evidence, compatibility limits, and
-  checksums in the release receipt.
-- [ ] Review Beta 5 prerelease contents, then publish the immutable tag and assets.
+- [x] User tested published Beta 5 and confirmed it is good enough for controlled
+  evaluation on 2026-09-16. This acceptance does not establish a 1.0 production
+  support commitment.
+- [x] Full regression suites, typecheck, lint, build, shared-file consistency,
+  database integration, Compose checks, and CI passed on final candidate
+  `dd0433e01264ef20e6fcfb99cde324a62a9931d3` in [CI run 35092341044](https://github.com/DATAPACT/inLUMEN/actions/runs/35092341044).
+- [x] Repeated the supported deterministic pipeline walkthrough on the
+  candidate; configuration checks passed and native Dagster execution returned
+  3 orders totaling 49.75.
+- [x] Built and inspected the final source archive and installation instructions;
+  recorded the candidate SHA, runtime versions, evidence, compatibility limits,
+  and checksums in the release receipt.
+- [x] Reviewed and published the prerelease tag and assets:
+  [`v1.0.0-beta.5`](https://github.com/DATAPACT/inLUMEN/releases/tag/v1.0.0-beta.5)
+  at `dd0433e01264ef20e6fcfb99cde324a62a9931d3`.
 
 Implementation and current checks: [verification record](operations/beta5-verification.md).
 Release copy: [release notes](beta5-release-notes.md).
