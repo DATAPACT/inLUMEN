@@ -1,8 +1,8 @@
 # inLUMEN 1.0 Beta 5 — Runtime code exchange
 
-Draft release notes. The candidate adds a code ZIP download beside the existing
-code ZIP uploader. The final release will identify the accepted source commit and
-include a checksummed source archive and installation guide.
+Beta 5 adds a code ZIP download beside the existing code ZIP uploader. The
+prerelease identifies its accepted source commit and includes a checksummed
+source archive and installation guide.
 
 ## Changes
 
