@@ -8,21 +8,21 @@ design → save/reopen → run → inspect → download workflow.
 
 Use a fresh checkout on a controlled local evaluation machine with Docker
 Compose and a running Docker daemon. Initial builds require network access.
-Beta 4 is fresh-install-only; first read the
+Beta 5 is fresh-install-only; first read the
 [preservation limits](operations/beta3-compatibility.md) if you have existing data.
 Do not run these commands over an existing installation's storage. The default
 Compose file has fixed container/network names and ports, so a second simultaneous
 installation needs explicitly isolated names, ports and storage.
 
-Use the published `v1.0.0-beta.4` tag. Its accepted source SHA and checksums are
-listed in the [release](https://github.com/DATAPACT/inLUMEN/releases/tag/v1.0.0-beta.4).
+Use the published `v1.0.0-beta.5` tag. Its accepted source SHA and checksums are
+listed in the [release](https://github.com/DATAPACT/inLUMEN/releases/tag/v1.0.0-beta.5).
 For prepublication verification, substitute the exact candidate SHA. Run:
 
 ```sh
 # Use the published tag; release verification uses the exact candidate SHA.
-INLUMEN_REF=v1.0.0-beta.4
-git clone https://github.com/DATAPACT/inLUMEN.git inlumen-beta4
-cd inlumen-beta4
+INLUMEN_REF=v1.0.0-beta.5
+git clone https://github.com/DATAPACT/inLUMEN.git inlumen-beta5
+cd inlumen-beta5
 git checkout --detach "$INLUMEN_REF"
 git rev-parse HEAD
 python3 - <<'PYCONFIG'
@@ -74,7 +74,11 @@ workflow; native frontend development requires Node 22.12+ and `npm ci`.
 3. Select **Summarize orders** and attach
    [`main.py`](../examples/order-summary/main.py) as its Python runtime package.
    It uses only the Python standard library; no `requirements.txt` is needed.
-4. Use **Save** to save a named version, such as `Order summary example`.
+4. Open **Library → Run → Runtime code** and choose **Download code ZIP**. The
+   downloaded `pipeline-code.zip` contains the Task's code in its own folder; it
+   does not include `orders.csv` or the pipeline design. The existing uploader can
+   use the archive with a matching Task that does not already have code attached.
+5. Use **Save** to save a named version, such as `Order summary example`.
    Reload the browser. Check that all three components, their connections, the
    Source input, and the Task script are still present.
 

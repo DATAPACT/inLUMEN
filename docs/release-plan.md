@@ -1,75 +1,52 @@
-# Beta 4 release plan
+# Beta 5 release plan
 
-Reviewed 2026-09-14 against GitHub and `main` at `a65dc709f4095b76466f3c2ce0c7cf5974eb44bc`.
-[Beta 3](https://github.com/DATAPACT/inLUMEN/releases/tag/v1.0.0-beta.3) is published;
-its milestone and acceptance issue #129 are closed. Preserve its tag and evidence.
-The [historical plan](beta3-release-plan.md) is retained for context only.
+Reviewed 2026-09-16 after merging PR #136. Beta 4 is published at
+[`v1.0.0-beta.4`](https://github.com/DATAPACT/inLUMEN/releases/tag/v1.0.0-beta.4);
+preserve its tag and evidence. The [Beta 3 plan](beta3-release-plan.md) is retained
+for history.
 
 ## Accepted milestone
 
-[v1.0.0-beta.4 — Guided configuration & generation metrics](https://github.com/DATAPACT/inLUMEN/milestone/6).
-PR #134 merged at `6faf4b46fbe1adffda1664ab650b9e3bf60abdc3`. The user
-reviewed the PR, tested the tool, and confirmed both issues addressed on
-2026-09-14. #99 and #100 are closed.
+[v1.0.0-beta.5 — Runtime code exchange](https://github.com/DATAPACT/inLUMEN/milestone/7).
+PR [#136](https://github.com/DATAPACT/inLUMEN/pull/136) merged on 2026-09-16 at
+`4b64b48de350f3e126eb261d5d040c092dbebe7b`; issue #103 is closed. The user
+confirmed acceptance after the code ZIP browser round-trip passed.
 
-### #99 — Click-to-add runtime parameters
+### #103 — Download code ZIP
 
-Click a detected environment variable in the selected node's Inspector to add its
-name to Runtime parameters with an empty, focused value input. Keep required/optional
-and sensitivity information. Mark existing parameters Added and prevent duplicates
-or overwrites. Removing a parameter makes its suggestion available again. Preserve
-manual Add and secure secret storage. Never infer or generate parameter values.
-Existing code discovery remains the source of suggestions after generation, upload
-and edits. Verify normal and sensitive values, keyboard access, and save/reopen.
-
-### #100 — Durable generation duration
-
-Persist server timestamps and duration with each background generation job. Queue
-time is request creation to worker start; generation duration is worker start to
-terminal result, including model calls, validation and repairs. Each resumed job
-is a separate attempt and has its own measurement. Cache hits measure the current
-job, not the original generation. Completed values remain fixed across progress
-updates, credential cleanup, history reads and service restarts.
-
-Show duration and queue time next to available cost/token metrics, and duration in
-recent history. Historical missing measurements are unavailable, never fabricated
-from mutable updated_at. A queued cancellation has queue time but no worker duration.
-After an interrupted worker is recovered, its finished_at records reconciliation;
-its actual completion time and duration are unknown. Preserve that distinction in
-UI. New fields are optional on reads and stored in existing JSON job payloads.
+Add **Download code ZIP** beside **Upload code ZIP** in Library → Run → Runtime
+code. Export code attached to Task nodes into distinct, upload-compatible folders;
+retain the file bytes and names. Include the Task ID in folder names so equal Task
+labels stay distinct, and let the uploader match the exact exported folders before
+using its existing name matching. Do not export source data, pipeline design,
+reusable pipeline definitions, or credentials. No **Package** action appears in
+the top toolbar.
 
 ## Release gates
 
-The remaining gates below are checked against the final source archive before
-publication. The published [release verification receipt](https://github.com/DATAPACT/inLUMEN/releases/download/v1.0.0-beta.4/release-verification.json)
-records their final outcomes and candidate SHA; the milestone records publication.
+Release checks apply to the final candidate source archive. The verification record
+will contain the exact source SHA, test outcomes, compatibility limits, and checksums.
 
-- [x] #99 browser acceptance, including save/reopen and secret handling.
-- [x] #100 lifecycle and durable-store checks, gateway pass-through, browser history
-  after reload, and completed record retrieval after service restart.
-- [ ] Regression suites, typecheck, lint, build, shared-file consistency, database
-  integration and Compose checks pass; CI is green on the candidate commit.
+- [x] #103 implementation merged; unit and browser checks pass, including file
+  contents, source-data exclusion, ZIP placement, and successful uploader matching.
+- [x] User acceptance of #103 on 2026-09-16.
+- [ ] Full regression suites, typecheck, lint, build, shared-file consistency,
+  database integration, Compose checks, and CI pass on the final candidate commit.
 - [ ] Repeat the supported deterministic pipeline walkthrough on the candidate;
-  verify configuration, execution and downloads remain usable.
-- [ ] Record final candidate SHA, evidence, compatibility limits and release notes.
-- [ ] Prepare and review Beta 4 prerelease contents before publication.
+  verify configuration, execution, and downloads remain usable.
+- [ ] Build and inspect the final source archive and installation instructions;
+  record candidate SHA, runtime versions, evidence, compatibility limits, and
+  checksums in the release receipt.
+- [ ] Review Beta 5 prerelease contents, then publish the immutable tag and assets.
 
-Implementation and checks: [verification record](operations/beta4-verification.md).
-Release copy: [release notes](beta4-release-notes.md).
+Implementation and current checks: [verification record](operations/beta5-verification.md).
+Release copy: [draft notes](beta5-release-notes.md).
 
 ## Remaining backlog
 
-GitHub had 10 open issues at initial review; #99 and #100 are now closed,
-leaving eight open issues. The user clarified #103: add **Download code ZIP** beside
-**Upload code ZIP** in the Runtime code section. This is the focused scope of
-[Beta 5 — Runtime code exchange](https://github.com/DATAPACT/inLUMEN/milestone/7).
-Export attached Task code into one folder per Task, preserving file contents and
-compatibility with the existing uploader. Source data and the pipeline design are
-not included. There is no Package action in the top toolbar. #63 graph previews follows with explicit
-accept/cancel and stale-revision behavior. #92 interactive tutorial and #77 UI
-refactoring remain uncommitted; split #77 into observable usability problems.
-#72 agent efficiency and #98 artifact-to-design remain exploratory. #59 README
-format and #9 compliance agents remain outside release completion criteria.
-
-Closed items #124, #122, #116, #114, #104, #102 and #101 are not carried forward.
-A release candidate or stable 1.0 requires its own agreed compatibility/support scope.
+Graph previews in #63 are the next scoped follow-up, with explicit accept/cancel
+and stale-revision behavior. #92 interactive tutorial and #77 UI refactoring remain
+uncommitted; split #77 into observable usability problems. #72 agent efficiency
+and #98 artifact-to-design remain exploratory. #59 README format and #9 compliance
+agents remain outside release completion criteria. A release candidate or stable
+1.0 requires its own agreed compatibility and support scope.
