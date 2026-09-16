@@ -40,7 +40,7 @@ will contain the exact source SHA, test outcomes, compatibility limits, and chec
 - [ ] Review Beta 5 prerelease contents, then publish the immutable tag and assets.
 
 Implementation and current checks: [verification record](operations/beta5-verification.md).
-Release copy: [draft notes](beta5-release-notes.md).
+Release copy: [release notes](beta5-release-notes.md).
 
 ## Remaining backlog
 
