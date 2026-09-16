@@ -1,4 +1,5 @@
 import { GraphSaveStatus } from '@/components/flow/GraphSaveStatus';
+import { codeZipFolder } from '@/features/flow/codeZip';
 import { clearPersistenceError, reportPersistenceError, getPersistenceState, graphReadTicket, acknowledgeGraphRead, persistenceEpoch } from '@/features/flow/persistenceState';
 import { readStoredArray, releaseDraftProtection } from '@/utils/workspaceStorage';
 import { getWorkspaceStorage } from '@/utils/workspaceStorage';
@@ -201,6 +202,8 @@ const taskPackageName = (value: unknown) => String(value || "")
   .trim();
 
 const packageMatch = (folder: string, taskNodes: Node[]) => {
+  const exportedTask = taskNodes.find((node) => codeZipFolder(node) === folder);
+  if (exportedTask) return exportedTask;
   const tokens = new Set(taskPackageName(folder).split(" ").filter(Boolean));
   const scored = taskNodes.map((node) => {
     const candidate = taskPackageName(`${node.data?.label || ""} ${node.data?.description || ""}`);
