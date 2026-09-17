@@ -284,8 +284,8 @@ test('preview can be disabled for direct assistant edits', async ({ page }) => {
   });
   await page.goto('/');
   await page.getByRole('button', { name: 'Chat', exact: true }).click();
-  await page.getByRole('switch', { name: 'Preview graph changes before applying' }).click();
-  await expect(page.getByRole('switch', { name: 'Preview graph changes before applying' })).toHaveAttribute('aria-checked', 'false');
+  await page.getByRole('switch', { name: 'Preview AI graph changes before applying' }).click();
+  await expect(page.getByRole('switch', { name: 'Preview AI graph changes before applying' })).toHaveAttribute('aria-checked', 'false');
   await page.getByPlaceholder('Describe the pipeline...').fill('Rename the source');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.locator('#canvas-panel .react-flow__node').first()).toContainText('Updated directly');
@@ -363,7 +363,7 @@ test('a follow-up direct edit works after applying a graph preview', async ({ pa
   await expect(page.locator('#canvas-panel .react-flow__node').first()).toContainText('First applied edit');
   await expect(page.getByLabel('Pipeline save status')).toHaveAttribute('data-save-state', 'saved');
 
-  await page.getByRole('switch', { name: 'Preview graph changes before applying' }).click();
+  await page.getByRole('switch', { name: 'Preview AI graph changes before applying' }).click();
   await page.getByPlaceholder('Describe the pipeline...').fill('Change its follow-up label');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.locator('#canvas-panel .react-flow__node').first()).toContainText('Second direct edit');
@@ -371,7 +371,7 @@ test('a follow-up direct edit works after applying a graph preview', async ({ pa
   await expect(page.getByRole('heading', { name: 'Review proposed graph' })).toHaveCount(0);
   await expect(page.getByLabel('Pipeline save status')).toHaveAttribute('data-save-state', 'saved');
 
-  await page.getByRole('switch', { name: 'Preview graph changes before applying' }).click();
+  await page.getByRole('switch', { name: 'Preview AI graph changes before applying' }).click();
   await page.getByPlaceholder('Describe the pipeline...').fill('Make another change with preview enabled');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Review proposed graph' })).toBeVisible();

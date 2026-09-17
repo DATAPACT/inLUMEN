@@ -1550,11 +1550,22 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       });
 
       setNodes((currentNodes) => {
-        const compactedNodes = compactGraphAfterNodeRemoval(currentNodes, edges, removedNodeIds);
-        const compactedPositions = new Map(
-          compactedNodes.map((node) => [String(node.id), node.position]),
-        );
         const nextNodes = applyNodeChanges(changes, currentNodes);
+        if (removedNodeIds.length === 0) return nextNodes;
+
+        const compactedNodes = compactGraphAfterNodeRemoval(currentNodes, edges, removedNodeIds);
+        const currentPositions = new Map(
+          currentNodes.map((node) => [String(node.id), node.position]),
+        );
+        const compactedPositions = new Map(
+          compactedNodes
+            .filter((node) => {
+              const currentPosition = currentPositions.get(String(node.id));
+              return currentPosition
+                && (currentPosition.x !== node.position.x || currentPosition.y !== node.position.y);
+            })
+            .map((node) => [String(node.id), node.position]),
+        );
         return nextNodes.map((node) => {
           const position = compactedPositions.get(String(node.id));
           return position ? { ...node, position } : node;
