@@ -99,6 +99,7 @@ export const ChatPanel = ({
         </div>
 
         <div className="mt-3 flex flex-wrap items-center gap-2">
+          <div className="mr-auto" />
           <Button
             variant="outline"
             size="sm"
@@ -163,9 +164,23 @@ export const ChatPanel = ({
                         "rounded-[18px] border px-3 py-2.5 text-sm leading-6 shadow-sm",
                         msg.role === 'user'
                           ? "border-emerald-400/25 bg-[linear-gradient(135deg,rgba(16,185,129,0.88),rgba(14,116,144,0.86))] text-white"
-                          : "border-border bg-muted/55 text-foreground",
+                        : "border-border bg-muted/55 text-foreground",
                       )}
                     >
+                      {msg.graphProposalStatus && (
+                        <div
+                          className={cn(
+                            "mb-2 rounded-lg border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em]",
+                            msg.graphProposalStatus === 'pending' && "border-amber-400/30 bg-amber-400/10 text-amber-600",
+                            msg.graphProposalStatus === 'applied' && "border-emerald-400/30 bg-emerald-400/10 text-emerald-600",
+                            msg.graphProposalStatus === 'discarded' && "border-rose-400/30 bg-rose-400/10 text-rose-600",
+                          )}
+                        >
+                          {msg.graphProposalStatus === 'pending' && 'Draft proposal · awaiting review'}
+                          {msg.graphProposalStatus === 'applied' && 'Proposal applied to canvas'}
+                          {msg.graphProposalStatus === 'discarded' && 'Proposal discarded · canvas unchanged'}
+                        </div>
+                      )}
                       {msg.role === 'assistant' ? (
                         <AssistantMessageContent
                           content={sanitizeAssistantMessage(msg.content)}

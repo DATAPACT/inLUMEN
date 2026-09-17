@@ -6,9 +6,12 @@ from sys import path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-
 path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from graph_client import run_neo4j_query
+from llm_config import LLMConfig
+from local_api_client import LocalApiResponse
+from neo4j_api import _validate_workspace_cypher
 from pipeline_agent.context import (
     _assistant_message_from_result,
     _clean_client_graph,
@@ -17,9 +20,6 @@ from pipeline_agent.context import (
     _safe_assistant_message,
 )
 from pipeline_agent.guardrails import _build_graph_sync_guardrail
-from graph_client import run_neo4j_query
-from llm_config import LLMConfig
-from local_api_client import LocalApiResponse
 from pipeline_editor_team import (
     _agent_query_returned_no_rows,
     build_pipeline_editing_team,
@@ -116,6 +116,86 @@ GENERATED_CODE = {
 
 
 class PipelineGraphValidationTest(unittest.TestCase):
+    def test_guardrail_ignores_updated_at_when_graph_content_is_unchanged(self):
+        before = {
+            "updated_at": "2026-09-17T10:00:00Z",
+            "nodes": [node(1, "source", "Input"), node(2, "destination", "Output")],
+            "edges": [edge(1, 2, "data", "data")],
+        }
+        after = {
+            **before,
+            "updated_at": "2026-09-17T10:01:00Z",
+        }
+
+        sync = _build_graph_sync_guardrail(
+            before,
+            after,
+            "Describe the current pipeline without making any changes.",
+        )
+
+        self.assertEqual("unchanged", sync["status"])
+        self.assertFalse(sync["graph_changed"])
+        self.assertTrue(sync["guardrail_passed"])
+
+    def test_guardrail_ignores_persisted_node_defaults_when_graph_content_is_unchanged(self):
+        ports = {
+            "inputs": [],
+            "outputs": [{
+                "id": "data",
+                "name": "data",
+                "type": "any",
+                "required": True,
+                "description": "Source data.",
+            }],
+        }
+        before = {
+            "nodes": [{
+                "id": "1",
+                "type": "source",
+                "label": "Audio Upload",
+                "description": "Uploaded audio file ingestion.",
+                "position": {"x": 0, "y": 0},
+                "template": "Custom",
+                "ports": ports,
+                "definition_id": "core.source",
+                "definition_version": 1,
+                "configuration_status": "unconfigured",
+            }],
+            "edges": [],
+        }
+        persisted = {
+            "nodes": [{
+                "id": "1",
+                "type": "custom",
+                "position": {"x": 0, "y": 0},
+                "data": {
+                    "type": "source",
+                    "label": "Audio Upload",
+                    "description": "Uploaded audio file ingestion.",
+                    "template_label": "Custom",
+                    "ports": ports,
+                    "files": [],
+                    "file_buckets": [],
+                    "has_files": "no",
+                    "implementation": {},
+                    "definition_id": "core.source",
+                    "definition_version": 1,
+                    "configuration_status": "unconfigured",
+                },
+            }],
+            "edges": [],
+        }
+
+        sync = _build_graph_sync_guardrail(
+            before,
+            persisted,
+            "What is the output?",
+        )
+
+        self.assertEqual("unchanged", sync["status"])
+        self.assertFalse(sync["graph_changed"])
+        self.assertTrue(sync["guardrail_passed"])
+
     def test_patient_risk_example_is_valid(self):
         graph = {
             "nodes": [
@@ -471,6 +551,46 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
             "managed Python package" in message
             for message in sync["validation_errors"]
         ))
+
+    def test_guardrail_allows_valid_structural_edit_with_preexisting_task_errors(self):
+        before = {
+            "nodes": [
+                node(1, "source", "Audio Upload"),
+                node(2, "task", "Speech-to-Text", {"task": "transcription"}),
+                node(3, "task", "Sentiment Analysis", {"task": "sentiment"}),
+                node(4, "destination", "JSON Output"),
+            ],
+            "edges": [
+                edge(1, 2, "data", "input"),
+                edge(2, 3, "output", "input"),
+                edge(3, 4, "output", "data"),
+            ],
+        }
+        after = {
+            "nodes": [
+                *before["nodes"][:2],
+                node(5, "task", "Anonymization", None),
+                *before["nodes"][2:],
+            ],
+            "edges": [
+                edge(1, 2, "data", "input"),
+                edge(2, 5, "output", "input"),
+                edge(5, 3, "output", "input"),
+                edge(3, 4, "output", "data"),
+            ],
+        }
+
+        self.assertFalse(validate_pipeline_graph(before)["valid"])
+        sync = _build_graph_sync_guardrail(
+            before,
+            after,
+            "Add an anonymization step after Speech-to-Text.",
+        )
+
+        self.assertEqual("synced", sync["status"])
+        self.assertTrue(sync["guardrail_passed"])
+        self.assertTrue(sync["graph_safe_to_apply"])
+        self.assertEqual([], sync["validation_errors"])
 
     def test_guardrail_accepts_a_valid_model_chosen_graph_change(self):
         before = {
@@ -1048,6 +1168,9 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("incoming[0].source_port", query)
         self.assertIn("outgoing[0].target_port", query)
         self.assertNotIn("FOREACH (p IN prevs", query)
+        self.assertIn("OPTIONAL MATCH (next)-[:FLOWS_TO*0..]->(downstream:STEP)", query)
+        self.assertIn("SET node.x = coalesce(node.x, 0.0) - 300.0", query)
+        _validate_workspace_cypher(query)
         self.assertEqual("delete_step", run_query.await_args.args[1])
 
     @patch("pipeline_agent.team.RoundRobinGroupChat")

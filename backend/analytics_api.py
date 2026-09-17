@@ -572,6 +572,7 @@ def agentic_pipeline_editor():
 
     log_llm_selection("User message sent to pipeline editor", llm_config)
     authorization = _request_authorization_header()
+    preview_changes = payload.get("preview_changes") is True
 
     try:
         turn = run_cancellable_pipeline_turn(
@@ -584,6 +585,7 @@ def agentic_pipeline_editor():
                 session_id=session_id,
                 llm_config=llm_config,
                 authorization=authorization,
+                preview_changes=preview_changes,
             ),
         )
         assistant_message, graph, sync = (
@@ -599,16 +601,20 @@ def agentic_pipeline_editor():
             "sync": sync,
         }), 200
     except PipelineEditorTurnCancelled as exc:
+        if preview_changes:
+            cancellation_message = (
+                "Stopped. The graph proposal was discarded; your saved pipeline is unchanged."
+            )
+        elif exc.rollback_applied:
+            cancellation_message = "Stopped. The pipeline from before this request was restored."
+        else:
+            cancellation_message = "Stopped, but the previous pipeline could not be restored automatically."
         return jsonify({
             "session_id": session_id,
             "turn_id": turn_id,
             "status": "cancelled",
             "rollback_applied": exc.rollback_applied,
-            "assistant_message": (
-                "Stopped. The pipeline from before this request was restored."
-                if exc.rollback_applied
-                else "Stopped, but the previous pipeline could not be restored automatically."
-            ),
+            "assistant_message": cancellation_message,
         }), 409
     except asyncio.CancelledError:
         return jsonify({

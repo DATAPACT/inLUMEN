@@ -6,6 +6,13 @@ from typing import Any
 
 from flask import Flask
 
+from auth_middleware import (
+    INTERNAL_PREVIEW_CLEANUP_CAPABILITY,
+    INTERNAL_PREVIEW_CLEANUP_ENVIRON_KEY,
+    INTERNAL_WORKSPACE_ID_ENVIRON_KEY,
+    internal_workspace_override,
+)
+
 
 class LocalApiHTTPError(RuntimeError):
     pass
@@ -45,14 +52,27 @@ def dispatch_flask_request(
     form: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
     query_capability: object | None = None,
+    internal_workspace_id: str | None = None,
+    preview_cleanup: bool = False,
 ) -> LocalApiResponse:
     request_kwargs: dict[str, Any] = {
         "path": f"/{backend_path.lstrip('/')}",
         "method": method,
         "headers": headers or {},
     }
+    environ_overrides = {}
     if query_capability is not None:
-        request_kwargs["environ_overrides"] = {"inlumen.query_capability": query_capability}
+        environ_overrides["inlumen.query_capability"] = query_capability
+    if internal_workspace_id is not None:
+        environ_overrides[INTERNAL_WORKSPACE_ID_ENVIRON_KEY] = internal_workspace_override(
+            internal_workspace_id
+        )
+    if preview_cleanup:
+        environ_overrides[INTERNAL_PREVIEW_CLEANUP_ENVIRON_KEY] = (
+            INTERNAL_PREVIEW_CLEANUP_CAPABILITY
+        )
+    if environ_overrides:
+        request_kwargs["environ_overrides"] = environ_overrides
     if params is not None:
         request_kwargs["query_string"] = params
 

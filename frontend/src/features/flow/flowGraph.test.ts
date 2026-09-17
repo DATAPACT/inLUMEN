@@ -2,13 +2,39 @@ import type { Node } from "reactflow";
 import { describe, expect, it } from "vitest";
 
 import {
+  compactGraphAfterNodeRemoval,
   createAgentGraphSnapshot,
+  hasGraphContentChanges,
   getNextNumericNodeId,
   normalizeGraph,
 } from "@/features/flow/flowGraph";
 
 
 describe("flow graph normalization", () => {
+  it("compacts a simple chain after removing a middle node", () => {
+    const graph = normalizeGraph({
+      nodes: [
+        { id: "1", position: { x: 0, y: 100 }, data: { type: "source", label: "Input" } },
+        { id: "2", position: { x: 300, y: 100 }, data: { type: "task", label: "First" } },
+        { id: "3", position: { x: 600, y: 100 }, data: { type: "task", label: "Removed" } },
+        { id: "4", position: { x: 900, y: 100 }, data: { type: "destination", label: "Output" } },
+      ],
+      edges: [
+        { source: "1", target: "2" },
+        { source: "2", target: "3" },
+        { source: "3", target: "4" },
+      ],
+    });
+
+    const compacted = compactGraphAfterNodeRemoval(
+      graph.nodes,
+      graph.edges,
+      ["3"],
+    );
+
+    expect(compacted.find((node) => node.id === "4")?.position.x).toBe(600);
+  });
+
   it("does not hydrate runtime parameters into an unconfigured agent design", () => {
     const graph = normalizeGraph({
       nodes: [{
@@ -68,6 +94,49 @@ describe("flow graph normalization", () => {
       expect.objectContaining({ id: "e-1-data-2-data", source: "1", target: "2" }),
     ]);
     expect(graph.settings).toEqual({ version: "1.0" });
+  });
+
+  it("does not treat persisted x/y coordinates as node content changes", () => {
+    const baseline = {
+      nodes: [{
+        id: "1",
+        type: "source",
+        label: "Audio Upload",
+        description: "Uploaded audio file ingestion.",
+        position: { x: 0, y: 0 },
+        template: "Custom",
+        ports: {
+          inputs: [],
+          outputs: [{ id: "data", name: "data", type: "any", required: true, description: "Source data." }],
+        },
+        definition_id: "core.source",
+        definition_version: 1,
+        configuration_status: "unconfigured",
+      }],
+      edges: [],
+    };
+    const persistedResponse = {
+      nodes: [{
+        id: "1",
+        type: "source",
+        label: "Audio Upload",
+        description: "Uploaded audio file ingestion.",
+        x: 0,
+        y: 0,
+        template: "Custom",
+        template_label: "Custom",
+        ports: {
+          inputs: [],
+          outputs: [{ id: "data", name: "data", type: "any", required: true, description: "Source data." }],
+        },
+        definition_id: "core.source",
+        definition_version: 1,
+        configuration_status: "unconfigured",
+      }],
+      edges: [],
+    };
+
+    expect(hasGraphContentChanges(baseline, persistedResponse)).toBe(false);
   });
 
   it("creates the compact graph contract consumed by agents", () => {

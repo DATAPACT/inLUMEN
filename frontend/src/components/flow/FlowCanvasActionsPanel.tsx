@@ -2,6 +2,8 @@ import React from 'react';
 import { Panel } from 'reactflow';
 import { AlertTriangle, CircleDot, Download, Redo2, Save, ShieldCheck, Trash2, Undo2, Upload } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 
 type FlowCanvasActionsPanelProps = {
   fileInputRef: React.RefObject<HTMLInputElement>;
@@ -21,6 +23,8 @@ type FlowCanvasActionsPanelProps = {
   canUndo: boolean;
   canRedo: boolean;
   isHistoryRestoring?: boolean;
+  previewGraphChanges?: boolean;
+  onPreviewGraphChangesChange?: (enabled: boolean) => void;
 };
 
 export const FlowCanvasActionsPanel = ({
@@ -41,6 +45,8 @@ export const FlowCanvasActionsPanel = ({
   canUndo,
   canRedo,
   isHistoryRestoring = false,
+  previewGraphChanges = true,
+  onPreviewGraphChangesChange,
 }: FlowCanvasActionsPanelProps) => (
   <>
     <Panel position="top-center" className="mt-2 w-max max-w-[calc(100%_-_1.5rem)]">
@@ -49,6 +55,22 @@ export const FlowCanvasActionsPanel = ({
         <Save className="h-3.5 w-3.5" />
         Save
       </Button>
+      <div
+        className="mx-1 flex items-center gap-2 rounded-lg border border-border/80 bg-background/50 px-2 py-1"
+        title="Review AI graph changes before applying them"
+      >
+        <Switch
+          id="preview-graph-changes"
+          checked={previewGraphChanges}
+          onCheckedChange={onPreviewGraphChangesChange}
+          disabled={isHistoryRestoring}
+          aria-label="Preview AI graph changes before applying"
+          className="scale-75"
+        />
+        <Label htmlFor="preview-graph-changes" className="cursor-pointer whitespace-nowrap text-[11px] font-medium">
+          Review AI changes
+        </Label>
+      </div>
       {saveStatus}
       <Button
         size="sm"

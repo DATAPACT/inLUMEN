@@ -107,7 +107,11 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
     const nodeData = hasNestedData
       ? nestedData
       : Object.fromEntries(
-        Object.entries(rawNode).filter(([key]) => !["id", "position", "data"].includes(key)),
+        // Agent snapshots use `position`, while the persisted graph endpoint
+        // flattens coordinates as `x`/`y`. Coordinates belong to the React
+        // Flow position, never to the durable node content used for change
+        // detection.
+        Object.entries(rawNode).filter(([key]) => !["id", "position", "data", "x", "y"].includes(key)),
       );
     const rawPosition = objectValue(rawNode.position);
     const position = {
@@ -243,6 +247,51 @@ export const normalizeGraph = (data: unknown): NormalizedGraph => {
   };
 };
 
+const GRAPH_UI_FIELDS = new Set([
+  "selected",
+  "dragging",
+  "positionAbsolute",
+  "width",
+  "height",
+  "measured",
+  "validation_issues",
+  "connected_ports",
+]);
+
+const stableGraphValue = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(stableGraphValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !GRAPH_UI_FIELDS.has(key))
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, item]) => [key, stableGraphValue(item)]),
+  );
+};
+
+/** Compare pipeline content while ignoring timestamps and canvas layout. */
+export const graphContentSignature = (data: unknown) => {
+  const graph = normalizeGraph(data);
+  const nodes = graph.nodes
+    .map((node) => ({
+      id: String(node.id),
+      data: stableGraphValue(node.data || {}),
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  const edges = graph.edges
+    .map((edge) => ({
+      source: String(edge.source),
+      sourceHandle: String(edge.sourceHandle || ""),
+      target: String(edge.target),
+      targetHandle: String(edge.targetHandle || ""),
+    }))
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return JSON.stringify({ nodes, edges });
+};
+
+export const hasGraphContentChanges = (before: unknown, after: unknown) =>
+  graphContentSignature(before) !== graphContentSignature(after);
+
 export const createAgentGraphSnapshot = (graph: NormalizedGraph): AgentGraphSnapshot => ({
   updated_at: graph.updated_at,
   ...(graph.settings ? { settings: graph.settings } : {}),
@@ -305,6 +354,66 @@ export const getNextNumericNodeId = (nodes: Node[], fallback = 1) => {
     .filter((value) => Number.isFinite(value));
 
   return numericIds.length > 0 ? Math.max(...numericIds) + 1 : fallback;
+};
+
+/**
+ * Close the horizontal gap left by deleting a node from a simple chain.
+ * Branches and merges are left untouched because their layout needs an
+ * explicit branch-aware arrangement rather than a blind horizontal shift.
+ */
+export const compactGraphAfterNodeRemoval = (
+  nodes: Node[],
+  edges: Edge[],
+  removedNodeIds: string[],
+): Node[] => {
+  const removed = new Set(removedNodeIds.map(String));
+  if (removed.size === 0) return nodes;
+
+  const activeEdges = edges.filter(
+    (edge) => !removed.has(String(edge.source)) && !removed.has(String(edge.target)),
+  );
+  const positions = new Map(nodes.map((node) => [String(node.id), node.position]));
+  const compactedIds = new Set<string>();
+
+  for (const removedId of removed) {
+    const sourceEdges = edges.filter((edge) => String(edge.target) === removedId);
+    const targetEdges = edges.filter((edge) => String(edge.source) === removedId);
+    if (sourceEdges.length > 1 || targetEdges.length !== 1) continue;
+
+    const removedNode = nodes.find((node) => String(node.id) === removedId);
+    const nextId = String(targetEdges[0]?.target || "");
+    const nextNode = nodes.find((node) => String(node.id) === nextId);
+    if (!removedNode || !nextNode || removed.has(nextId)) continue;
+
+    const shift = Number(nextNode.position.x) - Number(removedNode.position.x);
+    if (!Number.isFinite(shift) || shift <= 0) continue;
+
+    const queue = [nextId];
+    const downstream = new Set<string>();
+    while (queue.length > 0) {
+      const currentId = queue.shift()!;
+      if (downstream.has(currentId)) continue;
+      downstream.add(currentId);
+      activeEdges
+        .filter((edge) => String(edge.source) === currentId)
+        .forEach((edge) => {
+          const childId = String(edge.target);
+          if (!downstream.has(childId)) queue.push(childId);
+        });
+    }
+
+    downstream.forEach((nodeId) => {
+      const position = positions.get(nodeId);
+      if (position) positions.set(nodeId, { ...position, x: position.x - shift });
+      compactedIds.add(nodeId);
+    });
+  }
+
+  if (compactedIds.size === 0) return nodes;
+  return nodes.map((node) => {
+    const position = positions.get(String(node.id));
+    return position ? { ...node, position } : node;
+  });
 };
 
 export const downloadJsonFile = (data: unknown, fileName: string) => {

@@ -150,6 +150,10 @@ class PublicApiTest(unittest.TestCase):
         self.assertIn("/agentic_generate_yaml", schema["paths"])
         self.assertIn("/simple_chat", schema["paths"])
         self.assertIn("/simple_chat/cancel", schema["paths"])
+        chat_request = schema["components"]["schemas"]["ChatRequest"]["properties"]
+        self.assertEqual("boolean", chat_request["preview_changes"]["type"])
+        chat_sync = schema["components"]["schemas"]["ChatResponse"]["properties"]["sync"]["properties"]
+        self.assertEqual("boolean", chat_sync["preview_pending"]["type"])
         self.assertFalse(any("sim-pipe" in path for path in schema["paths"]))
         self.assertIn("/openapi.json", schema["paths"])
         self.assertEqual(["Health"], schema["paths"]["/health"]["get"]["tags"])

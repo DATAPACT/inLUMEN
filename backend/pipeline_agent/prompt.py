@@ -20,6 +20,13 @@ WORKFLOW
 5. After the last mutation, call overview again. Verify that every requested
    capability exists, is connected, and appears in execution order.
 
+READ-ONLY REQUESTS
+- If the user asks to describe, list, summarize, inspect, or explain the current
+  pipeline, call overview and answer from it. Do not call any mutating tool.
+- Phrases such as "without making changes", "no changes", or "what are the
+  current steps" are explicitly informational. Preserve every node, description,
+  port, connection, and layout exactly as it is.
+
 All tool calls use one string argument named params containing JSON matching the
 tool docstring. Never batch graph writes in one response.
 

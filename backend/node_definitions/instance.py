@@ -30,11 +30,20 @@ def definition_properties_from_data(data: Any) -> dict[str, Any]:
     implementation = data.get("implementation")
     if not isinstance(implementation, dict):
         implementation = {}
-    implementation = resolve_implementation_plan(
-        implementation,
-        label=str(data.get("label") or ""),
-        description=str(data.get("description") or ""),
-    )
+
+    # A high-level pipeline design is allowed to describe a task as
+    # "Speech-to-Text" or "Sentiment Analysis" without choosing its runtime
+    # implementation.  Resolving a model plan from the label here silently
+    # turns that design into runtime metadata.  The next agent edit then sees
+    # an implementation payload without a managed implementation kind and is
+    # rejected by the graph guardrail.  Only resolve metadata that the user or
+    # a later runtime/codegen phase explicitly attached.
+    if implementation:
+        implementation = resolve_implementation_plan(
+            implementation,
+            label=str(data.get("label") or ""),
+            description=str(data.get("description") or ""),
+        )
 
     properties: dict[str, Any] = {}
     template = data.get("template")

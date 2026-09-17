@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from copy import deepcopy
 from dataclasses import dataclass
 
 from chat_state import clear_state_from_disk, load_state_from_disk, save_state_to_disk
 from graph_client import (
+    clear_preview_workspace,
     fetch_pipeline_graph,
     save_active_pipeline_version,
     sync_backend_to_canvas_graph,
@@ -18,6 +20,7 @@ from pipeline_agent.context import (
     _build_agent_task,
     _graph_counts,
     _safe_assistant_message,
+    is_read_only_pipeline_request,
 )
 from pipeline_agent.guardrails import (
     _build_graph_sync_guardrail,
@@ -60,6 +63,7 @@ async def _run_pipeline_editor_turn(
     llm_config: LLMConfig,
     authorization: str | None,
     cancellation_state: dict,
+    preview_workspace_id: str | None = None,
 ) -> PipelineEditorTurnResult:
     """Reconcile, run, validate/repair, persist, and return one agent turn."""
     before_graph, before_error = await _fetch_graph_safely(authorization)
@@ -68,7 +72,7 @@ async def _run_pipeline_editor_turn(
             f"Could not read the persisted pipeline before the agent turn: {before_error}"
         )
 
-    if canvas_graph is not None:
+    if canvas_graph is not None and preview_workspace_id is None:
         try:
             await sync_backend_to_canvas_graph(
                 canvas_graph,
@@ -88,28 +92,93 @@ async def _run_pipeline_editor_turn(
             )
 
     visible_before_graph = canvas_graph or before_graph
-    if isinstance(visible_before_graph, dict):
+    agent_backend_graph = before_graph
+    if preview_workspace_id is not None:
+        if not isinstance(visible_before_graph, dict):
+            raise RuntimeError("Could not create a preview without a readable pipeline graph.")
+        try:
+            # Preview turns start from the visible design in an isolated
+            # workspace; they never reconcile the browser graph into live data.
+            await sync_backend_to_canvas_graph(
+                visible_before_graph,
+                "main",
+                "Main",
+                authorization=authorization,
+                workspace_id=preview_workspace_id,
+            )
+        except Exception as exc:
+            raise RuntimeError("Could not prepare an isolated workspace for the graph preview.") from exc
+        try:
+            # Give the agent the persisted staged snapshot as its backend
+            # context. The browser snapshot is intentionally kept separate
+            # below so follow-up edits can compare the UI and graph state.
+            agent_backend_graph = await fetch_pipeline_graph(
+                authorization=authorization,
+                workspace_id=preview_workspace_id,
+            )
+        except Exception as exc:
+            raise RuntimeError("Could not verify the isolated graph before the preview turn.") from exc
+
+    if isinstance(visible_before_graph, dict) and preview_workspace_id is None:
         cancellation_state["graph"] = deepcopy(visible_before_graph)
     team = build_pipeline_editing_team(
         llm_config=llm_config,
         authorization=authorization,
         provenance_context={"user_query": user_message, "session_id": session_id},
+        workspace_id=preview_workspace_id,
+        preview_mode=preview_workspace_id is not None,
     )
     team_state = load_state_from_disk(session_id)
     if team_state:
         await team.load_state(team_state)
 
     result = await team.run(
-        task=_build_agent_task(user_message, canvas_graph, before_graph)
+        task=_build_agent_task(user_message, canvas_graph, agent_backend_graph)
     )
     assistant_message = _assistant_message_from_result(result)
-    after_graph, after_error = await _fetch_graph_safely(authorization)
+    try:
+        after_graph = await fetch_pipeline_graph(
+            authorization=authorization,
+            **({"workspace_id": preview_workspace_id} if preview_workspace_id else {}),
+        )
+        after_error = None
+    except Exception as exc:
+        after_graph, after_error = None, str(exc)
     sync = _build_graph_sync_guardrail(
         visible_before_graph,
         after_graph,
         user_message,
         after_error,
     )
+
+    # Informational requests must never turn model paraphrasing or an accidental
+    # tool write into a real edit or a Review AI proposal. Preview workspaces can
+    # simply be discarded; direct turns restore the visible graph before any
+    # active-version save occurs below.
+    if is_read_only_pipeline_request(user_message) and sync.get("graph_changed"):
+        if preview_workspace_id is None:
+            if not isinstance(visible_before_graph, dict):
+                raise RuntimeError("No pre-turn graph snapshot is available for a read-only request.")
+            try:
+                await sync_backend_to_canvas_graph(
+                    visible_before_graph,
+                    active_version_uid,
+                    active_version_name,
+                    authorization=authorization,
+                )
+                after_graph = deepcopy(visible_before_graph)
+                after_error = None
+            except Exception as exc:
+                after_error = str(exc)
+        else:
+            after_graph = deepcopy(visible_before_graph)
+            after_error = None
+        sync = _build_graph_sync_guardrail(
+            visible_before_graph,
+            after_graph,
+            user_message,
+            after_error,
+        )
 
     if (
         not sync["guardrail_passed"]
@@ -127,7 +196,14 @@ async def _run_pipeline_editor_turn(
         repair_message = _assistant_message_from_result(repair_result)
         if repair_message:
             assistant_message = repair_message
-        after_graph, repaired_error = await _fetch_graph_safely(authorization)
+        try:
+            after_graph = await fetch_pipeline_graph(
+                authorization=authorization,
+                **({"workspace_id": preview_workspace_id} if preview_workspace_id else {}),
+            )
+            repaired_error = None
+        except Exception as exc:
+            after_graph, repaired_error = None, str(exc)
         sync = _build_graph_sync_guardrail(
             visible_before_graph,
             after_graph,
@@ -139,7 +215,7 @@ async def _run_pipeline_editor_turn(
     if not sync["guardrail_passed"] and sync.get("status") == "invalid":
         failure_messages = list(sync.get("validation_errors") or [])
         rollback_error = None
-        if sync["graph_changed"]:
+        if sync["graph_changed"] and preview_workspace_id is None:
             try:
                 if not isinstance(visible_before_graph, dict):
                     raise RuntimeError("No pre-turn graph snapshot is available.")
@@ -187,7 +263,7 @@ async def _run_pipeline_editor_turn(
             f"from before this request. Validation details: {reason}"
         )
 
-    if sync["guardrail_passed"] and isinstance(after_graph, dict):
+    if sync["guardrail_passed"] and isinstance(after_graph, dict) and preview_workspace_id is None:
         pipeline = (
             after_graph.get("pipeline")
             if isinstance(after_graph.get("pipeline"), dict)
@@ -217,15 +293,32 @@ async def _run_pipeline_editor_turn(
             sync["guardrail_passed"] = False
             sync["graph_safe_to_apply"] = True
 
-    if sync["guardrail_passed"]:
-        save_state_to_disk(session_id, await team.save_state())
-    else:
-        clear_state_from_disk(session_id)
+    # Until the user accepts a proposal, its tool history is not an accurate
+    # reflection of the live graph. Keep the prior chat state unchanged.
+    if preview_workspace_id is None:
+        if sync["guardrail_passed"]:
+            save_state_to_disk(session_id, await team.save_state())
+        else:
+            clear_state_from_disk(session_id)
 
     # Final trust boundary before API serialization. Preserve normal Copilot
     # prose; replace only content that contains a tool envelope, tool result, or
     # persisted-record signature. The replacement is derived from the validated
     # graph and therefore cannot repeat the leaked transcript.
+    if preview_workspace_id is not None and isinstance(after_graph, dict):
+        after_graph = deepcopy(after_graph)
+        pipeline = after_graph.get("pipeline")
+        if isinstance(pipeline, dict):
+            pipeline["active_version_uid"] = active_version_uid or "main"
+            pipeline["active_version_name"] = active_version_name or "Main"
+            pipeline["version"] = active_version_name or "Main"
+        if sync["guardrail_passed"] and sync.get("graph_changed"):
+            sync["status"] = "preview"
+            sync["preview_pending"] = True
+            sync["message"] = "Review the proposed graph. Your saved pipeline is unchanged until you apply it."
+        elif sync["guardrail_passed"]:
+            sync["message"] = "No graph changes were made. Your saved pipeline is unchanged."
+
     assistant_message = _safe_assistant_message(assistant_message, after_graph)
 
     return PipelineEditorTurnResult(assistant_message, after_graph, sync)
@@ -240,9 +333,11 @@ async def run_pipeline_editor_turn(
     session_id: str,
     llm_config: LLMConfig,
     authorization: str | None,
+    preview_changes: bool = False,
 ) -> PipelineEditorTurnResult:
-    """Run one agent turn and restore its pre-turn graph if it is cancelled."""
+    """Run one agent turn, isolating previews and restoring live turns on cancel."""
     cancellation_state: dict = {}
+    preview_workspace_id = str(uuid.uuid4()) if preview_changes else None
     try:
         return await _run_pipeline_editor_turn(
             user_message=user_message,
@@ -253,6 +348,7 @@ async def run_pipeline_editor_turn(
             llm_config=llm_config,
             authorization=authorization,
             cancellation_state=cancellation_state,
+            preview_workspace_id=preview_workspace_id,
         )
     except asyncio.CancelledError:
         current_task = asyncio.current_task()
@@ -273,8 +369,18 @@ async def run_pipeline_editor_turn(
             except Exception as exc:
                 rollback_error = str(exc)
                 print("[pipeline_agent.service] Cancellation rollback failed:", exc)
-        clear_state_from_disk(session_id)
+        if preview_workspace_id is None:
+            clear_state_from_disk(session_id)
         raise PipelineEditorTurnCancelled(
-            rollback_applied=rollback_applied,
+            rollback_applied=True if preview_workspace_id is not None else rollback_applied,
             detail=rollback_error,
         ) from None
+    finally:
+        if preview_workspace_id is not None:
+            try:
+                await asyncio.shield(clear_preview_workspace(
+                    preview_workspace_id,
+                    authorization=authorization,
+                ))
+            except Exception as exc:
+                print("[pipeline_agent.service] Failed to clean up preview workspace:", exc)

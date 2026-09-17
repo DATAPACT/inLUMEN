@@ -60,6 +60,7 @@ import {
   downloadJsonFile,
   getNextNumericNodeId,
   normalizeGraph,
+  compactGraphAfterNodeRemoval,
   type AgentGraphSnapshot,
   type NormalizedGraph,
 } from '@/features/flow/flowGraph';
@@ -132,6 +133,8 @@ interface FlowCanvasProps {
   onDisplayModeChange?: (advanced: boolean) => void;
   followAssistantDrawing?: boolean;
   workspaceResetKey?: number;
+  previewGraphChanges?: boolean;
+  onPreviewGraphChangesChange?: (enabled: boolean) => void;
 }
 
 export interface FlowCanvasRef {
@@ -509,6 +512,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   onDisplayModeChange,
   followAssistantDrawing = false,
   workspaceResetKey = 0,
+  previewGraphChanges = true,
+  onPreviewGraphChangesChange,
 }, ref) => {
   const [workspaceStorage] = useState(() => getWorkspaceStorage());
   const downloadedDraftSignatureRef = useRef<string | null>(null);
@@ -1544,7 +1549,28 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         void deleteNodeFromBackend(id).catch(reportPersistenceError);
       });
 
-      setNodes((currentNodes) => applyNodeChanges(changes, currentNodes));
+      setNodes((currentNodes) => {
+        const nextNodes = applyNodeChanges(changes, currentNodes);
+        if (removedNodeIds.length === 0) return nextNodes;
+
+        const compactedNodes = compactGraphAfterNodeRemoval(currentNodes, edges, removedNodeIds);
+        const currentPositions = new Map(
+          currentNodes.map((node) => [String(node.id), node.position]),
+        );
+        const compactedPositions = new Map(
+          compactedNodes
+            .filter((node) => {
+              const currentPosition = currentPositions.get(String(node.id));
+              return currentPosition
+                && (currentPosition.x !== node.position.x || currentPosition.y !== node.position.y);
+            })
+            .map((node) => [String(node.id), node.position]),
+        );
+        return nextNodes.map((node) => {
+          const position = compactedPositions.get(String(node.id));
+          return position ? { ...node, position } : node;
+        });
+      });
       for (const change of changes) {
         if (change.type === 'position' && change.position && !change.dragging && positionChanged(change)) {
           pushHistorySnapshot(undefined, { coalesceKey: 'keyboard-position' });
@@ -1560,7 +1586,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         onNodeSelect(null, { openInspector: false });
       }
     },
-    [nodes, onNodeSelect, markLocalWrite, onCanvasEdited, pushHistorySnapshot]
+    [edges, nodes, onNodeSelect, markLocalWrite, onCanvasEdited, pushHistorySnapshot]
   );
 
   const onEdgesChange = useCallback(
@@ -2232,6 +2258,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           canUndo={historyAvailability.canUndo}
           canRedo={historyAvailability.canRedo}
           isHistoryRestoring={isHistoryRestoring}
+          previewGraphChanges={previewGraphChanges}
+          onPreviewGraphChangesChange={onPreviewGraphChangesChange}
         />
       </ReactFlow>
       </PortDisplayContext.Provider>
@@ -2941,6 +2969,8 @@ export const WrappedFlowCanvas = ({
   onDisplayModeChange,
   followAssistantDrawing,
   workspaceResetKey,
+  previewGraphChanges,
+  onPreviewGraphChangesChange,
   flowCanvasRef,
 }: WrappedFlowCanvasProps) => (
   <ReactFlowProvider>
@@ -2961,6 +2991,8 @@ export const WrappedFlowCanvas = ({
       onDisplayModeChange={onDisplayModeChange}
       followAssistantDrawing={followAssistantDrawing}
       workspaceResetKey={workspaceResetKey}
+      previewGraphChanges={previewGraphChanges}
+      onPreviewGraphChangesChange={onPreviewGraphChangesChange}
     />
   </ReactFlowProvider>
 );

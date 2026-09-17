@@ -1,7 +1,7 @@
 """Validation and repair policy for pipeline-agent graph mutations."""
 
 import re
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 
 from pipeline_agent.context import (
     _build_agent_task,
@@ -230,6 +230,48 @@ def _requested_topology_errors(graph: dict | None, user_message: str) -> list[st
         )
     return errors
 
+
+def _new_graph_validation_errors(
+    before_graph: dict | None,
+    after_graph: dict | None,
+) -> dict:
+    """Return only blocking validation issues introduced by this edit.
+
+    Existing designs may contain runtime configuration issues that are outside
+    the design agent's scope. They should not prevent an otherwise valid
+    structural edit, while any new validation error must still block it.
+    """
+    before_report = (
+        validate_pipeline_graph(before_graph)
+        if isinstance(before_graph, dict) and _graph_counts(before_graph)[0] > 0
+        else {"issues": []}
+    )
+    after_report = validate_pipeline_graph(after_graph)
+
+    def issue_key(issue: dict) -> tuple[str, str, str, str, str]:
+        return tuple(
+            str(issue.get(key) or "")
+            for key in ("category", "code", "node_id", "edge_id", "message")
+        )
+
+    existing = Counter(
+        issue_key(issue)
+        for issue in before_report.get("issues", [])
+        if isinstance(issue, dict) and issue.get("severity") == "error"
+    )
+    introduced = []
+    for issue in after_report.get("issues", []):
+        if not isinstance(issue, dict) or issue.get("severity") != "error":
+            continue
+        key = issue_key(issue)
+        if existing[key]:
+            existing[key] -= 1
+        else:
+            introduced.append(issue)
+
+    return {"valid": not introduced, "issues": introduced}
+
+
 def _build_graph_sync_guardrail(
     before_graph: dict | None,
     after_graph: dict | None,
@@ -242,7 +284,7 @@ def _build_graph_sync_guardrail(
     graph_changed = _graph_signature(before_graph) != _graph_signature(after_graph)
     updated_at = after_graph.get("updated_at") if isinstance(after_graph, dict) else None
     validation = (
-        validate_pipeline_graph(after_graph)
+        _new_graph_validation_errors(before_graph, after_graph)
         if graph_changed and after_nodes > 0 and not fetch_error
         else {"valid": True, "issues": []}
     )

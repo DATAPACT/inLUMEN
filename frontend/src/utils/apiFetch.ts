@@ -22,7 +22,11 @@ export const setActiveWorkspaceId = (workspaceId: string | null): void => {
  * when AUTH_ENABLED is true and a token is available.
  * Falls back to a plain fetch if auth is disabled or no token has been received yet.
  */
-export const apiFetch = (url: string, init?: RequestInit): Promise<Response> => {
+export const apiFetch = (
+  url: string,
+  init?: RequestInit,
+  options: { expectedGraphRevision?: string | null } = {},
+): Promise<Response> => {
   const headers = new Headers(init?.headers);
   if (AUTH_ENABLED && _token) headers.set('Authorization', `Bearer ${_token}`);
   if (_workspaceId) headers.set('X-InLumen-Workspace-Id', _workspaceId);
@@ -31,14 +35,23 @@ export const apiFetch = (url: string, init?: RequestInit): Promise<Response> => 
   const graph = /^\/api\/(graph\/|pipeline\/(graph|history\/restore|versions|overview)(\/|$)|reusable-pipelines(\/|$)|nodes\/[^/]+\/files(\/text)?$)/.test(path);
   const send = () => fetch(url, (AUTH_ENABLED && _token) || _workspaceId || headers.has("If-Match") ? { ...init, headers } : init);
   if (mutation && graph) return graphWrite((revision) => {
-    if (revision) headers.set('If-Match', revision);
+    const expectedRevision = options.expectedGraphRevision === undefined
+      ? revision
+      : options.expectedGraphRevision;
+    if (expectedRevision) headers.set('If-Match', expectedRevision);
+    else headers.delete('If-Match');
     return send();
   }, {
-    readGraph: () => {
-      const readHeaders = new Headers(headers);
-      readHeaders.delete('If-Match');
-      return fetch(new URL('/api/pipeline/graph', new URL(url, window.location.origin)), { headers: readHeaders });
-    },
+    ...(options.expectedGraphRevision !== undefined
+      ? { expectedRevision: options.expectedGraphRevision }
+      : {}),
+    ...(options.expectedGraphRevision === undefined ? {
+      readGraph: () => {
+        const readHeaders = new Headers(headers);
+        readHeaders.delete('If-Match');
+        return fetch(new URL('/api/pipeline/graph', new URL(url, window.location.origin)), { headers: readHeaders });
+      },
+    } : {}),
     preservesGraph: path === '/api/reusable-pipelines',
     // Rejected files and reusable pipelines belong to their forms; no graph write occurred.
     validationStatuses: /^\/api\/(nodes\/[^/]+\/files(\/text)?|reusable-pipelines(\/.*)?)$/.test(path) ? [400, 404, 413, 415, 422] : undefined,

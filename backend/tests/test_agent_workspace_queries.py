@@ -3,7 +3,7 @@ import json
 import os
 import unittest
 import uuid
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from neo4j_api import _base_driver, _scope_cypher, _validate_workspace_cypher
 from pipeline_agent.tools import build_pipeline_editor_tools
@@ -24,6 +24,33 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
         self.assertTrue(captured)
         self.assertIn("[:FLOWS_TO]->(:STEP)", captured[-1])
         self.assertNotEqual(_scope_cypher(captured[-1], "alice"), _scope_cypher(captured[-1], "bob"))
+
+    def test_preview_uses_existing_reusable_catalog_but_rejects_new_catalog_writes(self):
+        run_query = AsyncMock(return_value="[]")
+        tools = build_pipeline_editor_tools(
+            workspace_id="preview-workspace",
+            preview_mode=True,
+        )
+        list_reusable = next(tool for tool in tools if tool.__name__ == "list_reusable_pipelines")
+        with patch("pipeline_agent.tools.run_neo4j_query", run_query):
+            asyncio.run(list_reusable("{}"))
+            self.assertEqual("list_reusable_pipelines", run_query.await_args.args[1])
+            self.assertIsNone(run_query.await_args.kwargs["workspace_id"])
+
+            run_query.reset_mock()
+            create_reusable = next(tool for tool in tools if tool.__name__ == "create_reusable_pipeline")
+            with patch("pipeline_agent.tools.validate_pipeline_graph", return_value={"valid": True}), \
+                 patch("pipeline_agent.tools.derive_subpipeline_interface", return_value={"inputs": [{}], "outputs": [{}]}), \
+                 patch("pipeline_agent.tools.public_ports_for_interface", return_value={"inputs": [{}], "outputs": [{}]}):
+                with self.assertRaisesRegex(RuntimeError, "cannot be included in a graph preview"):
+                    asyncio.run(create_reusable(json.dumps({
+                        "name": "Preview reusable",
+                        "graph": {"nodes": [], "edges": []},
+                    })))
+
+            run_query.assert_awaited_once()
+            self.assertEqual("find_reusable_pipeline_by_name", run_query.await_args.args[1])
+            self.assertIsNone(run_query.await_args.kwargs["workspace_id"])
 
     @unittest.skipUnless(os.getenv("RUN_NEO4J_INTEGRATION") == "1", "requires local Neo4j")
     def test_real_two_workspace_pipeline_creation_and_isolation(self):
