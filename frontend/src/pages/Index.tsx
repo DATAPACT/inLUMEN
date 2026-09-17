@@ -9,12 +9,14 @@ const PropertiesPanel = lazy(() => import('@/components/PropertiesPanel').then((
 import { Toolbar } from '@/components/Toolbar';
 import { WrappedFlowCanvas, FlowCanvasRef } from '@/components/FlowCanvas';
 import { ChatPanel } from '@/components/chat/ChatPanel';
+const GraphChangePreviewDialog = lazy(() => import('@/components/chat/GraphChangePreviewDialog').then((module) => ({ default: module.GraphChangePreviewDialog })));
 const VersionsPanel = lazy(() => import('@/components/versions/VersionsPanel').then((module) => ({ default: module.VersionsPanel })));
 import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
 import { sanitizeAssistantMessage } from '@/features/chat/messageSafety';
 import { CHAT_PROMPT_SUGGESTIONS } from '@/features/chat/promptSuggestions';
 import {
   MAIN_PIPELINE_VERSION_UID,
+  applyPipelineGraphPreview,
   clearPipelineWorkspace,
   fetchProvenanceProvO,
   fetchProvenanceReport,
@@ -22,7 +24,10 @@ import {
   savePipelineActiveVersion,
   setPipelineVersionAsMain,
   type PipelineVersionSummary,
+  type PipelineVersionGraph,
 } from '@/features/flow/flowPersistence';
+import { getGraphRevision } from '@/features/flow/persistenceState';
+import { hasGraphContentChanges, normalizeGraph } from '@/features/flow/flowGraph';
 import { notifyReusablePipelineCatalogChanged } from '@/features/flow/subpipelinePersistence';
 import { toast } from 'sonner';
 import {
@@ -81,6 +86,7 @@ const CHAT_HISTORY_KEY = "inlumen-chat-history";
 const PIPELINE_PROMPT_KEY = "inlumen-pipeline-high-level-prompt";
 const PANEL_STATE_KEY = "inlumen-panel-preferences";
 const THEME_KEY = "inlumen-theme";
+const GRAPH_PREVIEW_KEY = "inlumen-preview-graph-changes";
 const CHAT_PROCESSING_TOAST_ID = "pipeline-chat-processing";
 const createChatTurnId = () => {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -93,6 +99,17 @@ type RightPanel = 'inspector' | 'chat' | 'versions' | null;
 type PanelPreferences = {
   libraryOpen: boolean;
   rightPanel: RightPanel;
+};
+
+type PendingGraphPreview = {
+  baseline: unknown;
+  proposal: unknown;
+  expectedRevision: string | null;
+  versionUid: string;
+  versionName: string;
+  requestMessage: string;
+  stale: boolean;
+  conversationMessageIndex: number;
 };
 
 const DEFAULT_PANEL_PREFERENCES: PanelPreferences = {
@@ -128,6 +145,14 @@ const readSavedTheme = (workspaceStorage: WorkspaceStorage = getWorkspaceStorage
   }
 };
 
+const readGraphPreviewPreference = (workspaceStorage: WorkspaceStorage = getWorkspaceStorage()) => {
+  try {
+    return workspaceStorage.getItem(GRAPH_PREVIEW_KEY) !== "false";
+  } catch {
+    return true;
+  }
+};
+
 const createDownloadTimestamp = () =>
   new Date().toISOString().replace(/[:.]/g, "-");
 
@@ -136,6 +161,36 @@ const safeDownloadLabel = (value: string) =>
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "") || "main";
+
+const graphProposalStatusLabel = (status: ChatMessage['graphProposalStatus']) => {
+  if (status === 'pending') return 'Draft proposal · awaiting review';
+  if (status === 'applied') return 'Proposal applied to canvas';
+  if (status === 'discarded') return 'Proposal discarded · canvas unchanged';
+  return '';
+};
+
+const graphNodeCount = (graph: unknown) =>
+  graph && typeof graph === "object" && Array.isArray((graph as { nodes?: unknown }).nodes)
+    ? (graph as { nodes: unknown[] }).nodes.length
+    : 0;
+
+const describeGraphForChat = (graph: unknown) => {
+  const normalized = normalizeGraph(graph);
+  const labels = [...normalized.nodes]
+    .sort((a, b) => (
+      Number(a.position?.x || 0) - Number(b.position?.x || 0)
+      || Number(a.position?.y || 0) - Number(b.position?.y || 0)
+      || String(a.id).localeCompare(String(b.id))
+    ))
+    .map((node) => String(node.data?.label || node.id || "Untitled step").trim())
+    .filter(Boolean);
+  return labels.length > 0 ? labels.join(" → ") : "an empty pipeline";
+};
+
+const discardedProposalMessage = (baseline: unknown) => (
+  `The proposal was discarded. Your saved pipeline was left unchanged. `
+  + `Current pipeline: ${describeGraphForChat(baseline)}.`
+);
 
 const downloadBlob = (blob: Blob, filename: string) => {
   const url = URL.createObjectURL(blob);
@@ -160,11 +215,17 @@ const normalizeSavedConversation = (value: unknown): ChatMessage[] => {
     const entry = message as Partial<ChatMessage>;
     if (entry.role !== "user" && entry.role !== "assistant") return [];
     if (typeof entry.content !== "string") return [];
+    const graphProposalStatus = entry.graphProposalStatus === "pending"
+      || entry.graphProposalStatus === "applied"
+      || entry.graphProposalStatus === "discarded"
+      ? entry.graphProposalStatus
+      : undefined;
     return [{
       role: entry.role,
       content: entry.role === "assistant"
         ? sanitizeAssistantMessage(entry.content)
         : entry.content,
+      ...(graphProposalStatus ? { graphProposalStatus } : {}),
     }];
   });
 };
@@ -209,6 +270,7 @@ type ChatApiResponse = {
     node_count?: number;
     edge_count?: number;
     updated_at?: string | null;
+    preview_pending?: boolean;
     validation_errors?: string[];
   };
 };
@@ -227,6 +289,9 @@ const Index = () => {
   });
   const [isLightMode, setIsLightMode] = useState(readSavedTheme);
   const [panelPreferences, setPanelPreferences] = useState<PanelPreferences>(readPanelPreferences);
+  const [previewGraphChanges, setPreviewGraphChanges] = useState(readGraphPreviewPreference);
+  const [pendingGraphPreview, setPendingGraphPreview] = useState<PendingGraphPreview | null>(null);
+  const [isApplyingGraphPreview, setIsApplyingGraphPreview] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSharedLLMSettingsOpen, setIsSharedLLMSettingsOpen] = useState(false);
@@ -239,6 +304,8 @@ const Index = () => {
     turnId: string;
     controller: AbortController;
     beforeGraph: ReturnType<FlowCanvasRef["getCurrentGraph"]> | null;
+    previewGraphChanges: boolean;
+    previewBaseRevision: string | null;
   } | null>(null);
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
   const [pipelineLastUpdate, setPipelineLastUpdate] = useState<string>('Never');
@@ -303,6 +370,10 @@ const Index = () => {
   useEffect(() => {
     workspaceStorage.setItem(PANEL_STATE_KEY, JSON.stringify(panelPreferences));
   }, [workspaceStorage, panelPreferences]);
+
+  useEffect(() => {
+    workspaceStorage.setItem(GRAPH_PREVIEW_KEY, String(previewGraphChanges));
+  }, [workspaceStorage, previewGraphChanges]);
 
   useEffect(() => {
     if (pipelineHighLevelPrompt) {
@@ -538,9 +609,28 @@ const Index = () => {
     const turnId = createChatTurnId();
     const controller = new AbortController();
     const canvasGraph = flowCanvasRef.current?.getCurrentGraph() ?? null;
-    activeChatTurnRef.current = { turnId, controller, beforeGraph: canvasGraph };
+    const baselinePreviewGraph = flowCanvasRef.current?.getCurrentVersionGraph() ?? canvasGraph;
+    const turnVersionUid = activeVersionUidRef.current;
+    const turnVersionName = activeVersionNameRef.current;
+    let previewBaseRevision = getGraphRevision();
+    activeChatTurnRef.current = {
+      turnId,
+      controller,
+      beforeGraph: canvasGraph,
+      previewGraphChanges,
+      previewBaseRevision,
+    };
 
     try {
+      if (previewGraphChanges) {
+        // Include any queued active-version snapshot in the preview's base
+        // revision before asking the assistant to draft against this canvas.
+        await flushActiveVersionSnapshot();
+        previewBaseRevision = getGraphRevision();
+        if (activeChatTurnRef.current?.turnId === turnId) {
+          activeChatTurnRef.current.previewBaseRevision = previewBaseRevision;
+        }
+      }
       const activeCfg = selectedConfig || defaultConfig;
 
       const res = await apiFetch(`${INLUMEN_API_URL}/simple_chat`, {
@@ -552,8 +642,9 @@ const Index = () => {
           session_id: chatSessionId || null,
           user_message: messageText,
           canvas_graph: canvasGraph,
-          active_version_uid: activeVersionUidRef.current,
-          active_version_name: activeVersionNameRef.current,
+          preview_changes: previewGraphChanges,
+          active_version_uid: turnVersionUid,
+          active_version_name: turnVersionName,
           model: activeCfg.model,
           llm_config: buildLLMRequestConfig(activeCfg),
         }),
@@ -601,8 +692,23 @@ const Index = () => {
         setChatSessionId(data.session_id);
       }
 
+      const sync = data.sync;
+      const meaningfulGraphChange = Boolean(
+        data.graph && hasGraphContentChanges(baselinePreviewGraph || { nodes: [], edges: [] }, data.graph),
+      );
+      const isPreviewProposal = Boolean(
+        activeChatTurnRef.current?.previewGraphChanges
+        && sync?.preview_pending
+        && sync?.graph_changed !== false
+        && data.graph
+        && meaningfulGraphChange,
+      );
       const responseText = sanitizeAssistantMessage(data.assistant_message);
-      setConversation(prev => [...prev, { role: 'assistant', content: responseText }]);
+      setConversation(prev => [...prev, {
+        role: 'assistant',
+        content: responseText,
+        ...(isPreviewProposal ? { graphProposalStatus: 'pending' as const } : {}),
+      }]);
 
       if (!flowCanvasRef.current) {
         setCanvasSyncStatus({
@@ -612,7 +718,6 @@ const Index = () => {
         return;
       }
 
-      const sync = data.sync;
       const guardrailPassed = sync?.guardrail_passed !== false;
       const graphSafeToApply = sync?.graph_safe_to_apply ?? guardrailPassed;
       const syncMessage = sync?.message || 'The agent graph could not be verified.';
@@ -626,6 +731,40 @@ const Index = () => {
         toast.warning("Agent graph was not applied", {
           description: syncMessage,
         });
+        return;
+      }
+
+      if (
+        activeChatTurnRef.current?.previewGraphChanges
+        && sync?.preview_pending
+        && sync?.graph_changed !== false
+        && data.graph
+        && meaningfulGraphChange
+      ) {
+        setPendingGraphPreview({
+          baseline: baselinePreviewGraph || { nodes: [], edges: [] },
+          proposal: data.graph,
+          expectedRevision: activeChatTurnRef.current.previewBaseRevision,
+          versionUid: turnVersionUid,
+          versionName: turnVersionName,
+          requestMessage: messageText.trim(),
+          stale: false,
+          conversationMessageIndex: updatedConversation.length,
+        });
+        setCanvasSyncStatus({
+          state: 'idle',
+          message: 'A graph proposal is ready to review. Your saved pipeline is unchanged.',
+          updatedAt: sync?.updated_at ?? null,
+        });
+        toast.info("Graph proposal ready", {
+          description: "Review the changes before applying them to your canvas.",
+        });
+        return;
+      }
+
+      if (activeChatTurnRef.current?.previewGraphChanges) {
+        setCanvasSyncStatus({ state: 'idle', message: syncMessage });
+        toast.info("No graph changes to review", { description: syncMessage });
         return;
       }
 
@@ -687,25 +826,93 @@ const Index = () => {
     }
   };
 
+  const handleDiscardGraphPreview = () => {
+    const preview = pendingGraphPreview;
+    if (!preview) return;
+    setConversation((current) => current.map((message, index) => (
+      index === preview.conversationMessageIndex
+        ? {
+            ...message,
+            content: discardedProposalMessage(preview.baseline),
+            graphProposalStatus: 'discarded' as const,
+          }
+        : message
+    )));
+    setPendingGraphPreview(null);
+    setCanvasSyncStatus({ state: 'idle', message: 'Canvas is ready' });
+    toast.info("Proposal discarded", { description: "Your saved pipeline was left unchanged." });
+  };
+
+  const handleApplyGraphPreview = async () => {
+    const preview = pendingGraphPreview;
+    const flowCanvas = flowCanvasRef.current;
+    if (!preview || !flowCanvas || isApplyingGraphPreview || preview.stale) return;
+    setIsApplyingGraphPreview(true);
+    let graphSaved = false;
+    try {
+      await applyPipelineGraphPreview(
+        preview.proposal as PipelineVersionGraph,
+        preview.versionUid,
+        preview.versionName,
+        preview.expectedRevision || "",
+      );
+      graphSaved = true;
+      const syncedGraph = await flowCanvas.syncFromBackend(preview.proposal, { fitView: true });
+      if (graphNodeCount(preview.baseline) === 0 && syncedGraph.nodes.length > 0) {
+        setPipelineHighLevelPrompt(preview.requestMessage);
+      }
+      scheduleActiveVersionSnapshot();
+      setConversation((current) => current.map((message, index) => (
+        index === preview.conversationMessageIndex
+          ? { ...message, graphProposalStatus: 'applied' as const }
+          : message
+      )));
+      setPendingGraphPreview(null);
+      setCanvasSyncStatus({ state: 'idle', message: 'Graph proposal applied to the canvas.' });
+      toast.success("Graph proposal applied", {
+        description: `${syncedGraph.nodes.length} step${syncedGraph.nodes.length === 1 ? "" : "s"} on the canvas.`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not apply this graph proposal.";
+      if (graphSaved) {
+        setPendingGraphPreview(null);
+        const refreshMessage = `The proposal was saved, but the canvas could not refresh. Reload the saved graph before continuing. ${message}`;
+        setCanvasSyncStatus({ state: 'warning', message: refreshMessage });
+        toast.warning("Proposal saved; refresh needed", { description: refreshMessage });
+        return;
+      }
+      const stale = /out of date|revision could not be verified|saved graph has changed/i.test(message);
+      if (stale) {
+        setPendingGraphPreview((current) => current ? { ...current, stale: true } : current);
+      }
+      setCanvasSyncStatus({ state: stale ? 'warning' : 'error', message });
+      toast.error(stale ? "Proposal needs to be refreshed" : "Could not apply proposal", { description: message });
+    } finally {
+      setIsApplyingGraphPreview(false);
+    }
+  };
+
   const handleStopProcessing = () => {
     const activeTurn = activeChatTurnRef.current;
     if (!activeTurn) return;
 
-    // The visible turn ends synchronously. Restore the immutable pre-turn
-    // snapshot from memory and keep backend polling paused while the server
-    // finishes its own consistency rollback in the background.
+    // A preview never changed the live graph, so cancellation should leave any
+    // local user edits made while the assistant was working alone.
     activeChatTurnRef.current = null;
     activeTurn.controller.abort();
     setIsProcessing(false);
     toast.dismiss(CHAT_PROCESSING_TOAST_ID);
-    if (activeTurn.beforeGraph && flowCanvasRef.current) {
+    if (!activeTurn.previewGraphChanges && activeTurn.beforeGraph && flowCanvasRef.current) {
       flowCanvasRef.current.restoreGraphLocally(activeTurn.beforeGraph);
     }
+    const stoppedMessage = activeTurn.previewGraphChanges
+      ? "Stopped. The graph proposal was discarded; your canvas is unchanged."
+      : "Stopped. Changes from the interrupted turn were discarded.";
     setConversation((current) => [
       ...current,
       {
         role: 'assistant',
-        content: "Stopped. Changes from the interrupted turn were discarded.",
+        content: stoppedMessage,
       },
     ]);
     setCanvasSyncStatus({
@@ -809,6 +1016,9 @@ const Index = () => {
       ...conversation.flatMap((message) => [
         `## ${message.role === "user" ? "You" : "Pipeline Copilot"}`,
         "",
+        ...(message.graphProposalStatus
+          ? [`_${graphProposalStatusLabel(message.graphProposalStatus)}_`, ""]
+          : []),
         message.content,
         "",
       ]),
@@ -1312,8 +1522,10 @@ const Index = () => {
                   onActiveVersionChange={updateActiveVersion}
                   onActiveVersionNameChange={handleActiveVersionNameChange}
                   onPipelineDescriptionChange={setActivePipelineDescription}
-                  followAssistantDrawing={isProcessing}
+                  followAssistantDrawing={isProcessing && !previewGraphChanges}
                   workspaceResetKey={workspaceResetKey}
+                  previewGraphChanges={previewGraphChanges}
+                  onPreviewGraphChangesChange={setPreviewGraphChanges}
                   flowCanvasRef={flowCanvasRef}
                 />
               </div>
@@ -1351,9 +1563,9 @@ const Index = () => {
                       activeConfig={activeConfig}
                       conversation={conversation}
                       conversationEndRef={conversationEndRef}
-                      canvasSyncStatus={canvasSyncStatus}
-                      isProcessing={isProcessing}
-                      userInput={userInput}
+                  canvasSyncStatus={canvasSyncStatus}
+                  isProcessing={isProcessing}
+                  userInput={userInput}
                       promptSuggestions={CHAT_PROMPT_SUGGESTIONS}
                       formatConfigDescription={formatConfigDescription}
                       onUserInputChange={setUserInput}
@@ -1361,9 +1573,9 @@ const Index = () => {
                       onStopProcessing={handleStopProcessing}
                       onClearConversation={handleClearConversation}
                       onSaveConversation={handleSaveConversation}
-                      onExportConversation={handleExportConversation}
-                      onSuggestionClick={handleSuggestionClick}
-                    />
+                  onExportConversation={handleExportConversation}
+                  onSuggestionClick={handleSuggestionClick}
+                />
                   ) : (
                     <Suspense fallback={<p role="status" className="p-4">Loading panel…</p>}><VersionsPanel
                       className="bg-card/95"
@@ -1622,6 +1834,20 @@ const Index = () => {
           </div>
         </DialogContent>
       </Dialog>
+
+      {pendingGraphPreview && (
+        <Suspense fallback={<div role="status" className="fixed inset-0 z-50 grid place-items-center bg-background/70 text-sm text-muted-foreground">Loading graph preview…</div>}>
+          <GraphChangePreviewDialog
+            open
+            baseline={pendingGraphPreview.baseline}
+            proposal={pendingGraphPreview.proposal}
+            stale={pendingGraphPreview.stale}
+            isApplying={isApplyingGraphPreview}
+            onApply={() => { void handleApplyGraphPreview(); }}
+            onDiscard={handleDiscardGraphPreview}
+          />
+        </Suspense>
+      )}
 
       {isSharedLLMSettingsOpen && canManageSharedLLM && <ApplicationLLMSettings
         onClose={() => setIsSharedLLMSettingsOpen(false)}

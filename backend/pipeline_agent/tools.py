@@ -44,16 +44,36 @@ def _agent_query_returned_no_rows(result: object) -> bool:
 def build_pipeline_editor_tools(
     authorization: str | None = None,
     provenance_context: dict | None = None,
+    workspace_id: str | None = None,
+    preview_mode: bool = False,
 ) -> list[Any]:
     """Build request-scoped tools that mutate the persisted pipeline graph."""
 
     async def run_query(query: str, query_type: str) -> str:
         """Run a Cypher query against Neo4j and return results."""
+        if preview_mode and query_type == "create_reusable_pipeline":
+            raise RuntimeError(
+                "Creating a reusable pipeline changes the shared reusable catalog and "
+                "cannot be included in a graph preview. Ask the user to turn off "
+                "Preview graph changes before creating this reusable pipeline."
+            )
+        workspace_id_for_query = workspace_id
+        if preview_mode and query_type in {
+            "list_reusable_pipelines",
+            "resolve_reusable_pipeline_for_creation",
+            "resolve_reusable_pipeline",
+            "find_reusable_pipeline_by_name",
+        }:
+            # Preview workspaces contain only the active design graph. Read the
+            # shared immutable catalog from the authenticated workspace so an
+            # existing Subpipeline can still be designed and validated.
+            workspace_id_for_query = None
         return await run_neo4j_query(
             query,
             query_type,
             authorization=authorization,
             provenance_context=provenance_context,
+            workspace_id=workspace_id_for_query,
         )
 
     async def overview() -> str:
@@ -1610,22 +1630,32 @@ def build_pipeline_editor_tools(
             WITH p, s, incoming, outgoing,
                 s.flow_id AS deletedFlowId,
                 s.label AS deletedLabel,
-                CASE WHEN size(incoming) = 1 THEN incoming[0].node ELSE null END AS previous,
-                CASE WHEN size(outgoing) = 1 THEN outgoing[0].node ELSE null END AS following,
+                CASE WHEN size(incoming) = 1 THEN incoming[0].node ELSE null END AS prev,
+                CASE WHEN size(outgoing) = 1 THEN outgoing[0].node ELSE null END AS next,
                 CASE WHEN size(incoming) = 1 THEN incoming[0].source_port ELSE null END AS previousSourcePort,
                 CASE WHEN size(outgoing) = 1 THEN outgoing[0].target_port ELSE null END AS followingTargetPort
+            OPTIONAL MATCH (next)-[:FLOWS_TO*0..]->(downstream:STEP)
+            WITH p, s, incoming, outgoing, deletedFlowId, deletedLabel,
+                prev, next, previousSourcePort, followingTargetPort,
+                collect(DISTINCT downstream) AS downstreamSteps
+            FOREACH (node IN CASE
+                WHEN size(incoming) <= 1 AND size(outgoing) = 1 THEN downstreamSteps
+                ELSE []
+            END |
+                SET node.x = coalesce(node.x, 0.0) - 300.0
+            )
             FOREACH (_ IN CASE
                 WHEN size(incoming) = 1 AND size(outgoing) = 1 THEN [1]
                 ELSE []
             END |
-                MERGE (previous)-[bridge:FLOWS_TO]->(following)
+                MERGE (prev)-[bridge:FLOWS_TO]->(next)
                 SET bridge.source_port = coalesce(
                         previousSourcePort,
-                        {default_output_port_expression('previous')}
+                        {default_output_port_expression('prev')}
                     ),
                     bridge.target_port = coalesce(
                         followingTargetPort,
-                        {default_input_port_expression('following')}
+                        {default_input_port_expression('next')}
                     )
             )
             DETACH DELETE s

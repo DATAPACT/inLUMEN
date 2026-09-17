@@ -58,6 +58,8 @@ def dispatch_graph_request(
     form: dict | None = None,
     headers: dict | None = None,
     query_capability: object | None = None,
+    internal_workspace_id: str | None = None,
+    preview_cleanup: bool = False,
 ) -> LocalApiResponse:
     return dispatch_flask_request(
         _neo4j_app(),
@@ -70,6 +72,8 @@ def dispatch_graph_request(
         form=form,
         headers=headers,
         **({"query_capability": query_capability} if query_capability is not None else {}),
+        **({"internal_workspace_id": internal_workspace_id} if internal_workspace_id is not None else {}),
+        **({"preview_cleanup": True} if preview_cleanup else {}),
     )
 
 
@@ -100,19 +104,21 @@ def update_pipeline_overview(
 async def fetch_pipeline_graph(
     _graph_backend: str | None = None,
     authorization: str | None = None,
+    workspace_id: str | None = None,
 ) -> dict:
     """Fetch the current pipeline nodes, files and flows from Neo4j."""
     api_name = "in-process Neo4j adapter"
     try:
-        workspace_id = _request_workspace_id()
+        request_workspace_id = _request_workspace_id()
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
+        response = await _await_uncancellable_executor(loop.run_in_executor(
             None,
             lambda: dispatch_graph_request(
                 "neo4j_get_graph",
-                headers=_auth_headers(authorization, workspace_id),
+                headers=_auth_headers(authorization, request_workspace_id),
+                internal_workspace_id=workspace_id,
             ),
-        )
+        ))
         response.raise_for_status()
         return response.json()
     except Exception as exc:
@@ -155,6 +161,7 @@ async def sync_backend_to_canvas_graph(
     active_version_uid: str | None = None,
     active_version_name: str | None = None,
     authorization: str | None = None,
+    workspace_id: str | None = None,
 ) -> dict:
     """Make Neo4j match the visible canvas graph before an agent turn."""
     payload = {"graph": graph}
@@ -164,17 +171,18 @@ async def sync_backend_to_canvas_graph(
         payload["version_name"] = active_version_name
     api_name = "in-process Neo4j adapter"
     try:
-        workspace_id = _request_workspace_id()
+        request_workspace_id = _request_workspace_id()
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
+        response = await _await_uncancellable_executor(loop.run_in_executor(
             None,
             lambda: dispatch_graph_request(
                 "neo4j_sync_graph",
                 method="POST",
                 json_payload=payload,
-                headers=_json_headers(authorization, workspace_id),
+                headers=_json_headers(authorization, request_workspace_id),
+                internal_workspace_id=workspace_id,
             ),
-        )
+        ))
         response.raise_for_status()
         return response.json()
     except Exception as exc:
@@ -188,6 +196,7 @@ async def save_active_pipeline_version(
     active_version_uid: str,
     active_version_name: str,
     authorization: str | None = None,
+    workspace_id: str | None = None,
 ) -> dict:
     """Persist the current live graph into the requested active pipeline version."""
     payload = {
@@ -197,7 +206,7 @@ async def save_active_pipeline_version(
     }
     api_name = "in-process Neo4j adapter"
     try:
-        workspace_id = _request_workspace_id()
+        request_workspace_id = _request_workspace_id()
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
             None,
@@ -205,7 +214,8 @@ async def save_active_pipeline_version(
                 "neo4j_save_pipeline_active_version",
                 method="POST",
                 json_payload=payload,
-                headers=_json_headers(authorization, workspace_id),
+                headers=_json_headers(authorization, request_workspace_id),
+                internal_workspace_id=workspace_id,
             ),
         )
         response.raise_for_status()
@@ -216,11 +226,37 @@ async def save_active_pipeline_version(
         ) from exc
 
 
+async def clear_preview_workspace(
+    workspace_id: str,
+    authorization: str | None = None,
+) -> dict:
+    """Delete an isolated agent preview graph and its temporary revision row."""
+    try:
+        request_workspace_id = _request_workspace_id()
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: dispatch_graph_request(
+                "neo4j_clear_pipeline_workspace",
+                method="POST",
+                json_payload={},
+                headers=_json_headers(authorization, request_workspace_id),
+                internal_workspace_id=workspace_id,
+                preview_cleanup=True,
+            ),
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to clean up agent preview workspace: {exc}") from exc
+
+
 async def run_neo4j_query(
     query: str,
     query_type: str,
     authorization: str | None = None,
     provenance_context: dict | None = None,
+    workspace_id: str | None = None,
 ) -> str:
     """Run a Cypher query through the Neo4j API and return a string payload."""
     from workspace_queries import INTERNAL_QUERY_CAPABILITY
@@ -239,6 +275,7 @@ async def run_neo4j_query(
                 json_payload=payload,
                 headers=headers,
                 query_capability=INTERNAL_QUERY_CAPABILITY,
+                internal_workspace_id=workspace_id,
             ),
         ))
         response.raise_for_status()

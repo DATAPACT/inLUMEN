@@ -68,6 +68,8 @@ const graphSignature = (value: unknown): string | null => {
 
 type WriteOptions = {
   readGraph?: () => Promise<Response>;
+  // Pin a write to a revision captured before a user reviewed a proposal.
+  expectedRevision?: string | null;
   // Catalog-only mutations advance the workspace revision without editing the canvas.
   preservesGraph?: boolean;
   validationStatuses?: readonly number[];
@@ -81,7 +83,9 @@ export const graphWrite = (send: (revision: string | null) => Promise<Response>,
     if (epoch !== generation) throw new GraphSaveError('The workspace changed.', false, epoch);
     if (state.error) throw new GraphSaveError(state.error, state.conflict);
     try {
-      let response = await send(revision);
+      let response = await send(
+        options.expectedRevision === undefined ? revision : options.expectedRevision,
+      );
       if (epoch !== generation) throw new Error('The workspace changed.');
       let problem = response.ok ? null : await response.clone().json().catch(() => null);
       if (epoch !== generation) throw new Error('The workspace changed.');

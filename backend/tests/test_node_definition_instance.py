@@ -15,6 +15,16 @@ from node_definitions.artifacts import configuration_hash  # noqa: E402
 
 
 class NodeDefinitionInstanceTest(unittest.TestCase):
+    def test_unconfigured_semantic_task_does_not_gain_runtime_implementation(self):
+        properties = definition_properties_from_data({
+            "definition_id": "core.task",
+            "definition_version": 1,
+            "label": "Speech-to-Text",
+            "description": "Convert uploaded audio into transcript text.",
+        })
+
+        self.assertNotIn("implementation_json", properties)
+
     def test_round_trips_definition_data_through_neo4j_properties(self):
         data = {
             "definition_id": "core.data-preprocessing",

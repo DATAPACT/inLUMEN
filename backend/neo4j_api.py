@@ -1,6 +1,12 @@
 from flask import Flask, request, jsonify, g, has_request_context
 from neo4j import GraphDatabase
-from auth_middleware import current_workspace_id, is_auth_enabled, require_auth
+from auth_middleware import (
+    INTERNAL_PREVIEW_CLEANUP_CAPABILITY,
+    INTERNAL_PREVIEW_CLEANUP_ENVIRON_KEY,
+    current_workspace_id,
+    is_auth_enabled,
+    require_auth,
+)
 import uuid
 import json
 import os
@@ -1691,6 +1697,16 @@ def neo4j_clear_pipeline_workspace():
         with driver.session() as session:
             cleanup = _deep_clear_workspace(session)
 
+        # A preview workspace is disposable. Its revision lock row lives
+        # outside workspace-owned graph labels, so remove that row only when
+        # the in-process adapter presents the private cleanup capability.
+        if request.environ.get(INTERNAL_PREVIEW_CLEANUP_ENVIRON_KEY) is INTERNAL_PREVIEW_CLEANUP_CAPABILITY:
+            with _base_driver.session() as raw_session:
+                raw_session.run(
+                    "MATCH (revision:WORKSPACE_REVISION {workspace_id: $workspace_id}) DELETE revision",
+                    workspace_id=current_workspace_id(),
+                ).consume()
+
         cleared_at = datetime.now(timezone.utc).isoformat()
         graph = _empty_pipeline_graph(cleared_at)
         # Give the client a fresh local Main state without recreating a Neo4j
@@ -1736,13 +1752,20 @@ def neo4j_delete_node(flow_id):
     # TODO: Update to UID instead of flow_id once neo4j --> frontend connection is established
     try:
         with driver.session() as session:
-            result = session.run(
-                "MATCH (s:STEP) RETURN count(s) AS stepCount",
-            )
-            step_count = result.single()["stepCount"]
-            if step_count == 1:
-                session.run("""
+            session.run("""
                 MATCH (s:STEP {flow_id: $flow_id})
+                OPTIONAL MATCH (prev:STEP)-[:FLOWS_TO]->(s)
+                WITH s, collect(DISTINCT prev) AS predecessors
+                OPTIONAL MATCH (s)-[:FLOWS_TO]->(next:STEP)
+                WITH s, predecessors, collect(DISTINCT next) AS successors
+                OPTIONAL MATCH (s)-[:FLOWS_TO*1..]->(downstream:STEP)
+                WITH s, predecessors, successors, collect(DISTINCT downstream) AS downstream_steps
+                FOREACH (node IN CASE
+                    WHEN size(predecessors) <= 1 AND size(successors) = 1 THEN downstream_steps
+                    ELSE []
+                END |
+                    SET node.x = coalesce(node.x, 0.0) - 300.0
+                )
                 OPTIONAL MATCH (s)-[:HAS_FILE]->(f:FILE)
                 WITH s, collect(DISTINCT f) AS files
                 CALL {
@@ -1753,27 +1776,7 @@ def neo4j_delete_node(flow_id):
                 }
                 DETACH DELETE s
                 """, flow_id=flow_id)
-                session.run("""
-                MATCH (p:PIPELINE {status:'design'})
-                SET p.updated_at = datetime()
-                """)
-            elif step_count > 1:
-                session.run(
-                    """
-                    MATCH (s:STEP {flow_id: $flow_id})
-                    OPTIONAL MATCH (s)-[:HAS_FILE]->(f:FILE)
-                    WITH s, collect(DISTINCT f) AS files
-                    CALL {
-                      WITH files
-                      UNWIND files AS file
-                      WITH file WHERE file IS NOT NULL
-                      DETACH DELETE file
-                    }
-                    DETACH DELETE s
-                    """,
-                    flow_id=flow_id,
-                )
-                session.run("""
+            session.run("""
                 MATCH (p:PIPELINE {status:'design'})
                 SET p.updated_at = datetime()
                 """)

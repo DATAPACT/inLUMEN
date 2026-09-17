@@ -135,6 +135,14 @@ it('uses the dedicated graph revision instead of an encoding-specific ETag', asy
   });
 });
 
+it('keeps a reviewed graph proposal pinned to the revision captured before review', async () => {
+  captureGraphRevision(new Response('{}', { headers: { ETag: '"8"' } }));
+  const send = vi.fn().mockResolvedValue(new Response('{}', { headers: { ETag: '"9"' } }));
+  await graphWrite(send, { expectedRevision: '"5"' });
+  expect(send).toHaveBeenCalledOnce();
+  expect(send).toHaveBeenCalledWith('"5"');
+});
+
 it.each(['W/"object-checksum"', '"-1"', 'W/"1.5"'])('does not treat arbitrary validators as graph revisions: %s', async (etag) => {
   captureGraphRevision(new Response('{}', { headers: { ETag: etag } }));
   await graphWrite(async (revision) => { expect(revision).toBeNull(); return new Response('{}'); });

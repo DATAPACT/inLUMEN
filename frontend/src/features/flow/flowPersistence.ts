@@ -572,6 +572,34 @@ export const rebuildBackendFromFlow = async (
   return response.json();
 };
 
+export const applyPipelineGraphPreview = async (
+  graph: PipelineVersionGraph,
+  versionUid: string,
+  versionName: string,
+  expectedGraphRevision: string,
+) => {
+  if (!expectedGraphRevision) {
+    throw new Error("The graph revision could not be verified. Reload the canvas before applying this proposal.");
+  }
+  const response = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/graph`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      graph,
+      active_version_uid: versionUid,
+      version_name: versionName,
+    }),
+  }, { expectedGraphRevision });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    if (response.status === 409 || payload?.code === "graph_conflict") {
+      throw new Error("This proposal is out of date because the saved graph changed. Your current pipeline was kept; ask the assistant for a fresh proposal.");
+    }
+    throw new Error(`Could not apply the graph proposal (${response.status}).`);
+  }
+  return response.json().catch(() => ({}));
+};
+
 const buildPipelineGenerationPayload = (
   activeChatbotConfig?: ChatbotConfig,
   options: PipelineScriptGenerationOptions = {},

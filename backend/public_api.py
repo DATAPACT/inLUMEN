@@ -2829,6 +2829,14 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                 "canvas_graph": {"$ref": "#/components/schemas/ReactFlowGraph"},
                 "active_version_uid": {"type": "string"},
                 "active_version_name": {"type": "string"},
+                "preview_changes": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Run the agent against an isolated graph and return a proposal "
+                        "without changing the saved pipeline."
+                    ),
+                },
                 "model": {"type": "string"},
                 "llm_config": {"$ref": "#/components/schemas/LLMConfig"},
             },
@@ -2841,7 +2849,18 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                 "session_id": {"type": "string"},
                 "assistant_message": {"type": "string"},
                 "graph": {"$ref": "#/components/schemas/ReactFlowGraph"},
-                "sync": {"type": "object", "additionalProperties": True},
+                "sync": {
+                    "type": "object",
+                    "properties": {
+                        "guardrail_passed": {"type": "boolean"},
+                        "graph_safe_to_apply": {"type": "boolean"},
+                        "preview_pending": {
+                            "type": "boolean",
+                            "description": "True when the response graph is a validated proposal awaiting user acceptance.",
+                        },
+                    },
+                    "additionalProperties": True,
+                },
             },
         },
         "ChatResetRequest": {

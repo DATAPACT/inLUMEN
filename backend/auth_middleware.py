@@ -20,6 +20,18 @@ from workspace_store import (
 _jwks_client: Optional[PyJWKClient] = None
 _jwks_client_url: str = ""
 
+# These capabilities are passed through the in-process Flask adapter's WSGI
+# environment. They are never accepted from HTTP headers, so callers cannot
+# select a different workspace or request preview cleanup over the network.
+INTERNAL_WORKSPACE_ID_ENVIRON_KEY = "inlumen.internal_workspace_id"
+INTERNAL_PREVIEW_CLEANUP_ENVIRON_KEY = "inlumen.preview_cleanup_capability"
+_INTERNAL_WORKSPACE_OVERRIDE_CAPABILITY = object()
+INTERNAL_PREVIEW_CLEANUP_CAPABILITY = object()
+
+
+def internal_workspace_override(workspace_id: str) -> tuple[object, str]:
+    return (_INTERNAL_WORKSPACE_OVERRIDE_CAPABILITY, workspace_id)
+
 
 @dataclass(frozen=True)
 class AuthValidationError:
@@ -76,6 +88,16 @@ def current_principal() -> Principal:
 
 
 def current_workspace_id() -> str:
+    if has_request_context():
+        override = request.environ.get(INTERNAL_WORKSPACE_ID_ENVIRON_KEY)
+        if (
+            isinstance(override, tuple)
+            and len(override) == 2
+            and override[0] is _INTERNAL_WORKSPACE_OVERRIDE_CAPABILITY
+            and isinstance(override[1], str)
+            and override[1]
+        ):
+            return override[1]
     return current_principal().workspace_id
 
 

@@ -4,6 +4,34 @@ import json
 import re
 
 
+_READ_ONLY_INTENT = re.compile(
+    r"\b(?:describe|list|show|summari[sz]e|overview|inspect|explain|what(?:'s| is| are)|tell me)\b",
+    re.IGNORECASE,
+)
+_PIPELINE_SUBJECT = re.compile(
+    r"\b(?:current|pipeline|step|steps|graph|connection|connections|flow)\b",
+    re.IGNORECASE,
+)
+_MUTATION_INTENT = re.compile(
+    r"\b(?:add|remove|delete|insert|change|update|rename|create|build|connect|disconnect|modify|rearrange|move|replace|configure|clear)\b",
+    re.IGNORECASE,
+)
+
+
+def is_read_only_pipeline_request(message: object) -> bool:
+    """Recognize requests that ask for pipeline information, not an edit."""
+    text = str(message or "").strip()
+    if not text or _MUTATION_INTENT.search(text):
+        return False
+    if re.search(
+        r"\b(?:without|don't|do not|no)\b.{0,40}\b(?:change|changes|changing|modify|edit|update)\b",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        return True
+    return bool(_READ_ONLY_INTENT.search(text) and _PIPELINE_SUBJECT.search(text))
+
+
 def _assistant_message_from_result(result) -> str:
     """Select only a real model text message, never an agent tool event.
 
@@ -163,7 +191,26 @@ def _graph_signature(graph: dict | None) -> str:
         return json.dumps({"nodes": [], "edges": []}, sort_keys=True)
 
     cleaned = _clean_client_graph(graph) or {"nodes": [], "edges": []}
-    nodes = cleaned["nodes"]
+    nodes = []
+    for raw_node in cleaned["nodes"]:
+        node = dict(raw_node)
+        # The browser sends the compact agent snapshot while the persisted
+        # graph endpoint rehydrates equivalent nodes with storage defaults.
+        # Those defaults are not edits and must not create a review proposal.
+        node.pop("x", None)
+        node.pop("y", None)
+        node.pop("file_buckets", None)
+        # ``template`` is the compact agent form; the persisted graph uses
+        # ``template_label`` for the same value.
+        if node.get("template_label"):
+            node.pop("template", None)
+        if not node.get("files"):
+            node.pop("files", None)
+        if not node.get("implementation"):
+            node.pop("implementation", None)
+        if str(node.get("has_files") or "").strip().lower() in {"", "no", "false", "0"}:
+            node.pop("has_files", None)
+        nodes.append(node)
     edges = cleaned["edges"]
     nodes.sort(key=lambda node: str(node.get("id") or ""))
     edges.sort(key=lambda edge: (
@@ -172,7 +219,14 @@ def _graph_signature(graph: dict | None) -> str:
         str(edge.get("source_port") or ""),
         str(edge.get("target_port") or ""),
     ))
-    return json.dumps({"nodes": nodes, "edges": edges}, sort_keys=True)
+    # ``updated_at`` is persistence metadata, not a pipeline edit. The graph
+    # can be re-read after a no-op request with a newer timestamp, but that
+    # must not turn an informational response into a graph proposal.
+    return json.dumps({
+        "settings": cleaned.get("settings") or {},
+        "nodes": nodes,
+        "edges": edges,
+    }, sort_keys=True)
 
 
 def _json_safe_copy(value: object, depth: int = 0) -> object:
