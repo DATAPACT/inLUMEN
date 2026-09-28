@@ -27,6 +27,7 @@ try:
         _control_flow_main_source,
         _managed_adapter_main_source,
         _managed_adapter_runtime,
+        _inferred_system_packages_from_python_source,
         _task_capability_contract,
         _task_io_contract,
         generate_dockerfiles_with_agent,
@@ -39,6 +40,20 @@ else:
 
 
 class DeploymentAgentsTest(unittest.TestCase):
+    def test_openai_whisper_source_infers_ffmpeg_system_dependency(self):
+        self.assertEqual(
+            ["ffmpeg"],
+            _inferred_system_packages_from_python_source(
+                "import whisper\nmodel = whisper.load_model('small')\n"
+            ),
+        )
+        self.assertEqual(
+            [],
+            _inferred_system_packages_from_python_source(
+                "from faster_whisper import WhisperModel\n"
+            ),
+        )
+
     def test_database_and_object_storage_adapters_have_runtime_contracts(self):
         database_artifact, _ = _managed_adapter_runtime(
             {
