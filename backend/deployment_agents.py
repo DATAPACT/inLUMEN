@@ -1407,6 +1407,34 @@ def _is_attached_runtime_file(file_ref: dict[str, Any]) -> bool:
     )
 
 
+def _inferred_system_packages_from_python_source(source: object) -> list[str]:
+    """Infer OS packages required by reviewed Python libraries.
+
+    OpenAI Whisper uses the ``ffmpeg`` executable to decode audio.  It is not
+    installable through ``requirements.txt``, so make it part of the persisted
+    capability contract when an attached Task imports the ``whisper`` module.
+    """
+    if not isinstance(source, str):
+        return []
+    try:
+        tree = ast.parse(source, filename="main.py")
+    except SyntaxError:
+        return []
+    imports_whisper = any(
+        (
+            isinstance(node, ast.Import)
+            and any(alias.name == "whisper" for alias in node.names)
+        )
+        or (
+            isinstance(node, ast.ImportFrom)
+            and node.module is not None
+            and node.module == "whisper"
+        )
+        for node in ast.walk(tree)
+    )
+    return ["ffmpeg"] if imports_whisper else []
+
+
 def _is_function_style_task(source: object) -> bool:
     """Recognize the small, portable ``run(input, params)`` upload contract."""
     if not isinstance(source, str):
@@ -1635,6 +1663,7 @@ def _task_capability_contract(
     declared: dict[str, Any],
     io_contract: dict[str, Any],
     inferred_model_plan: dict[str, Any],
+    inferred_system_packages: list[str] | None = None,
 ) -> dict[str, Any]:
     """Create the authoritative build-time contract for an uploaded Task.
 
@@ -1659,6 +1688,7 @@ def _task_capability_contract(
     system_dependencies = [
         *system_dependencies,
         *(inferred_model_plan.get("required_system_packages") or []),
+        *(inferred_system_packages or []),
     ]
     supported_system_dependencies = {"ffmpeg"}
     unsupported_system_dependencies = sorted(
@@ -2172,10 +2202,14 @@ async def _read_attached_python_runtime(
         main_file.get("content"),
         parameters=step.get("param"),
     )
+    inferred_system_packages = _inferred_system_packages_from_python_source(
+        main_file.get("content")
+    )
     task_capabilities = _task_capability_contract(
         declared_task_contract,
         task_io_contract,
         inferred_model_plan,
+        inferred_system_packages,
     )
     unresolved_model_warnings = unresolved_model_plan_errors_from_python_source(
         main_file.get("content"),
