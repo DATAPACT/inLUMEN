@@ -91,6 +91,15 @@ removed while the relevant workers are stopped. They are not shared across
 workspaces. Cached model availability and download latency should be measured
 in the staging workload.
 
+Isolated Dagster workers keep their writable home, library caches, Hugging Face
+downloads, and temporary files under `/runtime`, backed by that job's disk
+workspace. These files are removed with the validation workspace and are not
+result artifacts or a shared model cache. The separate `/tmp` tmpfs remains
+limited to 256 MB; model downloads must not use it. Monitor free disk space on
+the host backing `CODEGEN_DEPLOYMENT_VALIDATION_WORKDIR`. An ENOSPC error can
+otherwise be wrapped by model libraries as "Can't load the model"; the run UI
+and runner preserve the storage failure when it appears in the captured trace.
+
 ## Backups and isolated restore
 
 Run from the repository root with access to the target Docker daemon. This is

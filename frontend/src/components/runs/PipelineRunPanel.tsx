@@ -30,6 +30,7 @@ import {
 import {
   formatOutputSize,
   presentRunOutputs,
+  presentRunFailure,
   summarizeNodeEvents,
 } from '@/features/runs/runPresentation';
 import { cn } from '@/lib/utils';
@@ -89,20 +90,6 @@ const stageStates = (
   return ['complete', 'complete', 'error', 'pending'];
 };
 
-const failureHint = (message: string) => {
-  const normalized = message.toLowerCase();
-  if (normalized.includes('huggingface') || normalized.includes('cached files')) {
-    return 'The model was not available in the isolated runtime. Verify that the uploaded code uses a reviewed, pinned model so inLUMEN can prefetch it.';
-  }
-  if (normalized.includes('no csv') || normalized.includes('no .wav') || normalized.includes('pipeline_input_dir')) {
-    return 'Check that the source node has the expected input file and that the task reads it directly from PIPELINE_INPUT_DIR.';
-  }
-  if (normalized.includes('environment variable') || normalized.includes('keyerror')) {
-    return 'Open the task Inspector and configure the runtime environment value reported by the script.';
-  }
-  return 'Open Technical logs for the full Dagster trace. The tested snapshot is also available below for local debugging.';
-};
-
 const StageIcon = ({ state }: { state: StageState }) => {
   if (state === 'complete') return <Check className="h-3.5 w-3.5" />;
   if (state === 'active') return <Loader2 className="h-3.5 w-3.5 animate-spin" />;
@@ -132,6 +119,10 @@ export const PipelineRunPanel = () => {
   const technicalLogs = useMemo(
     () => events.filter((event) => event.type.endsWith('.log')),
     [events],
+  );
+  const failure = presentRunFailure(
+    selectedRun?.error?.message || '',
+    technicalLogs.map((event) => event.message || ''),
   );
   const presentedOutputs = useMemo(
     () => presentRunOutputs(selectedRun?.result?.outputs || []),
@@ -429,9 +420,9 @@ export const PipelineRunPanel = () => {
                 <AlertCircle className="h-3.5 w-3.5" />
                 What went wrong
               </div>
-              <div className="mt-1 break-words">{selectedRun.error.message}</div>
+              <div className="mt-1 break-words">{failure.message}</div>
               <div className="mt-1.5 text-[11px] leading-relaxed text-red-200/80">
-                {failureHint(selectedRun.error.message)}
+                {failure.hint}
               </div>
             </div>
           )}

@@ -7,10 +7,10 @@ from typing import Any
 
 CONNECTOR_DEFINITIONS: dict[str, dict[str, dict[str, Any]]] = {
     "source": {
-        "custom": {"required": ()},
-        "file": {"required": ()},
-        "folder": {"required": ()},
-        "user upload": {"required": ()},
+        "custom": {"required": (), "requires_attached_files": True},
+        "file": {"required": (), "requires_attached_files": True},
+        "folder": {"required": (), "requires_attached_files": True},
+        "user upload": {"required": (), "requires_attached_files": True},
         "database": {"required": ("connection_url", "query")},
         "object storage": {"required": ("bucket",)},
         "rest api": {"required": ("url",)},

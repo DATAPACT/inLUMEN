@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from artifact_content import decode_artifact_content, verify_artifact_integrity
 from artifact_contract import ArtifactBinding, artifact_bindings, classify_artifact
+from connector_catalog import connector_definition
 from filesystem_runtime import filesystem_shell_component_source
 from node_parameters import normalize_secret_param_keys
 from node_ports import normalize_node_ports
@@ -190,6 +191,18 @@ if root_entries:
         if destination.exists():
             raise RuntimeError(f"Output collision at {destination}")
         shutil.move(str(source), str(destination))
+required_ports = json.loads(sys.argv[5]) if len(sys.argv) > 5 else ports
+for port in required_ports:
+    if not any(
+        path.is_file() and path.name not in {
+            ".gitkeep", "input_manifest.json", "output_manifest.json"
+        }
+        for path in (output_dir / port).rglob("*")
+    ):
+        raise RuntimeError(
+            f"Required output port {port!r} contains no artifacts. "
+            "The node must write output files to PIPELINE_OUTPUT_DIR before completing."
+        )
 for port in ports:
     (output_dir / port).mkdir(parents=True, exist_ok=True)
 '''
@@ -206,6 +219,19 @@ class DeploymentArtifactValidationError(ValueError):
 
 def _clean_string(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _required_output_ports(step: dict, bindings: Sequence[ArtifactBinding]) -> list[str]:
+    # Every current graph edge consumes a required artifact binding, even when
+    # the producer's otherwise-unconnected output is marked optional.
+    connected = {
+        binding.source_port for binding in bindings
+        if binding.source_node == step["flow_id"]
+    }
+    return [
+        port["id"] for port in (step.get("ports") or {}).get("outputs") or []
+        if port.get("id") and (port.get("required", True) or port["id"] in connected)
+    ]
 
 
 def _json_object(value: Any) -> dict:
@@ -1520,6 +1546,7 @@ def _build_codegen_argo_workflow_object(
                             f"/inlumen/staging/{binding.target_port}"
                             for binding in incoming_bindings
                         ]),
+                        json.dumps(_required_output_ports(step, bindings)),
                     ],
                     "env": env,
                 },
@@ -3803,6 +3830,7 @@ def _required_root_input_errors(
         if _clean_string(item.get("filename"))
     }
     errors: List[str] = []
+    root_ids = [step["flow_id"] for step in steps if not dependencies.get(step["flow_id"])]
     for step in steps:
         flow_id = _clean_string(step.get("flow_id"))
         if dependencies.get(flow_id):
@@ -3819,6 +3847,33 @@ def _required_root_input_errors(
                 "",
             )
         )
+        adapter = node_manifest.get("adapter")
+        adapter = adapter if isinstance(adapter, dict) else {}
+        runtime = _runtime_artifact_for_step(dockerfiles_payload, flow_id)
+        managed_source = (
+            step.get("type") == "source"
+            and runtime.get("generator") != ATTACHED_RUNTIME_GENERATOR
+            and (
+                runtime.get("generator") == MANAGED_ADAPTER_GENERATOR
+                or adapter.get("kind") == "source"
+            )
+        )
+        connector = connector_definition("source", step.get("template")) or {}
+        if managed_source and connector.get("requires_attached_files"):
+            owned_inputs = [
+                item for item in input_files
+                if _clean_string(item.get("filename"))
+                and PurePosixPath(item["filename"]).name not in {
+                    ".gitkeep", "input_manifest.json", "output_manifest.json"
+                }
+                and _root_input_owner(item, root_ids) == flow_id
+            ]
+            if not owned_inputs:
+                errors.append(
+                    f"Source {step.get('label') or flow_id!r} (node {flow_id}) has no input files. "
+                    "Attach data files to this Source before running. Upload code ZIP "
+                    "provides Task code; Source data must be attached separately."
+                )
         contract = (
             node_manifest.get("data_contract")
             if isinstance(node_manifest.get("data_contract"), dict)
@@ -4197,6 +4252,7 @@ def build_dagster_project_files(
                     "input_dir": input_dir,
                     "output_dir": output_dir,
                     "output_ports": output_ports,
+                    "required_output_ports": _required_output_ports(step, bindings),
                     "arguments": [],
                     "parameters": {
                         str(key): value

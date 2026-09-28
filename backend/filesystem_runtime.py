@@ -307,6 +307,22 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def validate_output_ports(output_dir: Path | str, required_ports: Iterable[str]) -> None:
+    """Require an artifact from each required producer output before success."""
+    for port in required_ports:
+        root = Path(output_dir) / port
+        if not any(
+            path.is_file() and path.name not in {
+                ".gitkeep", "input_manifest.json", "output_manifest.json"
+            }
+            for path in root.rglob("*")
+        ):
+            raise RuntimeError(
+                f"Required output port {port!r} contains no artifacts. "
+                "The node must write output files to PIPELINE_OUTPUT_DIR before completing."
+            )
+
+
 def discover_artifacts(output_dir: Path | str) -> list[dict[str, object]]:
     """Inventory files produced by a Task for runtime/provenance use only.
 
@@ -554,6 +570,21 @@ def _artifacts(output_dir):
     return results
 
 
+def _validate_output_ports(output_dir, required_ports):
+    for port in required_ports:
+        root = output_dir / port
+        if not any(
+            path.is_file() and path.name not in {
+                ".gitkeep", "input_manifest.json", "output_manifest.json"
+            }
+            for path in root.rglob("*")
+        ):
+            raise RuntimeError(
+                f"Required output port {port!r} contains no artifacts. "
+                "The node must write output files to PIPELINE_OUTPUT_DIR before completing."
+            )
+
+
 class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
     asset_key: str
     script_path: str
@@ -563,6 +594,7 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
     input_dir: str
     output_dir: str
     output_ports: list[str] = []
+    required_output_ports: list[str] | None = None
     arguments: list[str] = []
     parameters: dict = {}
     secret_environment: dict = {}
@@ -708,6 +740,10 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
                     "Task outputs were routed internally through the sole declared "
                     f"port {self.output_ports[0]!r}: {', '.join(moved)}"
                 )
+            _validate_output_ports(
+                output_dir,
+                self.output_ports if self.required_output_ports is None else self.required_output_ports,
+            )
             artifacts = _artifacts(output_dir)
             return dg.MaterializeResult(metadata={
                 "input_dir": str(input_dir),

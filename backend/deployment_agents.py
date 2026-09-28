@@ -754,6 +754,13 @@ def _port_directory(output_dir, direction="outputs"):
 
 
 def _copy_source_files(entries, output_dir):
+    if not entries:
+        label = ADAPTER_SPEC.get("label") or ADAPTER_SPEC.get("template") or "Source"
+        raise RuntimeError(
+            f"Source {label!r} has no input files. Attach data files to this Source "
+            "before running. Upload code ZIP provides Task code; Source data must "
+            "be attached separately."
+        )
     port_dir = _port_directory(output_dir)
     for entry in entries:
         filename = str(entry["filename"]).replace("\\\\", "/").lstrip("/")

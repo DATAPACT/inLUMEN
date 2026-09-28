@@ -2293,6 +2293,10 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
               Every Task folder needs a <code className="rounded bg-muted px-1 py-0.5 text-foreground">main.py</code> file.
               The ZIP must be smaller than 50 MB.
             </p>
+            <p className="text-sm text-muted-foreground">
+              Attach input data separately to each file-based Source node before running.
+              Upload code ZIP adds Task code; database and API Sources use their configured connections.
+            </p>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setIsTaskPackageGuideOpen(false)}>Cancel</Button>
