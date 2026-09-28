@@ -15,6 +15,13 @@ New deployment exports use `inlumen.deployment-bundle@2`,
 - Input publication is atomic. A failed copy or collision leaves the previous
   complete workspace untouched.
 - Duplicate-path comparisons are size-checked and streamed with bounded memory.
+- Managed Custom, File, Folder, and User Upload Sources must have data attached
+  before a run snapshot can be built. A code ZIP supplies Task implementations;
+  attach input data separately to the owning Source. Database, REST API, Object
+  Storage, and user-implemented Sources can acquire or generate their own data.
+- A producer succeeds only after every required or connected output contains an
+  artifact. Placeholder and orchestration metadata files do not count; a real
+  zero-byte file does. Both Dagster and Argo enforce this before downstream work.
 
 ## Compatibility
 

@@ -90,3 +90,25 @@ export const formatOutputSize = (sizeBytes: number | null) => {
   if (sizeBytes < 1024 ** 2) return `${(sizeBytes / 1024).toFixed(1)} KB`;
   return `${(sizeBytes / (1024 ** 2)).toFixed(1)} MB`;
 };
+
+
+export const presentRunFailure = (message: string, logs: string[] = []) => {
+  const details = [message, ...logs].join('\n').toLowerCase();
+  if (/no space left on device|disk quota exceeded|runtime storage is full/.test(details)) {
+    return {
+      message: 'Runtime storage ran out of space while writing downloaded files or temporary data.',
+      hint: 'Check the runtime cache and temporary-storage capacity, then start a new run.',
+    };
+  }
+  const normalized = message.toLowerCase();
+  if (normalized.includes('huggingface') || normalized.includes('cached files')) {
+    return { message, hint: 'Model loading failed. Check Technical logs for download, storage, or model-file errors.' };
+  }
+  if (normalized.includes('no csv') || normalized.includes('no .wav') || normalized.includes('pipeline_input_dir')) {
+    return { message, hint: 'Check that the source node has the expected input file and that the task reads it directly from PIPELINE_INPUT_DIR.' };
+  }
+  if (normalized.includes('environment variable') || normalized.includes('keyerror')) {
+    return { message, hint: 'Open the task Inspector and configure the runtime environment value reported by the script.' };
+  }
+  return { message, hint: 'Open Technical logs for the full Dagster trace. The tested snapshot is also available below for local debugging.' };
+};

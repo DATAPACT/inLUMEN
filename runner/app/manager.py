@@ -905,6 +905,10 @@ class PipelineRunManager:
 
     @staticmethod
     def _root_failure(output: str) -> str:
+        # Model SDKs wrap ENOSPC in a generic "Can't load the model" error.
+        # Preserve the actionable cause instead of selecting that last wrapper.
+        if re.search(r"no space left on device|disk quota exceeded", output, re.IGNORECASE):
+            return "Runtime storage is full: no space left for downloaded files or temporary data."
         candidates = []
         for match in PYTHON_ERROR_PATTERN.finditer(output):
             kind = match.group("kind")

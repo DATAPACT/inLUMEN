@@ -169,3 +169,18 @@ Verification/deployment results for `64a86b3` and `7b73d1d`:
 PR checks exposed a Docker Hub pull denial for the pinned MinIO image. CI and the production compose default now use `quay.io/minio/minio` with the identical SHA-256 digest; this changes the registry, not the MinIO version or data format. Existing `MINIO_IMAGE` overrides still take precedence.
 
 The browser accessibility check also caught a missing `group` role on the named save-status container. The read-only viewer test now waits for node visibility and compares the node transform across a drag, avoiding an unrelated initial visibility-style change. All 17 browser tests passed locally after these corrections.
+
+
+## CI MinIO source build (2026-09-28)
+
+The integration job's pinned MinIO image subsequently returned authorization
+errors from both Quay and Docker Hub. CI now builds the official
+`RELEASE.2025-10-15T17-29-55Z` source at commit
+`9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a` with its Go 1.24.8 toolchain.
+The disposable server binds to loopback, uses runner-temporary data, and is
+stopped after the tests. Health-check retries and startup logs are retained.
+This avoids depending on unavailable MinIO container images or registry secrets.
+
+The production Compose `MINIO_IMAGE` default still references the old image;
+existing deployments need a separately maintained image or an accessible
+`MINIO_IMAGE` override before a fresh production pull can succeed.

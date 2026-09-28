@@ -9,12 +9,38 @@ from pathlib import Path
 from unittest import mock
 
 from app.deployment_validation import (
-    _read_run_output_files,
+    _isolated_runtime_environment,
     _prepare_worker_directories,
+    _read_run_output_files,
     repair_deployment_bundle,
     validate_dagster_project,
     validate_deployment_bundle,
 )
+
+
+class IsolatedRuntimeEnvironmentTest(unittest.TestCase):
+    def test_read_only_runtime_has_writable_cache_locations(self):
+        environment = _isolated_runtime_environment(
+            {"API_TOKEN": "secret"},
+            has_models=True,
+        )
+
+        self.assertEqual("secret", environment["API_TOKEN"])
+        self.assertEqual("/runtime/home", environment["HOME"])
+        self.assertEqual("/runtime/cache", environment["XDG_CACHE_HOME"])
+        self.assertEqual("/runtime/tmp", environment["TMPDIR"])
+        self.assertEqual("/runtime/huggingface", environment["HF_HOME"])
+        self.assertEqual("/models/huggingface", environment["HF_HUB_CACHE"])
+        self.assertEqual("/models", environment["INLUMEN_MODEL_ROOT"])
+        self.assertEqual("1", environment["HF_HUB_OFFLINE"])
+
+    def test_model_free_runtime_does_not_require_model_mount(self):
+        environment = _isolated_runtime_environment(None, has_models=False)
+
+        self.assertNotIn("INLUMEN_MODEL_ROOT", environment)
+        self.assertEqual("/runtime/huggingface/hub", environment["HF_HUB_CACHE"])
+        self.assertNotIn("HF_HUB_OFFLINE", environment)
+        self.assertEqual("/runtime/cache", environment["XDG_CACHE_HOME"])
 
 
 class DagsterRuntimeDependencyValidationTest(unittest.TestCase):
@@ -488,6 +514,16 @@ import dagster as dg
 @dg.asset
 def attached_input(context):
     assert os.getuid() == 65532
+    # Real writes larger than the /tmp tmpfs reproduce the model-download case.
+    for directory in (os.environ['HF_HUB_CACHE'], os.environ['TMPDIR']):
+        cache = Path(directory)
+        cache.mkdir(parents=True, exist_ok=True)
+        target = cache / 'large-download.bin'
+        with target.open('wb') as handle:
+            for _ in range(300):
+                handle.write(b'x' * 1024 * 1024)
+        assert target.stat().st_size == 300 * 1024 * 1024
+        target.unlink()
     data = Path('/workspace/inputs/attached.txt').read_text()
     for mount in ('outputs', 'workspaces'):
         output = Path('/workspace') / mount / 'node-1-audio-upload' / context.run_id

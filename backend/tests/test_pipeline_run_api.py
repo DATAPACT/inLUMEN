@@ -34,6 +34,20 @@ class PipelineRunApiTest(unittest.TestCase):
         self.client = inlumen_api.app.test_client()
 
     @patch("inlumen_api.runner_request")
+    @patch("inlumen_api.prepare_dagster_execution_bundle")
+    @patch("inlumen_api._proxy", return_value=graph_response())
+    def test_missing_source_data_is_reported_without_launching_a_run(self, _proxy, prepare, runner):
+        message = "Source 'Uploaded Audio' (node 1) has no input files. Attach data files to this Source before running."
+        prepare.side_effect = inlumen_api.DeploymentArtifactValidationError(
+            "Deployment bundle input validation failed", [message],
+        )
+        response = self.client.post("/api/pipeline-runs", json={})
+        self.assertEqual(422, response.status_code)
+        self.assertIn(message, response.json["error"])
+        self.assertEqual([message], response.json["details"])
+        runner.assert_not_called()
+
+    @patch("inlumen_api.runner_request")
     @patch(
         "inlumen_api.prepare_dagster_execution_bundle",
         return_value={

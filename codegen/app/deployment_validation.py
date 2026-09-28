@@ -147,6 +147,44 @@ def deployment_execution_progress(execution_id: str) -> dict[str, Any]:
     return payload
 
 
+def _isolated_runtime_environment(
+    runtime_secrets: dict[str, str] | None,
+    *,
+    has_models: bool,
+) -> dict[str, str]:
+    """Build the environment for the non-root, read-only execution container.
+
+    The container intentionally has a read-only root filesystem.  Several
+    otherwise-local ML dependencies still create a user cache while loading a
+    model. Model downloads and their temporary files can exceed the small /tmp
+    tmpfs, so use a job-owned disk-backed mount for writable state.
+    """
+    environment = {
+        **(runtime_secrets or {}),
+        "DAGSTER_HOME": "/runtime/dagster-home",
+        "HOME": "/runtime/home",
+        "XDG_CACHE_HOME": "/runtime/cache",
+        "TMPDIR": "/runtime/tmp",
+        "HF_HOME": "/runtime/huggingface",
+        "HF_HUB_CACHE": "/runtime/huggingface/hub",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONUNBUFFERED": "1",
+    }
+    if has_models:
+        # Offline Hub lookups must see the prefetched snapshots. Other library
+        # caches remain writable under HF_HOME; reviewed adapters also resolve
+        # their snapshots directly through INLUMEN_MODEL_ROOT.
+        environment.update(
+            {
+                "HF_HUB_CACHE": "/models/huggingface",
+                "HF_HUB_OFFLINE": "1",
+                "TRANSFORMERS_OFFLINE": "1",
+                "INLUMEN_MODEL_ROOT": "/models",
+            }
+        )
+    return environment
+
+
 def prepare_deployment_execution(execution_id: str) -> None:
     """Register a fresh execution id before dispatching validation work."""
     if not execution_id:
@@ -417,6 +455,12 @@ def _isolated_dagster_execution(
     input_dir.mkdir(parents=True, exist_ok=True)
     _prepare_worker_directories(workspace_dir)
     _prepare_worker_directories(output_dir)
+    # Lives inside this job's workspace: excluded from snapshot hashing and
+    # result artifacts, with no shared writable cache across runs/workspaces.
+    runtime_dir = workspace_dir / ".runtime"
+    for name in ("home", "cache", "tmp", "dagster-home", "huggingface"):
+        (runtime_dir / name).mkdir(parents=True, exist_ok=True)
+    _prepare_worker_directories(runtime_dir)
     report: dict[str, Any] = {
         "project_root": str(project_root),
         "package_manager": "container-image",
@@ -622,24 +666,15 @@ def _isolated_dagster_execution(
             "starting_pipeline",
             "Starting the Dagster pipeline inside the isolated runtime.",
         )
-        environment = {
-            **(runtime_secrets or {}),
-            "DAGSTER_HOME": "/tmp/dagster-home",
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONUNBUFFERED": "1",
-            **(
-                {
-                    "HF_HOME": "/models/huggingface",
-                    "HF_HUB_CACHE": "/models/huggingface",
-                    "HF_HUB_OFFLINE": "1",
-                    "TRANSFORMERS_OFFLINE": "1",
-                    "INLUMEN_MODEL_ROOT": "/models",
-                }
-                if has_models
-                else {}
-            ),
-        }
+        environment = _isolated_runtime_environment(
+            runtime_secrets,
+            has_models=has_models,
+        )
         execution_volumes = {
+            str(runtime_dir.resolve()): {
+                "bind": "/runtime",
+                "mode": "rw",
+            },
             str(input_dir.resolve()): {
                 "bind": "/workspace/inputs",
                 "mode": "ro",

@@ -3,10 +3,26 @@ import { describe, expect, it } from 'vitest';
 import {
   formatOutputSize,
   presentRunOutputs,
+  presentRunFailure,
   summarizeNodeEvents,
 } from '@/features/runs/runPresentation';
 
 describe('run result presentation', () => {
+  it('shows storage exhaustion hidden by an old model-loading error', () => {
+    const failure = presentRunFailure(
+      "OSError: Can't load model from huggingface.co/models",
+      ['RuntimeError: File reconstruction error: No space left on device (os error 28)'],
+    );
+    expect(failure.message).toContain('ran out of space');
+    expect(failure.hint).toContain('temporary-storage capacity');
+    expect(failure.hint).not.toContain('pinned');
+  });
+
+  it('does not assume every model-loading failure means the model is unavailable', () => {
+    expect(presentRunFailure('OSError: huggingface model load failed').hint)
+      .toContain('download, storage, or model-file errors');
+  });
+
   it('keeps internal artifacts out of primary results and consolidates repeated names', () => {
     const presented = presentRunOutputs([
       { path: 'outputs/one/result.wav', filename: 'result.wav', size_bytes: 2048 },

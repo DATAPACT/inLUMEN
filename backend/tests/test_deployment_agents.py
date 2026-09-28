@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import inspect
 import io
 import json
@@ -301,6 +302,12 @@ class DeploymentAgentsTest(unittest.TestCase):
         )
         self.assertIn("value.risk_score > 0.8", flow_artifact["manifest"]["adapter"]["parameters"]["expression"])
 
+        body = '{"risk_score": 0.9}'
+        result["input_files"] = [{
+            "flow_id": "1", "filename": "risk.json", "content": body,
+            "size_bytes": len(body.encode()),
+            "sha256": "sha256:" + hashlib.sha256(body.encode()).hexdigest(),
+        }]
         bundle = build_deployment_bundle_files(
             graph, result, targets={"argo": True, "dagster": True},
         )

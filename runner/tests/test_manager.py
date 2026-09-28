@@ -435,6 +435,15 @@ async def test_dagster_failure_preserves_execution_log_and_error():
     )
 
 
+def test_model_loading_wrapper_does_not_hide_storage_exhaustion():
+    trace = (
+        "RuntimeError: Task error: File reconstruction error: IO Error: "
+        "No space left on device (os error 28)\n"
+        "OSError: Can't load the model for 'cardiffnlp/twitter-xlm-roberta-base-sentiment'."
+    )
+    assert PipelineRunManager._root_failure(trace).startswith("Runtime storage is full")
+
+
 @pytest.mark.asyncio
 async def test_failure_error_and_neo4j_summary_redact_runtime_secrets():
     summary_store = FakeRunSummaryStore()
