@@ -33,7 +33,7 @@ async function fixture(status = 200, wrongLLM = false) {
       settings.onclick=()=>dialog.hidden=false; menu.onclick=()=>item.hidden=false; item.onclick=()=>{item.hidden=true;document.getElementById('selected').hidden=false;}; close.onclick=()=>dialog.hidden=true;
       document.getElementById('close').onclick=()=>dialog.hidden=true;
       chat.onclick=()=>panel.hidden=false;
-      send.onclick=async()=>{const r=await api('/simple_chat',{method:'POST',body:JSON.stringify({llm_config:{credential_id:'${wrongLLM ? 'personal-llm' : 'application-llm'}'}})});if(r.ok){await r.json();canvas.innerHTML='<div class="react-flow__node">Node</div>';}};
+      send.onclick=async()=>{const r=await api('/simple_chat',{method:'POST',body:JSON.stringify({llm_config:{credential_id:'${wrongLLM ? 'personal-llm' : 'application-llm'}'}})});if(r.ok){const data=await r.json();canvas.innerHTML=data.graph.nodes.map(()=>'<div class="react-flow__node">Node</div>').join('');}};
       </script>`); return;
     }
     if (!user) {json({},401);return;}
