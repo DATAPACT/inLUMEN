@@ -19,6 +19,41 @@ from app.deployment_validation import (
 
 
 class IsolatedRuntimeEnvironmentTest(unittest.TestCase):
+    def test_vm_budget_is_applied_to_build_prefetch_and_runtime(self):
+        from app.deployment_validation import _isolated_dagster_execution
+        from app.resource_policy import GIB, ResourceAdmissionController
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            (root / "bundle-manifest.json").write_text("{}")
+            project = root / "dagster"
+            project.mkdir()
+            (project / "Dockerfile").write_text("FROM python:3.11-slim\n")
+            (project / "requirements.txt").write_text("faster-whisper==1.2.1\n")
+            (project / "model-requirements.json").write_text("{}")
+            (project / "model_prefetch.py").write_text("pass\n")
+            client = mock.Mock()
+            client.info.return_value = {"NCPU": 8, "MemTotal": 30 * GIB}
+            client.images.build.return_value = (mock.Mock(id="built-image"), [])
+            container = client.containers.run.return_value
+            container.wait.return_value = {"StatusCode": 0}
+            container.logs.return_value = b""
+            controller = ResourceAdmissionController(max_active_runs=2)
+            settings = {"CODEGEN_EXECUTION_CPU_BUDGET": "4", "CODEGEN_EXECUTION_MEMORY_GIB": "8", "CODEGEN_ML_CPU_THREADS": "2"}
+            with mock.patch.dict(os.environ, settings), mock.patch("app.deployment_validation.docker.from_env", return_value=client), \
+                 mock.patch("app.deployment_validation.RESOURCE_ADMISSION", controller):
+                report = _isolated_dagster_execution(project, execution_id="session-limits", timeout_seconds=60, runtime_secrets=None)
+            self.assertTrue(report["ok"], report)
+            self.assertEqual(client.images.build.call_args.kwargs["container_limits"],
+                {"memory": 4 * GIB, "memswap": 4 * GIB, "cpusetcpus": "0,1"})
+            self.assertEqual(client.containers.run.call_count, 2)
+            for call in client.containers.run.call_args_list:
+                self.assertEqual(call.kwargs["nano_cpus"], 2_000_000_000)
+                self.assertEqual(call.kwargs["mem_limit"], 4 * GIB)
+                self.assertEqual(call.kwargs["memswap_limit"], 4 * GIB)
+            self.assertEqual(client.containers.run.call_args.kwargs["environment"]["OMP_NUM_THREADS"], "2")
+            self.assertFalse(controller._active)
+
     def test_read_only_runtime_has_writable_cache_locations(self):
         environment = _isolated_runtime_environment(
             {"API_TOKEN": "secret"},

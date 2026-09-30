@@ -251,6 +251,18 @@ resource allocation limits. Set `INLUMEN_BACKEND_MEM_LIMIT`,
 `INLUMEN_FRONTEND_MEM_LIMIT` in `.env.production` when workload measurements
 justify different budgets.
 
+Production isolated execution defaults to **two active
+jobs sharing 4 CPUs and 8 GiB**, with each ML worker limited to 2 CPUs/4 GiB.
+The runner accepts up to 20 outstanding jobs globally (4 per workspace); later
+jobs wait for execution capacity. Configure this with
+`CODEGEN_EXECUTION_MAX_ACTIVE_RUNS`, `CODEGEN_EXECUTION_CPU_BUDGET`,
+`CODEGEN_EXECUTION_MEMORY_GIB`, and `CODEGEN_ML_CPU_THREADS`. Image builds and
+model preparation occupy the same slots. Keep one codegen replica/process:
+its execution admission controller is process-local. These limits protect the
+execution budget; measure chat/provider capacity separately. For an 8-vCPU/30-GiB
+host these defaults leave capacity for application services; adjust the budgets
+for other hosts and workloads. See [the VM load-test guide](vm-load-test.md).
+
 ### Routing more applications through the shared connector
 
 In the VM's separate `cloudflare/docker-compose.yml`, the connector's `default`

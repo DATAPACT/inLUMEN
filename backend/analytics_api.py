@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import threading
 import uuid
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
@@ -199,8 +200,18 @@ def _pipeline_graph_from_payload_or_backend(data: dict) -> dict:
     )
 
 
+_RUN_BUNDLE_PREPARATION = threading.BoundedSemaphore(1)
+
+
 def prepare_dagster_execution_bundle(pipeline_graph: dict) -> dict:
     """Freeze the reviewed runtime packages and inputs for an actual Dagster run."""
+    # Input bytes are staged/encoded before the runner accepts a job. Bound that
+    # memory-heavy work too: one preparation per Gunicorn process (two in prod).
+    with _RUN_BUNDLE_PREPARATION:
+        return _prepare_dagster_execution_bundle(pipeline_graph)
+
+
+def _prepare_dagster_execution_bundle(pipeline_graph: dict) -> dict:
     files = _file_refs_from_version_graph(pipeline_graph)
     filenames, _buckets, ids = _dockerfile_inputs(files)
     runtime = run_async(

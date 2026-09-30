@@ -557,6 +557,11 @@ def _isolated_dagster_execution(
             tag=image_tag,
             rm=True,
             forcerm=True,
+            container_limits={
+                "memory": int(allocation["memory_bytes"]),
+                "memswap": int(allocation["memory_bytes"]),
+                "cpusetcpus": ",".join(str(cpu) for cpu in range(int(allocation["cpu"]))),
+            },
             labels={"inlumen.pipeline.snapshot": snapshot_hash},
         )
         build_output = "\n".join(
@@ -618,6 +623,7 @@ def _isolated_dagster_execution(
                 security_opt=["no-new-privileges"],
                 pids_limit=256,
                 mem_limit=int(allocation["memory_bytes"]),
+                memswap_limit=int(allocation["memory_bytes"]),
                 nano_cpus=int(allocation["cpu"]) * 1_000_000_000,
                 tmpfs={"/tmp": "rw,noexec,nosuid,size=256m"},
                 environment=prefetch_environment,
@@ -666,6 +672,10 @@ def _isolated_dagster_execution(
             runtime_secrets,
             has_models=has_models,
         )
+        environment.update({
+            name: str(allocation["cpu"])
+            for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS")
+        })
         execution_volumes = {
             str(runtime_dir.resolve()): {
                 "bind": "/runtime",
@@ -701,6 +711,7 @@ def _isolated_dagster_execution(
             security_opt=["no-new-privileges"],
             pids_limit=256,
             mem_limit=int(allocation["memory_bytes"]),
+            memswap_limit=int(allocation["memory_bytes"]),
             nano_cpus=int(allocation["cpu"]) * 1_000_000_000,
             tmpfs={"/tmp": "rw,noexec,nosuid,size=256m,mode=1777"},
             environment=environment,
