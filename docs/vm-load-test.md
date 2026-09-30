@@ -182,7 +182,8 @@ The ZIP must contain four portable Task folders publishing `transcription.json`,
 single input through `INLUMEN_INPUT_MANIFEST` without embedding graph IDs or
 assuming fixed port names. See [the Task package contract](task-packages.md).
 There is a barrier between the two design requests. The harness verifies both
-graphs' roles and connections, opens **Upload code ZIP**, explicitly matches
+graphs' roles and connections, reviews and applies any proposed graph through
+**Apply to canvas**, then verifies the saved graph. It opens **Upload code ZIP**, explicitly matches
 the four packages to each user's generated node IDs, reviews and imports the
 same bytes, attaches the same WAV to the Source, then clicks **Run current pipeline**.
 Polling queued work does not resubmit it. This makes 40 design requests and 20

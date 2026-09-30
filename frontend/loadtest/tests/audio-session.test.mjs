@@ -38,7 +38,8 @@ test('checks the requested graph order and rejects bypasses', () => {
 });
 
 async function fixture(mode, bytes) {
-  const states = new Map(), messages = [], uploadedCodes = [], uploadedAudio = [], submissions = [];
+  const states = new Map(), messages = [], uploadedCodes = [], uploadedAudio = [], submissions = [], appliedPreviews = [];
+  const previewMode = ['preview_success', 'preview_apply_failure'].includes(mode);
   const server = createServer(async (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     const path = new URL(req.url, 'http://localhost').pathname;
@@ -60,6 +61,7 @@ async function fixture(mode, bytes) {
       res.end(`<button id="clear">Clear all</button><div role="alertdialog" aria-label="Clear the entire workspace?" id="confirmation" hidden><button id="confirmClear">Clear workspace</button></div>
       <button id="settings">Settings</button><div role="dialog" id="settingsDialog" hidden><button aria-haspopup="menu" id="menu">Config</button><p id="selected" hidden>Application-provided LLM · Managed by your administrator. No API key needed.</p><button id="closeSettings">Close</button></div><button role="menuitem" id="item" hidden>Application-provided LLM</button>
       <button id="chat">Chat</button><textarea placeholder="Describe the pipeline..."></textarea><button id="send">Send</button><div id="canvas"></div>
+      <div role="dialog" aria-label="Review proposed graph" id="preview" hidden><button id="applyPreview">Apply to canvas</button></div>
       <button id="library" aria-pressed="false">Library</button><button role="tab">Run</button><button id="upload">Upload code ZIP</button><input type="file" accept=".zip,application/zip" id="zip">
       <div role="dialog" aria-label="Review code ZIP" id="review" hidden><div id="matches"></div><button id="revalidate">Revalidate</button><button id="importCode">Import 4 Task packages</button></div><button id="run">Run current pipeline</button>
       <script>
@@ -69,7 +71,9 @@ async function fixture(mode, bytes) {
       confirmClear.onclick=async()=>{confirmation.hidden=true;clear.disabled=true;await api('/api/workspace/clear-all',{method:'POST'});canvas.innerHTML='';clear.disabled=false;};
       settings.onclick=()=>settingsDialog.hidden=false;menu.onclick=()=>item.hidden=false;item.onclick=()=>{item.hidden=true;selected.hidden=false;};closeSettings.onclick=()=>settingsDialog.hidden=true;
       library.onclick=()=>library.setAttribute('aria-pressed','true');
-      send.onclick=async()=>{send.disabled=true;const response=await api('/simple_chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:document.querySelector('textarea').value,llm_config:{credential_id:'application-llm'}})});if(response.ok){const data=await response.json();canvas.innerHTML='<div class="react-flow__node">Node</div>';document.querySelector('textarea').value='';}send.disabled=false;};
+      let proposal;
+      send.onclick=async()=>{send.disabled=true;const response=await api('/simple_chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:document.querySelector('textarea').value,llm_config:{credential_id:'application-llm'}})});if(response.ok){const data=await response.json();if(data.sync.preview_pending){proposal=data.graph;preview.hidden=false;}else{canvas.innerHTML='<div class="react-flow__node">Node</div>';}document.querySelector('textarea').value='';}send.disabled=false;};
+      applyPreview.onclick=async()=>{const response=await api('/api/pipeline/graph',{method:'POST',headers:{'Content-Type':'application/json','If-Match':'"revision"'},body:JSON.stringify({graph:proposal})});if(response.ok){canvas.innerHTML='<div class="react-flow__node">Node</div>';preview.hidden=true;}};
       upload.onclick=()=>zip.click();
       let code, report, mappings={};
       async function validate(){const form=new FormData();form.append('file',code);form.append('mappings',JSON.stringify(mappings));const response=await api('/api/pipeline/task-packages/validate',{method:'POST',body:form});report=await response.json();return report;}
@@ -88,13 +92,23 @@ async function fixture(mode, bytes) {
     const state = states.get(user);
     if (path === '/api/chatbot-configs') { json({ configs: [{ id: 'application-llm', has_api_key: true, model: 'fixture' }] }); return; }
     if (path === '/api/workspace/clear-all') { state.graph = { nodes: [], edges: [] }; state.chat = 0; json({ status: 'ok' }); return; }
-    if (path === '/api/pipeline/graph') { json(state.graph, 200, { ETag: '"revision"' }); return; }
+    if (path === '/api/pipeline/graph') {
+      if (req.method === 'POST') {
+        const proposal = JSON.parse((await body()).toString()).graph;
+        assert.equal(req.headers['if-match'], '"revision"');
+        if (mode === 'preview_apply_failure') { json({ code: 'graph_conflict' }, 409); return; }
+        state.graph = proposal;
+        appliedPreviews.push(user);
+      }
+      json(state.graph, 200, { ETag: '"revision"' }); return;
+    }
     if (path === '/simple_chat') {
       const message = JSON.parse((await body()).toString()).message;
       messages.push({ user, message }); state.chat++;
       await new Promise(resolve => setTimeout(resolve, 100));
-      state.graph = graphFor(user, state.chat === 2);
-      json({ graph: state.graph, sync: { guardrail_passed: true } }, mode === 'second_chat_failure' && state.chat === 2 ? 524 : 200); return;
+      const proposal = graphFor(user, state.chat === 2);
+      if (!previewMode) state.graph = proposal;
+      json({ graph: proposal, sync: { guardrail_passed: true, preview_pending: previewMode } }, mode === 'second_chat_failure' && state.chat === 2 ? 524 : 200); return;
     }
     if (path.startsWith('/api/pipeline/task-packages/')) {
       const content = await body();
@@ -133,11 +147,11 @@ async function fixture(mode, bytes) {
     json({}, 404);
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  return { baseURL: `http://127.0.0.1:${server.address().port}`, messages, uploadedCodes, uploadedAudio, submissions,
+  return { baseURL: `http://127.0.0.1:${server.address().port}`, messages, uploadedCodes, uploadedAudio, submissions, appliedPreviews,
     close: () => new Promise(resolve => server.close(resolve)) };
 }
 
-for (const mode of ['success', 'second_chat_failure', 'invalid_zip', 'run_failure', 'missing_artifact', 'excessive_allocation', 'custom_allocation_limits', 'excessive_memory']) {
+for (const mode of ['success', 'second_chat_failure', 'invalid_zip', 'run_failure', 'missing_artifact', 'excessive_allocation', 'custom_allocation_limits', 'excessive_memory', 'preview_success', 'preview_apply_failure']) {
   test(`audio session browser workload: ${mode}`, { timeout: 90000 }, async () => {
     const bytes = await syntheticBundle();
     const server = await fixture(mode, bytes);
@@ -148,19 +162,20 @@ for (const mode of ['success', 'second_chat_failure', 'invalid_zip', 'run_failur
     const audioBytes = Buffer.from('RIFF session fixture WAV bytes');
     await writeFile(audioFile, audioBytes);
     try {
-      const users = mode === 'success' ? 20 : 2;
+      const users = ['success', 'preview_success'].includes(mode) ? 20 : 2;
       const report = await runLoadTest({ baseURL: server.baseURL, issuer: server.baseURL + '/realms/inlumen',
         accounts: Array.from({ length: users }, (_, i) => ({ username: `user${i + 1}`, password: 'fixture-password' })),
         scenario: 'audio-session', codeZip, audioFile, timeoutMs: 5000, runTimeoutMs: 5000, pollMs: 20,
         maxRunCpus: mode === 'custom_allocation_limits' ? 4 : 2,
         maxRunMemoryGiB: mode === 'excessive_memory' ? 2 : 4, onProgress: () => {} });
       assert.equal(report.failure, null, JSON.stringify(report));
-      assert.equal(report.passed, ['success', 'custom_allocation_limits'].includes(mode), JSON.stringify(report));
+      assert.equal(report.passed, ['success', 'custom_allocation_limits', 'preview_success'].includes(mode), JSON.stringify(report));
       assert.deepEqual(report.allocation_limits, { cpu: mode === 'custom_allocation_limits' ? 4 : 2,
         memory_bytes: (mode === 'excessive_memory' ? 2 : 4) * 1024 ** 3 });
-      assert.equal(server.messages.length, users * 2);
-      for (let i = 1; i <= users; i++) assert.deepEqual(server.messages.filter(message => message.user === `user${i}`).map(item => item.message), AUDIO_PROMPTS);
-      const shouldRun = !['second_chat_failure', 'invalid_zip'].includes(mode);
+      const expectedMessages = mode === 'preview_apply_failure' ? AUDIO_PROMPTS.slice(0, 1) : AUDIO_PROMPTS;
+      assert.equal(server.messages.length, users * expectedMessages.length);
+      for (let i = 1; i <= users; i++) assert.deepEqual(server.messages.filter(message => message.user === `user${i}`).map(item => item.message), expectedMessages);
+      const shouldRun = !['second_chat_failure', 'invalid_zip', 'preview_apply_failure'].includes(mode);
       assert.equal(server.submissions.length, shouldRun ? users : 0);
       assert.equal(server.uploadedCodes.length, shouldRun ? users : 0);
       assert.ok(server.uploadedAudio.every(body => body.includes(audioBytes)));
@@ -173,6 +188,11 @@ for (const mode of ['success', 'second_chat_failure', 'invalid_zip', 'run_failur
       if (mode === 'second_chat_failure') assert.ok(report.results.every(result => result.failure === 'chat_http_524' && result.outcome_may_be_running));
       if (mode === 'run_failure' || mode === 'missing_artifact') assert.ok(report.results.every(result => !result.outcome_may_be_running));
       if (['excessive_allocation', 'excessive_memory'].includes(mode)) assert.ok(report.results.every(result => result.failure === 'execution_allocation_exceeds_configured_limits'));
+      if (mode === 'preview_success') {
+        assert.equal(server.appliedPreviews.length, users * 2);
+        assert.ok(report.results.every(result => result.stages.slice(0, 2).every(stage => stage.preview_applied)));
+      }
+      if (mode === 'preview_apply_failure') assert.ok(report.results.every(result => result.failure === 'graph_preview_apply_http_409'));
       const text = JSON.stringify(report);
       assert.ok(!text.includes('fixture-password') && !text.includes('Hello Alice'));
     } finally { await server.close(); await rm(dir, { recursive: true }); }

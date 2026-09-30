@@ -150,6 +150,19 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
       ensure(started.postDataJSON()?.llm_config?.credential_id === 'application-llm', 'wrong_llm_configuration');
       ensure(payload.sync?.guardrail_passed === true && payload.sync?.graph_safe_to_apply !== false, 'graph_guardrail_failed');
       validateGraph(payload.graph);
+      if (scenario === 'audio-session') validateAudioGraph(payload.graph, stage === 'extend_design');
+      if (payload.sync?.preview_pending) {
+        const preview = page.getByRole('dialog', { name: 'Review proposed graph', exact: true });
+        await expect(preview).toBeVisible({ timeout: 30000 });
+        const applied = page.waitForResponse(r => appPath(r.url()) && r.request().method() === 'POST'
+          && new URL(r.url()).pathname === '/api/pipeline/graph', { timeout: 30000 }).catch(() => null);
+        await preview.getByRole('button', { name: 'Apply to canvas', exact: true }).click();
+        const saved = await applied;
+        ensure(saved, 'graph_preview_apply_timeout_outcome_unknown');
+        ensure(saved.ok(), `graph_preview_apply_http_${saved.status()}`);
+        await expect(preview).toBeHidden();
+        result.preview_applied = true;
+      }
       await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 30000 });
       await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeVisible({ timeout: 30000 });
       const persisted = await api(actor, '/api/pipeline/graph');
