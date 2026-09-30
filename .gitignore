@@ -72,6 +72,11 @@ frontend/.env
 codegen/secrets/
 codegen/state/
 runner/state/
+/state/
+
+# Local participant packages and session preparation; retain them on disk.
+/examples/user-test-fast-transcription/
+/examples/user-test-session/
 
 # Deployment credentials and browser test artifacts
 .env.production

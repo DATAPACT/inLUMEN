@@ -153,8 +153,10 @@ npm audit --audit-level=moderate
 ```
 
 Use Python 3.11 with backend `requirements.lock`, frozen `uv.lock` environments
-for codegen/runner, and Node 22.12+ for frontend checks. The Python runner uses
-its invoking interpreter for backend tests. To update shared code, edit
+for codegen/runner, and Node 22.12+ for frontend checks. Backend tests use pytest;
+the runner prefers the backend's managed virtualenv when present, otherwise its
+invoking interpreter. Install test dependencies into the selected environment.
+To update shared code, edit
 `shared/leases.py`, `shared/request_diagnostics.py`, or the backend core node
 manifest, then run `python scripts/sync_shared.py`. CI checks generated copies.
 

@@ -41,15 +41,11 @@ def checks_for(component: str) -> list[Check]:
             Check(
                 "backend unit and API tests",
                 (
-                    sys.executable,
+                    project_python(ROOT / "backend"),
                     "-m",
-                    "unittest",
-                    "discover",
-                    "-s",
+                    "pytest",
                     "tests",
-                    "-p",
-                    "test_*.py",
-                    "-v",
+                    "-q",
                 ),
                 ROOT / "backend",
             )

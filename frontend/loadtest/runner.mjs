@@ -1,10 +1,17 @@
 import { chromium, expect } from '@playwright/test';
-import { ensure, validateSessions, validateGraph, safeFailure, summarize, DEFAULT_PROMPT } from './core.mjs';
+import { ensure, positiveInteger, validateSessions, validateGraph, validateAudioGraph, safeFailure, summarize, DEFAULT_PROMPT, AUDIO_PROMPTS } from './core.mjs';
+import { loadSessionAssets, runAudioSession } from './audio-session.mjs';
 
 const WS_HEADER = 'X-InLumen-Workspace-Id';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeoutMs = 180000, rampMs = 0, preflight = false, headed = false, prompt = DEFAULT_PROMPT, onProgress = console.log }) {
+export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeoutMs = 180000, rampMs = 0, preflight = false, headed = false, prompt = DEFAULT_PROMPT, scenario = 'design', codeZip, audioFile, runTimeoutMs = 1800000, maxRunCpus = 2, maxRunMemoryGiB = 4, pollMs = 5000, onProgress = console.log }) {
+  ensure(['design', 'audio-session'].includes(scenario), 'invalid_scenario');
+  const allocationLimits = scenario === 'audio-session' ? {
+    cpu: positiveInteger(maxRunCpus, 'max_run_cpus'),
+    memory_bytes: positiveInteger(maxRunMemoryGiB, 'max_run_memory_gib') * 1024 ** 3,
+  } : null;
+  const assets = scenario === 'audio-session' && !preflight ? await loadSessionAssets(codeZip, audioFile) : null;
   const runID = `loadtest-${new Date().toISOString().replace(/\D/g, '')}`;
   const browser = await chromium.launch({ headless: !headed });
   const actors = [], results = [], workspaces = [];
@@ -13,10 +20,10 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
   const issuerURL = new URL(issuer);
   const appPath = url => new URL(url).origin === origin;
 
-  async function api(actor, path, { method = 'GET', data, workspace = actor.workspace } = {}) {
+  async function api(actor, path, { method = 'GET', data, multipart, headers = {}, workspace = actor.workspace } = {}) {
     ensure(actor.token, 'missing_authenticated_token');
     const response = await actor.context.request.fetch(`${baseURL}${path}`, {
-      method, data, headers: { Authorization: actor.token, ...(workspace ? { [WS_HEADER]: workspace } : {}) },
+      method, data, multipart, headers: { Authorization: actor.token, ...(workspace ? { [WS_HEADER]: workspace } : {}), ...headers },
       timeout: 30000, maxRedirects: 0, maxRetries: 0,
     });
     return response;
@@ -108,12 +115,12 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
     if (!await actor.page.getByPlaceholder('Describe the pipeline...').isVisible()) {
       await actor.page.getByRole('button', { name: 'Chat', exact: true }).click();
     }
-    await actor.page.getByPlaceholder('Describe the pipeline...').fill(`${prompt}\nName this test pipeline ${runID}-u${actor.index + 1}-r${round}.`);
+    await actor.page.getByPlaceholder('Describe the pipeline...').fill(scenario === 'audio-session' ? AUDIO_PROMPTS[0] : `${prompt}\nName this test pipeline ${runID}-u${actor.index + 1}-r${round}.`);
     await expect(actor.page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled();
   }
 
-  async function design(actor, round) {
-    const result = { user_index: actor.index + 1, round, workspace_id: actor.workspace, model: actor.model, ok: false, phase: 'design' };
+  async function design(actor, round, stage = 'design') {
+    const result = { user_index: actor.index + 1, round, workspace_id: actor.workspace, model: actor.model, ok: false, phase: stage };
     const { page } = actor;
     let started;
     actor.wrongLLMConfiguration = false;
@@ -150,6 +157,7 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
       const graph = await persisted.json();
       validateGraph(graph);
       ensure(graph.nodes.length === payload.graph.nodes.length, 'persisted_graph_mismatch');
+      if (scenario === 'audio-session') actor.roles = validateAudioGraph(graph, stage === 'extend_design');
       result.nodes = graph.nodes.length;
       result.edges = graph.edges.length;
       result.ok = true;
@@ -162,9 +170,9 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
       actor.onBlockedChat = null;
       page.off('request', onRequest);
       result.elapsed_ms = Date.now() - begin;
-      results.push(result);
-      onProgress(`User ${actor.index + 1}, round ${round}: ${result.ok ? 'passed' : result.failure} (${result.elapsed_ms} ms)`);
+      onProgress(`User ${actor.index + 1}, round ${round}, ${stage}: ${result.ok ? 'passed' : result.failure} (${result.elapsed_ms} ms)`);
     }
+    return result;
   }
 
   try {
@@ -189,7 +197,47 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
       onProgress(`Round ${round}: ${actors.length} distinct users ready in their default workspaces.`);
       if (preflight) break;
       phase = 'design';
-      await Promise.all(actors.map(actor => design(actor, round)));
+      if (scenario === 'design') results.push(...await Promise.all(actors.map(actor => design(actor, round))));
+      else {
+        const begin = Date.now();
+        const sessions = actors.map(actor => ({ user_index: actor.index + 1, round, workspace_id: actor.workspace,
+          model: actor.model, ok: false, phase: 'audio_session', stages: [] }));
+        const first = await Promise.all(actors.map(actor => design(actor, round, 'initial_design')));
+        first.forEach((stage, i) => sessions[i].stages.push(stage));
+        if (first.every(stage => stage.ok)) {
+          phase = 'extend_design';
+          await Promise.all(actors.map(actor => actor.page.getByPlaceholder('Describe the pipeline...').fill(AUDIO_PROMPTS[1])));
+          const second = await Promise.all(actors.map(actor => design(actor, round, 'extend_design')));
+          second.forEach((stage, i) => sessions[i].stages.push(stage));
+          if (second.every(stage => stage.ok)) {
+            phase = 'import_and_execute';
+            await Promise.all(actors.map(async (actor, i) => {
+              actor.runId = null;
+              actor.runOutcomeMayBeRunning = false;
+              try {
+                await runAudioSession({ actor, round, assets, api, runTimeoutMs, pollMs, allocationLimits,
+                  onStage: stage => sessions[i].stages.push(stage), onProgress,
+                  isAppResponse: response => appPath(response.url()) });
+                sessions[i].ok = true;
+              } catch (error) {
+                sessions[i].failure = safeFailure(error);
+                sessions[i].run_id = actor.runId;
+                sessions[i].outcome_may_be_running = Boolean(actor.runOutcomeMayBeRunning);
+              } finally {
+                sessions[i].elapsed_ms = Date.now() - begin;
+              }
+            }));
+          }
+        }
+        for (const result of sessions) {
+          result.elapsed_ms ??= Date.now() - begin;
+          if (!result.ok) {
+            result.failure ??= result.stages.find(stage => !stage.ok)?.failure || 'session_stopped_after_design_failure';
+            result.outcome_may_be_running ||= result.stages.some(stage => stage.outcome_may_be_running);
+          }
+        }
+        results.push(...sessions);
+      }
       if (results.some(r => !r.ok)) break;
     }
   } catch (error) {
@@ -197,7 +245,7 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
   } finally {
     await browser.close();
   }
-  return { schema_version: 1, run_id: runID, base_url: baseURL, finished_at: new Date().toISOString(),
+  return { schema_version: 2, scenario, allocation_limits: allocationLimits, shared_assets: assets?.report || null, run_id: runID, base_url: baseURL, finished_at: new Date().toISOString(),
     workspace_mode: 'default', clear_all_before_each_round: !preflight, preflight, requested_rounds: rounds, failure, workspaces, results,
     summary: summarize(results, accounts.length),
     passed: !failure && (preflight || results.length === accounts.length * rounds && results.every(r => r.ok)),

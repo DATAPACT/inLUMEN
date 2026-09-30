@@ -27,7 +27,9 @@ jobs:
       - name: Check generated contracts and service modules
         run: python scripts/sync_shared.py --check
       - name: Install backend dependencies
-        run: python -m pip install --require-hashes -r backend/requirements.lock
+        run: |
+          python -m pip install --require-hashes -r backend/requirements.lock
+          python -m pip install pytest==9.1.1
       - name: Run backend tests
         run: python scripts/run_tests.py --component backend
 
@@ -89,6 +91,8 @@ jobs:
         run: cd frontend && npx playwright install --with-deps chromium
       - name: Browser recovery and accessibility tests
         run: npm run test:e2e --prefix frontend
+      - name: Stress harness regression tests
+        run: npm run test:stress --prefix frontend
 
   integration:
     name: Graph transactions and workspace isolation

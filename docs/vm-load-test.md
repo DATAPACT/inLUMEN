@@ -1,4 +1,4 @@
-# Deploy a candidate and test concurrent pipeline design
+# Deploy a candidate and test concurrent pipeline design and execution
 
 Select an exact candidate commit or release tag from the repository. Use a
 dedicated staging VM and synthetic test accounts/data for the first run.
@@ -52,6 +52,47 @@ The unchanged defaults are 2 workers × 4 threads: eight simultaneous request
 handlers, which can queue 20 synchronous chats. More threads are an experiment,
 not a capacity guarantee: watch memory, database connections and LLM rate limits.
 Codegen/runner queue limits are separate and do not limit pipeline-design chats.
+
+### Bounded execution budget
+
+For an 8-vCPU/30-GiB VM that also hosts Keycloak and other applications,
+Production Compose supplies these configurable execution defaults:
+
+```dotenv
+RUNNER_MAX_OUTSTANDING_RUNS=4
+RUNNER_MAX_GLOBAL_OUTSTANDING_RUNS=20
+CODEGEN_EXECUTION_MAX_ACTIVE_RUNS=2
+CODEGEN_EXECUTION_CPU_BUDGET=4
+CODEGEN_EXECUTION_MEMORY_GIB=8
+CODEGEN_ML_CPU_THREADS=2
+RUNNER_DAGSTER_TIMEOUT_SECONDS=1800
+```
+
+Up to 20 runs can be accepted across workspaces; only two execution jobs enter
+image building, model preparation or execution at once. Each ML worker receives
+2 CPUs and 4 GiB. The FIFO controller also checks the shared 4-CPU/8-GiB budget,
+clamped to Docker's detected host capacity after its existing reserve. Runtime
+containers use CPU quotas and memory limits. SDK build containers use memory
+limits and a restricted CPU set; common dependency layers are cached.
+Inference thread counts follow the allocation. The remaining host capacity is
+available to chats and other services; this is a fixed budget, not a measurement
+of free RAM or a promise that unrelated workloads will fit.
+
+Keep **one codegen replica with one Uvicorn process**. Resource admission is
+process-local; adding replicas/processes multiplies the execution budget.
+Runner outstanding-run limits use the shared database. A run's 1800-second
+deadline includes capacity waiting, model preparation and execution. Additional
+submissions beyond the global queue limit receive 429. Generation queue limits
+are separate; importing this provided ZIP makes no code-generation LLM calls.
+Before admission, the backend freezes each run's uploaded audio and code into
+its executable snapshot. That preparation is limited to one request per backend
+process (two with the production worker count), so 20 simultaneous submissions
+do not all stage and encode WAV files in backend memory at once.
+
+These settings are in the candidate checkout and take effect after its images
+are built and deployed. Existing containers do not acquire the new limits by
+editing `.env.production` alone. Record the deployed commit, effective container
+environment and VM resource usage before certifying readiness.
 
 ```sh
 docker compose --env-file .env.production -f docker-compose-prod.yml config --quiet
@@ -112,10 +153,10 @@ workspace content or send chat prompts.
 
 ```sh
 npm run stress -- --url https://inlumen.example.com --issuer https://identity.example.com/realms/inlumen --users 2 --preflight
-npm run stress -- --url https://inlumen.example.com --issuer https://identity.example.com/realms/inlumen --users 1
-npm run stress -- --url https://inlumen.example.com --issuer https://identity.example.com/realms/inlumen --users 5
-npm run stress -- --url https://inlumen.example.com --issuer https://identity.example.com/realms/inlumen --users 10
-npm run stress -- --url https://inlumen.example.com --issuer https://identity.example.com/realms/inlumen --users 20 --rounds 3
+npm run stress -- --url https://inlumen.example.com --issuer https://identity.example.com/realms/inlumen --users 1 --scenario audio-session --code-zip /path/pipeline-code.zip --audio-file /path/recording.wav
+npm run stress -- --url https://inlumen.example.com --issuer https://identity.example.com/realms/inlumen --users 5 --scenario audio-session --code-zip /path/pipeline-code.zip --audio-file /path/recording.wav
+npm run stress -- --url https://inlumen.example.com --issuer https://identity.example.com/realms/inlumen --users 10 --scenario audio-session --code-zip /path/pipeline-code.zip --audio-file /path/recording.wav
+npm run stress -- --url https://inlumen.example.com --issuer https://identity.example.com/realms/inlumen --users 20 --scenario audio-session --code-zip /path/pipeline-code.zip --audio-file /path/recording.wav
 ```
 
 Each user has an isolated [Playwright browser context](https://playwright.dev/docs/browser-contexts)
@@ -127,9 +168,34 @@ workspace content you intend to erase. No new workspaces are created. After the
 run, log in normally as that user to see the final round’s pipeline. If the final
 design fails validation and is rolled back, the canvas can be empty. Earlier
 rounds are overwritten, and older test workspaces from previous runner versions
-are left untouched. The default prompt requests a connected CSV
-transformation pipeline, without code generation or execution. `--prompt-file`
-customizes it; avoid execution requests or sensitive data in the first experiment.
+are left untouched. The default `design` scenario sends a single CSV pipeline
+design request and supports a custom `--prompt-file`. The optional `audio-session`
+scenario exercises design, extension, package import and execution with two messages:
+
+1. Create a pipeline that transcribes an uploaded audio recording, analyzes its sentiment, and outputs the results.
+2. Extend the pipeline by adding named entity recognition after transcription, followed by data anonymization before sentiment analysis.
+
+Provide the code ZIP and WAV through `--code-zip` and `--audio-file`; workload
+assets and generated results are local inputs, not repository dependencies.
+The ZIP must contain four portable Task folders publishing `transcription.json`,
+`entities.json`, `anonymized.json` and `sentiment.json`. Each Task should read its
+single input through `INLUMEN_INPUT_MANIFEST` without embedding graph IDs or
+assuming fixed port names. See [the Task package contract](task-packages.md).
+There is a barrier between the two design requests. The harness verifies both
+graphs' roles and connections, opens **Upload code ZIP**, explicitly matches
+the four packages to each user's generated node IDs, reviews and imports the
+same bytes, attaches the same WAV to the Source, then clicks **Run current pipeline**.
+Polling queued work does not resubmit it. This makes 40 design requests and 20
+pipeline runs for a 20-user round; the agent may make multiple provider calls
+for each design request. Keep the WAV duration fixed and rehearse cold caches
+as well as warm runs: models are cached separately per workspace, so warming
+one participant does not warm everyone's model cache.
+
+`--run-timeout-seconds` defaults to 1800 and bounds waiting for a submitted run.
+An unknown submission or polling outcome stops further rounds and leaves
+potentially active jobs for inspection. A 429 is reported as a failure without
+retrying. `--scenario design` retains the previous single CSV design request;
+only that scenario accepts `--prompt-file`.
 `--ramp-seconds 30` spreads submissions over 30 seconds instead of a simultaneous
 burst. `--headed` helps diagnose login/UI setup. `--timeout-seconds` defaults to180.
 
@@ -143,16 +209,28 @@ be running on the server; inspect it before starting another test.
 
 Each run writes `frontend/loadtest/results/<run-id>/report.json` and exits nonzero
 on failure. Reports contain success/failure counts, successful-scenario p50/p95/max
-latency, observed overlapping chat requests, HTTP status/request IDs where present,
-and the default workspace IDs used. Passwords, tokens, prompts and raw server errors are
+latency, stage p50/p95 times, observed overlapping chat requests, HTTP status/request IDs,
+run IDs, observed queue duration, allocation samples and the workspace IDs used.
+Reports also record both shared file SHA256 hashes. Passwords, tokens, prompts,
+transcripts, audio contents and raw server errors are
 not saved. The load-generator SHA is recorded; record the deployed server SHA
 separately. Workspace IDs/user IDs in reports are operational metadata.
 
-Latency covers sending the prompt through canvas display and persisted graph
-verification. Login and workspace setup are excluded. A passing scenario requires
-a successful response, a passed graph guardrail, a nonempty graph with valid edges,
-visible canvas nodes and a persisted graph. This checks basic functionality, not
-the semantic correctness of the designed pipeline. Cross-workspace denial is a
+Session latency covers both designs, import, upload and completed execution;
+login and workspace setup are excluded. Per-stage timings separate design latency
+from execution waiting. The audio scenario requires the intended graph order,
+successful four-Task import, successful execution, all four JSON outputs and
+matching text handoffs through NER, anonymization and sentiment. Original nested
+transcription fields must be absent from the anonymized output. Passing also
+requires observed ML allocations within the configured per-run limits; missing
+allocation metadata fails the check. The defaults are 2 CPUs/4 GiB, matching the
+production ML settings. Use `--max-run-cpus` and `--max-run-memory-gib` when testing
+a deployment with different settings. These flags set test expectations; they do
+not change server capacity. The selected limits are recorded in the report.
+Aggregate concurrency is verified separately with admission tests and live VM
+resource monitoring; per-user polling is not a simultaneous host-resource sample.
+This does not evaluate model accuracy or prove complete personal-data removal. The legacy
+design scenario retains its structural graph checks. Cross-workspace denial is a
 smoke check, not a comprehensive isolation/security test.
 
 Observe the VM alongside the test:
@@ -186,8 +264,12 @@ cd frontend
 npm run test:stress
 ```
 
-These tests use local HTTP fixtures and Chromium to exercise concurrent isolated
-sessions, workspace denial, repeated rounds, preflight and HTTP524 handling.
+These tests use local HTTP fixtures and Chromium to exercise a full 20-user
+two-message session, distinct IDs/ports, identical uploads, queued runs and
+artifact verification, plus failures in the second chat, package validation,
+execution and artifact delivery. They also cover workspace denial, repeated
+design-only rounds, preflight and HTTP524 handling. Codegen admission tests submit
+20 threaded jobs against the VM budget and verify peak resource use.
 They incur no LLM charges and do not establish real VM/Keycloak capacity.
 
 ## Shared Cloudflare connector (single application Compose file)
