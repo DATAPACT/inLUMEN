@@ -294,3 +294,5 @@ Only the frontend joins the external tunnel network; application services use
 the private network. `INLUMEN_PRIVATE_NETWORK` can preserve its existing name.
 Always use `docker compose --env-file .env.production -f docker-compose-prod.yml`.
 No Compose override is required. No application host ports are published.
+
+To rehearse direct application without the Review AI dialog, pass `--review-ai-changes false`. The runner sets the switch in each browser and verifies both chat requests use that preference. Omit the option to retain the deployment/browser preference. Set `VITE_REVIEW_AI_CHANGES_DEFAULT=false` in the VM’s private `.env.production` and rebuild the frontend to start new session browsers with review off; explicit saved user preferences still take priority.

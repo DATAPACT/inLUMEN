@@ -13,6 +13,7 @@ const GraphChangePreviewDialog = lazy(() => import('@/components/chat/GraphChang
 const VersionsPanel = lazy(() => import('@/components/versions/VersionsPanel').then((module) => ({ default: module.VersionsPanel })));
 import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
 import { sanitizeAssistantMessage } from '@/features/chat/messageSafety';
+import { graphPreviewPreference } from '@/features/chat/graphPreviewPreference';
 import { CHAT_PROMPT_SUGGESTIONS } from '@/features/chat/promptSuggestions';
 import {
   MAIN_PIPELINE_VERSION_UID,
@@ -147,9 +148,9 @@ const readSavedTheme = (workspaceStorage: WorkspaceStorage = getWorkspaceStorage
 
 const readGraphPreviewPreference = (workspaceStorage: WorkspaceStorage = getWorkspaceStorage()) => {
   try {
-    return workspaceStorage.getItem(GRAPH_PREVIEW_KEY) !== "false";
+    return graphPreviewPreference(workspaceStorage.getItem(GRAPH_PREVIEW_KEY));
   } catch {
-    return true;
+    return graphPreviewPreference(null);
   }
 };
 

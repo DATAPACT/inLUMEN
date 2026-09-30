@@ -39,7 +39,7 @@ test('checks the requested graph order and rejects bypasses', () => {
 
 async function fixture(mode, bytes) {
   const states = new Map(), messages = [], uploadedCodes = [], uploadedAudio = [], submissions = [], appliedPreviews = [];
-  const previewMode = ['preview_success', 'preview_apply_failure'].includes(mode);
+  const previewMode = ['preview_success', 'preview_apply_failure', 'review_disabled'].includes(mode);
   const server = createServer(async (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     const path = new URL(req.url, 'http://localhost').pathname;
@@ -60,7 +60,7 @@ async function fixture(mode, bytes) {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.end(`<button id="clear">Clear all</button><div role="alertdialog" aria-label="Clear the entire workspace?" id="confirmation" hidden><button id="confirmClear">Clear workspace</button></div>
       <button id="settings">Settings</button><div role="dialog" id="settingsDialog" hidden><button aria-haspopup="menu" id="menu">Config</button><p id="selected" hidden>Application-provided LLM · Managed by your administrator. No API key needed.</p><button id="closeSettings">Close</button></div><button role="menuitem" id="item" hidden>Application-provided LLM</button>
-      <button id="chat">Chat</button><textarea placeholder="Describe the pipeline..."></textarea><button id="send">Send</button><div id="canvas"></div>
+      <button role="switch" aria-label="Preview AI graph changes before applying" aria-checked="true" id="reviewAI">Review AI</button><button id="chat">Chat</button><textarea placeholder="Describe the pipeline..."></textarea><button id="send">Send</button><div id="canvas"></div>
       <div role="dialog" aria-label="Review proposed graph" id="preview" hidden><button id="applyPreview">Apply to canvas</button></div>
       <button id="library" aria-pressed="false">Library</button><button role="tab">Run</button><button id="upload">Upload code ZIP</button><input type="file" accept=".zip,application/zip" id="zip">
       <div role="dialog" aria-label="Review code ZIP" id="review" hidden><div id="matches"></div><button id="revalidate">Revalidate</button><button id="importCode">Import 4 Task packages</button></div><button id="run">Run current pipeline</button>
@@ -71,9 +71,10 @@ async function fixture(mode, bytes) {
       confirmClear.onclick=async()=>{confirmation.hidden=true;clear.disabled=true;await api('/api/workspace/clear-all',{method:'POST'});canvas.innerHTML='';clear.disabled=false;};
       settings.onclick=()=>settingsDialog.hidden=false;menu.onclick=()=>item.hidden=false;item.onclick=()=>{item.hidden=true;selected.hidden=false;};closeSettings.onclick=()=>settingsDialog.hidden=true;
       library.onclick=()=>library.setAttribute('aria-pressed','true');
+      reviewAI.onclick=()=>reviewAI.setAttribute('aria-checked',String(reviewAI.getAttribute('aria-checked')!=='true'));
       let proposal;
-      send.onclick=async()=>{send.disabled=true;const response=await api('/simple_chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:document.querySelector('textarea').value,llm_config:{credential_id:'application-llm'}})});if(response.ok){const data=await response.json();if(data.sync.preview_pending){proposal=data.graph;preview.hidden=false;}else{canvas.innerHTML='<div class="react-flow__node">Node</div>';}document.querySelector('textarea').value='';}send.disabled=false;};
-      applyPreview.onclick=async()=>{const response=await api('/api/pipeline/graph',{method:'POST',headers:{'Content-Type':'application/json','If-Match':'"revision"'},body:JSON.stringify({graph:proposal})});if(response.ok){canvas.innerHTML='<div class="react-flow__node">Node</div>';preview.hidden=true;}};
+      send.onclick=async()=>{send.disabled=true;const response=await api('/simple_chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:document.querySelector('textarea').value,preview_changes:reviewAI.getAttribute('aria-checked')==='true',llm_config:{credential_id:'application-llm'}})});if(response.ok){const data=await response.json();if(data.sync.preview_pending){proposal=data.graph;preview.hidden=false;}else{canvas.innerHTML='<div class="react-flow__node">Node</div>';}document.querySelector('textarea').value='';}send.disabled=false;};
+      applyPreview.onclick=async()=>{const response=await api('/api/pipeline/graph',{method:'POST',headers:{'Content-Type':'application/json','If-Match':'"1"'},body:JSON.stringify({graph:proposal})});if(response.ok){canvas.innerHTML='<div class="react-flow__node">Node</div>';preview.hidden=true;}};
       upload.onclick=()=>zip.click();
       let code, report, mappings={};
       async function validate(){const form=new FormData();form.append('file',code);form.append('mappings',JSON.stringify(mappings));const response=await api('/api/pipeline/task-packages/validate',{method:'POST',body:form});report=await response.json();return report;}
@@ -95,20 +96,21 @@ async function fixture(mode, bytes) {
     if (path === '/api/pipeline/graph') {
       if (req.method === 'POST') {
         const proposal = JSON.parse((await body()).toString()).graph;
-        assert.equal(req.headers['if-match'], '"revision"');
+        assert.equal(req.headers['if-match'], '"1"');
         if (mode === 'preview_apply_failure') { json({ code: 'graph_conflict' }, 409); return; }
         state.graph = proposal;
         appliedPreviews.push(user);
       }
-      json(state.graph, 200, { ETag: '"revision"' }); return;
+      json(state.graph, 200, { ETag: 'W/"1"', 'X-InLumen-Graph-Revision': '1' }); return;
     }
     if (path === '/simple_chat') {
-      const message = JSON.parse((await body()).toString()).message;
-      messages.push({ user, message }); state.chat++;
+      const { message, preview_changes } = JSON.parse((await body()).toString());
+      const pending = previewMode && preview_changes !== false;
+      messages.push({ user, message, preview_changes }); state.chat++;
       await new Promise(resolve => setTimeout(resolve, 100));
       const proposal = graphFor(user, state.chat === 2);
-      if (!previewMode) state.graph = proposal;
-      json({ graph: proposal, sync: { guardrail_passed: true, preview_pending: previewMode } }, mode === 'second_chat_failure' && state.chat === 2 ? 524 : 200); return;
+      if (!pending) state.graph = proposal;
+      json({ graph: proposal, sync: { guardrail_passed: true, preview_pending: pending } }, mode === 'second_chat_failure' && state.chat === 2 ? 524 : 200); return;
     }
     if (path.startsWith('/api/pipeline/task-packages/')) {
       const content = await body();
@@ -119,14 +121,14 @@ async function fixture(mode, bytes) {
       const packages = folders.map((folder, i) => ({ folder, node_id: mapping[folder] || null, manifest: { output: { path: outputs[i] } } }));
       const valid = mode !== 'invalid_zip' && packages.every((pkg, i) => pkg.node_id === roles[roleNames[i]]);
       if (path.endsWith('/import')) {
-        assert.ok(valid); assert.equal(req.headers['if-match'], '"revision"');
+        assert.ok(valid); assert.equal(req.headers['if-match'], '"1"');
         uploadedCodes.push(user); json({ imported: 4 }); return;
       }
-      json({ valid, digest: 'fixture-digest', graph_revision: '"revision"', packages, nodes: state.graph.nodes.filter(n => n.data.type === 'task') }); return;
+      json({ valid, digest: 'fixture-digest', graph_revision: '"1"', packages, nodes: state.graph.nodes.filter(n => n.data.type === 'task') }); return;
     }
     if (path.endsWith('/files')) {
       assert.equal(path, `/api/nodes/${user}-0/files`);
-      assert.equal(req.headers['if-match'], '"revision"');
+      assert.equal(req.headers['if-match'], '"1"');
       uploadedAudio.push(await body()); json({ status: 'ok' }); return;
     }
     if (path === '/api/pipeline-runs' && req.method === 'POST') { submissions.push(user); json({ run_id: `run-${user}`, status: 'queued' }, 202); return; }
@@ -151,7 +153,7 @@ async function fixture(mode, bytes) {
     close: () => new Promise(resolve => server.close(resolve)) };
 }
 
-for (const mode of ['success', 'second_chat_failure', 'invalid_zip', 'run_failure', 'missing_artifact', 'excessive_allocation', 'custom_allocation_limits', 'excessive_memory', 'preview_success', 'preview_apply_failure']) {
+for (const mode of ['success', 'second_chat_failure', 'invalid_zip', 'run_failure', 'missing_artifact', 'excessive_allocation', 'custom_allocation_limits', 'excessive_memory', 'preview_success', 'preview_apply_failure', 'review_disabled']) {
   test(`audio session browser workload: ${mode}`, { timeout: 90000 }, async () => {
     const bytes = await syntheticBundle();
     const server = await fixture(mode, bytes);
@@ -165,11 +167,11 @@ for (const mode of ['success', 'second_chat_failure', 'invalid_zip', 'run_failur
       const users = ['success', 'preview_success'].includes(mode) ? 20 : 2;
       const report = await runLoadTest({ baseURL: server.baseURL, issuer: server.baseURL + '/realms/inlumen',
         accounts: Array.from({ length: users }, (_, i) => ({ username: `user${i + 1}`, password: 'fixture-password' })),
-        scenario: 'audio-session', codeZip, audioFile, timeoutMs: 5000, runTimeoutMs: 5000, pollMs: 20,
+        scenario: 'audio-session', reviewAIChanges: mode === 'review_disabled' ? false : undefined, codeZip, audioFile, timeoutMs: 5000, runTimeoutMs: 5000, pollMs: 20,
         maxRunCpus: mode === 'custom_allocation_limits' ? 4 : 2,
         maxRunMemoryGiB: mode === 'excessive_memory' ? 2 : 4, onProgress: () => {} });
       assert.equal(report.failure, null, JSON.stringify(report));
-      assert.equal(report.passed, ['success', 'custom_allocation_limits', 'preview_success'].includes(mode), JSON.stringify(report));
+      assert.equal(report.passed, ['success', 'custom_allocation_limits', 'preview_success', 'review_disabled'].includes(mode), JSON.stringify(report));
       assert.deepEqual(report.allocation_limits, { cpu: mode === 'custom_allocation_limits' ? 4 : 2,
         memory_bytes: (mode === 'excessive_memory' ? 2 : 4) * 1024 ** 3 });
       const expectedMessages = mode === 'preview_apply_failure' ? AUDIO_PROMPTS.slice(0, 1) : AUDIO_PROMPTS;
@@ -191,6 +193,11 @@ for (const mode of ['success', 'second_chat_failure', 'invalid_zip', 'run_failur
       if (mode === 'preview_success') {
         assert.equal(server.appliedPreviews.length, users * 2);
         assert.ok(report.results.every(result => result.stages.slice(0, 2).every(stage => stage.preview_applied)));
+      }
+      if (mode === 'review_disabled') {
+        assert.equal(report.review_ai_changes, false);
+        assert.equal(server.appliedPreviews.length, 0);
+        assert.ok(server.messages.every(message => message.preview_changes === false));
       }
       if (mode === 'preview_apply_failure') assert.ok(report.results.every(result => result.failure === 'graph_preview_apply_http_409'));
       const text = JSON.stringify(report);

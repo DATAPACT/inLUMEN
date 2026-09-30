@@ -36,6 +36,17 @@ export class LoadTestError extends Error {
 }
 export function ensure(condition, code) { if (!condition) throw new LoadTestError(code); }
 
+export function graphRevision(headers) {
+  const explicit = headers['x-inlumen-graph-revision'];
+  if (explicit != null) {
+    ensure(/^\d+$/.test(explicit), 'invalid_graph_revision');
+    return `"${explicit}"`;
+  }
+  const match = /^(?:W\/)?"(\d+)"$/.exec(headers.etag || '');
+  ensure(match, 'missing_or_invalid_graph_revision');
+  return `"${match[1]}"`;
+}
+
 export function positiveInteger(value, name, max = 10000) {
   const parsed = Number(value);
   ensure(Number.isInteger(parsed) && parsed > 0 && parsed <= max, `invalid_${name}`);

@@ -3,7 +3,7 @@ import { basename } from 'node:path';
 import { createHash } from 'node:crypto';
 import JSZip from 'jszip';
 import { expect } from '@playwright/test';
-import { ensure, safeFailure } from './core.mjs';
+import { ensure, graphRevision, safeFailure } from './core.mjs';
 
 const outputRoles = { 'transcription.json': 'transcription', 'entities.json': 'ner',
   'anonymized.json': 'anonymization', 'sentiment.json': 'sentiment' };
@@ -87,9 +87,10 @@ export async function runAudioSession({ actor, round, assets, api, runTimeoutMs,
   });
   await stage('upload_audio', async result => {
     const graph = await api(actor, '/api/pipeline/graph');
-    ensure(graph.ok() && graph.headers().etag, 'audio_upload_requires_graph_revision');
+    ensure(graph.ok(), 'audio_upload_requires_graph_revision');
+    const revision = graphRevision(graph.headers());
     const response = await api(actor, `/api/nodes/${encodeURIComponent(actor.roles.source)}/files`, {
-      method: 'POST', headers: { 'If-Match': graph.headers().etag },
+      method: 'POST', headers: { 'If-Match': revision },
       multipart: { role: 'data', file: { name: assets.audioName, mimeType: 'audio/wav', buffer: assets.audio } },
     });
     ensure(response.ok(), `audio_upload_http_${response.status()}`);

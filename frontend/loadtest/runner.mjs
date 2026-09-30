@@ -5,8 +5,9 @@ import { loadSessionAssets, runAudioSession } from './audio-session.mjs';
 const WS_HEADER = 'X-InLumen-Workspace-Id';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeoutMs = 180000, rampMs = 0, preflight = false, headed = false, prompt = DEFAULT_PROMPT, scenario = 'design', codeZip, audioFile, runTimeoutMs = 1800000, maxRunCpus = 2, maxRunMemoryGiB = 4, pollMs = 5000, onProgress = console.log }) {
+export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeoutMs = 180000, rampMs = 0, preflight = false, headed = false, prompt = DEFAULT_PROMPT, scenario = 'design', codeZip, audioFile, runTimeoutMs = 1800000, maxRunCpus = 2, maxRunMemoryGiB = 4, pollMs = 5000, reviewAIChanges, onProgress = console.log }) {
   ensure(['design', 'audio-session'].includes(scenario), 'invalid_scenario');
+  ensure(reviewAIChanges === undefined || typeof reviewAIChanges === 'boolean', 'invalid_review_ai_changes');
   const allocationLimits = scenario === 'audio-session' ? {
     cpu: positiveInteger(maxRunCpus, 'max_run_cpus'),
     memory_bytes: positiveInteger(maxRunMemoryGiB, 'max_run_memory_gib') * 1024 ** 3,
@@ -115,6 +116,11 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
     if (!await actor.page.getByPlaceholder('Describe the pipeline...').isVisible()) {
       await actor.page.getByRole('button', { name: 'Chat', exact: true }).click();
     }
+    if (reviewAIChanges !== undefined) {
+      const review = actor.page.getByRole('switch', { name: 'Preview AI graph changes before applying', exact: true });
+      if (await review.getAttribute('aria-checked') !== String(reviewAIChanges)) await review.click();
+      await expect(review).toHaveAttribute('aria-checked', String(reviewAIChanges));
+    }
     await actor.page.getByPlaceholder('Describe the pipeline...').fill(scenario === 'audio-session' ? AUDIO_PROMPTS[0] : `${prompt}\nName this test pipeline ${runID}-u${actor.index + 1}-r${round}.`);
     await expect(actor.page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled();
   }
@@ -148,6 +154,10 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
       ensure(response.ok(), `chat_http_${response.status()}`);
       const payload = await response.json();
       ensure(started.postDataJSON()?.llm_config?.credential_id === 'application-llm', 'wrong_llm_configuration');
+      if (reviewAIChanges !== undefined) {
+        ensure(started.postDataJSON()?.preview_changes === reviewAIChanges, 'review_ai_changes_preference_mismatch');
+        if (!reviewAIChanges) ensure(!payload.sync?.preview_pending, 'unexpected_graph_preview');
+      }
       ensure(payload.sync?.guardrail_passed === true && payload.sync?.graph_safe_to_apply !== false, 'graph_guardrail_failed');
       validateGraph(payload.graph);
       if (scenario === 'audio-session') validateAudioGraph(payload.graph, stage === 'extend_design');
@@ -258,7 +268,7 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
   } finally {
     await browser.close();
   }
-  return { schema_version: 2, scenario, allocation_limits: allocationLimits, shared_assets: assets?.report || null, run_id: runID, base_url: baseURL, finished_at: new Date().toISOString(),
+  return { schema_version: 2, scenario, review_ai_changes: reviewAIChanges ?? null, allocation_limits: allocationLimits, shared_assets: assets?.report || null, run_id: runID, base_url: baseURL, finished_at: new Date().toISOString(),
     workspace_mode: 'default', clear_all_before_each_round: !preflight, preflight, requested_rounds: rounds, failure, workspaces, results,
     summary: summarize(results, accounts.length),
     passed: !failure && (preflight || results.length === accounts.length * rounds && results.every(r => r.ok)),
