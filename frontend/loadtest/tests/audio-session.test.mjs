@@ -136,9 +136,10 @@ async function fixture(mode, bytes) {
       state.polls++;
       const status = state.polls < 2 ? 'running' : mode === 'run_failure' ? 'failed' : 'succeeded';
       json({ run_id: `run-${user}`, status, progress: { phase: 'running_pipeline', resource_cpu: ['excessive_allocation', 'custom_allocation_limits'].includes(mode) ? 4 : 2, resource_memory_bytes: 4 * 1024 ** 3 },
-        result: { outputs: outputs.filter(name => mode !== 'missing_artifact' || name !== 'anonymized.json').map(filename => ({ filename, path: `outputs/${user}/${filename}` })) } }); return;
+        result: { outputs: [...outputs.filter(name => mode !== 'missing_artifact' || name !== 'anonymized.json').map(filename => ({ filename, path: `outputs/${user}/${filename}` })), ...(['destination_copy', 'conflicting_copy'].includes(mode) ? [{filename:'sentiment.json',path:`outputs/destination/${user}/sentiment.json`}] : [])] } }); return;
     }
     if (path.startsWith(`/api/pipeline-runs/run-${user}/outputs/`)) {
+      if (mode === 'conflicting_copy' && path.includes('/outputs/destination/')) { json({conflicting:true}); return; }
       const filename = path.split('/').at(-1);
       const data = { 'transcription.json': { text: 'Hello Alice, I am happy.', chunks: [] },
         'entities.json': { text: 'Hello Alice, I am happy.', entities: [{ label: 'PER', text: 'Alice' }] },
@@ -153,7 +154,7 @@ async function fixture(mode, bytes) {
     close: () => new Promise(resolve => server.close(resolve)) };
 }
 
-for (const mode of ['success', 'second_chat_failure', 'invalid_zip', 'run_failure', 'missing_artifact', 'excessive_allocation', 'custom_allocation_limits', 'excessive_memory', 'preview_success', 'preview_apply_failure', 'review_disabled']) {
+for (const mode of ['success', 'second_chat_failure', 'invalid_zip', 'run_failure', 'missing_artifact', 'excessive_allocation', 'custom_allocation_limits', 'excessive_memory', 'preview_success', 'preview_apply_failure', 'review_disabled', 'destination_copy', 'conflicting_copy']) {
   test(`audio session browser workload: ${mode}`, { timeout: 90000 }, async () => {
     const bytes = await syntheticBundle();
     const server = await fixture(mode, bytes);
@@ -171,7 +172,7 @@ for (const mode of ['success', 'second_chat_failure', 'invalid_zip', 'run_failur
         maxRunCpus: mode === 'custom_allocation_limits' ? 4 : 2,
         maxRunMemoryGiB: mode === 'excessive_memory' ? 2 : 4, onProgress: () => {} });
       assert.equal(report.failure, null, JSON.stringify(report));
-      assert.equal(report.passed, ['success', 'custom_allocation_limits', 'preview_success', 'review_disabled'].includes(mode), JSON.stringify(report));
+      assert.equal(report.passed, ['success', 'custom_allocation_limits', 'preview_success', 'review_disabled', 'destination_copy'].includes(mode), JSON.stringify(report));
       assert.deepEqual(report.allocation_limits, { cpu: mode === 'custom_allocation_limits' ? 4 : 2,
         memory_bytes: (mode === 'excessive_memory' ? 2 : 4) * 1024 ** 3 });
       const expectedMessages = mode === 'preview_apply_failure' ? AUDIO_PROMPTS.slice(0, 1) : AUDIO_PROMPTS;
@@ -200,6 +201,7 @@ for (const mode of ['success', 'second_chat_failure', 'invalid_zip', 'run_failur
         assert.ok(server.messages.every(message => message.preview_changes === false));
       }
       if (mode === 'preview_apply_failure') assert.ok(report.results.every(result => result.failure === 'graph_preview_apply_http_409'));
+      if (mode === 'conflicting_copy') assert.ok(report.results.every(result => result.failure === 'conflicting_sentiment_json'));
       const text = JSON.stringify(report);
       assert.ok(!text.includes('fixture-password') && !text.includes('Hello Alice'));
     } finally { await server.close(); await rm(dir, { recursive: true }); }

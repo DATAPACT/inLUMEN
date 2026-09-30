@@ -145,10 +145,18 @@ export async function runAudioSession({ actor, round, assets, api, runTimeoutMs,
     const artifacts = {};
     for (const filename of Object.keys(outputRoles)) {
       const outputs = (current.result?.outputs || []).filter(o => o.filename === filename || o.path?.split('/').at(-1) === filename);
-      ensure(outputs.length === 1 && outputs[0].path, `missing_or_duplicate_${filename.replace('.', '_')}`);
-      const output = await api(actor, `/api/pipeline-runs/${encodeURIComponent(runId)}/outputs/${outputs[0].path.split('/').map(encodeURIComponent).join('/')}`);
-      ensure(output.ok(), 'artifact_download_failed');
-      artifacts[filename] = await output.json();
+      ensure(outputs.length > 0 && outputs.every(output => output.path)
+        && new Set(outputs.map(output => output.path)).size === outputs.length, `missing_or_duplicate_${filename.replace('.', '_')}`);
+      let canonical;
+      for (const entry of outputs) {
+        const output = await api(actor, `/api/pipeline-runs/${encodeURIComponent(runId)}/outputs/${entry.path.split('/').map(encodeURIComponent).join('/')}`);
+        ensure(output.ok(), 'artifact_download_failed');
+        const bytes = await output.body();
+        // Destinations may publish a copy of the upstream Task artifact.
+        ensure(!canonical || bytes.equals(canonical), `conflicting_${filename.replace('.', '_')}`);
+        canonical = bytes;
+      }
+      artifacts[filename] = JSON.parse(canonical.toString('utf8'));
     }
     const transcript = artifacts['transcription.json'], entities = artifacts['entities.json'];
     const anonymized = artifacts['anonymized.json'], sentiment = artifacts['sentiment.json'];
