@@ -13,7 +13,7 @@ const GraphChangePreviewDialog = lazy(() => import('@/components/chat/GraphChang
 const VersionsPanel = lazy(() => import('@/components/versions/VersionsPanel').then((module) => ({ default: module.VersionsPanel })));
 import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
 import { sanitizeAssistantMessage } from '@/features/chat/messageSafety';
-import { graphPreviewPreference } from '@/features/chat/graphPreviewPreference';
+import { graphPreviewDefault, graphPreviewPreference } from '@/features/chat/graphPreviewPreference';
 import { CHAT_PROMPT_SUGGESTIONS } from '@/features/chat/promptSuggestions';
 import {
   MAIN_PIPELINE_VERSION_UID,
@@ -88,6 +88,7 @@ const PIPELINE_PROMPT_KEY = "inlumen-pipeline-high-level-prompt";
 const PANEL_STATE_KEY = "inlumen-panel-preferences";
 const THEME_KEY = "inlumen-theme";
 const GRAPH_PREVIEW_KEY = "inlumen-preview-graph-changes";
+const GRAPH_PREVIEW_DEFAULT_KEY = "inlumen-preview-graph-default";
 const CHAT_PROCESSING_TOAST_ID = "pipeline-chat-processing";
 const createChatTurnId = () => {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -148,9 +149,9 @@ const readSavedTheme = (workspaceStorage: WorkspaceStorage = getWorkspaceStorage
 
 const readGraphPreviewPreference = (workspaceStorage: WorkspaceStorage = getWorkspaceStorage()) => {
   try {
-    return graphPreviewPreference(workspaceStorage.getItem(GRAPH_PREVIEW_KEY));
+    return graphPreviewPreference(workspaceStorage.getItem(GRAPH_PREVIEW_KEY), workspaceStorage.getItem(GRAPH_PREVIEW_DEFAULT_KEY));
   } catch {
-    return graphPreviewPreference(null);
+    return graphPreviewDefault();
   }
 };
 
@@ -374,6 +375,7 @@ const Index = () => {
 
   useEffect(() => {
     workspaceStorage.setItem(GRAPH_PREVIEW_KEY, String(previewGraphChanges));
+    workspaceStorage.setItem(GRAPH_PREVIEW_DEFAULT_KEY, String(graphPreviewDefault()));
   }, [workspaceStorage, previewGraphChanges]);
 
   useEffect(() => {
@@ -623,10 +625,10 @@ const Index = () => {
     };
 
     try {
+      // Finish the previous canvas snapshot before the agent starts mutating
+      // its graph, in both direct and preview modes.
+      await flushActiveVersionSnapshot();
       if (previewGraphChanges) {
-        // Include any queued active-version snapshot in the preview's base
-        // revision before asking the assistant to draft against this canvas.
-        await flushActiveVersionSnapshot();
         previewBaseRevision = getGraphRevision();
         if (activeChatTurnRef.current?.turnId === turnId) {
           activeChatTurnRef.current.previewBaseRevision = previewBaseRevision;

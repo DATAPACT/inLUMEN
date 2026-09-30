@@ -292,11 +292,17 @@ test('preview can be disabled for direct assistant edits', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Review proposed graph' })).toHaveCount(0);
 });
 
-test('a follow-up direct edit works after applying a graph preview', async ({ page }) => {
+test('a follow-up direct edit waits for a queued snapshot after applying a graph preview', async ({ page }) => {
   let revision = 1;
   let persistedLabel = 'Original';
   let followUpCanvasLabel: string | undefined;
   let turn = 0;
+  let snapshotComplete = false;
+  let followUpBeforeSnapshot = false;
+  let releaseSnapshot!: () => void;
+  let signalSnapshotStarted!: () => void;
+  const snapshotGate = new Promise<void>(resolve => { releaseSnapshot = resolve; });
+  const snapshotStarted = new Promise<void>(resolve => { signalSnapshotStarted = resolve; });
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname;
     if (path === '/api/pipeline/graph' && route.request().method() === 'GET') {
@@ -311,6 +317,9 @@ test('a follow-up direct edit works after applying a graph preview', async ({ pa
       revision++;
       await route.fulfill({ json: { ok: true }, headers: { ETag: `"${revision}"` } });
     } else if (path === '/api/pipeline/versions/active' && route.request().method() === 'POST') {
+      signalSnapshotStarted();
+      await snapshotGate;
+      snapshotComplete = true;
       revision++;
       await route.fulfill({ json: { version: { uid: 'main', name: 'Main', updated_at: '2026-01-02' } }, headers: { ETag: `"${revision}"` } });
     } else if (path === '/api/pipeline/updated-at') {
@@ -334,6 +343,7 @@ test('a follow-up direct edit works after applying a graph preview', async ({ pa
       return;
     }
     if (turn === 2) {
+      followUpBeforeSnapshot = !snapshotComplete;
       expect(body.preview_changes).toBe(false);
       followUpCanvasLabel = body.canvas_graph.nodes[0].label;
       persistedLabel = 'Second direct edit';
@@ -361,11 +371,17 @@ test('a follow-up direct edit works after applying a graph preview', async ({ pa
   await expect(page.getByRole('heading', { name: 'Review proposed graph' })).toBeVisible();
   await page.getByRole('button', { name: 'Apply to canvas' }).click();
   await expect(page.locator('#canvas-panel .react-flow__node').first()).toContainText('First applied edit');
-  await expect(page.getByLabel('Pipeline save status')).toHaveAttribute('data-save-state', 'saved');
+  await snapshotStarted;
 
   await page.getByRole('switch', { name: 'Preview AI graph changes before applying' }).click();
   await page.getByPlaceholder('Describe the pipeline...').fill('Change its follow-up label');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
+  try {
+    await page.waitForTimeout(150);
+    expect(followUpBeforeSnapshot).toBe(false);
+  } finally {
+    releaseSnapshot();
+  }
   await expect(page.locator('#canvas-panel .react-flow__node').first()).toContainText('Second direct edit');
   expect(followUpCanvasLabel).toBe('First applied edit');
   await expect(page.getByRole('heading', { name: 'Review proposed graph' })).toHaveCount(0);

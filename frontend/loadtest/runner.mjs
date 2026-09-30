@@ -173,7 +173,8 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
         await expect(preview).toBeHidden();
         result.preview_applied = true;
       }
-      await expect(page.locator('.react-flow__node')).toHaveCount(payload.graph.nodes.length, { timeout: 30000 });
+      await expect(page.locator('.react-flow__node')).toHaveCount(payload.graph.nodes.length, { timeout: 30000 })
+        .catch(() => { ensure(false, 'canvas_graph_sync_timeout'); });
       await expect(page.locator('.react-flow__node').first()).toBeVisible({ timeout: 30000 });
       await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeVisible({ timeout: 30000 });
       const persisted = await api(actor, '/api/pipeline/graph');
