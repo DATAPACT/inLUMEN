@@ -228,31 +228,30 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
           model: actor.model, ok: false, phase: 'audio_session', stages: [] }));
         const first = await Promise.all(actors.map(actor => design(actor, round, 'initial_design')));
         first.forEach((stage, i) => sessions[i].stages.push(stage));
-        if (first.every(stage => stage.ok)) {
-          phase = 'extend_design';
-          await Promise.all(actors.map(actor => actor.page.getByPlaceholder('Describe the pipeline...').fill(AUDIO_PROMPTS[1])));
-          const second = await Promise.all(actors.map(actor => design(actor, round, 'extend_design')));
-          second.forEach((stage, i) => sessions[i].stages.push(stage));
-          if (second.every(stage => stage.ok)) {
-            phase = 'import_and_execute';
-            await Promise.all(actors.map(async (actor, i) => {
-              actor.runId = null;
-              actor.runOutcomeMayBeRunning = false;
-              try {
-                await runAudioSession({ actor, round, assets, api, runTimeoutMs, pollMs, allocationLimits,
-                  onStage: stage => sessions[i].stages.push(stage), onProgress,
-                  isAppResponse: response => appPath(response.url()) });
-                sessions[i].ok = true;
-              } catch (error) {
-                sessions[i].failure = safeFailure(error);
-                sessions[i].run_id = actor.runId;
-                sessions[i].outcome_may_be_running = Boolean(actor.runOutcomeMayBeRunning);
-              } finally {
-                sessions[i].elapsed_ms = Date.now() - begin;
-              }
-            }));
+        const extendedActors = actors.filter((_, i) => first[i].ok);
+        phase = 'extend_design';
+        await Promise.all(extendedActors.map(actor => actor.page.getByPlaceholder('Describe the pipeline...').fill(AUDIO_PROMPTS[1])));
+        await Promise.all(extendedActors.map(async actor => {
+          sessions[actor.index].stages.push(await design(actor, round, 'extend_design'));
+        }));
+        phase = 'import_and_execute';
+        await Promise.all(actors.map(async (actor, i) => {
+          if (sessions[i].stages.length !== 2 || !sessions[i].stages.every(stage => stage.ok)) return;
+          actor.runId = null;
+          actor.runOutcomeMayBeRunning = false;
+          try {
+            await runAudioSession({ actor, round, assets, api, runTimeoutMs, pollMs, allocationLimits,
+              onStage: stage => sessions[i].stages.push(stage), onProgress,
+              isAppResponse: response => appPath(response.url()) });
+            sessions[i].ok = true;
+          } catch (error) {
+            sessions[i].failure = safeFailure(error);
+            sessions[i].run_id = actor.runId;
+            sessions[i].outcome_may_be_running = Boolean(actor.runOutcomeMayBeRunning);
+          } finally {
+            sessions[i].elapsed_ms = Date.now() - begin;
           }
-        }
+        }));
         for (const result of sessions) {
           result.elapsed_ms ??= Date.now() - begin;
           if (!result.ok) {

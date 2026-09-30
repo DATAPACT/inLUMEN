@@ -110,7 +110,7 @@ async function fixture(mode, bytes) {
       await new Promise(resolve => setTimeout(resolve, 100));
       const proposal = graphFor(user, state.chat === 2);
       if (!pending) state.graph = proposal;
-      json({ graph: proposal, sync: { guardrail_passed: true, preview_pending: pending } }, mode === 'second_chat_failure' && state.chat === 2 ? 524 : 200); return;
+      json({ graph: proposal, sync: { guardrail_passed: true, preview_pending: pending } }, (mode === 'second_chat_failure' || mode === 'one_design_failure' && user === 'user1') && state.chat === 2 ? 524 : 200); return;
     }
     if (path.startsWith('/api/pipeline/task-packages/')) {
       const content = await body();
@@ -154,7 +154,7 @@ async function fixture(mode, bytes) {
     close: () => new Promise(resolve => server.close(resolve)) };
 }
 
-for (const mode of ['success', 'second_chat_failure', 'invalid_zip', 'run_failure', 'missing_artifact', 'excessive_allocation', 'custom_allocation_limits', 'excessive_memory', 'preview_success', 'preview_apply_failure', 'review_disabled', 'destination_copy', 'conflicting_copy']) {
+for (const mode of ['success', 'second_chat_failure', 'invalid_zip', 'run_failure', 'missing_artifact', 'excessive_allocation', 'custom_allocation_limits', 'excessive_memory', 'preview_success', 'preview_apply_failure', 'review_disabled', 'destination_copy', 'conflicting_copy', 'one_design_failure']) {
   test(`audio session browser workload: ${mode}`, { timeout: 90000 }, async () => {
     const bytes = await syntheticBundle();
     const server = await fixture(mode, bytes);
@@ -179,8 +179,9 @@ for (const mode of ['success', 'second_chat_failure', 'invalid_zip', 'run_failur
       assert.equal(server.messages.length, users * expectedMessages.length);
       for (let i = 1; i <= users; i++) assert.deepEqual(server.messages.filter(message => message.user === `user${i}`).map(item => item.message), expectedMessages);
       const shouldRun = !['second_chat_failure', 'invalid_zip', 'preview_apply_failure'].includes(mode);
-      assert.equal(server.submissions.length, shouldRun ? users : 0);
-      assert.equal(server.uploadedCodes.length, shouldRun ? users : 0);
+      const expectedRuns = mode === 'one_design_failure' ? users - 1 : shouldRun ? users : 0;
+      assert.equal(server.submissions.length, expectedRuns);
+      assert.equal(server.uploadedCodes.length, expectedRuns);
       assert.ok(server.uploadedAudio.every(body => body.includes(audioBytes)));
       assert.equal(report.results.length, users);
       if (mode === 'success') {
@@ -202,6 +203,10 @@ for (const mode of ['success', 'second_chat_failure', 'invalid_zip', 'run_failur
       }
       if (mode === 'preview_apply_failure') assert.ok(report.results.every(result => result.failure === 'graph_preview_apply_http_409'));
       if (mode === 'conflicting_copy') assert.ok(report.results.every(result => result.failure === 'conflicting_sentiment_json'));
+      if (mode === 'one_design_failure') {
+        assert.equal(report.results[0].failure, 'chat_http_524');
+        assert.equal(report.results[1].ok, true);
+      }
       const text = JSON.stringify(report);
       assert.ok(!text.includes('fixture-password') && !text.includes('Hello Alice'));
     } finally { await server.close(); await rm(dir, { recursive: true }); }
