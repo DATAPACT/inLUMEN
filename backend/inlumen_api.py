@@ -6,7 +6,7 @@ import os
 import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
-from io import StringIO
+from io import StringIO, BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -16,6 +16,10 @@ from urllib.request import Request, urlopen
 from flask import Flask, Response, g, jsonify, make_response, request
 
 from artifact_contract import classify_artifact
+from artifact_runtime import ArtifactContractError
+from task_artifacts import TASK_METADATA_FILENAME, parse_task_metadata
+from task_package_contract import AUTHORING_GUIDE, EXAMPLE, TASK_SCHEMA, public_manifest, validate_package
+from task_packages import inspect_packages, task_package_folder, MAX_ARCHIVE, PLATFORM_FILES
 from application_llm import (
     APPLICATION_LLM_ID,
     application_llm_request_config,
@@ -125,10 +129,11 @@ DEFAULT_CODEGEN_ALLOWED_PACKAGES = [
 CODEGEN_RUNTIME_FILENAMES = {
     "main.py",
     "requirements.txt",
+    TASK_METADATA_FILENAME,
     "node-manifest.json",
     "validation-report.json",
 }
-USER_TASK_RUNTIME_FILENAMES = {"main.py", "requirements.txt"}
+USER_TASK_RUNTIME_FILENAMES = {"main.py", "requirements.txt", TASK_METADATA_FILENAME}
 PIPELINE_RUNTIME_BEHAVIOR_INSTRUCTION = """Design the entire pipeline as one coherent program before writing any node.
 For every edge, decide the exact output filename, format, schema or object shape, and required runtime dependencies. The producer must write that contract and the consumer must read the same contract.
 Implement every capability requested by the high-level request and graph. A terminal behavior such as answering questions, alerting, or publishing results must produce that real result, not only an intermediate score, index, or status.
@@ -138,35 +143,8 @@ Preserve information needed by downstream nodes. For example, retrieval pipeline
 Every node must be a finite, non-interactive Python 3.11 batch program. Validate required inputs before loading large models or doing other slow setup. Invalid inputs and processing failures must raise a clear error and exit non-zero; never serialize an exception or placeholder as a successful output.
 Before returning code, self-check every graph edge, filename, serialization shape, dependency, and requested terminal result end to end."""
 
-PIPELINE_RUNTIME_ATTACHMENT_INSTRUCTION = f"""{PIPELINE_RUNTIME_BEHAVIOR_INSTRUCTION}
-
-Create the files needed to run every pipeline node.
-For each flow_id, return main.py and requirements.txt. Leave requirements.txt empty when the script only uses the Python 3.11 standard library.
-When a node runs, the platform provides a standard workspace through
-PIPELINE_INPUT_DIR and PIPELINE_OUTPUT_DIR. Read upstream files directly from
-PIPELINE_INPUT_DIR and write every downstream artifact directly beneath
-PIPELINE_OUTPUT_DIR. Port names never create implicit workspace directories.
-Keep connected nodes consistent about output filenames and formats.
-Each main.py must be a finite, non-interactive batch program: do not call input(), start a server or UI, watch for files, or loop forever. Validate required input files before loading large models or doing other slow setup, then exit when the output files are written.
-Associate each returned file with its flow_id so inLUMEN can attach it to the correct node."""
-EXTERNAL_AI_RUNTIME_RESPONSE_INSTRUCTION = f"""{PIPELINE_RUNTIME_BEHAVIOR_INSTRUCTION}
-
-For every node, create:
-- main.py
-- requirements.txt only if main.py needs third-party packages
-
-Return code files only. Never create or return input data, example data, fake files, placeholder files, credentials, Dockerfiles, Dagster files, or manifests. Real input data is attached to Source nodes separately from generated code.
-
-Each main.py runs with its Source node's attached input files or the previous
-node's output files materialized under PIPELINE_INPUT_DIR. It must write its
-results beneath PIPELINE_OUTPUT_DIR. Connected nodes must agree on output
-filenames and formats.
-
-Each main.py must be a one-shot, non-interactive Python 3.11 batch program. It must not call input(), start a server or UI, watch for files, sleep indefinitely, or loop forever. It must validate required input files before loading large models, downloading resources, or doing other slow setup; invalid inputs must fail immediately with a clear error. A node with a downstream connection must write at least one real output file, then exit successfully.
-
-If you can create files, return one ZIP with folders named nodes/<flow_id>/. Otherwise, show each file in its own code block under a clear NODE <flow_id> heading. Return complete working code, not pseudocode.
-
-Finish with a short SOURCE INPUT MAP. For every real external input the user must provide, state the exact filename, flow_id, and Source node label that first reads it. The user attaches these files to the corresponding Source node; they must never be created by code generation or attached as runtime code."""
+PIPELINE_RUNTIME_ATTACHMENT_INSTRUCTION = PIPELINE_RUNTIME_BEHAVIOR_INSTRUCTION + "\n" + AUTHORING_GUIDE
+EXTERNAL_AI_RUNTIME_RESPONSE_INSTRUCTION = PIPELINE_RUNTIME_ATTACHMENT_INSTRUCTION
 CHATBOT_CONFIGS_PATH = Path(
     os.getenv("CHATBOT_CONFIGS_PATH", "state/chatbot_configurations.json")
 )
@@ -363,11 +341,11 @@ def _proxy(
     include_content_type = files is None and form is None and json_payload is None
     body = None if json_payload is not None else data if data is not None else request.get_data()
     headers = _forward_headers(include_content_type=include_content_type)
-    if adapter_request is dispatch_graph_request and "If-Match" in headers:
+    if adapter_request is dispatch_graph_request and ("If-Match" in headers or getattr(g, "graph_write_etag", None)):
         # One file action can attach a file, update its artifact and record an
         # event. Only our successful writes advance this request's condition;
         # a read or rejected write must not acknowledge somebody else's edit.
-        headers["If-Match"] = getattr(g, "graph_write_etag", headers["If-Match"])
+        headers["If-Match"] = getattr(g, "graph_write_etag", headers.get("If-Match"))
     upstream = adapter_request(
         backend_path,
         method=method or request.method,
@@ -654,6 +632,7 @@ def _node_file_entries(
             "filename": filename,
             "bucket": bucket,
             "content_type": content_type,
+            "role": item.get("role") if isinstance(item, dict) else None,
             **_file_kind_and_format(filename),
         }
         if isinstance(item, dict) and item.get("snapshot_bucket") and item.get("snapshot_object"):
@@ -1220,7 +1199,7 @@ def _codegen_configuration_hash(
     implementation = implementation_plan_from_data(data)
     contract = artifact.get("data_contract")
     contract_version = (
-        str(contract.get("version") or "")
+        str(contract.get("version") or contract.get("contract_id") or "")
         if isinstance(contract, dict)
         else ""
     )
@@ -1238,8 +1217,12 @@ def _persist_codegen_artifact(
     node_id: str,
     artifact: dict[str, Any],
     graph: dict[str, Any],
+    *, publish: bool = True,
 ) -> dict[str, Any]:
     files = artifact.get("files") if isinstance(artifact.get("files"), list) else []
+    portable = {item["filename"]: item.get("content", "") for item in files if item.get("filename") not in PLATFORM_FILES and not item.get("filename", "").lower().startswith("dockerfile")}
+    if TASK_METADATA_FILENAME in portable:
+        validate_package(portable)
     runtime_environment = runtime_environment_from_files(files)
     stored_files = []
     file_hashes: dict[str, str] = {}
@@ -1298,18 +1281,10 @@ def _persist_codegen_artifact(
             "attached_at": _utc_now_iso(),
         },
     }
-    graph_response = _proxy(
-        dispatch_graph_request,
-        "neo4j_update_generated_artifact",
-        method="POST",
-        data=b"",
-        json_payload={
-            "flow_id": node_id,
-            "generated_artifact": generated_artifact,
-            "publish_files": stored_files,
-        },
-    )
-    graph_response.raise_for_status()
+    if publish:
+        graph_response = _proxy(dispatch_graph_request, "neo4j_replace_task_packages", method="POST", data=b"",
+            json_payload={"packages": [{"node_id": node_id, "artifact": generated_artifact, "files": stored_files}]})
+        graph_response.raise_for_status()
     return generated_artifact
 
 
@@ -1350,6 +1325,8 @@ def _mark_codegen_artifact_user_modified(
             }
         if isinstance(data.get("file_buckets"), list):
             artifact["files"] = [deepcopy(item) for item in data["file_buckets"] if isinstance(item, dict) and item.get("role") == "code"]
+        artifact.pop("package_digest", None)
+        artifact["status"] = "stale"
         if python_source is not None:
             artifact["runtime_environment"] = discover_runtime_environment(
                 python_source
@@ -1473,13 +1450,25 @@ def _build_external_ai_runtime_prompt(
             "Infer the intended pipeline behavior from the node labels, descriptions, "
             "parameters, attachments, and edges below."
         )
+    task_folders = [
+        {"folder": task_package_folder(node['flow_id'], node['label']) + '/', "flow_id": node['flow_id'], "label": node['label']}
+        for node in graph_context.get('nodes', []) if node.get('type') == 'task'
+    ]
     return (
-        "You are preparing runtime files that a user will manually upload to the "
-        "matching nodes of an inLUMEN pipeline.\n\n"
+        "Create one upload-ready code ZIP for the inLUMEN Tasks listed below. "
+        "Use the exact folder paths; Sources and Destinations are managed by inLUMEN.\n\n"
+        "Folder labels identify the work; the suffix is a stable node ID, not an execution order. "
+        "Only graph edges define dependencies. Parallel branches remain separate Tasks, even when labels repeat.\n\n"
         "HIGH-LEVEL PIPELINE REQUEST:\n"
         f"{pipeline_request}\n\n"
         "RUNTIME AND DELIVERY CONTRACT:\n"
         f"{EXTERNAL_AI_RUNTIME_RESPONSE_INSTRUCTION}\n\n"
+        "REQUIRED TASK FOLDERS (do not rename or create connector packages):\n"
+        f"{json.dumps(task_folders, indent=2)}\n\n"
+        "AUTHORITATIVE inlumen.task.json SCHEMA (Draft 2020-12):\n"
+        f"{json.dumps(TASK_SCHEMA, indent=2)}\n\n"
+        "RUNTIME CONSTRAINTS:\n"
+        f"{json.dumps(context['runtime_constraints'], indent=2)}\n\n"
         "PIPELINE GRAPH:\n"
         f"{json.dumps(graph_context, indent=2, sort_keys=True)}\n"
     )
@@ -1968,9 +1957,14 @@ def _finalize_pipeline_codegen_response(
                     flow_id,
                     artifact,
                     graph,
+                    publish=False,
                 ),
             }
         )
+    if persisted_nodes:
+        response = _proxy(dispatch_graph_request, "neo4j_replace_task_packages", method="POST", data=b"", json_payload={"packages": [
+            {"node_id": item["flow_id"], "artifact": item["generated_artifact"], "files": item["generated_artifact"]["files"]} for item in persisted_nodes]})
+        response.raise_for_status()
     return (
         True,
         {
@@ -2790,6 +2784,7 @@ def node_generate_script(node_id: str):
                     "codegen_service_url": CODEGEN_SERVICE_URL,
                 },
             )
+        g.graph_write_etag = request.headers.get("If-Match") or graph_response.headers.get("ETag")
         generated_artifact = _persist_codegen_artifact(node_id, artifact, graph)
         return jsonify(
             {
@@ -2872,6 +2867,134 @@ def pipeline_generation_preflight():
         return jsonify(preflight), 200
     except Exception as exc:
         return _json_error(502, "pipeline generation preflight failed", str(exc))
+
+
+@app.route("/api/pipeline/task-packages/<action>", methods=["POST", "OPTIONS"])
+@require_auth
+def pipeline_task_packages(action):
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    if action not in {"validate", "import"}:
+        return _json_error(404, "Unknown package operation")
+    upload = request.files.get("file")
+    if upload is None:
+        return _json_error(400, "ZIP file is required")
+    data = upload.stream.read(MAX_ARCHIVE + 1)
+    try:
+        mappings = json.loads(request.form.get("mappings") or "{}")
+        graph_response = _proxy(dispatch_graph_request, "neo4j_get_graph", method="GET", data=b"")
+        if not graph_response.ok:
+            return _response_from_upstream(graph_response)
+        revision = graph_response.headers.get("ETag")
+        report, packages = inspect_packages(data, _upstream_json(graph_response), mappings)
+        report["graph_revision"] = revision
+        if action == "validate":
+            return jsonify(report), 200
+        if not revision or request.headers.get("If-Match") != revision:
+            return _json_error(409, "Graph changed. Validate the packages again.")
+        if request.form.get("digest") != report["digest"]:
+            return _json_error(409, "ZIP changed. Validate the packages again.")
+        if not report["valid"]:
+            return jsonify(report), 422
+        staged = []
+        for item in report["packages"]:
+            node_id = item["node_id"]
+            refs = []
+            for filename, body in packages[item["folder"]].items():
+                package_key = hashlib.sha256(item['folder'].encode()).hexdigest()[:16]
+                object_name = f".packages/{report['digest']}/{package_key}/{filename}"
+                response = _proxy(dispatch_object_request, "minio_upload_file", method="POST", data=b"",
+                    form={"bucket_id": node_id}, files={"file": (object_name, BytesIO(body), "application/octet-stream")})
+                response.raise_for_status()
+                refs.append({"filename": filename, "bucket": node_bucket_name(node_id),
+                    "snapshot_bucket": node_bucket_name(node_id), "snapshot_object": object_name, "role": "code"})
+            artifact = {"generator": "inlumen-attached-runtime", "status": "package_validated",
+                "data_contract": item["data_contract"], "files": refs, "package_digest": report["digest"],
+                "validation_report": {"status": "valid", "scope": "package", "warnings": item["warnings"]},
+                "provenance": {"origin": "user_uploaded", "user_modified": True}}
+            staged.append({"node_id": node_id, "files": refs, "artifact": artifact})
+        # Staged blobs cannot affect active Tasks until this revision-checked transaction commits.
+        response = _proxy(dispatch_graph_request, "neo4j_replace_task_packages", method="POST", data=b"", json_payload={"packages": staged})
+        if response.status_code == 409:
+            return _json_error(409, "Graph changed during import. Validate the packages again.")
+        return _response_from_upstream(response)
+    except (ArtifactContractError, ValueError, UnicodeError) as exc:
+        return _json_error(422, "Invalid Task package", str(exc))
+    except Exception as exc:
+        return _json_error(502, "Package import failed; previous packages remain active", str(exc))
+
+
+@app.route("/api/pipeline/task-packages/download", methods=["GET"])
+@require_auth
+def download_task_packages():
+    import zipfile
+    try:
+        response = _proxy(dispatch_graph_request, "neo4j_get_graph", method="GET", data=b"")
+        if not response.ok:
+            return _response_from_upstream(response)
+        graph = _upstream_json(response)
+        buffer = BytesIO()
+        count = 0
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for node in graph.get("nodes", []):
+                if normalize_step_type(node.get("data", {}).get("type")) != "task":
+                    continue
+                contents = {}
+                for file in _node_file_entries(node, include_samples=False, include_runtime_artifacts=True):
+                    if file.get("role") == "data":
+                        continue
+                    response = _proxy(dispatch_object_request, "minio_read_file", method="GET", data=b"", params={
+                        "bucket_name": file.get("snapshot_bucket") or file["bucket"],
+                        "filename": file.get("snapshot_object") or file["filename"]})
+                    response.raise_for_status()
+                    contents[file["filename"]] = response.content
+                if not contents:
+                    continue
+                if TASK_METADATA_FILENAME not in contents:
+                    manifest = json.loads(contents.get("node-manifest.json", b"{}"))
+                    contract = manifest.get("data_contract") or node.get("data", {}).get("generated_artifact", {}).get("data_contract") or {}
+                    contents[TASK_METADATA_FILENAME] = json.dumps(public_manifest(contract), indent=2).encode()
+                # Model dependencies are portable declarations, not graph identities.
+                platform_manifest = json.loads(contents.get("node-manifest.json", b"{}"))
+                public = json.loads(contents[TASK_METADATA_FILENAME])
+                if public.get("version") == 1 and not public.get("models") and platform_manifest.get("model_requirements"):
+                    public["models"] = platform_manifest["model_requirements"]
+                    contents[TASK_METADATA_FILENAME] = json.dumps(public, indent=2).encode()
+                contents = {name: body for name, body in contents.items() if name not in PLATFORM_FILES and not name.lower().startswith('dockerfile')}
+                validate_package(contents)
+                for name, body in contents.items():
+                    archive.writestr(f"{task_package_folder(node['id'], node.get('data', {}).get('label'))}/{name}", body)
+                count += 1
+        if not count:
+            return _json_error(422, "No Task packages are attached")
+        if len(buffer.getvalue()) > MAX_ARCHIVE:
+            return _json_error(413, "Code ZIP exceeds 50 MB")
+        return Response(buffer.getvalue(), mimetype="application/zip", headers={"Content-Disposition": 'attachment; filename="pipeline-code.zip"'})
+    except Exception as exc:
+        return _json_error(422, "Could not export portable Task packages", str(exc))
+
+
+@app.route("/api/task-package-template", methods=["GET"])
+@require_auth
+def task_package_template():
+    import zipfile
+    from task_package_contract import TASK_SCHEMA
+    buffer = BytesIO()
+    source = """import json, os
+from pathlib import Path
+inputs = json.loads(Path(os.environ['INLUMEN_INPUT_MANIFEST']).read_text())['inputs']
+if len(inputs) != 1:
+    raise ValueError('Expected one JSON file artifact')
+data = json.loads(Path(inputs[0]['path']).read_text())
+output = Path(os.environ['PIPELINE_OUTPUT_DIR']) / 'result.json'
+output.write_text(json.dumps(data), encoding='utf-8')
+"""
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("Task/main.py", source)
+        archive.writestr("Task/inlumen.task.json", json.dumps(EXAMPLE, indent=2))
+        archive.writestr("README.txt", AUTHORING_GUIDE)
+        archive.writestr("task-package.schema.json", json.dumps(TASK_SCHEMA, indent=2))
+    return Response(buffer.getvalue(), mimetype="application/zip", headers={"Content-Disposition": 'attachment; filename="task-template.zip"'})
 
 
 @app.route("/api/pipeline/external-runtime-prompt", methods=["POST", "OPTIONS"])
@@ -2966,6 +3089,7 @@ def pipeline_generation_runs():
             "status": str(codegen_run.get("status") or "queued"),
             "graph": graph,
             "metadata": metadata,
+            "graph_revision": graph_response.headers.get("ETag"),
             "context_fingerprint": _codegen_context_fingerprint(
                 codegen_payload["context"]
             ),
@@ -3040,6 +3164,7 @@ def pipeline_generation_run_resume(run_id: str):
             "status": str(codegen_run.get("status") or "queued"),
             "graph": local_run["graph"],
             "metadata": metadata,
+            "graph_revision": local_run.get("graph_revision"),
             "context_fingerprint": local_run.get("context_fingerprint", ""),
             "remote_job": _codegen_job_snapshot(codegen_run),
             "persisted": False,
@@ -3145,6 +3270,7 @@ def pipeline_generation_run(run_id: str):
                 data=b"",
             )
             current_graph_response.raise_for_status()
+            g.graph_write_etag = local_run.get("graph_revision") or current_graph_response.headers.get("ETag")
             current_graph = _upstream_json(current_graph_response)
             current_graph = current_graph if isinstance(current_graph, dict) else {}
             current_context = _build_pipeline_codegen_context(
@@ -3153,9 +3279,8 @@ def pipeline_generation_run(run_id: str):
             )
             expected_fingerprint = str(local_run.get("context_fingerprint") or "")
             if (
-                expected_fingerprint
-                and _codegen_context_fingerprint(current_context)
-                != expected_fingerprint
+                (local_run.get("graph_revision") and local_run["graph_revision"] != current_graph_response.headers.get("ETag"))
+                or (expected_fingerprint and _codegen_context_fingerprint(current_context) != expected_fingerprint)
             ):
                 reason = (
                     "The pipeline changed while code generation was running. "
@@ -3289,12 +3414,15 @@ def node_files(node_id: str):
                     422,
                     "generated runtime files cannot be uploaded manually",
                 )
-            if lower_name not in USER_TASK_RUNTIME_FILENAMES:
-                return _json_error(
-                    422,
-                    "unsupported Task runtime file",
-                    "Upload main.py and, only when needed, requirements.txt.",
-                )
+            if lower_name == TASK_METADATA_FILENAME:
+                if safe_name != TASK_METADATA_FILENAME:
+                    return _json_error(422, "Task metadata must be named exactly inlumen.task.json")
+                try:
+                    parse_task_metadata(uploaded.stream.read())
+                except ArtifactContractError as exc:
+                    return _json_error(422, "Invalid uploaded artifact declaration", str(exc))
+                finally:
+                    uploaded.stream.seek(0)
             if lower_name == "main.py":
                 python_source = uploaded.stream.read().decode("utf-8", errors="replace")
                 uploaded.stream.seek(0)
@@ -3460,6 +3588,13 @@ def node_text_file(node_id: str):
                 "Task runtime files can only be edited on Task nodes",
                 "Sources and Destinations are managed connector adapters.",
             )
+    if filename.lower() == TASK_METADATA_FILENAME:
+        if filename != TASK_METADATA_FILENAME:
+            return _json_error(422, "Task metadata must be named exactly inlumen.task.json")
+        try:
+            parse_task_metadata(content)
+        except ArtifactContractError as exc:
+            return _json_error(422, "Invalid uploaded artifact declaration", str(exc))
     storage_response = _proxy(
         dispatch_object_request,
         "minio_update_text_file",

@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .artifact_runtime import ArtifactContractError, validate_declaration
+from .task_package_contract import public_manifest, validate_package
 from .generation_budget import budgeted
 from .llm import (
     LLMGenerationError,
@@ -133,6 +135,20 @@ async def generate_node_script_bundle(
     *,
     usage_callback: GenerationUsageCallback | None = None,
 ) -> GenerateNodeScriptResponse:
+    # Freeze the same declaration used by whole-pipeline generation before any
+    # implementation or repair request. Older callers may omit concrete paths.
+    if not request.context.expected_outputs:
+        request.context.expected_outputs = expected_outputs_for_node(
+            request.context.target_node,
+            [edge.target for edge in request.context.graph.edges
+             if edge.source == request.context.target_node.flow_id],
+            request.context.available_inputs,
+        )
+    request.context.expected_outputs = [
+        item if item.filename else item.model_copy(update={
+            "filename": artifact_filename(request.context.target_node.flow_id, item)
+        }) for item in request.context.expected_outputs
+    ]
     used_fallback = False
     generation_usage = GenerationUsage()
 
@@ -234,6 +250,9 @@ async def build_and_validate_node(
         files=files,
         runtime_constraints=request.context.runtime_constraints,
     )
+    if not is_output_node_kind(request.context.target_node.type) and len(data_contract.outputs) != 1:
+        validation.errors.append("Producing nodes must declare exactly one output artifact; declare a directory bundle for multiple files.")
+        validation.status = "invalid"
     merge_validation_report(
         validation,
         validate_contract_alignment(
@@ -595,9 +614,15 @@ def build_pipeline_generation_plan(
             if edge.target == flow_id and edge.source in outputs_by_node
         ]
         child_ids = [edge.target for edge in graph.edges if edge.source == flow_id]
+        incoming_edges = [edge for edge in graph.edges if edge.target == flow_id and edge.source in outputs_by_node]
         inherited_inputs = [
             FileDescriptor(
-                filename=artifact_filename(parent_id, output),
+                filename=artifact_filename(edge.source, output),
+                source_node=edge.source,
+                connection_id=edge.id or f"{edge.source}:{edge.source_port}->{edge.target}:{edge.target_port}",
+                target_port=edge.target_port,
+                representation=output.representation,
+                members=output.members,
                 kind=output.kind,
                 format=output.format,
                 columns=output.columns,
@@ -605,8 +630,8 @@ def build_pipeline_generation_plan(
                 schema=output.schema,
                 semantic_role=output.semantic_role,
             )
-            for parent_id in parent_ids
-            for output in outputs_by_node[parent_id]
+            for edge in incoming_edges
+            for output in outputs_by_node[edge.source]
         ]
         available_inputs = [*node.files, *inherited_inputs]
         expected_outputs = expected_outputs_for_node(
@@ -614,6 +639,10 @@ def build_pipeline_generation_plan(
             child_ids,
             available_inputs,
         )
+        if not is_output_node_kind(node.type) and len(expected_outputs) != 1:
+            raise ValueError(f"Node {flow_id} must declare exactly one output artifact")
+        for declaration in expected_outputs:
+            validate_declaration(declaration.model_dump(mode="json"))
         outputs_by_node[flow_id] = expected_outputs
         context = GenerationContext(
             target_node=node,
@@ -663,7 +692,14 @@ def build_pipeline_generation_plan(
                 ),
             }
         )
+    for node_plan in plan_nodes:
+        node_plan["downstream_contracts"] = [
+            {"target_node": child["flow_id"], "input": item}
+            for child in plan_nodes for item in child["inputs"]
+            if item.get("source_node") == node_plan["flow_id"]
+        ]
     required_packages = merge_requirements(
+        ["jsonschema>=4.23,<5"],
         *[
             required_packages_for_node(
                 context.target_node,
@@ -682,7 +718,7 @@ def build_pipeline_generation_plan(
         )
     return (
         {
-            "schema_version": "inlumen.pipeline-plan@1",
+            "schema_version": "inlumen.pipeline-plan@2",
             "pipeline": request.context.pipeline,
             "design": request.context.design,
             "edges": [edge.model_dump(mode="json") for edge in graph.edges],
@@ -949,7 +985,7 @@ def requirements_for_model_free_subplan(
         requirements,
         allowed_packages,
         source=source,
-        required_packages=merge_requirements(*required),
+        required_packages=merge_requirements(["jsonschema>=4.23,<5"], *required),
     )
 
 
@@ -1041,6 +1077,8 @@ async def generate_pipeline_script_bundles_node_first(
     seed_nodes: list[PipelineGeneratedNode] | None = None,
     target_flow_ids: set[str] | None = None,
 ) -> GeneratePipelineScriptsResponse:
+    complete_plan, planned_contexts = build_pipeline_generation_plan(request)
+    planned_nodes = {node["flow_id"]: node for node in complete_plan["nodes"]}
     ordered_ids = topological_order(request.context.graph)
     nodes_by_id = {node.flow_id: node for node in request.context.graph.nodes}
     if start_from_flow_id:
@@ -1127,22 +1165,15 @@ async def generate_pipeline_script_bundles_node_first(
                 for parent_id in parent_ids
             ]
             inherited_inputs: list[FileDescriptor] = []
-            for parent_id in parent_ids:
-                inherited_inputs.extend(handoff_outputs_by_node.get(parent_id, []))
-                if parent_id not in handoff_outputs_by_node:
-                    for output in outputs_by_node.get(parent_id, []):
-                        inherited_inputs.append(
-                            FileDescriptor(
-                                filename=artifact_filename(parent_id, output),
-                                kind=output.kind,
-                                format=output.format,
-                                columns=output.columns,
-                                required_columns=output.required_columns,
-                                schema=output.schema,
-                                semantic_role=output.semantic_role,
-                                sample=None,
-                            )
-                        )
+            for edge in request.context.graph.edges:
+                if edge.target != flow_id or edge.source not in outputs_by_node:
+                    continue
+                planned = [item for item in planned_contexts[flow_id].available_inputs
+                           if item.connection_id == (edge.id or f"{edge.source}:{edge.source_port}->{edge.target}:{edge.target_port}")]
+                materialized = handoff_outputs_by_node.get(edge.source, [])
+                for descriptor in planned:
+                    sample = materialized[0].sample if len(materialized) == 1 else descriptor.sample
+                    inherited_inputs.append(descriptor.model_copy(update={"sample": sample}))
             available_inputs = [*node.files, *inherited_inputs]
             node_required_packages = required_packages_for_node(
                 node,
@@ -1161,6 +1192,7 @@ async def generate_pipeline_script_bundles_node_first(
                 pipeline={
                     **request.context.pipeline,
                     "upstream_contracts": upstream_contracts,
+                    "downstream_contracts": planned_nodes[flow_id]["downstream_contracts"],
                     "generation_mode": "pipeline",
                     "generation_run_id": run.run_id,
                 },
@@ -1171,11 +1203,7 @@ async def generate_pipeline_script_bundles_node_first(
                     downstream_nodes=child_ids,
                 ),
                 available_inputs=available_inputs,
-                expected_outputs=expected_outputs_for_node(
-                    node,
-                    child_ids,
-                    available_inputs,
-                ),
+                expected_outputs=planned_contexts[flow_id].expected_outputs,
                 runtime_constraints=node_runtime_constraints,
             )
 
@@ -1492,6 +1520,9 @@ def build_edge_contracts(
         EdgeDataContract(
             source=edge.source,
             target=edge.target,
+            connection_id=edge.id or f"{edge.source}:{edge.source_port}->{edge.target}:{edge.target_port}",
+            source_port=edge.source_port,
+            target_port=edge.target_port,
             outputs=outputs_by_node.get(edge.source, []),
         )
         for edge in graph.edges
@@ -1522,12 +1553,13 @@ def files_from_payload(
             request.context.available_inputs,
         ),
     )
+    requirements = merge_requirements(requirements, ["jsonschema>=4.23,<5"])
     requirements_txt = "\n".join(requirements)
     if requirements_txt:
         requirements_txt += "\n"
 
     manifest = node_manifest(request, payload, requirements)
-    return [
+    files = [
         GeneratedFile(
             filename="main.py", content=main_py + "\n", content_type="text/x-python"
         ),
@@ -1539,6 +1571,13 @@ def files_from_payload(
         ),
     ]
 
+    if request.context.target_node.type in {"task", "action", "custom"}:
+        try:
+            files.append(GeneratedFile(filename="inlumen.task.json", content=json.dumps(public_manifest(manifest["data_contract"], models=manifest.get("model_requirements")), indent=2) + "\n", content_type="application/json"))
+        except ArtifactContractError:
+            pass  # The shared validator reports this for the normal repair loop.
+    return files
+
 
 def normalize_requirements(
     raw: Any,
@@ -1547,48 +1586,26 @@ def normalize_requirements(
     main_py: str = "",
     required_packages: list[str] | None = None,
 ) -> list[str]:
-    if not isinstance(raw, list):
-        raw = []
-    allowed_by_name = {
-        package_name(item): str(item).strip()
-        for item in allowed_packages
-        if package_name(item)
-    }
-    requirements: list[str] = []
-    seen: set[str] = set()
-    compiler_required = list(required_packages or [])
-    for index, item in enumerate([*compiler_required, *raw]):
-        # Requirements produced by the planner/compiler are trusted. Model
-        # output is still constrained to strings and the request allowlist.
-        if index >= len(compiler_required) and not isinstance(item, str):
-            continue
-        text = str(item or "").strip()
-        name = package_name(text)
-        if not name or name in seen:
-            continue
-        if allowed_by_name and name not in allowed_by_name:
-            continue
-        requirements.append(allowed_by_name.get(name, text))
-        seen.add(name)
+    raw = [] if raw is None else raw if isinstance(raw, list) else [raw]
+    allowed_by_name = {package_name(item): str(item).strip() for item in allowed_packages if package_name(item)}
+    requirements = []
+    for item in [*(required_packages or []), *raw]:
+        # Preserve each declaration. Invalid/unlisted entries are reported by
+        # package validation and the repair loop, never silently discarded.
+        text = str(item).strip()
+        requirements.append(text)
+        allowed = allowed_by_name.get(package_name(text))
+        if allowed and allowed != text:
+            requirements.append(allowed)
+    declared = {package_name(item) for item in requirements}
     for inferred in infer_requirements_from_imports(main_py, allowed_by_name):
-        name = package_name(inferred)
-        if name and name not in seen:
+        if package_name(inferred) not in declared:
             requirements.append(inferred)
-            seen.add(name)
-    return requirements
+    return list(dict.fromkeys(requirements))
 
 
 def merge_requirements(*groups: list[str]) -> list[str]:
-    merged: list[str] = []
-    seen: set[str] = set()
-    for group in groups:
-        for item in group:
-            text = str(item or "").strip()
-            name = package_name(text)
-            if name and name not in seen:
-                merged.append(text)
-                seen.add(name)
-    return merged
+    return list(dict.fromkeys(str(item).strip() for group in groups for item in group if str(item).strip()))
 
 
 def requirements_for_compiled_source(
@@ -1650,6 +1667,11 @@ def data_contract_from_payload(
     return DataContract(
         inputs=[
             ExpectedArtifact(
+                source_node=file.source_node,
+                connection_id=file.connection_id,
+                target_port=file.target_port,
+                representation=file.representation,
+                members=file.members,
                 name=Path(file.filename).stem
                 if "/" in file.filename
                 else file.filename,
@@ -1713,6 +1735,7 @@ def node_manifest(
     }
     return {
         "schema_version": 1,
+        "node_type": request.context.target_node.type,
         "flow_id": flow_id,
         "generator": "inlumen-codegen-service",
         "generator_version": GENERATOR_VERSION,
@@ -1767,6 +1790,21 @@ def expected_outputs_for_node(
     table_input = first_table_input(inputs)
     task = classify_node_task(node, inputs)
     task_name = f"final_{name}" if is_output_node_kind(node.type) else name
+    if is_input_node_kind(node.type):
+        declared = (node.implementation or {}).get("output_artifact") or (node.parameters or {}).get("output_artifact")
+        if isinstance(declared, dict):
+            return [ExpectedArtifact.model_validate(declared)]
+        if len(inputs) > 1:
+            raise ValueError(f"Source {node.flow_id} has multiple files; declare output_artifact as a directory bundle")
+        if len(inputs) == 1:
+            item = inputs[0]
+            return [ExpectedArtifact(name=Path(item.filename).stem, filename=item.filename,
+                kind=item.kind or "binary", representation=item.representation,
+                format=item.format, schema=item.schema, columns=item.columns,
+                required_columns=item.required_columns, semantic_role=item.semantic_role)]
+    declared = (node.implementation or {}).get("output_artifact") or (node.parameters or {}).get("output_artifact")
+    if isinstance(declared, dict):
+        return [ExpectedArtifact.model_validate(declared)]
     if task == "speech_to_text":
         return [
             ExpectedArtifact(
@@ -2189,7 +2227,10 @@ def expected_outputs_for_node(
                     ),
                 )
             )
-        return model_outputs
+        return [ExpectedArtifact(name=name, kind="directory", representation="directory",
+            filename=name + "_bundle", semantic_role="trained_model_bundle",
+            description="Model, metrics, and predictions published as one training bundle.",
+            members=[item.model_dump(mode="json") for item in model_outputs])]
     elif any(keyword in label_text for keyword in ("alert", "notify", "warning")):
         return [
             ExpectedArtifact(
@@ -2253,12 +2294,17 @@ def validate_contract_alignment(
 ) -> ValidationReport:
     checks = ["planned_output_contract_alignment"]
     errors: list[str] = []
+    if len(actual.outputs) != len(expected_outputs):
+        errors.append("Output cardinality differs from the agreed artifact contract")
     actual_by_name = {item.name: item for item in actual.outputs}
     for expected in expected_outputs:
         actual_output = actual_by_name.get(expected.name)
         if actual_output is None:
             errors.append(f"Missing planned output contract: {expected.name}")
             continue
+        for field in ("filename", "representation", "schema", "members", "required_columns"):
+            if getattr(actual_output, field) != getattr(expected, field):
+                errors.append(f"Output {expected.name} {field} differs from the agreed contract")
         if actual_output.kind != expected.kind:
             errors.append(
                 f"Output {expected.name} kind mismatch: "

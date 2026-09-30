@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "inputs": [
+    {
+      "port": "input",
+      "type": "file",
+      "format": "json",
+      "schema": {
+        "type": "object",
+        "required": ["source", "transcription"],
+        "properties": {
+          "transcription": {
+            "type": "object",
+            "required": ["text"],
+            "properties": {"text": {"type": "string", "minLength": 1}}
+          }
+        }
+      }
+    }
+  ],
+  "output": {
+    "type": "file",
+    "path": "analysis.json",
+    "format": "json",
+    "name": "transcription-and-sentiment",
+    "kind": "data",
+    "schema": {
+      "type": "object",
+      "required": ["source", "transcription", "sentiment"],
+      "properties": {
+        "source": {"type": "object"},
+        "transcription": {"type": "object"},
+        "sentiment": {
+          "type": "object",
+          "required": ["label", "confidence", "score", "score_scale"],
+          "properties": {
+            "label": {"type": "string"},
+            "confidence": {"type": "number"},
+            "score": {"type": "number"},
+            "score_scale": {"type": "string"}
+          }
+        }
+      }
+    }
+  },
+  "models": [
+    {
+      "model_id": "cardiffnlp/twitter-roberta-base-sentiment-latest",
+      "model_revision": "main"
+    }
+  ]
+}

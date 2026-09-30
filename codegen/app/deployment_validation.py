@@ -37,10 +37,10 @@ except ImportError:  # pragma: no cover - service image installs PyYAML.
 
 
 SUPPORTED_BUNDLE_MANIFEST_VERSIONS = frozenset(
-    {"inlumen.deployment-bundle@1", "inlumen.deployment-bundle@2"}
+    {"inlumen.deployment-bundle@1", "inlumen.deployment-bundle@2", "inlumen.deployment-bundle@3"}
 )
 SUPPORTED_RUN_SPEC_VERSIONS = frozenset(
-    {"inlumen.run-spec@1", "inlumen.run-spec@2", "inlumen.run-spec@3"}
+    {"inlumen.run-spec@1", "inlumen.run-spec@2", "inlumen.run-spec@3", "inlumen.run-spec@4"}
 )
 
 _ACTIVE_DEPLOYMENT_PROCESSES: dict[str, subprocess.Popen[str]] = {}
@@ -167,21 +167,17 @@ def _isolated_runtime_environment(
         "TMPDIR": "/runtime/tmp",
         "HF_HOME": "/runtime/huggingface",
         "HF_HUB_CACHE": "/runtime/huggingface/hub",
+        "HF_HUB_OFFLINE": str((runtime_secrets or {}).get("HF_HUB_OFFLINE", "0")),
+        "TRANSFORMERS_OFFLINE": str((runtime_secrets or {}).get("TRANSFORMERS_OFFLINE", "0")),
+        "HF_HUB_DISABLE_XET": str((runtime_secrets or {}).get("HF_HUB_DISABLE_XET", "1")),
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONUNBUFFERED": "1",
     }
     if has_models:
-        # Offline Hub lookups must see the prefetched snapshots. Other library
-        # caches remain writable under HF_HOME; reviewed adapters also resolve
-        # their snapshots directly through INLUMEN_MODEL_ROOT.
-        environment.update(
-            {
-                "HF_HUB_CACHE": "/models/huggingface",
-                "HF_HUB_OFFLINE": "1",
-                "TRANSFORMERS_OFFLINE": "1",
-                "INLUMEN_MODEL_ROOT": "/models",
-            }
-        )
+        # Reviewed adapters resolve pinned snapshots directly from this read-only
+        # store. Its presence does not mean every uploaded Task's model is cached.
+        # Keep Hub downloads enabled and pointed at the writable job cache.
+        environment["INLUMEN_MODEL_ROOT"] = "/models"
     return environment
 
 
@@ -1123,19 +1119,20 @@ def _validate_bundle_structure(
             if isinstance(run_spec.get("artifact_contract"), dict)
             else {}
         )
-        if manifest_version == "inlumen.deployment-bundle@2":
-            if run_spec_version != "inlumen.run-spec@3":
+        if manifest_version in {"inlumen.deployment-bundle@2", "inlumen.deployment-bundle@3"}:
+            expected_run = "inlumen.run-spec@4" if manifest_version.endswith("@3") else "inlumen.run-spec@3"
+            expected_contract = "inlumen.artifact-contract@4" if manifest_version.endswith("@3") else "inlumen.artifact-contract@3"
+            if run_spec_version != expected_run:
                 errors.append(
-                    "inlumen.deployment-bundle@2 requires inlumen.run-spec@3."
+                    f"{manifest_version} requires {expected_run}."
                 )
             for location, contract in (
                 ("bundle-manifest.json", manifest_artifact_contract),
                 ("run-spec.json", run_artifact_contract),
             ):
-                if contract.get("schema_version") != "inlumen.artifact-contract@3":
+                if contract.get("schema_version") != expected_contract:
                     errors.append(
-                        f"{location} must use inlumen.artifact-contract@3 for "
-                        "inlumen.deployment-bundle@2."
+                        f"{location} must use {expected_contract} for {manifest_version}."
                     )
                 if contract.get("port_namespaced") is not False:
                     errors.append(

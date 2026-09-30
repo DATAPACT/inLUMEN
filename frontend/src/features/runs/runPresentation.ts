@@ -101,6 +101,12 @@ export const presentRunFailure = (message: string, logs: string[] = []) => {
     };
   }
   const normalized = message.toLowerCase();
+  if (/artifact contract|artifactcontracterror|artifact declaration|incompatible artifact connection/.test(details)) {
+    return {
+      message,
+      hint: 'A step did not satisfy its declared artifact contract. Check the producer and connection named above. Regenerate older task code before starting a new run.',
+    };
+  }
   if (normalized.includes('huggingface') || normalized.includes('cached files')) {
     return { message, hint: 'Model loading failed. Check Technical logs for download, storage, or model-file errors.' };
   }

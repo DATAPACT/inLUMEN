@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "inputs": [
+    {"port": "input", "type": "file", "format": "wav"}
+  ],
+  "output": {
+    "type": "file",
+    "path": "transcription.json",
+    "format": "json",
+    "name": "transcription",
+    "kind": "data",
+    "schema": {
+      "type": "object",
+      "required": ["source", "transcription"],
+      "properties": {
+        "source": {"type": "object"},
+        "transcription": {
+          "type": "object",
+          "required": ["text", "segments"],
+          "properties": {
+            "text": {"type": "string", "minLength": 1},
+            "language": {"type": ["string", "null"]},
+            "language_probability": {"type": "number"},
+            "duration_seconds": {"type": "number"},
+            "segments": {"type": "array"}
+          }
+        }
+      }
+    }
+  },
+  "models": [
+    {
+      "model_id": "Systran/faster-whisper-small",
+      "model_revision": "main"
+    }
+  ]
+}

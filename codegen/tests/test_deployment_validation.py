@@ -30,17 +30,26 @@ class IsolatedRuntimeEnvironmentTest(unittest.TestCase):
         self.assertEqual("/runtime/cache", environment["XDG_CACHE_HOME"])
         self.assertEqual("/runtime/tmp", environment["TMPDIR"])
         self.assertEqual("/runtime/huggingface", environment["HF_HOME"])
-        self.assertEqual("/models/huggingface", environment["HF_HUB_CACHE"])
+        self.assertEqual("/runtime/huggingface/hub", environment["HF_HUB_CACHE"])
         self.assertEqual("/models", environment["INLUMEN_MODEL_ROOT"])
-        self.assertEqual("1", environment["HF_HUB_OFFLINE"])
+        self.assertEqual("0", environment["HF_HUB_OFFLINE"])
+        self.assertEqual("0", environment["TRANSFORMERS_OFFLINE"])
 
     def test_model_free_runtime_does_not_require_model_mount(self):
         environment = _isolated_runtime_environment(None, has_models=False)
 
         self.assertNotIn("INLUMEN_MODEL_ROOT", environment)
         self.assertEqual("/runtime/huggingface/hub", environment["HF_HUB_CACHE"])
-        self.assertNotIn("HF_HUB_OFFLINE", environment)
+        self.assertEqual("0", environment["HF_HUB_OFFLINE"])
         self.assertEqual("/runtime/cache", environment["XDG_CACHE_HOME"])
+
+    def test_explicit_offline_policy_is_preserved(self):
+        environment = _isolated_runtime_environment(
+            {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"},
+            has_models=True,
+        )
+        self.assertEqual("1", environment["HF_HUB_OFFLINE"])
+        self.assertEqual("1", environment["TRANSFORMERS_OFFLINE"])
 
 
 class DagsterRuntimeDependencyValidationTest(unittest.TestCase):

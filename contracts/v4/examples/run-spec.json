@@ -1,0 +1,119 @@
+{
+  "schema_version": "inlumen.run-spec@4",
+  "artifact_contract": {
+    "schema_version": "inlumen.artifact-contract@4",
+    "transport": "filesystem",
+    "artifacts_per_connection": 1,
+    "input_environment": "PIPELINE_INPUT_DIR",
+    "output_environment": "PIPELINE_OUTPUT_DIR",
+    "recursive": true,
+    "input_layout": "<artifact-relative-path>",
+    "output_layout": "<artifact-relative-path>",
+    "port_namespaced": false,
+    "run_isolation": "<run_id>",
+    "source_agnostic": true,
+    "connector_agnostic": true
+  },
+  "runtime": {
+    "default_engine": "dagster",
+    "package_manager": "uv",
+    "python": "3.11"
+  },
+  "node_order": [
+    "source",
+    "consumer"
+  ],
+  "nodes": [
+    {
+      "id": "source",
+      "kind": "source",
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "data"
+        }
+      ],
+      "runtime_environment": [],
+      "data_contract": {
+        "contract_id": "inlumen.generic-node@2",
+        "version": "2",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "transcript",
+            "filename": "transcript.json",
+            "kind": "json",
+            "format": "json",
+            "representation": "file",
+            "schema": {
+              "type": "object",
+              "required": [
+                "transcript"
+              ],
+              "properties": {
+                "transcript": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "consumer",
+      "kind": "destination",
+      "inputs": [
+        {
+          "id": "input"
+        }
+      ],
+      "outputs": [],
+      "runtime_environment": [],
+      "data_contract": {
+        "contract_id": "inlumen.generic-node@2",
+        "version": "2",
+        "inputs": [
+          {
+            "name": "transcript",
+            "filename": "transcript.json",
+            "kind": "json",
+            "format": "json",
+            "representation": "file",
+            "schema": {
+              "type": "object",
+              "required": [
+                "transcript"
+              ],
+              "properties": {
+                "transcript": {
+                  "type": "string"
+                }
+              }
+            },
+            "source_node": "source",
+            "connection_id": "source:data->consumer:input",
+            "target_port": "input"
+          }
+        ],
+        "outputs": []
+      }
+    }
+  ],
+  "connections": [
+    {
+      "source": "source",
+      "source_port": "data",
+      "target": "consumer",
+      "target_port": "input",
+      "connection_id": "source:data->consumer:input",
+      "artifact_name": "transcript"
+    }
+  ],
+  "run_inputs": {},
+  "outputs": {},
+  "engines": {
+    "dagster": {},
+    "argo": null
+  }
+}

@@ -92,3 +92,26 @@ class ExportContractSchemaTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_v4_declares_single_artifact_and_keeps_previous_schema():
+    from jsonschema import Draft202012Validator
+    root = REPOSITORY_ROOT / "contracts" / "v4"
+    for path in root.glob("*.schema.json"):
+        Draft202012Validator.check_schema(json.loads(path.read_text()))
+    schema = json.loads((root / "node-data-contract.schema.json").read_text())
+    validator = Draft202012Validator(schema)
+    artifact = {"name": "model", "filename": "model", "representation": "directory"}
+    contract = {"contract_id": "inlumen.generic-node@2", "inputs": [], "outputs": [artifact]}
+    assert not list(validator.iter_errors(contract))
+    assert list(validator.iter_errors({**contract, "outputs": [artifact, artifact]}))
+    legacy = json.loads((CONTRACT_V3_ROOT / "artifact-contract.schema.json").read_text())
+    assert legacy["properties"]["schema_version"]["const"] == "inlumen.artifact-contract@3"
+
+
+def test_v4_examples_validate_against_their_versioned_schemas():
+    from jsonschema import Draft202012Validator
+    root = REPOSITORY_ROOT / 'contracts' / 'v4'
+    for example in (root / 'examples').glob('*.json'):
+        schema = json.loads((root / (example.stem + '.schema.json')).read_text())
+        Draft202012Validator(schema).validate(json.loads(example.read_text()))

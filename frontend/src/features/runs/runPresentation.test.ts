@@ -54,3 +54,10 @@ describe('run result presentation', () => {
     expect(formatOutputSize(null)).toBe('');
   });
 });
+
+it('explains artifact boundary failures without hiding the connection', () => {
+  const message = 'Artifact contract violation at transcription: missing transcript.json';
+  const result = presentRunFailure(message);
+  expect(result.message).toBe(message);
+  expect(result.hint).toContain('declared artifact contract');
+});

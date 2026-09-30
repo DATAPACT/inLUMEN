@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { getGraphRevision, subscribePersistence, persistenceEpoch, getPersistenceState } from '@/features/flow/persistenceState';
-import { codeZipEntries } from '@/features/flow/codeZip';
 import { normalizeGraph } from '@/features/flow/flowGraph';
 import { readNodeFile } from '@/features/nodes/nodePersistence';
 
@@ -293,20 +292,9 @@ export function Sidebar({
       if (getPersistenceState().pending || getPersistenceState().error) {
         throw new Error('Wait for your changes to finish saving before downloading code.');
       }
-      const entries = codeZipEntries(normalizeGraph(await fetchPipelineGraph()).nodes);
-      if (!entries.length) throw new Error('No Task code is attached yet. Generate or upload code first.');
-      const { default: JSZip } = await import('jszip');
-      const zip = new JSZip();
-      let bytes = 0;
-      for (const entry of entries) {
-        if (epoch !== persistenceEpoch()) throw new Error('The workspace changed. Try downloading again.');
-        const content = await (await readNodeFile(entry.nodeId, entry.file)).arrayBuffer();
-        bytes += content.byteLength;
-        if (bytes > 50 * 1024 * 1024) throw new Error('The code exceeds the 50 MB ZIP upload limit.');
-        zip.file(entry.path, content);
-      }
-      const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
-      if (blob.size > 50 * 1024 * 1024) throw new Error('The code ZIP exceeds the 50 MB upload limit.');
+      const response = await apiFetch(`${INLUMEN_API_URL}/api/pipeline/task-packages/download`);
+      if (!response.ok) { const error = await response.json(); throw new Error(error.details || error.error); }
+      const blob = await response.blob();
       if (epoch !== persistenceEpoch()) throw new Error('The workspace changed. Try downloading again.');
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');

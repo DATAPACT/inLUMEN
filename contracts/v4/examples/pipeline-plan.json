@@ -1,0 +1,87 @@
+{
+  "schema_version": "inlumen.pipeline-plan@2",
+  "nodes": [
+    {
+      "flow_id": "anonymize",
+      "function_name": "node_anonymize",
+      "inputs": [
+        {
+          "name": "transcript",
+          "filename": "transcript.json",
+          "representation": "file",
+          "kind": "json",
+          "format": "json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "transcript"
+            ],
+            "properties": {
+              "transcript": {
+                "type": "string"
+              }
+            }
+          },
+          "source_node": "transcribe",
+          "connection_id": "transcribe.output->anonymize.input",
+          "target_port": "input"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "anonymized_transcript",
+          "filename": "anonymized.json",
+          "representation": "file",
+          "kind": "json",
+          "format": "json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "transcript"
+            ],
+            "properties": {
+              "transcript": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "downstream_contracts": [
+        {
+          "target_node": "sentiment",
+          "input": {
+            "name": "anonymized_transcript",
+            "filename": "anonymized.json",
+            "representation": "file",
+            "kind": "json",
+            "format": "json",
+            "schema": {
+              "type": "object",
+              "required": [
+                "transcript"
+              ],
+              "properties": {
+                "transcript": {
+                  "type": "string"
+                }
+              }
+            },
+            "source_node": "anonymize",
+            "connection_id": "anonymize.output->sentiment.input",
+            "target_port": "input"
+          }
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "anonymize.output->sentiment.input",
+      "source": "anonymize",
+      "source_port": "output",
+      "target": "sentiment",
+      "target_port": "input"
+    }
+  ]
+}

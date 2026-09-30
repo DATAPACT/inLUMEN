@@ -3,7 +3,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -427,8 +427,9 @@ class CodegenServiceClientTest(unittest.TestCase):
         }
 
         with (
+            patch.object(inlumen_api, "_proxy", return_value=Mock()),
             patch.object(inlumen_api, "_persist_codegen_run_report", return_value=response["generation_run"]),
-            patch.object(inlumen_api, "_persist_codegen_artifact", side_effect=lambda _flow_id, artifact, _graph: artifact),
+            patch.object(inlumen_api, "_persist_codegen_artifact", side_effect=lambda _flow_id, artifact, _graph, **kwargs: artifact),
         ):
             is_valid, finalized = inlumen_api._finalize_pipeline_codegen_response(
                 response,

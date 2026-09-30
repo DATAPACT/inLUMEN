@@ -2,9 +2,14 @@ import hashlib
 import json
 import re
 from collections import defaultdict, deque
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import unquote, urlsplit
 
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import InvalidWheelFilename, parse_wheel_filename
+
+from artifact_runtime import ArtifactContractError, CONTRACT_ID, validate_connection_contract, validate_declaration
 from artifact_content import decode_artifact_content, verify_artifact_integrity
 from artifact_contract import ArtifactBinding, artifact_bindings, classify_artifact
 from connector_catalog import connector_definition
@@ -51,8 +56,9 @@ DAGSTER_PINNED_VERSION = "1.13.12"
 DAGSTER_LIBRARY_PINNED_VERSION = "0.29.12"
 UV_PINNED_VERSION = "0.11.32"
 ARTIFACT_CONTRACT = {
-    "schema_version": "inlumen.artifact-contract@3",
+    "schema_version": "inlumen.artifact-contract@4",
     "transport": "filesystem",
+    "artifacts_per_connection": 1,
     "input_environment": "PIPELINE_INPUT_DIR",
     "output_environment": "PIPELINE_OUTPUT_DIR",
     "recursive": True,
@@ -70,7 +76,7 @@ _RESERVED_PARAMETER_ENVIRONMENT_NAMES = {
     "PIPELINE_PARAMS_JSON",
 }
 
-_ARGO_PORT_RUNNER = r'''import json
+_ARGO_PORT_RUNNER = Path(__file__).with_name('artifact_runtime.py').read_text() + '\n' + r'''import json
 import os
 import shutil
 import subprocess
@@ -136,6 +142,32 @@ if missing:
     raise RuntimeError(
         "Missing required runtime environment variable(s): " + ", ".join(sorted(missing))
     )
+contract = json.loads(sys.argv[6]) if len(sys.argv) > 6 else {}
+if contract.get("contract_id") == CONTRACT_ID:
+    bindings = json.loads(sys.argv[7]) if len(sys.argv) > 7 else []
+    input_dir = Path(os.environ["PIPELINE_INPUT_DIR"])
+    published = Path(os.environ["PIPELINE_OUTPUT_DIR"])
+    if published.exists():
+        shutil.rmtree(published)
+    work = published.parent / "runtime"
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    output = work / "publish"
+    inputs = stage_bound_artifacts(bindings, input_dir) if bindings else [validate_artifact(input_dir, item) for item in contract.get("inputs", [])]
+    env = {**os.environ, **prepare_node_environment(input_dir, output, work, inputs, contract,
+        json.loads(os.environ.get("PIPELINE_PARAMS_JSON", "{}")))}
+    result = subprocess.run(command, env=env)
+    if result.returncode:
+        raise SystemExit(result.returncode)
+    receipt = work / "outputs.json"
+    actual = json.loads(receipt.read_text()).get("outputs") if receipt.is_file() else None
+    if contract.get("outputs") or ports:
+        validate_result(output, contract.get("outputs", []), actual, producer=os.environ.get("INLUMEN_FLOW_ID", "producer"))
+    published.mkdir(parents=True, exist_ok=True)
+    target = published / (ports[0] if ports else "result")
+    publish_artifact_directory(output, target)
+    raise SystemExit(0)
 if staging_roots:
     input_dir = Path(os.environ["PIPELINE_INPUT_DIR"])
     input_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -1232,6 +1264,58 @@ def _step_data_contract(step: dict) -> dict:
     return contract if isinstance(contract, dict) else {}
 
 
+def _runtime_artifact_contract(step: dict, payload, *, require_current=False) -> dict:
+    manifest = _json_object(_deployment_file_content(payload, step["flow_id"], "node-manifest.json"))
+    contract = dict(manifest.get("data_contract") or _step_data_contract(step))
+    if contract.get("contract_id") != CONTRACT_ID:
+        if require_current:
+            raise DeploymentArtifactValidationError("Artifact contract upgrade required", [
+                f"Node {step['flow_id']} ({step.get('label', '')}) has no current artifact declaration. "
+                'Add inlumen.task.json with {"version":1,"output":{"type":"file","path":"YOUR_ACTUAL_OUTPUT.json"}} '
+                "using the implementation's actual output path (or type directory for a bundle). "
+                "Adding an explicit declaration does not require AI regeneration. Historical snapshots are unchanged."
+            ])
+        return contract
+    if step.get("type") == "source" and not contract.get("outputs"):
+        files = [item for item in (payload.get("input_files", []) if isinstance(payload, dict) else []) if str(item.get("flow_id")) == step["flow_id"]]
+        if len(files) == 1:
+            filename = files[0]["filename"]
+            declaration = {"name": Path(filename).stem, "filename": filename, "representation": "file", "kind": "binary"}
+            contract["outputs"] = [declaration]
+            contract["inputs"] = [declaration]
+    outputs = contract.get("outputs", [])
+    if step.get("type") not in {"destination", "output"} and len(outputs) != 1:
+        raise DeploymentArtifactValidationError("Invalid artifact contract", [f"Node {step['flow_id']} must declare exactly one output artifact."])
+    contract["outputs"] = [validate_declaration(item) for item in outputs]
+    contract["inputs"] = [validate_declaration(item) for item in contract.get("inputs", [])]
+    return contract
+
+
+def _declared_bindings(step, incoming, steps_by_id, payload, source_root):
+    result = []
+    target_contract = _runtime_artifact_contract(step, payload)
+    if target_contract.get("contract_id") != CONTRACT_ID:
+        return result
+    for binding in incoming:
+        producer = steps_by_id[binding.source_node]
+        contract = _runtime_artifact_contract(producer, payload, require_current=True)
+        output = contract["outputs"][0]
+        connection_id = f"{binding.source_node}:{binding.source_port}->{binding.target_node}:{binding.target_port}"
+        expected = next((item for item in [*target_contract.get("inputs", []), *target_contract.get("input_requirements", [])]
+            if (not item.get("source_node") and not item.get("connection_id") and item.get("target_port") == binding.target_port) or item.get("connection_id") == connection_id or
+            (item.get("source_node") == binding.source_node and item.get("target_port", "") in {"", binding.target_port})), {})
+        try:
+            validate_connection_contract(output, expected, connection=connection_id)
+        except ArtifactContractError as exc:
+            raise DeploymentArtifactValidationError("Incompatible artifact connection", [str(exc)]) from exc
+        result.append({"source_dir": source_root(binding), "source_port": binding.source_port,
+            "source_node": binding.source_node, "target_port": binding.target_port,
+            "connection_id": expected.get("connection_id") or connection_id,
+            "filename": expected.get("filename") or output["filename"],
+            "artifact": output, "run_scoped": True})
+    return result
+
+
 def _contract_env_name(contract: dict, key: str, default: str) -> str:
     value = _clean_string(contract.get(key))
     return value if value else default
@@ -1547,6 +1631,9 @@ def _build_codegen_argo_workflow_object(
                             for binding in incoming_bindings
                         ]),
                         json.dumps(_required_output_ports(step, bindings)),
+                        json.dumps(_runtime_artifact_contract(step, dockerfiles_payload)),
+                        json.dumps(_declared_bindings(step, incoming_bindings, steps_by_id, dockerfiles_payload,
+                            lambda binding: f"/inlumen/staging/{binding.target_port}")),
                     ],
                     "env": env,
                 },
@@ -2809,23 +2896,28 @@ def _dagster_requirements_content(install_requires: Sequence[str]) -> str:
     return "\n".join(_dagster_project_dependencies(install_requires)) + "\n"
 
 
-def _parse_requirements_for_dagster_project(content: str) -> List[str]:
-    requirements: List[str] = []
-    for raw_line in content.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith(("-", "--")):
-            continue
-        if line.startswith(("git+", "http://", "https://", "file:", ".")):
-            continue
-        if "://" in line:
-            continue
-        if " #" in line:
-            line = line.split(" #", 1)[0].strip()
-        if line:
-            requirements.append(line)
-    return requirements
+def _parse_requirements_for_dagster_project(content: str, package_files=None) -> List[str]:
+    from task_package_contract import resolve_requirements
+    try:
+        return resolve_requirements({**(package_files or {}), "requirements.txt": content})
+    except ArtifactContractError as exc:
+        raise DeploymentArtifactValidationError("Invalid Task dependencies", [str(exc)]) from exc
+
+
+def _package_dependencies(payload, flow_id):
+    from artifact_content import decode_artifact_content
+    files = {item["filename"]: decode_artifact_content(item) for item in _deployment_files_for_step(payload, flow_id)}
+    return _parse_requirements_for_dagster_project(files.get("requirements.txt", b""), files)
+
+
+def _pipeline_constraints(payload, steps):
+    from artifact_content import decode_artifact_content
+    from task_package_contract import resolve_requirements
+    constraints = []
+    for step in steps:
+        files = {item["filename"]: decode_artifact_content(item) for item in _deployment_files_for_step(payload, step["flow_id"])}
+        constraints.extend(resolve_requirements(files, with_constraints=True)[1])
+    return "\n".join(dict.fromkeys(constraints)) + "\n"
 
 
 def _model_requirements_for_dagster(
@@ -3278,12 +3370,13 @@ ARG INLUMEN_ACCELERATOR=cpu
 ARG INLUMEN_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
 WORKDIR /workspace
 COPY dagster/requirements.txt /tmp/inlumen-requirements.txt
+COPY dagster/constraints.txt /tmp/inlumen-constraints.txt
 RUN --mount=type=cache,target=/root/.cache/uv \\
     if [ "$INLUMEN_ACCELERATOR" = "cpu" ] && grep -Eiq '^torch([<>=!~].*)?$' /tmp/inlumen-requirements.txt; then \\
          TORCH_REQUIREMENT="$(grep -Ei '^torch([<>=!~].*)?$' /tmp/inlumen-requirements.txt | head -n 1)" \\
          && uv pip install --system --index-url "$INLUMEN_PYTORCH_CPU_INDEX_URL" "$TORCH_REQUIREMENT"; \\
        fi \\
-    && uv pip install --system -r /tmp/inlumen-requirements.txt
+    && uv pip install --system -r /tmp/inlumen-requirements.txt -c /tmp/inlumen-constraints.txt
 COPY dagster /workspace/dagster
 COPY inputs /workspace/inputs
 COPY nodes /workspace/nodes
@@ -3302,12 +3395,13 @@ ARG INLUMEN_ACCELERATOR=cpu
 ARG INLUMEN_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
 WORKDIR /app
 COPY requirements.txt /tmp/inlumen-requirements.txt
+COPY constraints.txt /tmp/inlumen-constraints.txt
 RUN --mount=type=cache,target=/root/.cache/uv \\
     if [ "$INLUMEN_ACCELERATOR" = "cpu" ] && grep -Eiq '^torch([<>=!~].*)?$' /tmp/inlumen-requirements.txt; then \\
          TORCH_REQUIREMENT="$(grep -Ei '^torch([<>=!~].*)?$' /tmp/inlumen-requirements.txt | head -n 1)" \\
          && uv pip install --system --index-url "$INLUMEN_PYTORCH_CPU_INDEX_URL" "$TORCH_REQUIREMENT"; \\
        fi \\
-    && uv pip install --system -r /tmp/inlumen-requirements.txt
+    && uv pip install --system -r /tmp/inlumen-requirements.txt -c /tmp/inlumen-constraints.txt
 COPY . /app
 RUN mkdir -p /app/.dagster_home
 RUN --mount=type=cache,target=/root/.cache/uv uv pip install --system --no-deps -e .
@@ -3442,8 +3536,9 @@ x-dagster-environment: &dagster-environment
   # Reviewed adapters still load their prefetched snapshots directly from
   # INLUMEN_MODEL_ROOT, but do not impose an offline-only policy on user code.
   HF_HUB_OFFLINE: "${{HF_HUB_OFFLINE:-0}}"
-  HF_HOME: /models/huggingface
-  HF_HUB_CACHE: /models/huggingface
+  HF_HOME: /runtime/huggingface
+  HF_HUB_CACHE: /runtime/huggingface/hub
+  HF_HUB_DISABLE_XET: "${{HF_HUB_DISABLE_XET:-1}}"
   TRANSFORMERS_OFFLINE: "${{TRANSFORMERS_OFFLINE:-0}}"
   INLUMEN_ACCELERATOR: "${{INLUMEN_ACCELERATOR:-cpu}}"
   INLUMEN_MODEL_ROOT: /models
@@ -3454,6 +3549,7 @@ x-dagster-environment: &dagster-environment
   PYTHONUNBUFFERED: "1"
 
 x-dagster-volumes: &dagster-volumes
+  - dagster_runtime_cache:/runtime
   - {output_mount}
 {input_volume_line}\
 {model_volume_line}\
@@ -3567,6 +3663,7 @@ services:
 volumes:
   dagster_postgres_data:
   dagster_compute_logs:
+  dagster_runtime_cache:
 {model_volume_declaration}\
 
 networks:
@@ -4049,7 +4146,7 @@ def build_dagster_project_files(
         dockerfiles_payload,
     )
     output_files: List[dict] = []
-    aggregate_requirements: List[str] = []
+    aggregate_requirements: List[str] = ["jsonschema>=4.23,<5"]
     project_dir = _sanitize_fragment(project_dir, "dagster_project")
 
     root_input_files = _root_input_files_for_dagster(steps, dependencies, dockerfiles_payload)
@@ -4116,7 +4213,7 @@ def build_dagster_project_files(
             "requirements.txt",
         )
         aggregate_requirements.extend(
-            _parse_requirements_for_dagster_project(requirements_content)
+            _package_dependencies(dockerfiles_payload, step_id)
         )
 
         node_artifact_root = f"{project_dir}/src/inlumen_dagster_project/artifacts/nodes/{_sanitize_fragment(step_id, 'step')}"
@@ -4246,6 +4343,9 @@ def build_dagster_project_files(
                 "type": "inlumen_dagster_project.components.shell_command.ShellCommand",
                 "attributes": {
                     "asset_key": asset_name,
+                    "data_contract": _runtime_artifact_contract(step, dockerfiles_payload),
+                    "artifact_bindings": _declared_bindings(step, incoming_bindings, steps_by_id, dockerfiles_payload,
+                        lambda binding: f"../outputs/{_bundle_node_dir(steps_by_id[binding.source_node])}" if bundle_layout else f"storage/{asset_names[binding.source_node]}"),
                     "script_path": script_path,
                     "upstream_assets": [asset_names[parent] for parent in parents],
                     "input_bindings": input_bindings,
@@ -4274,6 +4374,11 @@ def build_dagster_project_files(
             _dagster_file(
                 f"{project_dir}/pyproject.toml",
                 _dagster_project_metadata_content(aggregate_requirements),
+                "dagster-project",
+            ),
+            _dagster_file(
+                f"{project_dir}/constraints.txt",
+                _pipeline_constraints(dockerfiles_payload, steps),
                 "dagster-project",
             ),
             _dagster_file(
@@ -4446,13 +4551,7 @@ def _shared_argo_runtime(
                 ],
             )
         requirements.extend(
-            _parse_requirements_for_dagster_project(
-                _deployment_file_content(
-                    dockerfiles_payload,
-                    step_id,
-                    "requirements.txt",
-                )
-            )
+            _package_dependencies(dockerfiles_payload, step_id)
         )
         for file_entry in step_files:
             content = str(file_entry.get("content") or "")
@@ -4475,6 +4574,7 @@ def _shared_argo_runtime(
             "context_path": f"{working_dir}/node-manifest.json",
         }
 
+    requirements.append("jsonschema>=4.23,<5")
     unique_requirements: List[str] = []
     seen_requirements: set[str] = set()
     for requirement in requirements:
@@ -4507,9 +4607,10 @@ COPY --from=ghcr.io/astral-sh/uv:{UV_PINNED_VERSION} /uv /uvx /bin/
 ENV PYTHONUNBUFFERED=1
 WORKDIR /workspace
 COPY argo/requirements.txt /tmp/inlumen-requirements.txt
+COPY argo/constraints.txt /tmp/inlumen-constraints.txt
 RUN --mount=type=cache,target=/root/.cache/uv \\
     if [ -s /tmp/inlumen-requirements.txt ]; then \\
-      uv pip install --system -r /tmp/inlumen-requirements.txt; \\
+      uv pip install --system -r /tmp/inlumen-requirements.txt -c /tmp/inlumen-constraints.txt; \\
     fi
 COPY nodes /workspace/nodes
 LABEL inlumen.runtime.environment-hash="{environment_hash}"
@@ -4544,6 +4645,8 @@ def build_run_spec(
             "source_port": binding.source_port,
             "target": binding.target_node,
             "target_port": binding.target_port,
+            "connection_id": f"{binding.source_node}:{binding.source_port}->{binding.target_node}:{binding.target_port}",
+            "artifact_name": next(iter(_runtime_artifact_contract(steps_by_id[binding.source_node], dockerfiles_payload).get("outputs", [])), {}).get("name", ""),
         }
         for binding in _resolved_artifact_bindings(steps_by_id, connections)
     ]
@@ -4555,13 +4658,7 @@ def build_run_spec(
             dockerfiles_payload,
             step_id,
         )
-        requirements = _parse_requirements_for_dagster_project(
-            _deployment_file_content(
-                dockerfiles_payload,
-                step_id,
-                "requirements.txt",
-            )
-        )
+        requirements = _package_dependencies(dockerfiles_payload, step_id)
         dependency_hash = hashlib.sha256(
             json.dumps(
                 {"python": "3.11", "requirements": requirements},
@@ -4610,6 +4707,7 @@ def build_run_spec(
             ),
             "inputs": ports.get("inputs") or [],
             "outputs": ports.get("outputs") or [],
+            "data_contract": _runtime_artifact_contract(step, dockerfiles_payload),
             "parents": dependencies.get(step_id) or [],
             "output_path": f"outputs/{node_dir}",
             "parameters": _step_runtime_parameters(step),
@@ -4681,7 +4779,7 @@ def build_run_spec(
         ),
     }
     return {
-        "schema_version": "inlumen.run-spec@3",
+        "schema_version": "inlumen.run-spec@4",
         "artifact_contract": dict(ARTIFACT_CONTRACT),
         "runtime": {
             "default_engine": "dagster" if targets.get("dagster") else "argo",
@@ -4847,6 +4945,8 @@ def build_deployment_bundle_files(
             "Deployment bundle input validation failed",
             input_errors,
         )
+    for step in steps:
+        _runtime_artifact_contract(step, dockerfiles_payload, require_current=True)
     _validate_explicit_input_integrity(dockerfiles_payload, root_input_files)
     root_step_ids = [
         step_id for step_id in ordered_ids if not dependencies.get(step_id)
@@ -4906,6 +5006,11 @@ def build_deployment_bundle_files(
                     shared_argo_runtime["dockerfile_content"],
                     role="argo-runtime",
                     content_type="text/x-dockerfile",
+                ),
+                _bundle_file(
+                    "argo/constraints.txt",
+                    _pipeline_constraints(dockerfiles_payload, steps),
+                    role="argo-runtime",
                 ),
                 _bundle_file(
                     "argo/requirements.txt",
@@ -4990,7 +5095,7 @@ def build_deployment_bundle_files(
     )
 
     manifest = {
-        "schema_version": "inlumen.deployment-bundle@2",
+        "schema_version": "inlumen.deployment-bundle@3",
         "artifact_contract": dict(ARTIFACT_CONTRACT),
         "run_spec": "run-spec.json",
         "targets": selected_targets,
@@ -5056,7 +5161,7 @@ def build_deployment_bundle_files(
             "valid": True,
             "checks": [
                 "canonical deployment bundle layout generated",
-                "engine-neutral inlumen.run-spec@3 generated",
+                "engine-neutral inlumen.run-spec@4 generated",
                 "node runtime artifacts copied under nodes/<node>/",
                 "root inputs and per-node output directories declared",
                 "selected deployment targets generated deterministically",

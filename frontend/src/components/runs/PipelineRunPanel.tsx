@@ -219,7 +219,7 @@ export const PipelineRunPanel = () => {
   const stages = selectedRun
     ? stageStates(selectedRun.status, selectedRun.progress?.phase)
     : [];
-  const stageLabels = ['Snapshot', 'Runtime', 'Pipeline', 'Results'];
+  const stageLabels = ['Snapshot', stages[1] === 'complete' ? 'Runtime built' : 'Runtime', 'Pipeline', 'Results'];
   const elapsedSeconds = selectedRun?.started_at
     ? Math.max(0, (Date.now() - new Date(selectedRun.started_at).valueOf()) / 1000)
     : 0;
@@ -328,7 +328,7 @@ export const PipelineRunPanel = () => {
             <div className="min-w-0">
               <div className="font-medium">Run status</div>
               <div className={cn('mt-0.5 font-medium capitalize', statusClass(selectedRun.status))}>
-                {selectedRun.status}
+                {selectedRun.status === 'succeeded' ? 'Execution succeeded' : selectedRun.status}
               </div>
             </div>
             {isActivePipelineRun(selectedRun.status) && (

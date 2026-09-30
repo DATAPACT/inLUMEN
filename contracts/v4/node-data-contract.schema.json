@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inlumen:schema:node-data-contract:2",
+  "type": "object",
+  "required": [
+    "contract_id",
+    "inputs",
+    "outputs"
+  ],
+  "properties": {
+    "contract_id": {
+      "const": "inlumen.generic-node@2"
+    },
+    "version": {
+      "const": "2"
+    },
+    "inputs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/artifact"
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "maxItems": 1,
+      "items": {
+        "$ref": "#/$defs/artifact"
+      }
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "required": [
+        "name",
+        "filename",
+        "representation"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "filename": {
+          "type": "string",
+          "minLength": 1
+        },
+        "representation": {
+          "enum": [
+            "file",
+            "directory"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "format": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema": {
+          "type": "object"
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifact"
+          }
+        }
+      }
+    }
+  }
+}

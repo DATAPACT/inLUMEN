@@ -13,3 +13,8 @@ model workflows. Unsupported or unsafe model output fails validation.
 
 Dockerfiles belong to the deployment export. Dagster and Argo use consolidated
 target-level build files rather than `Dockerfile.<flow_id>` files.
+
+The version-2 generation plan binds exactly one declared artifact per connection.
+Sample execution launches compiled node packages using the same artifact validator
+and staging implementation as exported runtimes. Scratch files and receipts remain
+outside published outputs. See `docs/migrations/artifact-contract-v3-to-v4.md`.

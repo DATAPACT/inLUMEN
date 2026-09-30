@@ -2,6 +2,7 @@ import ast
 import hashlib
 import json
 import re
+from pathlib import Path
 from typing import Any, Optional
 
 from connector_catalog import require_supported_connector
@@ -11,6 +12,9 @@ from pydantic import BaseModel, Field
 from attachment_validation import attachment_input_errors
 from artifact_content import encode_artifact_bytes, is_text_artifact
 from artifact_contract import classify_artifact
+from artifact_runtime import ArtifactContractError
+from task_artifacts import task_data_contract
+from task_package_contract import validate_package
 from async_runtime import run_async
 from deployment_artifacts import (
     DeploymentArtifactValidationError,
@@ -736,6 +740,9 @@ def _parameter(name, default=""):
 
 
 def _entries(input_dir):
+    manifest = os.getenv("INLUMEN_INPUT_MANIFEST")
+    if manifest:
+        return json.loads(Path(manifest).read_text())["inputs"]
     if not input_dir.is_dir():
         return []
     return [
@@ -746,11 +753,8 @@ def _entries(input_dir):
 
 
 def _port_directory(output_dir, direction="outputs"):
-    ports = (ADAPTER_SPEC.get("ports") or {}).get(direction) or []
-    port = ports[0] if isinstance(ports[0], dict) else {}
-    port_id = str(port.get("id") or port.get("name") or "data")
-    port_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", port_id).strip("-") or "data"
-    return output_dir / port_id
+    bundle = (ADAPTER_SPEC.get("parameters") or {}).get("output_artifact") or {}
+    return output_dir / bundle["filename"] if bundle.get("representation") == "directory" else output_dir
 
 
 def _copy_source_files(entries, output_dir):
@@ -766,9 +770,17 @@ def _copy_source_files(entries, output_dir):
         filename = str(entry["filename"]).replace("\\\\", "/").lstrip("/")
         if not filename or ".." in Path(filename).parts:
             raise ValueError(f"Source adapter received unsafe filename: {filename!r}")
+        declaration = (ADAPTER_SPEC.get("parameters") or {}).get("output_artifact") or {}
+        if declaration.get("representation", "file") == "file" and declaration.get("filename"):
+            if len(entries) != 1:
+                raise ValueError("A file source artifact requires exactly one uploaded file")
+            filename = declaration["filename"]
         destination = port_dir / filename
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(entry["path"], destination)
+        if Path(entry["path"]).is_dir():
+            shutil.copytree(entry["path"], destination)
+        else:
+            shutil.copy2(entry["path"], destination)
 
 
 def _database_source(output_dir):
@@ -785,10 +797,13 @@ def _database_source(output_dir):
     if output_format not in {"csv", "parquet"}:
         raise RuntimeError("Database Source output_format must be csv or parquet.")
     default_filename = f"database_rows.{output_format}"
-    filename = Path(str(_parameter("output_filename", default_filename))).name
+    filename = str(_parameter("output_filename", default_filename))
+    if Path(filename).is_absolute() or ".." in Path(filename).parts:
+        raise ValueError("Unsafe source output filename")
     port_dir = _port_directory(output_dir)
     port_dir.mkdir(parents=True, exist_ok=True)
     output_path = port_dir / filename
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     with psycopg.connect(connection_url, connect_timeout=int(_parameter("connect_timeout", "10"))) as connection:
         with connection.cursor() as cursor:
             cursor.execute(query)
@@ -816,7 +831,7 @@ def _database_source(output_dir):
                         writer.writerows(rows)
                         row_count += len(rows)
 
-    manifest_path = output_dir / "output_manifest.json"
+    manifest_path = Path(os.environ.get("PIPELINE_WORK_DIR", str(output_dir.parent))) / "connector-metadata.json"
     manifest = {
         "schema_version": "inlumen.data-artifact@1",
         "name": output_path.stem,
@@ -866,7 +881,7 @@ def _object_storage_source(output_dir):
             "object": object_key,
         })
 
-    (output_dir / "output_manifest.json").write_text(
+    (Path(os.environ.get("PIPELINE_WORK_DIR", str(output_dir.parent))) / "connector-metadata.json").write_text(
         json.dumps({
             "schema_version": "inlumen.data-artifact@1",
             "kind": "object-set",
@@ -936,12 +951,15 @@ def _rest_api_source(output_dir):
         "text/csv": "csv",
         "text/plain": "txt",
     }.get(content_type, "bin")
-    filename = Path(str(_parameter("output_filename", f"response.{extension}"))).name
+    filename = str(_parameter("output_filename", f"response.{extension}"))
+    if Path(filename).is_absolute() or ".." in Path(filename).parts:
+        raise ValueError("Unsafe source output filename")
     port_dir = _port_directory(output_dir)
     port_dir.mkdir(parents=True, exist_ok=True)
     output_path = port_dir / filename
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(payload)
-    (output_dir / "output_manifest.json").write_text(
+    (Path(os.environ.get("PIPELINE_WORK_DIR", str(output_dir.parent))) / "connector-metadata.json").write_text(
         json.dumps({
             "schema_version": "inlumen.data-artifact@1",
             "kind": "api-response",
@@ -1009,7 +1027,10 @@ def _generic_destination_outputs(entries, output_dir):
         target = requested_filename if requested_filename and len(entries) == 1 else filename
         target_path = output_dir / target
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(entry["path"], target_path)
+        if Path(entry["path"]).is_dir():
+            shutil.copytree(entry["path"], target_path)
+        else:
+            shutil.copy2(entry["path"], target_path)
         copied.append({
             "filename": str(target_path.relative_to(output_dir)),
             "source": filename,
@@ -1155,6 +1176,34 @@ def _managed_adapter_runtime(
             "format": "original",
             "description": "Objects downloaded from the configured S3-compatible location.",
         })
+    source_files = [item for item in step.get("files", []) if item.get("role") != "code" and item.get("filename") not in {"main.py", "requirements.txt", "node-manifest.json", "validation-report.json"}]
+    data_inputs = [{"name": Path(item["filename"]).stem, "filename": item["filename"], "kind": "binary"} for item in source_files] if adapter_kind == "source" else []
+    if adapter_kind == "source":
+        declared = (step.get("implementation") or {}).get("output_artifact") or adapter_parameters.get("output_artifact")
+        if isinstance(declared, dict):
+            data_outputs = [declared]
+            adapter_spec["parameters"]["output_artifact"] = declared
+            if declared.get("representation", "file") == "file":
+                adapter_spec["parameters"]["output_filename"] = declared["filename"]
+            main_content = _managed_adapter_main_source_v2(adapter_spec)
+        elif adapter_template == "database":
+            data_outputs[0]["filename"] = output_filename
+        elif adapter_template == "object storage":
+            raise DeploymentArtifactValidationError("Source artifact declaration required", [f"Node {flow_id}: declare output_artifact for the object or directory bundle."])
+        elif adapter_template == "rest api":
+            data_outputs = [{"name": "response", "filename": adapter_parameters.get("output_filename") or "response.bin", "kind": "binary", "format": "bin"}]
+            adapter_spec["parameters"].setdefault("output_filename", "response.bin")
+            main_content = _managed_adapter_main_source_v2(adapter_spec)
+        else:
+            source_files = [item for item in step.get("files", []) if item.get("role") != "code" and item.get("filename") not in {"main.py", "requirements.txt", "node-manifest.json", "validation-report.json"}]
+            if len(source_files) > 1:
+                raise DeploymentArtifactValidationError("Source artifact declaration required", [f"Node {flow_id}: multiple files require an explicit directory output_artifact."])
+            if source_files:
+                filename = source_files[0]["filename"]
+                data_outputs = [{"name": Path(filename).stem, "filename": filename, "kind": "binary", "format": Path(filename).suffix.lstrip(".")}]
+            data_inputs = [{"name": Path(item["filename"]).stem, "filename": item["filename"], "kind": "binary"} for item in source_files]
+        for output in data_outputs:
+            output.setdefault("representation", "directory" if output.get("kind") == "directory" else "file")
     runtime_environment = []
     if adapter_template == "rest api":
         runtime_environment.extend(
@@ -1191,7 +1240,8 @@ def _managed_adapter_runtime(
         "flow_id": flow_id,
         "entrypoint": ["python", "/app/main.py"],
         "data_contract": {
-            "inputs": [] if adapter_kind == "source" else [{"name": "input_artifacts", "kind": "artifact"}],
+            "contract_id": "inlumen.generic-node@2", "version": "2",
+            "inputs": data_inputs,
             "outputs": data_outputs,
         },
         "adapter": adapter_spec,
@@ -1330,14 +1380,13 @@ def _control_flow_runtime(
     }
     main_content = _control_flow_main_source(flow_spec)
     ports = step.get("ports") if isinstance(step.get("ports"), dict) else {}
+    output_artifact = (step.get("implementation") or {}).get("output_artifact") or (step.get("param") or {}).get("output_artifact")
     node_manifest = {
         "schema_version": "inlumen.node-manifest@1",
         "flow_id": flow_id,
         "entrypoint": ["python", "/app/main.py"],
-        "data_contract": {
-            "inputs": ports.get("inputs") or [],
-            "outputs": ports.get("outputs") or [],
-        },
+        "data_contract": ({"contract_id": "inlumen.generic-node@2", "version": "2", "inputs": [], "outputs": [output_artifact]}
+            if output_artifact else {"inputs": ports.get("inputs") or [], "outputs": ports.get("outputs") or []}),
         "adapter": flow_spec,
         "source": "inLUMEN deterministic control-flow adapter",
     }
@@ -1557,6 +1606,10 @@ def _task_io_contract(
         else ""
     ).strip().lower()
     cli = _cli_task_contract(source)
+    if declared.get("version") == 1:
+        # Public v1 packages always run their ordinary main.py entrypoint.
+        # Function/CLI adaptation belongs exclusively to legacy declarations.
+        adapter = "manifest" if isinstance(source, str) and all(token in source for token in ("INLUMEN_INPUT_MANIFEST", "INLUMEN_OUTPUT_MANIFEST")) else "filesystem"
 
     if not adapter and _is_function_style_task(source):
         adapter = "function"
@@ -1746,6 +1799,7 @@ def _task_capability_contract(
             "runtime": runtime,
             "adapter_id": str(item.get("adapter_id") or "user-declared-model").strip(),
             **({"credential": credential} if credential else {}),
+            **{key: item[key] for key in ("model_variants", "runtime_selection", "resource_class") if key in item},
         })
     if not models and inferred_model_plan.get("model_id") and inferred_model_plan.get("model_revision"):
         models.append({
@@ -2175,6 +2229,10 @@ async def _read_attached_python_runtime(
             }
         )
 
+    if "inlumen.task.json" in filenames:
+        from artifact_content import decode_artifact_content
+        checked = validate_package({item["filename"]: decode_artifact_content(item) for item in runtime_files})
+
     main_file = next(
         (item for item in runtime_files if item["filename"] == "main.py"),
         {},
@@ -2248,11 +2306,19 @@ async def _read_attached_python_runtime(
             }
         )
 
+    declared_data_contract = {}
+    if "data_contract" in declared_task_contract or "output" in declared_task_contract and "version" in declared_task_contract:
+        try:
+            declared_data_contract = task_data_contract(declared_task_contract)
+        except ArtifactContractError as exc:
+            raise DeploymentArtifactValidationError(
+                "Invalid uploaded artifact declaration", [f"Node {flow_id}: {exc}"]
+            ) from exc
     node_manifest = {
         "schema_version": "inlumen.node-manifest@1",
         "flow_id": flow_id,
         "entrypoint": entrypoint,
-        "data_contract": {
+        "data_contract": declared_data_contract or {
             "inputs": fixture_descriptors,
             "outputs": [],
         },

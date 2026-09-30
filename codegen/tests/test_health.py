@@ -434,12 +434,6 @@ def test_deterministic_fallback_writes_required_metrics_schema(
             ],
             "expected_outputs": [
                 {
-                    "name": "modeltraining_model",
-                    "kind": "model",
-                    "format": "pickle",
-                    "filename": "modeltraining_model.pickle",
-                },
-                {
                     "name": "modeltraining_metrics",
                     "kind": "json",
                     "format": "json",

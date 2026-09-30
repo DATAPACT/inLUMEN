@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "output": {
+    "type": "file",
+    "path": "entities.json"
+  }
+}

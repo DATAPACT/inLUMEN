@@ -1598,6 +1598,45 @@ def neo4j_update_node():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/neo4j_replace_task_packages', methods=['POST'])
+@require_auth
+def neo4j_replace_task_packages():
+    packages = (request.get_json(silent=True) or {}).get("packages", [])
+    if not packages or not request.headers.get("If-Match"):
+        return jsonify({"error": "Packages and graph revision are required"}), 422
+    try:
+        with driver.session() as session:
+            for item in packages:
+                row = session.run("MATCH (n:STEP {flow_id:$id}) RETURN n.type AS type", id=item["node_id"]).single()
+                if not row or str(row["type"]).lower() != "task":
+                    raise ValueError("Package target must be an existing Task")
+            for item in packages:
+                node_id = item["node_id"]
+                session.run("""
+                    MATCH (n:STEP {flow_id:$id})-[:HAS_FILE]->(f:FILE)
+                    WHERE coalesce(f.role,'code') <> 'data'
+                    DETACH DELETE f
+                """, id=node_id).consume()
+                for file in item["files"]:
+                    if file["bucket"] != node_bucket_name(node_id) or not file["snapshot_object"].startswith((".packages/", ".generated/")):
+                        raise ValueError("Invalid immutable package reference")
+                    session.run("""
+                        MATCH (n:STEP {flow_id:$id})
+                        CREATE (f:FILE {uid:randomUUID(), filename:$filename, bucket:$bucket,
+                            snapshot_bucket:$bucket, snapshot_object:$object, role:'code', added_at:datetime()})
+                        CREATE (n)-[:HAS_FILE]->(f)
+                    """, id=node_id, filename=file["filename"], bucket=file["bucket"], object=file["snapshot_object"]).consume()
+                session.run("""
+                    MATCH (n:STEP {flow_id:$id})
+                    SET n.generated_artifact_json=$artifact, n.has_files='yes'
+                    WITH n MATCH (p:PIPELINE)-[:HAS_STEP]->(n) SET p.updated_at=datetime()
+                """, id=node_id, artifact=json.dumps(item["artifact"])).consume()
+            _record_provenance_event(session, "task_packages_imported", "manual", "Imported validated Task packages.", {"node_ids": [p["node_id"] for p in packages]})
+        return jsonify({"imported": len(packages), "packages": packages}), 200
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 422
+
+
 @app.route('/neo4j_update_generated_artifact', methods=['POST'])
 @require_auth
 def neo4j_update_generated_artifact():
