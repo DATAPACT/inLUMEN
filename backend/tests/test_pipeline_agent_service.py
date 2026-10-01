@@ -462,5 +462,49 @@ class PipelineAgentServiceTest(unittest.TestCase):
         save_state.assert_called_once_with("repair-session", {"history": []})
         clear_state.assert_not_called()
 
+    @patch("pipeline_agent.service.clear_state_from_disk")
+    @patch("pipeline_agent.service.save_state_to_disk")
+    @patch("pipeline_agent.service.load_state_from_disk", return_value=None)
+    @patch("pipeline_agent.service.save_active_pipeline_version", new_callable=AsyncMock)
+    @patch("pipeline_agent.service.fetch_pipeline_graph", new_callable=AsyncMock)
+    @patch("pipeline_agent.service.build_pipeline_editing_team")
+    def test_partial_compound_edit_is_repaired_before_success(
+        self, build_team, fetch_graph, save_version, _load_state, save_state, clear_state,
+    ):
+        def component(node_id, kind, label):
+            return {"id": str(node_id), "data": {"type": kind, "label": label, "description": label}}
+
+        def link(source, target, source_port, target_port):
+            return {"source": str(source), "target": str(target), "sourceHandle": source_port, "targetHandle": target_port}
+
+        before = {"nodes": [component(1, "source", "Input"), component(2, "task", "Parsing"), component(3, "destination", "Output")],
+                  "edges": [link(1, 2, "data", "input"), link(2, 3, "output", "data")]}
+        partial = {"nodes": [*before["nodes"], component(4, "task", "Validation")],
+                   "edges": [link(1, 2, "data", "input"), link(2, 4, "output", "input"), link(4, 3, "output", "data")]}
+        complete = {"nodes": [*partial["nodes"], component(5, "task", "Normalization")],
+                    "edges": [link(1, 2, "data", "input"), link(2, 4, "output", "input"), link(4, 5, "output", "input"), link(5, 3, "output", "data")]}
+        fetch_graph.side_effect = [before, partial, complete]
+        team = MagicMock()
+        team.run = AsyncMock(side_effect=[
+            SimpleNamespace(messages=[SimpleNamespace(type="TextMessage", source="assistant", content="Added validation.")]),
+            SimpleNamespace(messages=[SimpleNamespace(type="TextMessage", source="assistant", content="Added the missing normalization step.")]),
+        ])
+        team.save_state = AsyncMock(return_value={"history": []})
+        build_team.return_value = team
+        result = asyncio.run(run_pipeline_editor_turn(
+            user_message="Extend the pipeline by adding validation after parsing, followed by normalization before output.",
+            canvas_graph=None, active_version_uid="main", active_version_name="Main", session_id="compound-edit",
+            llm_config=LLMConfig(provider="openrouter", model="test/model", base_url="https://example.test/v1", api_key="secret"),
+            authorization="Bearer token",
+        ))
+        self.assertEqual(2, team.run.await_count)
+        self.assertIn("normalization", team.run.await_args.kwargs["task"])
+        self.assertTrue(result.sync["guardrail_passed"])
+        self.assertTrue(result.sync["repaired"])
+        self.assertEqual(5, len(result.graph["nodes"]))
+        save_version.assert_awaited_once_with(complete, "main", "Main", authorization="Bearer token")
+        clear_state.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

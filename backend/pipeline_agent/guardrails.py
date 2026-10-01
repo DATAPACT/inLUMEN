@@ -21,6 +21,63 @@ def _node_data(node: object) -> dict:
     return data if isinstance(data, dict) else node
 
 
+def _incomplete_ordered_addition_errors(
+    before_graph: dict | None, after_graph: dict | None, user_message: str,
+) -> list[str]:
+    """Catch partial compound insertions without prescribing domain-specific nodes.
+
+    Only explicit additive commands with two or more named before/after clauses
+    establish this lower bound. Paraphrased labels are allowed when the requested
+    number of components was added; existing named components make repeats safe.
+    """
+    text = " ".join(str(user_message or "").lower().split())
+    if not re.match(r"^(?:please\s+)?(?:extend|add|insert|update|modify|include|expand)\b", text):
+        return []
+    if re.search(r"\b(?:remove|delete|replace|rebuild|reset|clear)\b|\b(?:don't|do not|without)\b", text):
+        return []
+    clauses = re.findall(
+        r"\b(add(?:ing)?|insert(?:ing)?|followed by)\s+([^,;.!?]+?)"
+        r"\s+(?:after|before)\s+[^,;.!?]+", text,
+    )
+    if len(clauses) < 2 or clauses[0][0] == "followed by":
+        return []
+    phrases = [phrase.strip() for _, phrase in clauses]
+    ignored = {"a", "an", "the", "data", "task", "step", "stage", "component"}
+
+    def terms(value):
+        return [word for word in re.findall(r"[a-z]+", value.lower()) if word not in ignored]
+
+    if any(not terms(phrase) or len(terms(phrase)) > 6 for phrase in phrases):
+        return []
+
+    def labels(graph):
+        nodes = (graph or {}).get("nodes")
+        return [str(_node_data(node).get("label") or "") for node in (nodes if isinstance(nodes, list) else [])]
+
+    def present(phrase, candidates):
+        words = terms(phrase)
+        acronym = "".join(word[0] for word in words)
+        for label in candidates:
+            actual = terms(label)
+            # Exact operation words or their conventional acronym (e.g. a label
+            # can abbreviate a three-word capability). Never inspect descriptions
+            # which may mention a later step without actually implementing it.
+            if (len(acronym) >= 3 and acronym in actual) or all(word in actual for word in words):
+                return True
+        return False
+
+    before_labels, after_labels = labels(before_graph), labels(after_graph)
+    required = sum(not present(phrase, before_labels) for phrase in phrases)
+    added = len(after_labels) - len(before_labels)
+    if added >= required:
+        return []
+    return [
+        f"The compound insertion is incomplete: requested addition {phrase!r} is missing. "
+        "Keep the existing valid components and insert every remaining requested step in order."
+        for phrase in phrases if not present(phrase, after_labels)
+    ]
+
+
 def _requested_branch_contract(user_message: str) -> dict[str, bool]:
     """Extract only explicit, high-confidence branch requirements from prose."""
     text = " ".join(str(user_message or "").lower().split())
@@ -294,6 +351,8 @@ def _build_graph_sync_guardrail(
         if not fetch_error
         else []
     )
+    if not fetch_error and isinstance(before_graph, dict) and isinstance(after_graph, dict):
+        topology_errors.extend(_incomplete_ordered_addition_errors(before_graph, after_graph, user_message))
     validation_errors.extend(topology_errors)
 
     if fetch_error:
@@ -376,6 +435,8 @@ def _guardrail_repair_task(
         "at a time. If the attempted new design is structurally wrong, delete its steps "
         "and rebuild them in actual dependency order. A destination must remain terminal, "
         "and rest-api tasks require a real endpoint. Verify the final graph with overview."
+        " For an incomplete compound insertion, preserve the valid existing graph and "
+        "insert only the missing requested components in their specified order."
         " If an existing configured Subpipeline reports a missing required input, keep its "
         "saved reference and repair the parent wiring: insert or connect an upstream Source "
         "to that public input, then connect its output to downstream processing and a terminal "
