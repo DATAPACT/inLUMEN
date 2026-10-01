@@ -236,7 +236,7 @@ export const PipelineRunPanel = () => {
   const stages = selectedRun
     ? stageStates(isWaitingForExecution(selectedRun) ? 'queued' : selectedRun.status, selectedRun.progress?.phase)
     : [];
-  const stageLabels = ['Snapshot', stages[1] === 'complete' ? 'Runtime built' : 'Runtime', 'Pipeline', 'Results'];
+  const stageLabels = ['Queue', stages[1] === 'complete' ? 'Runtime built' : 'Runtime', 'Pipeline', 'Results'];
   const waiting = selectedRun ? isWaitingForExecution(selectedRun) : false;
   const runEnd = selectedRun?.finished_at ? Date.parse(selectedRun.finished_at) : Date.now();
   const admitted = selectedRun?.progress?.admitted_at;
