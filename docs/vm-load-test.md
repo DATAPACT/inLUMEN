@@ -336,7 +336,7 @@ To preview a reset of **all owned workspaces** belonging to a supplied roster:
 npm run stress:reset -- --url https://inlumen.example.com --issuer https://identity.example.com/realms/inlumen --accounts loadtest/accounts.participants.local.json
 ```
 
-Close participants' inLUMEN tabs and pause the session before applying. Add
+Pause the session, wait for AI edits and uploads to finish, and close participants' inLUMEN tabs before applying. Add
 `--apply` to perform that exact allowlisted reset. To include the original 20
 accounts, supply a private, deduplicated combined account file or run the tool
 once per account file. The utility authenticates each account, preflights the

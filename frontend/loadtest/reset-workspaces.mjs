@@ -104,7 +104,7 @@ async function main() {
   const { values } = parseArgs({ options: { url: { type: 'string' }, issuer: { type: 'string' },
     accounts: { type: 'string' }, apply: { type: 'boolean', default: false }, help: { type: 'boolean', default: false } } });
   if (values.help) {
-    console.log('node loadtest/reset-workspaces.mjs --url https://inlumen.example --issuer https://identity.example/realms/inlumen --accounts loadtest/accounts.participants.local.json [--apply]\nDefault: preview only. --apply resets ALL owned workspaces for exactly the accounts in the file, cancelling active work first. Accounts, memberships and model caches are retained. Ask participants to close inLUMEN tabs before applying and reload afterwards.');
+    console.log('node loadtest/reset-workspaces.mjs --url https://inlumen.example --issuer https://identity.example/realms/inlumen --accounts loadtest/accounts.participants.local.json [--apply]\nDefault: preview only. --apply resets ALL owned workspaces for exactly the accounts in the file, cancelling active work first. Accounts, memberships and model caches are retained. Pause the session, wait for AI edits/uploads to finish, close inLUMEN tabs before applying, and reload afterwards.');
     return;
   }
   ensure(values.accounts, 'accounts_file_required');
