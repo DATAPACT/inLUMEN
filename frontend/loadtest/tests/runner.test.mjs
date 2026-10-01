@@ -2,10 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { runLoadTest } from '../runner.mjs';
+import { LoadTestError } from '../core.mjs';
 
 // Real Chromium + local HTTP fixture; no Keycloak, LLM or external service calls.
-async function fixture(status = 200, wrongLLM = false) {
+async function fixture(status = 200, wrongLLM = false, loginWorkspaceChanged = false) {
   const workspaces = new Map();
+  const unscopedSessionReads = new Map();
   let counter = 0, chats = 0, clears = 0;
   const graph = {nodes:[{id:'a'},{id:'b'}],edges:[{source:'a',target:'b'}]};
   const server = createServer(async (req,res) => {
@@ -37,7 +39,13 @@ async function fixture(status = 200, wrongLLM = false) {
       </script>`); return;
     }
     if (!user) {json({},401);return;}
-    if (url.pathname === '/api/session') {if (!workspaces.has(`personal-${user}`)) workspaces.set(`personal-${user}`,{user,graph});json({user:{id:user},active_workspace_id:scope||`personal-${user}`,is_application_admin:false});return;}
+    if (url.pathname === '/api/session') {
+      if (!workspaces.has(`personal-${user}`)) workspaces.set(`personal-${user}`,{user,graph});
+      if (!scope) unscopedSessionReads.set(user, (unscopedSessionReads.get(user) || 0) + 1);
+      const active = loginWorkspaceChanged && !scope && unscopedSessionReads.get(user) > 1
+        ? `changed-${user}` : scope || `personal-${user}`;
+      json({user:{id:user},active_workspace_id:active,is_application_admin:false});return;
+    }
     if (url.pathname === '/api/workspaces') {const id=`w${++counter}`;workspaces.set(id,{user,graph:{nodes:[],edges:[]}});json({workspace:{id}},201);return;}
     if (url.pathname === '/api/chatbot-configs') {json({configs:[{id:'application-llm',has_api_key:true,model:'fixture'}]});return;}
     const workspace = workspaces.get(scope || `personal-${user}`);
@@ -60,6 +68,7 @@ for (const scenario of [{preflight:true,status:200}, {preflight:false,status:200
       assert.equal(server.created(),0);
       assert.equal(server.clears(),scenario.preflight?0:scenario.status===200&&!scenario.wrongLLM?6:3);
       assert.ok(report.workspaces.every(w=>w.workspace_id===`personal-user${w.user_index}`));
+      assert.ok(report.workspaces.every(w => w.login_workspace_id === w.workspace_id && w.username === `user${w.user_index}`));
       if (scenario.preflight || scenario.status===200&&!scenario.wrongLLM) assert.ok([...server.workspaces.values()].every(w=>w.graph.nodes.length===2));
       assert.equal(report.passed,scenario.status===200&&!scenario.wrongLLM);
       assert.equal(server.chats(),scenario.preflight||scenario.wrongLLM?0:scenario.status===200&&!scenario.wrongLLM?6:3);
@@ -83,5 +92,43 @@ test('participant rehearsals leave default workspace graphs untouched', {timeout
     assert.equal(server.workspaces.get('personal-user1').graph.nodes.length, 2);
     assert.equal(server.workspaces.get('personal-user2').graph.nodes.length, 2);
     assert.ok(report.workspaces.every(w => !w.workspace_id.startsWith('personal-')));
+    assert.ok(report.workspaces.every(w => w.login_workspace_id === `personal-user${w.user_index}` && w.login_workspace_id !== w.workspace_id));
+  } finally { await server.close(); }
+});
+
+test('a changed normal-login workspace stops before clearing or paid design requests', {timeout:60000}, async () => {
+  const server = await fixture(200, false, true);
+  try {
+    const report = await runLoadTest({ baseURL: server.baseURL, issuer: server.baseURL + '/realms/inlumen',
+      accounts: [1,2].map(i => ({username: 'user'+i, password: 'test-password'})),
+      workspaceMode: 'default', onProgress: () => {},
+    });
+    assert.equal(report.passed, false);
+    assert.equal(report.failure.code, 'login_workspace_changed');
+    assert.equal(server.created(), 0);
+    assert.equal(server.clears(), 0);
+    assert.equal(server.chats(), 0);
+    assert.ok([...server.workspaces.values()].every(w => w.graph.nodes.length === 2));
+  } finally { await server.close(); }
+});
+
+test('cache preparation failures retain isolated workspace IDs and do not clear or design', {timeout:60000}, async () => {
+  const server = await fixture();
+  try {
+    const report = await runLoadTest({ baseURL: server.baseURL, issuer: server.baseURL + '/realms/inlumen',
+      accounts: [1,2].map(i => ({username: 'user'+i, password: 'test-password'})),
+      workspaceMode: 'isolated', onProgress: () => {},
+      beforeWorkspacePreparation: async workspaces => {
+        assert.equal(workspaces.length, 2);
+        throw new LoadTestError('model_cache_preparation_failed');
+      },
+    });
+    assert.equal(report.passed, false);
+    assert.equal(report.failure.phase, 'model_cache_preparation');
+    assert.equal(report.failure.code, 'model_cache_preparation_failed');
+    assert.equal(report.workspaces.length, 2);
+    assert.ok(report.workspaces.every(w => server.workspaces.has(w.workspace_id)));
+    assert.equal(server.clears(), 0);
+    assert.equal(server.chats(), 0);
   } finally { await server.close(); }
 });

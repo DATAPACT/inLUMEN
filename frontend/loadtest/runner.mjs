@@ -80,7 +80,14 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
   }
 
   async function prepare(actor, round) {
-    workspaces.push({ user_index: actor.index + 1, user_id: actor.session.user.id, round, workspace_id: actor.workspace });
+    if (workspaceMode === 'default') {
+      // A headerless session is exactly what a normal browser login selects.
+      // Confirm it still matches before Clear all can erase any content.
+      const loginResponse = await api(actor, '/api/session', { workspace: null });
+      ensure(loginResponse.ok(), `login_workspace_http_${loginResponse.status()}`);
+      const login = await loginResponse.json();
+      ensure(login.user?.id === actor.session.user.id && login.active_workspace_id === actor.workspace, 'login_workspace_changed');
+    }
     const freshSession = actor.page.waitForResponse(r => appPath(r.url()) && new URL(r.url()).pathname === '/api/session', { timeout: 60000 })
       .then(r => r.json()).catch(() => null);
     await actor.page.goto(baseURL);
@@ -222,6 +229,7 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
     }
 
     for (let round = 1; round <= rounds; round++) {
+      phase = 'workspace_setup';
       if (workspaceMode === 'isolated') {
         await Promise.all(actors.map(async actor => {
           const response = await api(actor, '/api/workspaces', { method: 'POST', data: { name: `${runID}-u${actor.index + 1}-r${round}` } });
@@ -230,7 +238,16 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
           ensure(actor.workspace, 'missing_rehearsal_workspace_id');
         }));
       }
-      if (beforeWorkspacePreparation) await beforeWorkspacePreparation(actors.map(actor => ({ user_index: actor.index + 1, user_id: actor.session.user.id, workspace_id: actor.workspace, round })));
+      const roundWorkspaces = actors.map(actor => ({ user_index: actor.index + 1, username: accounts[actor.index].username,
+        user_id: actor.session.user.id, login_workspace_id: actor.session.active_workspace_id, workspace_id: actor.workspace, round }));
+      workspaces.push(...roundWorkspaces);
+      for (const workspace of roundWorkspaces) {
+        onProgress(`User ${workspace.user_index} (${workspace.username}), round ${round}: test workspace ${workspace.workspace_id}; normal login workspace ${workspace.login_workspace_id}.`);
+      }
+      if (beforeWorkspacePreparation) {
+        phase = 'model_cache_preparation';
+        await beforeWorkspacePreparation(roundWorkspaces);
+      }
       phase = 'prepare';
       const prepared = await Promise.allSettled(actors.map(actor => prepare(actor, round)));
       const failed = prepared.find(r => r.status === 'rejected');
