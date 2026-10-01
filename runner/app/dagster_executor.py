@@ -80,7 +80,7 @@ class CodegenDagsterExecutor:
         await self._client.aclose()
 
     async def workload(self) -> dict[str, Any]:
-        return await self._request("GET", "/v1/execution-workload", None, 10)
+        return await self._request("GET", "/v1/execution-workload", None, 2)
 
     async def result(self, run_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/v1/validate/deployment-bundle/{quote(run_id, safe='')}/result", None, 10)

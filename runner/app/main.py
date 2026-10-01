@@ -123,12 +123,19 @@ async def workload(workspace_id: Annotated[str, Depends(workspace_context)]) -> 
         try:
             async with _WORKLOAD_LOCK:
                 if time.monotonic() - _WORKLOAD_CACHE.get("at", 0) >= 2:
-                    remote = await observe()
+                    try:
+                        remote = await observe()
+                    except Exception:
+                        remote = None
+                    # Cache failures too: a worker outage must not produce one
+                    # serialized timeout per observing browser.
                     _WORKLOAD_CACHE.update(at=time.monotonic(), value=remote)
                 remote = _WORKLOAD_CACHE["value"]
+            if not isinstance(remote, dict):
+                return result
             active = max(int(remote["active_runs"]), 0)
             result.update(active_runs=active,
-                          queued_runs=max(int(remote["queued_runs"]), outstanding - active, 0),
+                          queued_runs=max(int(remote["queued_runs"]), 0),
                           max_active_runs=max(int(remote["max_active_runs"]), 1),
                           observed_at=remote["observed_at"], worker_available=True)
         except Exception:

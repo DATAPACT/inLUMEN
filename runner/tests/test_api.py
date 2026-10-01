@@ -133,3 +133,21 @@ def test_workload_is_authenticated_anonymous_and_degrades_when_worker_is_unavail
         response = client.get('/v1/pipeline-runs/workload', headers={'Authorization': 'Bearer test-token'})
         assert response.json()['worker_available'] is False
         assert 'active_runs' not in response.json()
+
+
+def test_workload_outage_is_cached_instead_of_retrying_for_every_browser(monkeypatch):
+    monkeypatch.setenv('RUNNER_SERVICE_API_KEY', 'test-token')
+    calls = []
+    class OfflineExecutor(BlockingExecutor):
+        async def workload(self):
+            calls.append(1)
+            raise RuntimeError('unavailable')
+    monkeypatch.setattr(main, 'RUN_MANAGER', PipelineRunManager(PipelineRunStore(':memory:'), adapter='dagster', executor=OfflineExecutor()))
+    main._WORKLOAD_CACHE.clear()
+    with TestClient(main.app) as client:
+        for _ in range(39):
+            response = client.get('/v1/pipeline-runs/workload', headers={'Authorization': 'Bearer test-token'})
+            assert response.status_code == 200
+            assert response.json()['worker_available'] is False
+    assert len(calls) == 1
+    main._WORKLOAD_CACHE.clear()
