@@ -45,6 +45,8 @@ export type PipelineRunRecord = {
     resource_memory_bytes?: number | null;
     resource_reason?: string | null;
     queue_position?: number | null;
+    admitted_at?: string | null;
+    observed_at?: string | null;
   } | null;
   error?: { code?: string; message?: string; details?: unknown } | null;
   result?: {
@@ -72,6 +74,21 @@ export type RunnerCapabilities = {
   available_run_slots: number;
   summary_persistence: boolean;
   message?: string | null;
+};
+
+export type ExecutionWorkload = {
+  outstanding_runs: number;
+  max_outstanding_runs: number;
+  worker_available: boolean;
+  active_runs?: number;
+  queued_runs?: number;
+  max_active_runs?: number;
+  observed_at?: string;
+};
+
+export const fetchExecutionWorkload = async (): Promise<ExecutionWorkload> => {
+  const response = await apiFetch(`${INLUMEN_API_URL}/api/pipeline-runs/workload`);
+  return responseJson<ExecutionWorkload>(response, 'Workload information is unavailable.');
 };
 
 const responseJson = async <T>(response: Response, fallback: string): Promise<T> => {

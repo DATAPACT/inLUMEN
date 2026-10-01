@@ -187,6 +187,23 @@ class ResourceAdmissionController:
         self._active: dict[str, dict[str, Any]] = {}
         self._waiting: list[str] = []
 
+    def enqueue(self, execution_id: str) -> None:
+        """Register arrival before a worker thread or bundle preparation starts."""
+        with self._condition:
+            if execution_id not in self._active and execution_id not in self._waiting:
+                self._waiting.append(execution_id)
+
+    def snapshot(self, execution_id: str | None = None) -> dict[str, Any]:
+        """Expose counts and only the caller's position, never other run IDs."""
+        with self._condition:
+            return {
+                "active_runs": len(self._active),
+                "queued_runs": len(self._waiting),
+                "max_active_runs": self.max_active_runs,
+                "queue_position": self._waiting.index(execution_id) + 1
+                if execution_id in self._waiting else None,
+            }
+
     def acquire(
         self,
         execution_id: str,
@@ -196,11 +213,10 @@ class ResourceAdmissionController:
         cancelled: Callable[[], bool],
         on_wait: Callable[[dict[str, int]], None],
     ) -> dict[str, Any] | None:
+        self.enqueue(execution_id)
         with self._condition:
             if execution_id in self._active:
                 return dict(self._active[execution_id])
-            if execution_id not in self._waiting:
-                self._waiting.append(execution_id)
 
         while True:
             if cancelled() or time.monotonic() >= deadline:

@@ -5,8 +5,10 @@ import { loadSessionAssets, runAudioSession } from './audio-session.mjs';
 const WS_HEADER = 'X-InLumen-Workspace-Id';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeoutMs = 180000, rampMs = 0, preflight = false, headed = false, prompt = DEFAULT_PROMPT, scenario = 'design', codeZip, audioFile, runTimeoutMs = 1800000, maxRunCpus = 2, maxRunMemoryGiB = 4, pollMs = 5000, reviewAIChanges, onProgress = console.log }) {
+export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeoutMs = 180000, rampMs = 0, preflight = false, headed = false, prompt = DEFAULT_PROMPT, scenario = 'design', codeZip, audioFile, runTimeoutMs = 1800000, maxRunCpus = 2, maxRunMemoryGiB = 4, pollMs = 5000, reviewAIChanges, workspaceMode = 'default', synchronizedRun = false, beforeWorkspacePreparation, onProgress = console.log }) {
   ensure(['design', 'audio-session'].includes(scenario), 'invalid_scenario');
+  ensure(['default', 'isolated'].includes(workspaceMode), 'invalid_workspace_mode');
+  ensure(!synchronizedRun || scenario === 'audio-session', 'synchronized_run_requires_audio_session');
   ensure(reviewAIChanges === undefined || typeof reviewAIChanges === 'boolean', 'invalid_review_ai_changes');
   const allocationLimits = scenario === 'audio-session' ? {
     cpu: positiveInteger(maxRunCpus, 'max_run_cpus'),
@@ -90,7 +92,7 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
     ensure(shared?.has_api_key, 'shared_llm_not_enabled');
     actor.model = shared.model;
     if (!preflight) {
-      onProgress(`User ${actor.index + 1}, round ${round}: clearing default workspace.`);
+      onProgress(`User ${actor.index + 1}, round ${round}: clearing test workspace.`);
       // The toolbar opens a confirmation dialog; only its action sends the request.
       const cleared = actor.page.waitForResponse(r => appPath(r.url()) && new URL(r.url()).pathname === '/api/workspace/clear-all', { timeout: timeoutMs }).catch(() => null);
       await actor.page.getByRole('button', { name: 'Clear all', exact: true }).click();
@@ -214,12 +216,21 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
     }
 
     for (let round = 1; round <= rounds; round++) {
+      if (workspaceMode === 'isolated') {
+        await Promise.all(actors.map(async actor => {
+          const response = await api(actor, '/api/workspaces', { method: 'POST', data: { name: `${runID}-u${actor.index + 1}-r${round}` } });
+          ensure(response.status() === 201, 'rehearsal_workspace_creation_failed');
+          actor.workspace = (await response.json()).workspace?.id;
+          ensure(actor.workspace, 'missing_rehearsal_workspace_id');
+        }));
+      }
+      if (beforeWorkspacePreparation) await beforeWorkspacePreparation(actors.map(actor => ({ user_index: actor.index + 1, user_id: actor.session.user.id, workspace_id: actor.workspace, round })));
       phase = 'prepare';
       const prepared = await Promise.allSettled(actors.map(actor => prepare(actor, round)));
       const failed = prepared.find(r => r.status === 'rejected');
       if (failed) throw failed.reason;
       ensure(new Set(actors.map(a => a.workspace)).size === accounts.length, 'duplicate_test_workspaces');
-      onProgress(`Round ${round}: ${actors.length} distinct users ready in their default workspaces.`);
+      onProgress(`Round ${round}: ${actors.length} distinct users ready in their test workspaces.`);
       if (preflight) break;
       phase = 'design';
       if (scenario === 'design') results.push(...await Promise.all(actors.map(actor => design(actor, round))));
@@ -236,12 +247,19 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
           sessions[actor.index].stages.push(await design(actor, round, 'extend_design'));
         }));
         phase = 'import_and_execute';
+        let ready = 0, releaseRun;
+        const barrier = new Promise(resolve => { releaseRun = resolve; });
+        const participants = actors.filter((_, i) => sessions[i].stages.length === 2 && sessions[i].stages.every(stage => stage.ok)).length;
+        const arrive = () => { if (++ready === participants) releaseRun(); };
+
         await Promise.all(actors.map(async (actor, i) => {
           if (sessions[i].stages.length !== 2 || !sessions[i].stages.every(stage => stage.ok)) return;
           actor.runId = null;
           actor.runOutcomeMayBeRunning = false;
+          let arrived = false;
           try {
             await runAudioSession({ actor, round, assets, api, runTimeoutMs, pollMs, allocationLimits,
+              beforeRun: synchronizedRun ? async () => { arrived = true; arrive(); await barrier; } : undefined,
               onStage: stage => sessions[i].stages.push(stage), onProgress,
               isAppResponse: response => appPath(response.url()) });
             sessions[i].ok = true;
@@ -250,6 +268,7 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
             sessions[i].run_id = actor.runId;
             sessions[i].outcome_may_be_running = Boolean(actor.runOutcomeMayBeRunning);
           } finally {
+            if (synchronizedRun && !arrived) arrive();
             sessions[i].elapsed_ms = Date.now() - begin;
           }
         }));
@@ -270,7 +289,7 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
     await browser.close();
   }
   return { schema_version: 2, scenario, review_ai_changes: reviewAIChanges ?? null, allocation_limits: allocationLimits, shared_assets: assets?.report || null, run_id: runID, base_url: baseURL, finished_at: new Date().toISOString(),
-    workspace_mode: 'default', clear_all_before_each_round: !preflight, preflight, requested_rounds: rounds, failure, workspaces, results,
+    workspace_mode: workspaceMode, synchronized_run: synchronizedRun, clear_all_before_each_round: !preflight, preflight, requested_rounds: rounds, failure, workspaces, results,
     summary: summarize(results, accounts.length),
     passed: !failure && (preflight || results.length === accounts.length * rounds && results.every(r => r.ok)),
   };

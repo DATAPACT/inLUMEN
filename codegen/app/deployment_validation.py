@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import docker
-from docker.errors import DockerException
+from docker.errors import DockerException, ImageNotFound
 from requests.exceptions import ReadTimeout
 
 from .resource_policy import (
@@ -118,6 +118,12 @@ def deployment_execution_progress(execution_id: str) -> dict[str, Any]:
             }
         )
     payload["observed_at"] = _utc_now_iso()
+    queue = RESOURCE_ADMISSION.snapshot(execution_id)
+    payload["queue_position"] = queue["queue_position"]
+    if queue["queue_position"] is not None:
+        payload.update(phase="waiting_for_capacity", message="Waiting for execution capacity. Your run will start automatically.")
+        # Waiting jobs have no containers. Avoid inspecting Docker for every waiter.
+        return payload
     client = None
     try:
         client = docker.from_env()
@@ -535,6 +541,7 @@ def _isolated_dagster_execution(
             resource_memory_bytes=allocation["memory_bytes"],
             resource_reason=allocation["reason"],
             queue_position=None,
+            admitted_at=_utc_now_iso(),
         )
         snapshot_digest = hashlib.sha256()
         for snapshot_file in sorted(
@@ -551,19 +558,29 @@ def _isolated_dagster_execution(
             snapshot_digest.update(b"\0")
         snapshot_hash = snapshot_digest.hexdigest()[:20]
         image_tag = f"inlumen-dagster-run:{snapshot_hash}"
-        image, build_logs = client.images.build(
-            path=str(bundle_root),
-            dockerfile=dockerfile_relative,
-            tag=image_tag,
-            rm=True,
-            forcerm=True,
-            container_limits={
-                "memory": int(allocation["memory_bytes"]),
-                "memswap": int(allocation["memory_bytes"]),
-                "cpusetcpus": ",".join(str(cpu) for cpu in range(int(allocation["cpu"]))),
-            },
-            labels={"inlumen.pipeline.snapshot": snapshot_hash},
-        )
+        image_started = time.monotonic()
+        try:
+            image = client.images.get(image_tag)
+            if image.attrs.get("Config", {}).get("Labels", {}).get("inlumen.pipeline.snapshot") != snapshot_hash:
+                image = None
+        except ImageNotFound:
+            image = None
+        image_cache_hit = image is not None
+        build_logs = []
+        if image is None:
+            image, build_logs = client.images.build(
+                path=str(bundle_root),
+                dockerfile=dockerfile_relative,
+                tag=image_tag,
+                rm=True,
+                forcerm=True,
+                container_limits={
+                    "memory": int(allocation["memory_bytes"]),
+                    "memswap": int(allocation["memory_bytes"]),
+                    "cpusetcpus": ",".join(str(cpu) for cpu in range(int(allocation["cpu"]))),
+                },
+                labels={"inlumen.pipeline.snapshot": snapshot_hash},
+            )
         build_output = "\n".join(
             str(item.get("stream") or item.get("error") or "").rstrip()
             for item in build_logs
@@ -573,6 +590,8 @@ def _isolated_dagster_execution(
         report["steps"].append(
             {
                 "name": "image_build",
+                "duration_seconds": round(time.monotonic() - image_started, 3),
+                "cache_hit": image_cache_hit,
                 "command": ["docker", "build", "-f", dockerfile_relative, "."],
                 "returncode": 0,
                 "output": build_output[-12000:],
@@ -590,6 +609,7 @@ def _isolated_dagster_execution(
         model_volume += "-ws-" + hashlib.sha256(EXECUTION_WORKSPACE.get().encode()).hexdigest()[:20]
         has_models = model_requirements.is_file() and model_prefetch.is_file()
         if has_models:
+            model_started = time.monotonic()
             _set_deployment_progress(
                 execution_id,
                 "prefetching_models",
@@ -649,6 +669,7 @@ def _isolated_dagster_execution(
             report["steps"].append(
                 {
                     "name": "model_prefetch",
+                    "duration_seconds": round(time.monotonic() - model_started, 3),
                     "command": [
                         "python",
                         "/workspace/dagster/model_prefetch.py",

@@ -70,3 +70,18 @@ for (const scenario of [{preflight:true,status:200}, {preflight:false,status:200
     } finally {await server.close();}
   });
 }
+
+test('participant rehearsals leave default workspace graphs untouched', {timeout:60000}, async () => {
+  const server = await fixture();
+  try {
+    const report = await runLoadTest({ baseURL: server.baseURL, issuer: server.baseURL + '/realms/inlumen',
+      accounts: [1,2].map(i => ({username: 'user'+i, password: 'test-password'})),
+      workspaceMode: 'isolated', onProgress: () => {} });
+    assert.equal(report.passed, true, JSON.stringify(report));
+    assert.equal(report.workspace_mode, 'isolated');
+    assert.equal(server.created(), 2);
+    assert.equal(server.workspaces.get('personal-user1').graph.nodes.length, 2);
+    assert.equal(server.workspaces.get('personal-user2').graph.nodes.length, 2);
+    assert.ok(report.workspaces.every(w => !w.workspace_id.startsWith('personal-')));
+  } finally { await server.close(); }
+});

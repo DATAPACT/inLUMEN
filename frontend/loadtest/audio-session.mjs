@@ -34,7 +34,7 @@ export async function loadSessionAssets(codeZip, audioFile) {
 
 // Both uploads use the normal application paths. Code review and Run are driven
 // through the UI; audio uses the authenticated Source attachment API.
-export async function runAudioSession({ actor, round, assets, api, runTimeoutMs, pollMs, allocationLimits, onStage, onProgress, isAppResponse }) {
+export async function runAudioSession({ actor, round, assets, api, runTimeoutMs, pollMs, allocationLimits, onStage, onProgress, isAppResponse, beforeRun }) {
   const { page } = actor;
   let runId;
   let terminal = false;
@@ -102,6 +102,7 @@ export async function runAudioSession({ actor, round, assets, api, runTimeoutMs,
     if (await library.getAttribute('aria-pressed') !== 'true') await library.click();
     await page.getByRole('tab', { name: 'Run', exact: true }).click();
   });
+  if (beforeRun) await beforeRun();
   await stage('execute_pipeline', async result => {
     const begin = Date.now();
     const accepted = responseFor('/api/pipeline-runs');
@@ -136,6 +137,11 @@ export async function runAudioSession({ actor, round, assets, api, runTimeoutMs,
       result.resource_cpu = current.progress?.resource_cpu ?? result.resource_cpu;
       result.resource_memory_bytes = current.progress?.resource_memory_bytes ?? result.resource_memory_bytes;
     }
+    result.created_at = current.created_at;
+    result.admitted_at = current.progress?.admitted_at || null;
+    result.finished_at = current.finished_at;
+    result.queue_wait_ms = result.admitted_at ? Math.max(0, Date.parse(result.admitted_at) - Date.parse(current.created_at)) : null;
+    result.worker_execution_ms = result.admitted_at ? Math.max(0, Date.parse(current.finished_at) - Date.parse(result.admitted_at)) : null;
     result.observed_statuses = [...statuses];
     terminal = true;
     result.status = current.status;

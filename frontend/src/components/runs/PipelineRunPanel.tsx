@@ -19,6 +19,8 @@ import {
   downloadPipelineRunOutput,
   fetchPipelineRunEvents,
   fetchRunnerCapabilities,
+  fetchExecutionWorkload,
+  type ExecutionWorkload,
   getPipelineRun,
   isActivePipelineRun,
   listPipelineRuns,
@@ -29,6 +31,8 @@ import {
 } from '@/features/runs/pipelineRuns';
 import {
   formatOutputSize,
+  isWaitingForExecution,
+  presentRunPhase,
   presentRunOutputs,
   presentRunFailure,
   summarizeNodeEvents,
@@ -105,6 +109,9 @@ export const PipelineRunPanel = () => {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [workload, setWorkload] = useState<ExecutionWorkload | null>(null);
+  const [workloadFresh, setWorkloadFresh] = useState(false);
+  const [refreshFailed, setRefreshFailed] = useState(false);
 
   const selectedRun = useMemo(
     () => runs.find((run) => run.run_id === selectedRunId) || runs[0] || null,
@@ -158,34 +165,44 @@ export const PipelineRunPanel = () => {
   }, [loadInitial]);
 
   useEffect(() => {
-    if (!selectedRunIdForRefresh || !selectedRunStatus) {
-      setEvents([]);
-      return;
-    }
-    let cancelled = false;
+    let stopped = false;
+    let timer: number;
     const refresh = async () => {
       try {
-        const [record, eventPayload] = await Promise.all([
-          getPipelineRun(selectedRunIdForRefresh),
-          fetchPipelineRunEvents(selectedRunIdForRefresh, 0),
-        ]);
-        if (cancelled) return;
-        setRuns((current) => mergeRun(current, record));
-        setEvents(eventPayload.events || []);
-      } catch (nextError) {
-        if (!cancelled) {
-          setError(nextError instanceof Error ? nextError.message : 'Failed to refresh the run.');
-        }
-      }
+        const next = await fetchExecutionWorkload();
+        if (!stopped) { setWorkload(next); setWorkloadFresh(next.worker_available); }
+      } catch { if (!stopped) setWorkloadFresh(false); }
+      if (!stopped) timer = window.setTimeout(refresh, document.hidden ? 15000 : 3000);
     };
     void refresh();
-    const interval = isActivePipelineRun(selectedRunStatus)
-      ? window.setInterval(() => { void refresh(); }, 1000)
-      : undefined;
-    return () => {
-      cancelled = true;
-      if (interval !== undefined) window.clearInterval(interval);
+    return () => { stopped = true; window.clearTimeout(timer); };
+  }, []);
+
+  useEffect(() => {
+    setEvents([]);
+    setRefreshFailed(false);
+    if (!selectedRunIdForRefresh) return;
+    let stopped = false;
+    let timer: number;
+    let cursor = 0;
+    const refresh = async () => {
+      let active = true;
+      try {
+        const [record, payload] = await Promise.all([
+          getPipelineRun(selectedRunIdForRefresh),
+          fetchPipelineRunEvents(selectedRunIdForRefresh, cursor),
+        ]);
+        if (stopped) return;
+        cursor = payload.next_cursor;
+        setRuns(current => mergeRun(current, record));
+        setEvents(current => [...current, ...(payload.events || [])]);
+        setRefreshFailed(false);
+        active = isActivePipelineRun(record.status);
+      } catch { if (!stopped) setRefreshFailed(true); }
+      if (!stopped && active) timer = window.setTimeout(refresh, document.hidden ? 15000 : 3000);
     };
+    void refresh();
+    return () => { stopped = true; window.clearTimeout(timer); };
   }, [selectedRunIdForRefresh, selectedRunStatus]);
 
   const handleStart = async () => {
@@ -217,12 +234,17 @@ export const PipelineRunPanel = () => {
   };
 
   const stages = selectedRun
-    ? stageStates(selectedRun.status, selectedRun.progress?.phase)
+    ? stageStates(isWaitingForExecution(selectedRun) ? 'queued' : selectedRun.status, selectedRun.progress?.phase)
     : [];
   const stageLabels = ['Snapshot', stages[1] === 'complete' ? 'Runtime built' : 'Runtime', 'Pipeline', 'Results'];
-  const elapsedSeconds = selectedRun?.started_at
-    ? Math.max(0, (Date.now() - new Date(selectedRun.started_at).valueOf()) / 1000)
-    : 0;
+  const waiting = selectedRun ? isWaitingForExecution(selectedRun) : false;
+  const runEnd = selectedRun?.finished_at ? Date.parse(selectedRun.finished_at) : Date.now();
+  const admitted = selectedRun?.progress?.admitted_at;
+  const elapsedSeconds = selectedRun ? Math.max(0, (runEnd - Date.parse(selectedRun.created_at)) / 1000) : 0;
+  const queueSeconds = selectedRun ? Math.max(0, ((admitted ? Date.parse(admitted) : runEnd) - Date.parse(selectedRun.created_at)) / 1000) : 0;
+  const executionSeconds = admitted ? Math.max(0, (runEnd - Date.parse(admitted)) / 1000) : 0;
+  const observationStale = selectedRun && isActivePipelineRun(selectedRun.status)
+    && (selectedRun.progress?.observed_at ? Date.now() - Date.parse(selectedRun.progress.observed_at) > 15000 : elapsedSeconds > 15);
   const heartbeatAgeSeconds = selectedRun?.progress?.heartbeat_at
     ? Math.max(0, (Date.now() - new Date(selectedRun.progress.heartbeat_at).valueOf()) / 1000)
     : null;
@@ -270,6 +292,12 @@ export const PipelineRunPanel = () => {
         A fixed snapshot is created at launch. You can close the browser while it runs.
       </p>
 
+      <div className="mt-3 text-xs text-muted-foreground">
+        {workloadFresh && workload ? `${workload.active_runs} running / ${workload.max_active_runs} slots · ${workload.queued_runs} queued across inLUMEN` : 'Workload information is temporarily unavailable.'}
+      </div>
+      {(refreshFailed || observationStale) && <p role="status" className="mt-2 text-xs text-amber-200">Run updates are delayed. Your run may still be processing; refresh to check its status.</p>}
+      {workloadFresh && workload && workload.outstanding_runs >= workload.max_outstanding_runs && <p role="status" className="mt-2 text-xs text-amber-200">The shared queue is full. Try again when a run finishes.</p>}
+
       {runCapacityFull && (
         <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-200">
           Run capacity is full ({outstandingRunCount}/{capacityLimit}). Wait for a run to finish or cancel an active run before launching another.
@@ -314,7 +342,7 @@ export const PipelineRunPanel = () => {
                   </span>
                 </span>
                 <span className={cn('shrink-0 font-medium capitalize', statusClass(run.status))}>
-                  {run.status}
+                  {presentRunPhase(run)}
                 </span>
               </button>
             ))}
@@ -328,7 +356,7 @@ export const PipelineRunPanel = () => {
             <div className="min-w-0">
               <div className="font-medium">Run status</div>
               <div className={cn('mt-0.5 font-medium capitalize', statusClass(selectedRun.status))}>
-                {selectedRun.status === 'succeeded' ? 'Execution succeeded' : selectedRun.status}
+                {presentRunPhase(selectedRun)}
               </div>
             </div>
             {isActivePipelineRun(selectedRun.status) && (
@@ -367,18 +395,19 @@ export const PipelineRunPanel = () => {
           {isActivePipelineRun(selectedRun.status) && (
             <div
               className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-amber-100"
-              aria-live="polite"
+
             >
-              <div className="flex items-center gap-1.5 font-medium">
+              <div role="status" aria-live="polite" aria-atomic="true" className="flex items-center gap-1.5 font-medium">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                {selectedRun.progress?.active_node_name || 'Pipeline is working'}
+                {presentRunPhase(selectedRun)}
               </div>
               <div className="mt-1 text-[11px] leading-relaxed text-amber-100/85">
-                {selectedRun.progress?.message
-                  || 'Dagster is executing the isolated pipeline snapshot. No failure has been reported.'}
+                {waiting ? `Waiting for an execution slot${selectedRun.progress?.queue_position ? ` · position ${selectedRun.progress.queue_position}` : ''}. Your run will start automatically.` : selectedRun.progress?.message || 'Processing the saved pipeline.'}
               </div>
               <div className="mt-1.5 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-amber-100/70">
                 <span>Total elapsed: {formatDuration(elapsedSeconds)}</span>
+                <span>Queue wait: {formatDuration(queueSeconds)}</span>
+                {admitted && <span>Execution: {formatDuration(executionSeconds)}</span>}
                 {selectedRun.progress?.resource_profile && (
                   <span className="capitalize">
                     Profile: {selectedRun.progress.resource_profile.replace('_', ' ')}
@@ -402,7 +431,7 @@ export const PipelineRunPanel = () => {
                   </span>
                 )}
               </div>
-              {(selectedRun.progress?.active_node_name || elapsedSeconds >= 90) && (
+              {!waiting && (selectedRun.progress?.active_node_name || elapsedSeconds >= 90) && (
                 <div className="mt-1.5 text-[10px] leading-relaxed text-amber-100/65">
                   {heartbeatIsStale
                     ? 'No fresh heartbeat has arrived for 45 seconds. The node may be busy or stalled; check again shortly or cancel the run if it remains unchanged.'

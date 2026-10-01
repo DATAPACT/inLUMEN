@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from typing import Any
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
+import httpx
 
 
 class DagsterExecutionServiceError(RuntimeError):
@@ -23,7 +21,9 @@ class CodegenDagsterExecutor:
         api_key: str | None = None,
         timeout_seconds: int | None = None,
         workspace_id: str = "local-workspace",
+        client: httpx.AsyncClient | None = None,
     ) -> None:
+        self._client = client or httpx.AsyncClient(limits=httpx.Limits(max_connections=100, max_keepalive_connections=50))
         self.workspace_id = workspace_id
         self.service_url = (
             service_url
@@ -40,7 +40,7 @@ class CodegenDagsterExecutor:
 
     def for_workspace(self, workspace_id: str) -> "CodegenDagsterExecutor":
         return CodegenDagsterExecutor(service_url=self.service_url, api_key=self.api_key,
-                                     timeout_seconds=self.timeout_seconds, workspace_id=workspace_id)
+                                     timeout_seconds=self.timeout_seconds, workspace_id=workspace_id, client=self._client)
 
     @property
     def configured(self) -> bool:
@@ -52,94 +52,61 @@ class CodegenDagsterExecutor:
         files: list[dict[str, Any]],
         runtime_secrets: dict[str, str],
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(
-            self._request,
-            "POST",
-            "/v1/validate/deployment-bundle",
-            {
-                "execution_id": run_id,
-                "files": files,
-                "targets": {"argo": False, "dagster": True},
-                "mode": "validate",
-                "validate_argo": False,
-                "validate_dagster": True,
-                "materialize": True,
-                "timeout_seconds": self.timeout_seconds,
-                "runtime_secrets": runtime_secrets,
-            },
-        )
+        accepted = await self._request("POST", "/v1/validate/deployment-bundle?background=true", {
+            "execution_id": run_id, "files": files,
+            "targets": {"argo": False, "dagster": True}, "mode": "validate",
+            "validate_argo": False, "validate_dagster": True, "materialize": True,
+            "timeout_seconds": self.timeout_seconds, "runtime_secrets": runtime_secrets,
+        }, 30)
+        if accepted.get("status") != "accepted":
+            return accepted  # Completed immutable receipt on a duplicate submission.
+        deadline = asyncio.get_running_loop().time() + self.timeout_seconds + 30
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                receipt = await self.result(run_id)
+            except DagsterExecutionServiceError:
+                # Observation is safe to retry. Submission is never retried: an
+                # unknown POST outcome may already own a durable execution.
+                await asyncio.sleep(2)
+                continue
+            if receipt.get("status") == "completed":
+                return receipt["result"]
+            if receipt.get("status") == "interrupted":
+                raise DagsterExecutionServiceError("Execution was interrupted; it will not be replayed.")
+            await asyncio.sleep(2)
+        raise DagsterExecutionServiceError("Execution did not finish before its deadline.")
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def workload(self) -> dict[str, Any]:
+        return await self._request("GET", "/v1/execution-workload", None, 10)
 
     async def result(self, run_id: str) -> dict[str, Any]:
-        return await asyncio.to_thread(self._request, "GET",
-            f"/v1/validate/deployment-bundle/{quote(run_id, safe='')}/result", None, 10)
+        return await self._request("GET", f"/v1/validate/deployment-bundle/{quote(run_id, safe='')}/result", None, 10)
 
     async def cancel(self, run_id: str) -> None:
-        await asyncio.to_thread(
-            self._request,
-            "DELETE",
-            f"/v1/validate/deployment-bundle/{quote(run_id, safe='')}",
-            None,
-        )
+        await self._request("DELETE", f"/v1/validate/deployment-bundle/{quote(run_id, safe='')}", None, 10)
 
     async def progress(self, run_id: str) -> dict[str, Any]:
-        return await asyncio.to_thread(
-            self._request,
-            "GET",
-            f"/v1/validate/deployment-bundle/{quote(run_id, safe='')}/progress",
-            None,
-            10,
-        )
+        return await self._request("GET", f"/v1/validate/deployment-bundle/{quote(run_id, safe='')}/progress", None, 10)
 
-    def _request(
-        self,
-        method: str,
-        path: str,
-        payload: dict[str, Any] | None,
-        request_timeout_seconds: int | None = None,
-    ) -> dict[str, Any]:
+    async def _request(self, method: str, path: str, payload: dict[str, Any] | None,
+                       request_timeout_seconds: int | None = None) -> dict[str, Any]:
         if not self.configured:
-            raise DagsterExecutionServiceError(
-                "Dagster execution service authentication is not configured."
-            )
-        encoded = (
-            json.dumps(payload, separators=(",", ":")).encode("utf-8")
-            if payload is not None
-            else None
-        )
-        request = Request(
-            f"{self.service_url}{path}",
-            data=encoded,
-            method=method,
-            headers={
-                "Accept": "application/json",
-                "X-InLumen-Workspace-Id": self.workspace_id,
-                "Authorization": f"Bearer {self.api_key}",
-                **({"Content-Type": "application/json"} if encoded else {}),
-            },
-        )
+            raise DagsterExecutionServiceError("Dagster execution service authentication is not configured.")
         try:
-            with urlopen(
-                request,
-                timeout=request_timeout_seconds or self.timeout_seconds + 30,
-            ) as response:
-                raw = response.read().decode("utf-8")
-        except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise DagsterExecutionServiceError(
-                f"Dagster execution service rejected the run ({exc.code}): {detail}"
-            ) from exc
-        except URLError as exc:
-            raise DagsterExecutionServiceError(
-                f"Dagster execution service is unavailable at {self.service_url}: {exc.reason}"
-            ) from exc
-        try:
-            parsed = json.loads(raw) if raw else {}
+            response = await self._client.request(method, f"{self.service_url}{path}", json=payload,
+                headers={"Accept": "application/json", "X-InLumen-Workspace-Id": self.workspace_id,
+                         "Authorization": f"Bearer {self.api_key}"},
+                timeout=request_timeout_seconds or self.timeout_seconds + 30)
+            response.raise_for_status()
+            parsed = response.json()
+        except httpx.HTTPError as exc:
+            # Do not echo response bodies: upstream errors can contain runtime secrets.
+            raise DagsterExecutionServiceError("Execution service request failed. Check service health and run status.") from exc
         except ValueError as exc:
-            raise DagsterExecutionServiceError(
-                "Dagster execution service returned invalid JSON."
-            ) from exc
+            raise DagsterExecutionServiceError("Execution service returned invalid JSON.") from exc
         if not isinstance(parsed, dict):
-            raise DagsterExecutionServiceError(
-                "Dagster execution service returned a non-object response."
-            )
+            raise DagsterExecutionServiceError("Execution service returned a non-object response.")
         return parsed

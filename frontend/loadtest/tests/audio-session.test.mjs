@@ -154,10 +154,10 @@ async function fixture(mode, bytes) {
     close: () => new Promise(resolve => server.close(resolve)) };
 }
 
-for (const mode of ['success', 'second_chat_failure', 'invalid_zip', 'run_failure', 'missing_artifact', 'excessive_allocation', 'custom_allocation_limits', 'excessive_memory', 'preview_success', 'preview_apply_failure', 'review_disabled', 'destination_copy', 'conflicting_copy', 'one_design_failure']) {
+for (const mode of ['synchronized_success', 'synchronized_invalid_zip', 'success', 'second_chat_failure', 'invalid_zip', 'run_failure', 'missing_artifact', 'excessive_allocation', 'custom_allocation_limits', 'excessive_memory', 'preview_success', 'preview_apply_failure', 'review_disabled', 'destination_copy', 'conflicting_copy', 'one_design_failure']) {
   test(`audio session browser workload: ${mode}`, { timeout: 90000 }, async () => {
     const bytes = await syntheticBundle();
-    const server = await fixture(mode, bytes);
+    const server = await fixture(mode === 'synchronized_success' ? 'success' : mode === 'synchronized_invalid_zip' ? 'invalid_zip' : mode, bytes);
     const dir = await mkdtemp(join(tmpdir(), 'inlumen-session-'));
     const codeZip = join(dir, 'synthetic-code.zip');
     await writeFile(codeZip, bytes);
@@ -168,23 +168,23 @@ for (const mode of ['success', 'second_chat_failure', 'invalid_zip', 'run_failur
       const users = ['success', 'preview_success'].includes(mode) ? 20 : 2;
       const report = await runLoadTest({ baseURL: server.baseURL, issuer: server.baseURL + '/realms/inlumen',
         accounts: Array.from({ length: users }, (_, i) => ({ username: `user${i + 1}`, password: 'fixture-password' })),
-        scenario: 'audio-session', reviewAIChanges: mode === 'review_disabled' ? false : undefined, codeZip, audioFile, timeoutMs: 5000, runTimeoutMs: 5000, pollMs: 20,
+        scenario: 'audio-session', synchronizedRun: mode.startsWith('synchronized_'), reviewAIChanges: mode === 'review_disabled' ? false : undefined, codeZip, audioFile, timeoutMs: 5000, runTimeoutMs: 5000, pollMs: 20,
         maxRunCpus: mode === 'custom_allocation_limits' ? 4 : 2,
         maxRunMemoryGiB: mode === 'excessive_memory' ? 2 : 4, onProgress: () => {} });
       assert.equal(report.failure, null, JSON.stringify(report));
-      assert.equal(report.passed, ['success', 'custom_allocation_limits', 'preview_success', 'review_disabled', 'destination_copy'].includes(mode), JSON.stringify(report));
+      assert.equal(report.passed, ['success', 'synchronized_success', 'custom_allocation_limits', 'preview_success', 'review_disabled', 'destination_copy'].includes(mode), JSON.stringify(report));
       assert.deepEqual(report.allocation_limits, { cpu: mode === 'custom_allocation_limits' ? 4 : 2,
         memory_bytes: (mode === 'excessive_memory' ? 2 : 4) * 1024 ** 3 });
       const expectedMessages = mode === 'preview_apply_failure' ? AUDIO_PROMPTS.slice(0, 1) : AUDIO_PROMPTS;
       assert.equal(server.messages.length, users * expectedMessages.length);
       for (let i = 1; i <= users; i++) assert.deepEqual(server.messages.filter(message => message.user === `user${i}`).map(item => item.message), expectedMessages);
-      const shouldRun = !['second_chat_failure', 'invalid_zip', 'preview_apply_failure'].includes(mode);
+      const shouldRun = !['second_chat_failure', 'invalid_zip', 'synchronized_invalid_zip', 'preview_apply_failure'].includes(mode);
       const expectedRuns = mode === 'one_design_failure' ? users - 1 : shouldRun ? users : 0;
       assert.equal(server.submissions.length, expectedRuns);
       assert.equal(server.uploadedCodes.length, expectedRuns);
       assert.ok(server.uploadedAudio.every(body => body.includes(audioBytes)));
       assert.equal(report.results.length, users);
-      if (mode === 'success') {
+      if (['success', 'synchronized_success'].includes(mode)) {
         assert.ok(report.summary.peak_observed_chat_requests > 1);
         assert.ok(report.results.every(result => result.stages.length === 5 && result.stages.at(-1).artifacts_verified.length === 4));
         assert.equal(report.shared_assets.audio_bytes, audioBytes.length);

@@ -12,6 +12,8 @@ try {
     'timeout-seconds': { type: 'string', default: '180' }, 'ramp-seconds': { type: 'string', default: '0' },
     'prompt-file': { type: 'string' }, output: { type: 'string', default: 'loadtest/results' },
     scenario: { type: 'string', default: 'design' },
+    'workspace-mode': { type: 'string', default: 'default' },
+    'synchronized-run': { type: 'boolean', default: false },
     'review-ai-changes': { type: 'string' },
     'code-zip': { type: 'string' }, 'audio-file': { type: 'string' },
     'run-timeout-seconds': { type: 'string', default: '1800' },
@@ -37,9 +39,11 @@ try {
     ensure(values['review-ai-changes'] === undefined || ['true', 'false'].includes(values['review-ai-changes']), 'invalid_review_ai_changes');
     const reviewAIChanges = values['review-ai-changes'] === undefined ? undefined : values['review-ai-changes'] === 'true';
     const maxRunMemoryGiB = positiveInteger(values['max-run-memory-gib'], 'max_run_memory_gib');
-    console.log(`${values.preflight ? 'Preflight only' : 'LIVE LLM workload'}: ${count} users, ${rounds} round(s). ${values.preflight ? 'Default workspaces will not be cleared.' : 'CLEAR ALL will erase participating users’ default workspace content before each round; final results remain there.'}`);
+    console.log(`Workspace mode: ${values['workspace-mode']}. Use isolated for participant rehearsals. Synchronized Run: ${values['synchronized-run']}.`);
+    console.log(`${values.preflight ? 'Preflight only' : 'LIVE LLM workload'}: ${count} users, ${rounds} round(s). ${values.preflight ? 'Default workspaces will not be cleared.' : 'CLEAR ALL will erase participating users’ selected test workspace content before each round; final results remain there.'}`);
     const report = await runLoadTest({ baseURL, issuer, accounts, rounds, timeoutMs, rampMs, prompt,
       scenario: values.scenario, codeZip: values['code-zip'], audioFile: values['audio-file'], runTimeoutMs, maxRunCpus, maxRunMemoryGiB,
+      workspaceMode: values['workspace-mode'], synchronizedRun: values['synchronized-run'],
       preflight: values.preflight, headed: values.headed, reviewAIChanges });
     try { report.load_generator_commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { report.load_generator_commit = null; }
     report.server_commit = 'Record the deployed VM commit separately.';

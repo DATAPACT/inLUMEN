@@ -60,7 +60,7 @@ Production Compose supplies these configurable execution defaults:
 
 ```dotenv
 RUNNER_MAX_OUTSTANDING_RUNS=4
-RUNNER_MAX_GLOBAL_OUTSTANDING_RUNS=20
+RUNNER_MAX_GLOBAL_OUTSTANDING_RUNS=50
 CODEGEN_EXECUTION_MAX_ACTIVE_RUNS=2
 CODEGEN_EXECUTION_CPU_BUDGET=4
 CODEGEN_EXECUTION_MEMORY_GIB=8
@@ -68,7 +68,7 @@ CODEGEN_ML_CPU_THREADS=2
 RUNNER_DAGSTER_TIMEOUT_SECONDS=1800
 ```
 
-Up to 20 runs can be accepted across workspaces; only two execution jobs enter
+Up to 50 runs can be accepted across workspaces; only two execution jobs enter
 image building, model preparation or execution at once. Each ML worker receives
 2 CPUs and 4 GiB. The FIFO controller also checks the shared 4-CPU/8-GiB budget,
 clamped to Docker's detected host capacity after its existing reserve. Runtime
@@ -164,7 +164,7 @@ and a separate Keycloak identity. All users prepare first, then click Send toget
 **Before every live round, the runner clicks Clear all in each participating
 user’s default workspace. This deletes pipelines, files, runs, outputs, chat,
 provenance, node secrets and generation history there.** Use only accounts whose
-workspace content you intend to erase. No new workspaces are created. After the
+workspace content you intend to erase. With the default workspace mode, no new workspaces are created; use `--workspace-mode isolated` for participant rehearsals. After the
 run, log in normally as that user to see the final round’s pipeline. If the final
 design fails validation and is rolled back, the canvas can be empty. Earlier
 rounds are overwritten, and older test workspaces from previous runner versions
@@ -296,3 +296,59 @@ Always use `docker compose --env-file .env.production -f docker-compose-prod.yml
 No Compose override is required. No application host ports are published.
 
 To rehearse direct application without the Review AI dialog, pass `--review-ai-changes false`. The runner sets the switch in each browser and verifies both chat requests use that preference. Omit the option to retain the deployment/browser preference. Set `VITE_REVIEW_AI_CHANGES_DEFAULT=false` in the VM’s private `.env.production` and rebuild the frontend to start session browsers with review off. A changed deployment default applies once to existing browsers too; subsequent user choices are retained until that default changes again.
+
+## Participant rehearsals and bulk reset
+
+Keep the original 20 disposable accounts and the meeting roster in separate,
+private `loadtest/accounts*.local.json` files. Run the original 20-user scenario
+as before. For participant accounts, use **isolated** workspaces so rehearsals
+leave their session workspaces and files untouched:
+
+```sh
+npm run stress -- --url https://inlumen.example.com --issuer https://identity.example.com/realms/inlumen --accounts loadtest/accounts.participants.local.json --users 39 --workspace-mode isolated --scenario audio-session --code-zip /path/pipeline-code.zip --audio-file /path/recording.wav --review-ai-changes false
+```
+
+Add `--synchronized-run` for a second experiment: each successfully prepared
+browser waits until all other successful browsers have uploaded the ZIP and
+WAV, then they click Run together. Failed preparations release their barrier
+slot; failures remain failures in the report. Each report identifies every
+rehearsal workspace. Isolated preflight also creates rehearsal workspaces;
+normal preflight remains read-only.
+
+The production queue defaults to 50 outstanding executions globally and four
+per workspace. The codegen pending limit also defaults to 50. Keep two active
+jobs (4 CPU / 8 GiB combined) as the baseline. Compare with three active jobs,
+6 CPU / 12 GiB combined, on the actual VM before selecting three. Keep two CPU
+threads per ML job. Include CPU, available memory, swap, OOM kills, container
+restarts, API latency, output correctness, waiting time, and execution time in
+that comparison. Do not assume additional concurrency reduces completion time.
+
+The Run panel shows anonymous shared active/queued counts and the selected run's
+queue position. Queue admission is FIFO in the single codegen process; position
+can change when another run is cancelled. Polling uses incremental events,
+non-overlapping requests and a slower interval in hidden tabs. Delayed
+observations are labelled; queue waiting and worker execution have separate
+clocks. No finish-time estimate is shown without measured evidence.
+
+To preview a reset of **all owned workspaces** belonging to a supplied roster:
+
+```sh
+npm run stress:reset -- --url https://inlumen.example.com --issuer https://identity.example.com/realms/inlumen --accounts loadtest/accounts.participants.local.json
+```
+
+Close participants' inLUMEN tabs and pause the session before applying. Add
+`--apply` to perform that exact allowlisted reset. To include the original 20
+accounts, supply a private, deduplicated combined account file or run the tool
+once per account file. The utility authenticates each account, preflights the
+entire ownership list, cancels active pipeline/generation work, waits for it to
+stop, clears workspace content through the existing authenticated API, and
+verifies an empty graph. It refuses non-owned memberships and stops on errors;
+it does not roll back previously completed resets. Re-preview before retrying.
+
+Reset removes graphs, uploaded code/data, outputs, provenance, run/generation
+history, server-side chat sessions and node secrets. It retains Keycloak users,
+passwords, workspace memberships, shared LLM configuration and model cache
+volumes. Browser-local chat/settings are not centrally erased; participants
+should reload and start a new conversation afterwards. Reset does not delete
+workspace memberships: rehearsal workspace shells remain listed. Never place
+rosters, credentials, audio, ZIPs or raw reports in Git.

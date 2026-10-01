@@ -47,7 +47,7 @@ from auth_middleware import (
     validate_auth_mode_configuration,
     validate_production_auth_configuration,
 )
-from chat_state import clear_state_from_disk
+from chat_state import clear_state_from_disk, clear_workspace_chat_states
 from chatbot_config_store import load_chatbot_configs, save_chatbot_configs
 from codegen_runs import CodegenRunStore
 from deployment_artifacts import DeploymentArtifactValidationError
@@ -2324,6 +2324,17 @@ def pipeline_run_capabilities():
         return _pipeline_runner_error_response(exc)
 
 
+@app.route("/api/pipeline-runs/workload", methods=["GET", "OPTIONS"])
+@require_auth
+def pipeline_run_workload():
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    try:
+        return jsonify(runner_request("GET", "/v1/pipeline-runs/workload")), 200
+    except PipelineRunnerError as exc:
+        return _pipeline_runner_error_response(exc)
+
+
 @app.route("/api/pipeline-runs", methods=["GET", "POST", "DELETE", "OPTIONS"])
 @require_auth
 def pipeline_runs():
@@ -2568,7 +2579,7 @@ def workspace_clear_all():
         }
         run_cleanup_ok = False
 
-    chat_reset = False
+    chat_reset = clear_workspace_chat_states() > 0
     if session_id:
         clear_state_from_disk(session_id)
         chat_reset = True

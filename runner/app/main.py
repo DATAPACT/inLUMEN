@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
@@ -46,7 +47,7 @@ RUN_MANAGER = PipelineRunManager(
     artifact_store=RUN_ARTIFACT_STORE,
     max_outstanding_runs=int(os.getenv("RUNNER_MAX_OUTSTANDING_RUNS", "4")),
     max_global_outstanding_runs=int(
-        os.getenv("RUNNER_MAX_GLOBAL_OUTSTANDING_RUNS", "20")
+        os.getenv("RUNNER_MAX_GLOBAL_OUTSTANDING_RUNS", "50")
     ),
     summary_store=RUN_SUMMARY_STORE,
 )
@@ -67,6 +68,9 @@ async def lifespan(_app: FastAPI):
         recovery.cancel()
         await asyncio.gather(recovery, return_exceptions=True)
         RUN_SUMMARY_STORE.close()
+        close = getattr(RUN_MANAGER.executor, "aclose", None)
+        if close:
+            await close()
 
 
 app = FastAPI(
@@ -101,6 +105,36 @@ def capabilities(
     workspace_id: Annotated[str, Depends(workspace_context)],
 ) -> dict:
     return RUN_MANAGER.capabilities(workspace_id)
+
+
+_WORKLOAD_CACHE: dict = {}
+_WORKLOAD_LOCK = asyncio.Lock()
+
+
+@app.get("/v1/pipeline-runs/workload", dependencies=SERVICE_AUTH)
+async def workload(workspace_id: Annotated[str, Depends(workspace_context)]) -> dict:
+    """Global anonymous counts; per-run endpoints remain workspace scoped."""
+    outstanding = RUN_MANAGER._outstanding_run_count()
+    result = {"outstanding_runs": outstanding,
+              "max_outstanding_runs": RUN_MANAGER.max_global_outstanding_runs,
+              "worker_available": False}
+    observe = getattr(RUN_MANAGER.executor, "workload", None)
+    if observe:
+        try:
+            async with _WORKLOAD_LOCK:
+                if time.monotonic() - _WORKLOAD_CACHE.get("at", 0) >= 2:
+                    remote = await observe()
+                    _WORKLOAD_CACHE.update(at=time.monotonic(), value=remote)
+                remote = _WORKLOAD_CACHE["value"]
+            active = max(int(remote["active_runs"]), 0)
+            result.update(active_runs=active,
+                          queued_runs=max(int(remote["queued_runs"]), outstanding - active, 0),
+                          max_active_runs=max(int(remote["max_active_runs"]), 1),
+                          observed_at=remote["observed_at"], worker_available=True)
+        except Exception:
+            # Loss of telemetry must not reject a user's run or invent zero activity.
+            pass
+    return result
 
 
 @app.post(

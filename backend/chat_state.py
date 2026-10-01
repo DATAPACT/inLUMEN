@@ -136,3 +136,25 @@ def clear_state_from_disk(session_id: str) -> None:
     path = state_file(session_id)
     if path.exists():
         path.unlink()
+
+
+def clear_workspace_chat_states() -> int:
+    """Remove every server-side chat session in the authenticated workspace."""
+    workspace_id = current_workspace_id()
+    if _database_url():
+        with _engine().begin() as connection:
+            result = connection.execute(text("DELETE FROM chat_sessions WHERE workspace_id=:workspace_id"),
+                                        {"workspace_id": workspace_id})
+            return result.rowcount
+    # Local development mixes other state files in STATE_DIR; only scoped workspace
+    # directories can be cleared in bulk without touching unrelated state.
+    if workspace_id == LOCAL_WORKSPACE_ID:
+        return 0
+    directory = STATE_DIR / "chat-sessions" / workspace_id
+    removed = 0
+    if directory.is_dir():
+        for path in directory.glob("*.json"):
+            if path.is_file():
+                path.unlink()
+                removed += 1
+    return removed

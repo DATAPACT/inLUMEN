@@ -111,3 +111,25 @@ def test_api_reports_bounded_run_capacity(monkeypatch):
         ).json()
         assert capabilities["available_run_slots"] == 0
         client.delete("/v1/pipeline-runs", headers=headers)
+
+
+def test_workload_is_authenticated_anonymous_and_degrades_when_worker_is_unavailable(monkeypatch):
+    monkeypatch.setenv('RUNNER_SERVICE_API_KEY', 'test-token')
+    class ObservedExecutor(BlockingExecutor):
+        async def workload(self):
+            return {'active_runs': 2, 'queued_runs': 37, 'max_active_runs': 2, 'observed_at': '2026-10-01T12:00:00Z'}
+    manager = PipelineRunManager(PipelineRunStore(':memory:'), adapter='dagster', executor=ObservedExecutor())
+    monkeypatch.setattr(main, 'RUN_MANAGER', manager)
+    main._WORKLOAD_CACHE.clear()
+    with TestClient(main.app) as client:
+        assert client.get('/v1/pipeline-runs/workload').status_code == 401
+        response = client.get('/v1/pipeline-runs/workload', headers={'Authorization': 'Bearer test-token'})
+        assert response.status_code == 200
+        assert response.json()['queued_runs'] == 37
+        assert not set(response.json()).intersection({'workspace_id', 'run_id', 'user_id'})
+    main._WORKLOAD_CACHE.clear()
+    manager.executor = BlockingExecutor()
+    with TestClient(main.app) as client:
+        response = client.get('/v1/pipeline-runs/workload', headers={'Authorization': 'Bearer test-token'})
+        assert response.json()['worker_available'] is False
+        assert 'active_runs' not in response.json()
