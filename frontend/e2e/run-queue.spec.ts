@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 test('Run shows queue position and workload, recovers after reload, and cancels without resubmitting', async ({ page }) => {
-  let cancelled = false, launches = 0;
+  let cancelled = false, launches = 0, full = false;
   const record = () => ({ run_id: 'own-run', status: cancelled ? 'cancelled' : 'running',
     snapshot: { pipeline_version: 'main', node_count: 6 }, created_at: new Date(Date.now() - 12000).toISOString(),
     progress: { phase: 'waiting_for_capacity', queue_position: 7, observed_at: new Date().toISOString() } });
@@ -9,7 +9,7 @@ test('Run shows queue position and workload, recovers after reload, and cancels 
     const { pathname } = new URL(route.request().url());
     if (pathname === '/api/pipeline/graph') return route.fulfill({ json: { nodes: [], edges: [] } });
     if (pathname.endsWith('/capabilities')) return route.fulfill({ json: { execution_available: true, max_outstanding_runs: 4 } });
-    if (pathname.endsWith('/workload')) return route.fulfill({ json: { outstanding_runs: 12, max_outstanding_runs: 50, worker_available: true, active_runs: 2, max_active_runs: 2, queued_runs: 10 } });
+    if (pathname.endsWith('/workload')) return route.fulfill({ json: { outstanding_runs: full ? 50 : 12, max_outstanding_runs: 50, worker_available: true, active_runs: 2, max_active_runs: 2, queued_runs: full ? 48 : 10 } });
     if (pathname === '/api/pipeline-runs') {
       if (route.request().method() === 'POST') launches++;
       return route.fulfill({ json: { runs: [record()] } });
@@ -39,4 +39,7 @@ test('Run shows queue position and workload, recovers after reload, and cancels 
   await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toHaveCount(0);
   expect(cancelled).toBe(true);
   expect(launches).toBe(0);
+  full = true;
+  await expect(page.getByText('The shared queue is full. Try again when a run finishes.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Run current pipeline', exact: true })).toBeDisabled();
 });

@@ -155,6 +155,12 @@ export async function runLoadTest({ baseURL, issuer, accounts, rounds = 1, timeo
       result.request_id = response.headers()['x-request-id'] || null;
       ensure(response.ok(), `chat_http_${response.status()}`);
       const payload = await response.json();
+      result.graph_summary = {
+        nodes: Array.isArray(payload.graph?.nodes) ? payload.graph.nodes.length : null,
+        edges: Array.isArray(payload.graph?.edges) ? payload.graph.edges.length : null,
+        sync_status: payload.sync?.status || null,
+        repaired: payload.sync?.repaired === true,
+      };
       ensure(started.postDataJSON()?.llm_config?.credential_id === 'application-llm', 'wrong_llm_configuration');
       if (reviewAIChanges !== undefined) {
         ensure(started.postDataJSON()?.preview_changes === reviewAIChanges, 'review_ai_changes_preference_mismatch');

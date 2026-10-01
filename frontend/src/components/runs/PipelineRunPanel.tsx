@@ -141,6 +141,7 @@ export const PipelineRunPanel = () => {
   );
   const capacityLimit = capabilities?.max_outstanding_runs || 0;
   const runCapacityFull = capacityLimit > 0 && outstandingRunCount >= capacityLimit;
+  const globalCapacityFull = workloadFresh && workload !== null && workload.outstanding_runs >= workload.max_outstanding_runs;
 
   const loadInitial = useCallback(async () => {
     setLoading(true);
@@ -279,6 +280,7 @@ export const PipelineRunPanel = () => {
           || loading
           || !capabilities?.execution_available
           || runCapacityFull
+          || globalCapacityFull
         }
       >
         {submitting ? (
@@ -296,7 +298,7 @@ export const PipelineRunPanel = () => {
         {workloadFresh && workload ? `${workload.active_runs} running / ${workload.max_active_runs} slots · ${workload.queued_runs} queued across inLUMEN` : 'Workload information is temporarily unavailable.'}
       </div>
       {(refreshFailed || observationStale) && <p role="status" className="mt-2 text-xs text-amber-200">Run updates are delayed. Your run may still be processing; refresh to check its status.</p>}
-      {workloadFresh && workload && workload.outstanding_runs >= workload.max_outstanding_runs && <p role="status" className="mt-2 text-xs text-amber-200">The shared queue is full. Try again when a run finishes.</p>}
+      {globalCapacityFull && <p role="status" className="mt-2 text-xs text-amber-200">The shared queue is full. Try again when a run finishes.</p>}
 
       {runCapacityFull && (
         <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-200">
