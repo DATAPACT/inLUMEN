@@ -58,6 +58,9 @@ class CodegenDagsterExecutor:
             "validate_argo": False, "validate_dagster": True, "materialize": True,
             "timeout_seconds": self.timeout_seconds, "runtime_secrets": runtime_secrets,
         }, 30)
+        # The worker now owns the durable snapshot. Release uploaded audio/code
+        # while this coroutine only polls, rather than retaining every queued bundle.
+        files = []
         if accepted.get("status") != "accepted":
             return accepted  # Completed immutable receipt on a duplicate submission.
         deadline = asyncio.get_running_loop().time() + self.timeout_seconds + 30
