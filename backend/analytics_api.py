@@ -1,7 +1,9 @@
 import asyncio
+import hashlib
 import json
 import os
 import re
+import threading
 import uuid
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
@@ -10,7 +12,10 @@ from urllib.request import Request, urlopen
 from flask import Flask, jsonify, has_request_context, make_response, request
 
 from async_runtime import run_async
-from auth_middleware import current_workspace_id, require_auth
+from auth_middleware import current_workspace_id, current_principal, require_auth
+from conversations import ConversationError, chat_scope, conversation_store, registry_turn_id
+from chat_routes import create_chat_blueprint
+from sqlalchemy.exc import SQLAlchemyError
 from chat_state import clear_state_from_disk
 from deployment_artifacts import (
     DeploymentArtifactValidationError,
@@ -39,6 +44,7 @@ from workspace_storage import node_bucket_name
 from workspace_store import WORKSPACE_HEADER
 
 app = Flask(__name__)
+app.register_blueprint(create_chat_blueprint())
 from observability import install_request_observability
 install_request_observability(app)
 
@@ -199,8 +205,18 @@ def _pipeline_graph_from_payload_or_backend(data: dict) -> dict:
     )
 
 
+_RUN_BUNDLE_PREPARATION = threading.BoundedSemaphore(1)
+
+
 def prepare_dagster_execution_bundle(pipeline_graph: dict) -> dict:
     """Freeze the reviewed runtime packages and inputs for an actual Dagster run."""
+    # Input bytes are staged/encoded before the runner accepts a job. Bound that
+    # memory-heavy work too: one preparation per Gunicorn process (two in prod).
+    with _RUN_BUNDLE_PREPARATION:
+        return _prepare_dagster_execution_bundle(pipeline_graph)
+
+
+def _prepare_dagster_execution_bundle(pipeline_graph: dict) -> dict:
     files = _file_refs_from_version_graph(pipeline_graph)
     filenames, _buckets, ids = _dockerfile_inputs(files)
     runtime = run_async(
@@ -552,16 +568,18 @@ def agentic_pipeline_editor():
         return _preflight_response()
 
     payload = request.get_json(force=True) or {}
-    user_message = (payload.get("user_message") or "").strip()
-    if not user_message:
+    user_message = payload.get("user_message")
+    if not isinstance(user_message, str) or not user_message.strip() or len(user_message) > 20000:
         return jsonify({"error": "Missing user_message"}), 400
+    user_message = user_message.strip()
+    if current_principal().workspace_role not in {"owner", "editor"}:
+        return jsonify({"error": "Pipeline editing permission is required."}), 403
     canvas_graph = _clean_client_graph(payload.get("canvas_graph"))
     active_version_uid = str(payload.get("active_version_uid") or payload.get("version_uid") or "main").strip() or "main"
     active_version_name = str(payload.get("active_version_name") or payload.get("version_name") or "").strip()
     if active_version_uid == "main":
         active_version_name = "Main"
 
-    session_id = payload.get("session_id") or str(uuid.uuid4())
     turn_id = str(payload.get("turn_id") or uuid.uuid4()).strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", turn_id):
         return jsonify({"error": "Invalid turn_id"}), 400
@@ -574,10 +592,34 @@ def agentic_pipeline_editor():
     authorization = _request_authorization_header()
     preview_changes = payload.get("preview_changes") is True
 
+    # Fingerprint the operation, never store credentials/configuration in history.
+    operation = {"user_message": user_message, "canvas_graph": canvas_graph,
+                 "active_version_uid": active_version_uid, "active_version_name": active_version_name,
+                 "preview_changes": preview_changes, "model": llm_config.model, "provider": llm_config.provider}
+    fingerprint = hashlib.sha256(json.dumps(operation, sort_keys=True).encode()).hexdigest()
+    scope = chat_scope()
+    try:
+        store = conversation_store()
+        session_id, replay, replay_status = store.start(scope, turn_id=turn_id,
+            request_sha256=fingerprint, user_message=user_message, conversation_id=payload.get("conversation_id"))
+        if replay is not None:
+            return jsonify(replay), replay_status
+    except ConversationError as exc:
+        return jsonify({"error": str(exc), "code": exc.code}), exc.status
+    except SQLAlchemyError:
+        return jsonify({"error": "Conversation history is unavailable; the request was not started."}), 503
+
+    def respond(response, http_status=200, status="completed"):
+        try:
+            store.finish(scope, turn_id, response, http_status, status)
+        except SQLAlchemyError:
+            return jsonify({"error": "The result could not be saved to conversation history. Refresh before retrying."}), 503
+        return jsonify(response), http_status
+
     try:
         turn = run_cancellable_pipeline_turn(
-            turn_id,
-            run_pipeline_editor_turn(
+            registry_turn_id(scope, turn_id),
+            _run_persistent_pipeline_turn(store, scope, turn_id, dict(
                 user_message=user_message,
                 canvas_graph=canvas_graph,
                 active_version_uid=active_version_uid,
@@ -586,20 +628,20 @@ def agentic_pipeline_editor():
                 llm_config=llm_config,
                 authorization=authorization,
                 preview_changes=preview_changes,
-            ),
+            )),
         )
         assistant_message, graph, sync = (
             turn.assistant_message,
             turn.graph,
             turn.sync,
         )
-        return jsonify({
+        return respond({
             "session_id": session_id,
             "turn_id": turn_id,
             "assistant_message": assistant_message,
             "graph": graph,
             "sync": sync,
-        }), 200
+        })
     except PipelineEditorTurnCancelled as exc:
         if preview_changes:
             cancellation_message = (
@@ -609,23 +651,49 @@ def agentic_pipeline_editor():
             cancellation_message = "Stopped. The pipeline from before this request was restored."
         else:
             cancellation_message = "Stopped, but the previous pipeline could not be restored automatically."
-        return jsonify({
+        return respond({
             "session_id": session_id,
             "turn_id": turn_id,
             "status": "cancelled",
             "rollback_applied": exc.rollback_applied,
             "assistant_message": cancellation_message,
-        }), 409
+        }, 409, "cancelled")
     except asyncio.CancelledError:
-        return jsonify({
+        return respond({
             "session_id": session_id,
             "turn_id": turn_id,
             "status": "cancelled",
             "rollback_applied": True,
             "assistant_message": "Stopped before the agent turn started.",
-        }), 409
+        }, 409, "cancelled")
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        # Internal exception strings may contain provider responses or credentials.
+        return respond({"session_id": session_id, "turn_id": turn_id,
+                        "error": "The pipeline request failed. Check the saved pipeline before trying again."}, 500, "failed")
+
+
+async def _run_persistent_pipeline_turn(store, scope, turn_id, kwargs):
+    if await asyncio.to_thread(store.heartbeat, scope, turn_id):
+        raise asyncio.CancelledError
+    task = asyncio.create_task(run_pipeline_editor_turn(**kwargs))
+
+    async def monitor():
+        while not task.done():
+            await asyncio.sleep(5)
+            try:
+                cancelled = await asyncio.to_thread(store.heartbeat, scope, turn_id)
+            except Exception:
+                cancelled = True
+            if cancelled:
+                task.cancel()
+                return
+
+    watcher = asyncio.create_task(monitor())
+    try:
+        return await task
+    finally:
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
 
 
 @app.route("/simple_chat/cancel", methods=["POST", "OPTIONS"])
@@ -639,14 +707,17 @@ def agentic_pipeline_editor_cancel():
     turn_id = str(payload.get("turn_id") or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", turn_id):
         return jsonify({"error": "A valid turn_id is required"}), 400
-    session_id = str(payload.get("session_id") or "").strip()
-    if session_id:
-        clear_state_from_disk(session_id)
-    result = request_pipeline_turn_cancel(turn_id)
+    scope = chat_scope()
+    try:
+        conversation_store().cancel(scope, turn_id)
+    except SQLAlchemyError:
+        return jsonify({"error": "Cancellation could not be saved. Try stopping the request again."}), 503
+    result = request_pipeline_turn_cancel(registry_turn_id(scope, turn_id))
     return jsonify({
         **result,
+        "turn_id": turn_id,
         "completed": False,
-        "session_cleared": bool(session_id),
+        "session_cleared": False,
     }), 202
 
 
@@ -658,7 +729,12 @@ def agentic_pipeline_editor_reset():
         return _preflight_response()
 
     payload = request.get_json(force=True) or {}
-    session_id = payload.get("session_id")
+    try:
+        session_id = conversation_store().reset(chat_scope(), payload.get("conversation_id"))
+    except ConversationError as exc:
+        return jsonify({"error": str(exc), "code": exc.code}), exc.status
+    except SQLAlchemyError:
+        return jsonify({"error": "Conversation history could not be cleared."}), 503
     if session_id:
         clear_state_from_disk(session_id)
     return jsonify({"ok": True}), 200

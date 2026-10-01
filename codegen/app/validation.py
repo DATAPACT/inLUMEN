@@ -5,6 +5,9 @@ import json
 import re
 import sys
 
+from .task_package_contract import validate_package
+from .artifact_runtime import ArtifactContractError
+
 from .schemas import GeneratedFile, RuntimeConstraints, ValidationReport
 
 BANNED_IMPORTS = {
@@ -48,6 +51,14 @@ def validate_generated_files(
         if filename not in by_name:
             errors.append(f"Missing required generated file: {filename}")
 
+    try:
+        metadata = json.loads(manifest.content) if manifest else {}
+        if metadata.get("node_type") in {"task", "action", "custom"} or "inlumen.task.json" in by_name:
+            validate_package({name: item.content for name, item in by_name.items() if name not in {"node-manifest.json", "validation-report.json"}})
+            checks.append("public_task_package")
+    except (ArtifactContractError, ValueError) as exc:
+        errors.append(str(exc))
+
     imported_roots: set[str] = set()
     if main_py is not None:
         try:
@@ -85,6 +96,7 @@ def validate_generated_files(
             for item in runtime_constraints.allowed_packages
             if package_name(item)
         }
+        allowed.add("jsonschema")  # Platform-owned artifact validator.
         declared: set[str] = set()
         for line in requirements.content.splitlines():
             stripped = line.strip()

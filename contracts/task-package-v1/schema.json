@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inlumen:task-package:1",
+  "title": "inLUMEN Task package v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "output"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "version": {
+      "const": 1
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "path"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "table",
+            "json",
+            "text",
+            "image",
+            "audio",
+            "video",
+            "document",
+            "model",
+            "directory",
+            "binary"
+          ]
+        },
+        "type": {
+          "enum": [
+            "file",
+            "directory"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!\\.{1,2}(?:/|$))(?!.*\\/\\.{1,2}(?:/|$))[^/\\\\:*?\\[\\]\\u0000-\\u001f]+(?:/[^/\\\\:*?\\[\\]\\u0000-\\u001f]+)*$"
+        },
+        "format": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema": {
+          "type": "object"
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/properties/output"
+          }
+        }
+      }
+    },
+    "inputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "port"
+        ],
+        "properties": {
+          "port": {
+            "type": "string",
+            "minLength": 1
+          },
+          "type": {
+            "enum": [
+              "file",
+              "directory"
+            ]
+          },
+          "format": {
+            "type": "string",
+            "minLength": 1
+          },
+          "schema": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "model_id",
+          "model_revision"
+        ],
+        "properties": {
+          "model_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model_revision": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{7,64}$",
+            "description": "Verified immutable model commit SHA; never a branch or tag such as main. Use the same SHA in model-loading code."
+          },
+          "runtime": {
+            "const": "local"
+          },
+          "adapter_id": {
+            "type": "string"
+          },
+          "resource_class": {
+            "type": "string"
+          },
+          "model_variants": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "model_id",
+                "model_revision"
+              ],
+              "properties": {
+                "model_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "model_revision": {
+                  "type": "string",
+                  "pattern": "^[0-9a-fA-F]{7,64}$",
+                  "description": "Verified immutable model commit SHA; never a branch or tag such as main. Use the same SHA in model-loading code."
+                }
+              }
+            }
+          },
+          "runtime_selection": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "default_profile": {
+                "type": "string"
+              },
+              "auto_profile_by_device": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

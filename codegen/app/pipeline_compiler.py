@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import keyword
+from pathlib import Path
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -380,6 +381,9 @@ def compose_pipeline_program(
     )
     if report.status == "invalid":
         raise PipelineCompilerError("; ".join(report.errors))
+    if plan.get("schema_version") == "inlumen.pipeline-plan@2":
+        compiled = compile_pipeline_nodes(source, {str(n["flow_id"]): str(n["function_name"]) for n in plan["nodes"]})
+        return _artifact_runtime_source() + "\n" + f"INLUMEN_PIPELINE_PLAN = {plan!r}\nCOMPILED_NODES = { {n.flow_id: n.source for n in compiled}!r}\n" + _compiled_pipeline_runner()
     return (
         source.rstrip()
         + "\n\n"
@@ -387,6 +391,71 @@ def compose_pipeline_program(
         + _pipeline_runtime_adapter()
         + "\n"
     )
+
+
+def _compiled_pipeline_runner() -> str:
+    return r'''
+import subprocess
+import sys
+
+def _run_compiled_pipeline():
+    root = Path(os.environ.get("PIPELINE_OUTPUT_DIR") or os.environ["INLUMEN_OUTPUT_DIR"]).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    input_manifest = json.loads(Path(os.environ["INLUMEN_INPUT_MANIFEST"]).read_text())
+    supplied = input_manifest.get("inputs", [])
+    produced = {}
+    for node in INLUMEN_PIPELINE_PLAN["nodes"]:
+        flow_id = node["flow_id"]
+        work = root / ".runtime" / flow_id
+        if work.exists():
+            shutil.rmtree(work)
+        work.mkdir(parents=True, exist_ok=True)
+        (root / ".runtime" / (flow_id + ".json")).unlink(missing_ok=True)
+        script = work / "main.py"
+        script.write_text(COMPILED_NODES[flow_id])
+        output = work / "publish"
+        destination = root / "nodes" / flow_id
+        if destination.exists():
+            shutil.rmtree(destination)
+        input_dir = root / ".inputs" / flow_id
+        bindings = []
+        for declared in node.get("inputs", []):
+            parent = declared.get("source_node")
+            if parent:
+                artifact = produced[parent][0]
+                bindings.append({"source_dir": str(root / "nodes" / parent),
+                    "artifact": artifact, "filename": declared["filename"],
+                    "source_node": parent, "connection_id": declared.get("connection_id", ""),
+                    "target_port": declared.get("target_port", "")})
+        if bindings:
+            inputs = stage_bound_artifacts(bindings, input_dir)
+        else:
+            names = set(node.get("input_filenames", []))
+            inputs = [item for item in supplied if item.get("filename") in names]
+            input_dir.mkdir(parents=True, exist_ok=True)
+            # Source inputs may be multiple uploaded files only for a declared bundle.
+            inputs = stage_bound_artifacts([{"source_dir": str(Path(item["path"]).parent),
+                "artifact": {**item, "name": item.get("name") or Path(item["filename"]).stem,
+                    "filename": Path(item["path"]).name}, "filename": item["filename"]} for item in inputs], input_dir)
+        contract = {"contract_id": CONTRACT_ID, "version": "2", "inputs": node.get("inputs", []), "outputs": node.get("outputs", [])}
+        env = {**os.environ, **prepare_node_environment(input_dir, output, work, inputs, contract,
+            node.get("descriptor", {}).get("parameters", {}))}
+        subprocess.run([sys.executable, str(script)], env=env, check=True)
+        actual = json.loads((work / "outputs.json").read_text())["outputs"]
+        if contract["outputs"]:
+            actual = validate_result(output, contract["outputs"], actual, producer=flow_id)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        publish_artifact_directory(output, destination)
+        actual = [{**item, "path": str(destination / item["filename"]), "source_node": flow_id} for item in actual]
+        produced[flow_id] = actual
+        atomic_json(root / ".runtime" / (flow_id + ".json"), {"outputs": actual})
+    parents = {parent for node in INLUMEN_PIPELINE_PLAN["nodes"] for parent in node.get("parents", [])}
+    final = [item for node in INLUMEN_PIPELINE_PLAN["nodes"] if node["flow_id"] not in parents for item in produced[node["flow_id"]]]
+    atomic_json(os.environ.get("INLUMEN_OUTPUT_MANIFEST") or root / "output_manifest.json", {"outputs": final})
+
+if __name__ == "__main__":
+    _run_compiled_pipeline()
+'''
 
 
 def deterministic_pipeline_source(plan: dict[str, Any]) -> str:
@@ -414,123 +483,53 @@ def deterministic_pipeline_source(plan: dict[str, Any]) -> str:
     return _fallback_helpers().rstrip() + "\n\n" + "\n\n".join(functions) + "\n"
 
 
+def _artifact_runtime_source() -> str:
+    return Path(__file__).with_name("artifact_runtime.py").read_text(encoding="utf-8")
+
+
 def _node_runtime_adapter(function_name: str) -> str:
-    return f'''
+    return _artifact_runtime_source() + f'''
+
 def _inlumen_node_main():
-    import json as _json
-    import os as _os
-    from pathlib import Path as _Path
-    _manifest_path = _Path(_os.environ.get("INLUMEN_INPUT_MANIFEST", ""))
-    _input_dir = _Path(
-        _os.environ.get("PIPELINE_INPUT_DIR")
-        or (str(_manifest_path.parent) if _manifest_path else "/workspace/input")
-    )
-    _output_dir = _Path(
-        _os.environ.get("PIPELINE_OUTPUT_DIR")
-        or _os.environ.get("INLUMEN_OUTPUT_DIR", "/workspace/output")
-    )
-    _output_manifest_path = _Path(
-        _os.environ.get("INLUMEN_OUTPUT_MANIFEST", str(_output_dir / "output_manifest.json"))
-    )
-    _context_path = _Path(_os.environ.get("INLUMEN_CONTEXT_PATH", ""))
-    _manifest = (
-        _json.loads(_manifest_path.read_text(encoding="utf-8"))
-        if _manifest_path.is_file()
-        else {{
-            "inputs": [
-                {{"filename": _path.relative_to(_input_dir).as_posix(), "path": str(_path)}}
-                for _path in sorted(_input_dir.rglob("*"))
-                if _path.is_file()
-            ]
-        }}
-    )
-    _inputs = _manifest.get("inputs") or _manifest.get("files") or []
-    _context = {{}}
-    if _context_path.is_file():
-        _context = _json.loads(_context_path.read_text(encoding="utf-8"))
-    _runtime_parameters = _json.loads(
-        _os.environ.get("INLUMEN_PARAMS_JSON", "{{}}") or "{{}}"
-    )
-    if isinstance(_runtime_parameters, dict):
-        _context["parameters"] = _runtime_parameters
-    _output_dir.mkdir(parents=True, exist_ok=True)
-    _compat_dir = _output_dir / ".inlumen-inputs"
-    _compat_dir.mkdir(parents=True, exist_ok=True)
-    for _item in _inputs:
-        if not isinstance(_item, dict):
+    import os
+    import json
+    from pathlib import Path
+    input_dir = Path(os.environ.get("PIPELINE_INPUT_DIR", "/workspace/input"))
+    output_dir = Path(os.environ.get("PIPELINE_OUTPUT_DIR") or os.environ.get("INLUMEN_OUTPUT_DIR", "/workspace/output"))
+    work_dir = Path(os.environ.get("PIPELINE_WORK_DIR") or str(output_dir.parent / ("." + output_dir.name + "-runtime")))
+    work_dir.mkdir(parents=True, exist_ok=True)
+    context_path = Path(os.environ.get("INLUMEN_CONTEXT_PATH") or str(Path(__file__).with_name("node-manifest.json")))
+    context = json.loads(context_path.read_text()) if context_path.is_file() else {{}}
+    contract = context.get("data_contract") or {{}}
+    manifest_path = Path(os.environ.get("INLUMEN_INPUT_MANIFEST", ""))
+    if manifest_path.is_file():
+        inputs = json.loads(manifest_path.read_text()).get("inputs", [])
+    else:
+        inputs = [validate_artifact(input_dir, item) for item in contract.get("inputs", [])]
+    for declaration in contract.get("inputs", []):
+        if not declaration.get("connection_id"):
             continue
-        _source = _Path(str(_item.get("path") or ""))
-        if not _source.exists():
-            continue
-        _filename = _Path(str(_item.get("filename") or _source.name))
-        _aliases = [_Path(_filename.name)]
-        if not _filename.is_absolute() and ".." not in _filename.parts:
-            _aliases.append(_filename)
-        for _alias in _aliases:
-            _target = _compat_dir / _alias
-            _target.parent.mkdir(parents=True, exist_ok=True)
-            if not _target.exists():
-                _target.symlink_to(_source)
-    _previous_cwd = _Path.cwd()
+        matches = [item for item in inputs if item.get("connection_id") == declaration["connection_id"]]
+        if len(matches) != 1:
+            raise ArtifactContractError("Expected exactly one artifact for connection " + declaration["connection_id"])
+        expected = {{**matches[0], **declaration, "filename": matches[0]["filename"]}}
+        validate_artifact(input_dir, expected)
+    context["parameters"] = json.loads(os.environ.get("INLUMEN_PARAMS_JSON") or os.environ.get("PIPELINE_PARAMS_JSON") or json.dumps(context.get("parameters", {{}})))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    previous = Path.cwd()
     try:
-        _os.chdir(_compat_dir)
-        _outputs = {function_name}(_inputs, _output_dir, _context)
+        os.chdir(work_dir)
+        outputs = {function_name}(inputs, output_dir.resolve(), context)
     finally:
-        _os.chdir(_previous_cwd)
-    if not isinstance(_outputs, list):
-        raise TypeError("{function_name} must return a list of output descriptors")
-    _data_contract = (
-        _context.get("data_contract")
-        if isinstance(_context.get("data_contract"), dict)
-        else {{}}
-    )
-    _expected_outputs = (
-        _data_contract.get("outputs")
-        if isinstance(_data_contract.get("outputs"), list)
-        else []
-    )
-    _normalized_outputs = []
-    for _index, _item in enumerate(_outputs):
-        if not isinstance(_item, dict):
-            raise TypeError("{function_name} output descriptors must be objects")
-        _expected = next(
-            (
-                _candidate for _candidate in _expected_outputs
-                if isinstance(_candidate, dict)
-                and (
-                    (_item.get("name") and _candidate.get("name") == _item.get("name"))
-                    or (
-                        _item.get("filename")
-                        and _candidate.get("filename") == _item.get("filename")
-                    )
-                )
-            ),
-            _expected_outputs[_index]
-            if _index < len(_expected_outputs)
-            and isinstance(_expected_outputs[_index], dict)
-            else {{}},
-        )
-        _normalized = {{**_expected, **_item}}
-        _raw_path = str(
-            _normalized.get("path") or _normalized.get("filename") or ""
-        )
-        if not _raw_path:
-            raise ValueError("{function_name} output is missing path and filename")
-        _path = _Path(_raw_path)
-        if not _path.is_absolute():
-            _path = _output_dir / _path
-        _normalized["path"] = str(_path)
-        _normalized.setdefault("filename", _path.name)
-        _normalized_outputs.append(_normalized)
-    _outputs = _normalized_outputs
-    _output_manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    _output_manifest_path.write_text(
-        _json.dumps({{
-            "schema_version": "inlumen.output-manifest@1",
-            "outputs": _outputs,
-        }}, indent=2, sort_keys=True) + "\\n",
-        encoding="utf-8",
-    )
+        os.chdir(previous)
+    if contract.get("outputs"):
+        outputs = validate_result(output_dir, contract["outputs"], outputs, producer=context.get("flow_id", "{function_name}"))
+    elif not isinstance(outputs, list):
+        raise ArtifactContractError("Node must return artifact descriptors")
+    elif contract.get("contract_id") == CONTRACT_ID and outputs:
+        raise ArtifactContractError("Terminal node returned an undeclared artifact")
+    receipt = Path(os.environ.get("INLUMEN_OUTPUT_MANIFEST") or str(work_dir / "outputs.json"))
+    atomic_json(receipt, {{"schema_version": "inlumen.output-manifest@2", "outputs": outputs}})
 
 
 if __name__ == "__main__":
@@ -539,7 +538,7 @@ if __name__ == "__main__":
 
 
 def _pipeline_runtime_adapter() -> str:
-    return """
+    return _artifact_runtime_source() + "\n" + """
 def _inlumen_pipeline_load(path):
     import json as _json
     from pathlib import Path as _Path
@@ -591,10 +590,15 @@ def _inlumen_pipeline_main():
         ]
         if not _parents:
             _inputs.extend(_direct or _root_inputs)
-        else:
-            _inputs.extend([
-                _item for _item in _direct if _item not in _inputs
-            ])
+        elif _filenames:
+            _inputs.extend([_item for _item in _direct if _item not in _inputs])
+        _bound_inputs = []
+        for _index, _item in enumerate(_inputs):
+            _declaration = next((d for d in _node.get("inputs", [])
+                if d.get("source_node") == _item.get("source_node") and d.get("source_node")), {})
+            _bound_inputs.append({**_item, **{k: v for k, v in _declaration.items()
+                if k in {"connection_id", "target_port"}}})
+        _inputs = _bound_inputs
         _node_dir = _output_root / "nodes" / _flow_id
         _node_dir.mkdir(parents=True, exist_ok=True)
         _node_context = {
@@ -604,31 +608,9 @@ def _inlumen_pipeline_main():
             "node": _node.get("descriptor", {}),
             "parameters": (_node.get("descriptor", {}).get("parameters") or {}),
         }
-        _compat_dir = _node_dir / ".inlumen-inputs"
-        _compat_dir.mkdir(parents=True, exist_ok=True)
-        for _item in _inputs:
-            if not isinstance(_item, dict):
-                continue
-            _source = _Path(str(_item.get("path") or ""))
-            if not _source.exists():
-                continue
-            _filename = _Path(str(_item.get("filename") or _source.name))
-            _aliases = [_Path(_filename.name)]
-            if not _filename.is_absolute() and ".." not in _filename.parts:
-                _aliases.append(_filename)
-            for _alias in _aliases:
-                _target = _compat_dir / _alias
-                _target.parent.mkdir(parents=True, exist_ok=True)
-                if not _target.exists():
-                    _target.symlink_to(_source)
-        _previous_cwd = _Path.cwd()
-        try:
-            _os.chdir(_compat_dir)
-            _outputs = globals()[_node["function_name"]](
-                _inputs, _node_dir, _node_context
-            )
-        finally:
-            _os.chdir(_previous_cwd)
+        _outputs = globals()[_node["function_name"]](
+            _inputs, _node_dir, _node_context
+        )
         if not isinstance(_outputs, list):
             raise TypeError(
                 f"{_node['function_name']} must return a list of output descriptors"
@@ -673,8 +655,13 @@ def _inlumen_pipeline_main():
                 )
             _normalized_outputs.append(_normalized)
         _outputs = _normalized_outputs
+        if INLUMEN_PIPELINE_PLAN.get("schema_version") == "inlumen.pipeline-plan@2" and _expected_outputs:
+            _outputs = validate_result(_node_dir, _expected_outputs, _outputs, producer=_flow_id)
+        _outputs = [{**item, "source_node": _flow_id} for item in _outputs]
         _produced[_flow_id] = _outputs
-        (_node_dir / "output_manifest.json").write_text(
+        _receipt_dir = _output_root / ".runtime"
+        _receipt_dir.mkdir(parents=True, exist_ok=True)
+        (_receipt_dir / (_flow_id + ".json")).write_text(
             _json.dumps({
                 "schema_version": "inlumen.output-manifest@1",
                 "flow_id": _flow_id,
@@ -907,6 +894,11 @@ def _inlumen_train_classical_ml(inputs, output_dir, specs, context):
     predictions = estimator.predict(features)
     accuracy = float(accuracy_score(raw_targets, predictions))
 
+    bundle = specs[0] if len(specs) == 1 and specs[0].get("representation") == "directory" else None
+    if bundle:
+        output_dir = output_dir / bundle["filename"]
+        output_dir.mkdir(parents=True, exist_ok=True)
+        specs = bundle.get("members", [])
     outputs = []
     for spec in specs:
         name = spec.get("name") or "output"
@@ -935,5 +927,5 @@ def _inlumen_train_classical_ml(inputs, output_dir, specs, context):
                 encoding="utf-8",
             )
         outputs.append({**spec, "filename": filename, "path": str(path)})
-    return outputs
+    return [{**bundle, "path": str(output_dir)}] if bundle else outputs
 """.strip()

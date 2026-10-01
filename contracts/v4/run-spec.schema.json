@@ -1,0 +1,282 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inlumen:schema:run-spec:4",
+  "title": "inLUMEN Engine-Neutral Run Specification",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "artifact_contract",
+    "runtime",
+    "node_order",
+    "nodes",
+    "connections",
+    "run_inputs",
+    "outputs",
+    "engines"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "inlumen.run-spec@4"
+    },
+    "artifact_contract": {
+      "type": "object",
+      "required": [
+        "schema_version"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "inlumen.artifact-contract@4"
+        }
+      },
+      "additionalProperties": true
+    },
+    "runtime": {
+      "type": "object",
+      "required": [
+        "default_engine",
+        "package_manager",
+        "python"
+      ],
+      "properties": {
+        "default_engine": {
+          "enum": [
+            "dagster",
+            "argo"
+          ]
+        },
+        "package_manager": {
+          "type": "string"
+        },
+        "python": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "node_order": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "inputs",
+          "outputs",
+          "runtime_environment",
+          "data_contract"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": [
+              "source",
+              "task",
+              "destination",
+              "flow",
+              "subpipeline"
+            ]
+          },
+          "inputs": {
+            "type": "array"
+          },
+          "outputs": {
+            "type": "array"
+          },
+          "runtime_environment": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/runtimeEnvironment"
+            }
+          },
+          "data_contract": {
+            "$ref": "#/$defs/data_contract"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "connections": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/connection"
+      }
+    },
+    "run_inputs": {
+      "type": "object"
+    },
+    "outputs": {
+      "type": "object"
+    },
+    "engines": {
+      "type": "object",
+      "required": [
+        "dagster",
+        "argo"
+      ],
+      "properties": {
+        "dagster": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "argo": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "connection": {
+      "type": "object",
+      "required": [
+        "source",
+        "source_port",
+        "target",
+        "target_port",
+        "connection_id",
+        "artifact_name"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_port": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target_port": {
+          "type": "string",
+          "minLength": 1
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "artifact_name": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "runtimeEnvironment": {
+      "type": "object",
+      "required": [
+        "name",
+        "required",
+        "secret",
+        "source"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "secret": {
+          "type": "boolean"
+        },
+        "source": {
+          "enum": [
+            "static-python-analysis",
+            "node-manifest"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "artifact": {
+      "type": "object",
+      "required": [
+        "name",
+        "filename",
+        "representation"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "filename": {
+          "type": "string",
+          "minLength": 1
+        },
+        "representation": {
+          "enum": [
+            "file",
+            "directory"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "format": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema": {
+          "type": "object"
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifact"
+          }
+        }
+      }
+    },
+    "data_contract": {
+      "type": "object",
+      "required": [
+        "contract_id",
+        "inputs",
+        "outputs"
+      ],
+      "properties": {
+        "contract_id": {
+          "const": "inlumen.generic-node@2"
+        },
+        "version": {
+          "const": "2"
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifact"
+          }
+        },
+        "outputs": {
+          "type": "array",
+          "maxItems": 1,
+          "items": {
+            "$ref": "#/$defs/artifact"
+          }
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

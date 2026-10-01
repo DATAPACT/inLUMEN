@@ -736,6 +736,8 @@ class PipelineRunManager:
                 or current_progress.get("resource_reason")
             ),
             "queue_position": payload.get("queue_position"),
+            "admitted_at": payload.get("admitted_at") or current_progress.get("admitted_at"),
+            "observed_at": payload.get("observed_at") or observed_at,
         }
         if next_progress == current_progress and not events_changed:
             return

@@ -302,6 +302,8 @@ async def test_background_run_persists_live_node_heartbeat_progress():
         "resource_memory_bytes": None,
         "resource_reason": None,
         "queue_position": None,
+        "admitted_at": None,
+        "observed_at": running["progress"]["observed_at"],
     }
     assert running["progress"]["heartbeat_at"]
     assert any(

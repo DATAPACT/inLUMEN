@@ -1,0 +1,34 @@
+{
+  "execution": {
+    "adapter": "filesystem"
+  },
+  "data_contract": {
+    "contract_id": "inlumen.generic-node@2",
+    "version": "2",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "entities",
+        "filename": "entities.json",
+        "representation": "file",
+        "kind": "json",
+        "format": "json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "text",
+            "entities"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "entities": {
+              "type": "array"
+            }
+          }
+        }
+      }
+    ]
+  }
+}

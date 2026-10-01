@@ -1,0 +1,34 @@
+{
+  "execution": {
+    "adapter": "filesystem"
+  },
+  "data_contract": {
+    "contract_id": "inlumen.generic-node@2",
+    "version": "2",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "anonymized",
+        "filename": "anonymized.json",
+        "representation": "file",
+        "kind": "json",
+        "format": "json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "text",
+            "anonymized"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "anonymized": {
+              "const": true
+            }
+          }
+        }
+      }
+    ]
+  }
+}

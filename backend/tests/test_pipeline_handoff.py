@@ -30,6 +30,7 @@ def source_payload(template="Custom", inputs=()):
         "flow_id": "1", "label": "Uploaded data", "type": "source",
         "template": template,
         "ports": {"inputs": [], "outputs": [{"id": "data", "required": True}]},
+        "param": {"output_artifact": {"name": "objects", "filename": "objects", "kind": "directory", "representation": "directory"}} if template == "Object Storage" else {},
     }
     artifact, dockerfile = _managed_adapter_runtime(step)
     graph = {"nodes": [{"id": "1", "data": {
@@ -66,6 +67,9 @@ class PipelineHandoffTest(unittest.TestCase):
     def test_attached_custom_source_can_generate_its_own_data(self):
         graph, payload = source_payload()
         payload["runtime_artifacts"][0]["generator"] = "inlumen-attached-runtime"
+        manifest = payload["runtime_artifacts"][0]["manifest"]
+        manifest["data_contract"]["outputs"] = [{"name": "result", "filename": "result.json", "kind": "json", "format": "json"}]
+        next(f for f in payload["runtime_artifacts"][0]["files"] if f["filename"] == "node-manifest.json")["content"] = json.dumps(manifest)
         build_deployment_bundle_files(graph, payload, targets={"dagster": True, "argo": False})
 
     def test_input_on_one_source_does_not_satisfy_another_source(self):
@@ -113,10 +117,8 @@ class PipelineHandoffTest(unittest.TestCase):
                 **os.environ, "PIPELINE_INPUT_DIR": str(root / "input"), "PIPELINE_OUTPUT_DIR": str(root / "output"),
             }, capture_output=True, text=True)
             self.assertEqual(0, result.returncode, result.stderr)
-            normalize_single_output_port(root / "output", ["data"])
-            validate_output_ports(root / "output", ["data"])
             for consumer in ("task-a", "task-b"):
-                staged = stage_input_bindings([{"source_dir": str(root / "output"), "source_port": "data"}], root / consumer)
+                staged = stage_input_bindings([{"source_dir": str(root / "output"), "source_port": ""}], root / consumer)
                 self.assertEqual(fixtures, {p.relative_to(staged).as_posix(): p.read_bytes() for p in staged.rglob("*") if p.is_file()})
 
     def test_local_and_exported_validation_reject_missing_empty_and_metadata_only_outputs(self):

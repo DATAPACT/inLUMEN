@@ -6,3 +6,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .inlumen_*/
+
+# Tests and regression fixtures are not needed by the production service.
+/tests/

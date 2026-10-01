@@ -1,0 +1,66 @@
+{
+  "schema_version": "inlumen.deployment-bundle@3",
+  "artifact_contract": {
+    "schema_version": "inlumen.artifact-contract@4",
+    "transport": "filesystem",
+    "artifacts_per_connection": 1,
+    "input_environment": "PIPELINE_INPUT_DIR",
+    "output_environment": "PIPELINE_OUTPUT_DIR",
+    "recursive": true,
+    "input_layout": "<artifact-relative-path>",
+    "output_layout": "<artifact-relative-path>",
+    "port_namespaced": false,
+    "run_isolation": "<run_id>",
+    "source_agnostic": true,
+    "connector_agnostic": true
+  },
+  "run_spec": "run-spec.json",
+  "readme": "README.md",
+  "targets": {
+    "dagster": true,
+    "argo": false
+  },
+  "node_order": [
+    "source",
+    "consumer"
+  ],
+  "nodes": [
+    {
+      "flow_id": "source",
+      "path": "nodes/source",
+      "output_path": "outputs/source",
+      "parents": []
+    },
+    {
+      "flow_id": "consumer",
+      "path": "nodes/consumer",
+      "output_path": "outputs/consumer",
+      "parents": [
+        "source"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "source": "source",
+      "source_port": "data",
+      "target": "consumer",
+      "target_port": "input",
+      "connection_id": "source:data->consumer:input",
+      "artifact_name": "transcript"
+    }
+  ],
+  "inputs": {
+    "path": "inputs",
+    "file_count": 0,
+    "lifecycle": "run",
+    "transport": "filesystem"
+  },
+  "outputs": {
+    "path": "outputs",
+    "per_node": [
+      "outputs/source",
+      "outputs/consumer"
+    ]
+  }
+}

@@ -59,6 +59,8 @@ class SubpipelineExecutionDepthTest(unittest.TestCase):
 def node_manifest_content(implementation_plan=None):
     manifest = {
             "data_contract": {
+                "contract_id": "inlumen.generic-node@2", "version": "2",
+                "outputs": [{"name": "dataset", "filename": "dataset", "kind": "directory", "representation": "directory"}],
                 "inputs": [
                     {
                         "name": "vital_signs_short.csv",
@@ -105,6 +107,7 @@ def codegen_payload():
             },
         ],
         "deployment_files": [
+            {"path": "nodes/1/extra.txt", "filename": "extra.txt", "flow_id": "1", "content": "# Local include\n"},
             {"path": "nodes/1/main.py", "filename": "main.py", "flow_id": "1", "content": "print('ingest')\n"},
             {"path": "nodes/1/requirements.txt", "filename": "requirements.txt", "flow_id": "1", "content": "pandas\n# comment\n-r extra.txt\n"},
             {"path": "nodes/1/node-manifest.json", "filename": "node-manifest.json", "flow_id": "1", "content": node_manifest_content()},
@@ -121,7 +124,7 @@ def codegen_payload():
             },
             {"path": "nodes/2/main.py", "filename": "main.py", "flow_id": "2", "content": "print('preprocess')\n"},
             {"path": "nodes/2/requirements.txt", "filename": "requirements.txt", "flow_id": "2", "content": "pandas\nnumpy\n"},
-            {"path": "nodes/2/node-manifest.json", "filename": "node-manifest.json", "flow_id": "2", "content": "{}\n"},
+            {"path": "nodes/2/node-manifest.json", "filename": "node-manifest.json", "flow_id": "2", "content": json.dumps({"data_contract": {"contract_id": "inlumen.generic-node@2", "version": "2", "inputs": [], "outputs": [{"name": "result", "filename": "result.json", "kind": "json", "format": "json", "representation": "file"}]}})},
         ],
     }
 
@@ -240,7 +243,7 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertIn("artifactRepositoryRef:", yaml_text)
         self.assertIn("PIPELINE_INPUT_DIR", yaml_text)
         self.assertIn("PIPELINE_OUTPUT_DIR", yaml_text)
-        self.assertNotIn("INLUMEN_OUTPUT_MANIFEST", yaml_text)
+        self.assertIn("INLUMEN_OUTPUT_MANIFEST", yaml_text)
 
     def test_dagster_project_files_use_persisted_scripts_and_graph_dependencies(self):
         files = build_dagster_project_files(self.graph(), codegen_payload())
@@ -335,6 +338,11 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             targets={"argo": True, "dagster": True},
         )
         by_path = {item["path"]: item["content"] for item in bundle["files"]}
+        from jsonschema import Draft202012Validator
+        schema_root = Path(__file__).resolve().parents[2] / "contracts" / "v4"
+        for filename, schema_name in (("run-spec.json", "run-spec.schema.json"), ("bundle-manifest.json", "deployment-bundle.schema.json")):
+            Draft202012Validator(json.loads((schema_root / schema_name).read_text())).validate(json.loads(by_path[filename]))
+        Draft202012Validator(json.loads((schema_root / "artifact-contract.schema.json").read_text())).validate(json.loads(by_path["run-spec.json"])["artifact_contract"])
         self.assertIn("README.md", by_path)
         self.assertIn("bundle-manifest.json", by_path)
         self.assertIn("run-spec.json", by_path)
@@ -439,12 +447,12 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertNotIn("name: image-1", argo_workflow)
         run_spec = json.loads(by_path["run-spec.json"])
         self.assertEqual(
-            "inlumen.deployment-bundle@2",
+            "inlumen.deployment-bundle@3",
             bundle["manifest"]["schema_version"],
         )
-        self.assertEqual("inlumen.run-spec@3", run_spec["schema_version"])
+        self.assertEqual("inlumen.run-spec@4", run_spec["schema_version"])
         self.assertEqual(
-            "inlumen.artifact-contract@3",
+            "inlumen.artifact-contract@4",
             run_spec["artifact_contract"]["schema_version"],
         )
         self.assertEqual(
@@ -572,6 +580,8 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertIn("inlumen_model_store:/models:ro", compose)
         self.assertIn('HF_HUB_DISABLE_XET: "${HF_HUB_DISABLE_XET:-1}"', compose)
         self.assertIn("HF_HUB_CACHE: /models/huggingface", compose)
+        self.assertIn("HF_HUB_CACHE: /runtime/huggingface/hub", compose)
+        self.assertIn("dagster_runtime_cache:/runtime", compose)
         self.assertIn('HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-0}"', compose)
         self.assertIn("runtime-egress:", compose)
         self.assertIn('HF_TOKEN: "${HF_TOKEN:-}"', compose)

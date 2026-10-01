@@ -26,6 +26,7 @@ from docker.errors import DockerException, ImageNotFound
 from packaging.requirements import InvalidRequirement, Requirement
 from requests.exceptions import ReadTimeout
 
+from .artifact_runtime import ArtifactContractError, CONTRACT_ID, atomic_json, validate_artifact, validate_result
 from .resource_policy import RESOURCE_PROFILES
 from .schemas import (
     ExpectedArtifact,
@@ -183,7 +184,7 @@ def validate_node_with_docker(
             inputs_dir=inputs_dir,
             outputs_dir=outputs_dir,
             input_manifest_path=manifest_path,
-            output_manifest_path=outputs_dir / "output_manifest.json",
+            output_manifest_path=workspace / "runtime" / "outputs.json",
             context_path=context_path,
             expected_outputs=artifact.data_contract.outputs,
             timeout_seconds=timeout_seconds,
@@ -246,7 +247,7 @@ def execute_node_with_docker_handoff(
             inputs_dir=inputs_dir,
             outputs_dir=outputs_dir,
             input_manifest_path=manifest_path,
-            output_manifest_path=outputs_dir / "output_manifest.json",
+            output_manifest_path=workspace / "runtime" / "outputs.json",
             context_path=context_path,
             expected_outputs=artifact.data_contract.outputs,
             timeout_seconds=timeout_seconds,
@@ -258,7 +259,7 @@ def execute_node_with_docker_handoff(
         if report.status == "valid":
             outputs = persist_descriptors_for_handoff(
                 output_descriptors_from_manifest(
-                    outputs_dir / "output_manifest.json",
+                    workspace / "runtime" / "outputs.json",
                     outputs_dir,
                 ),
                 handoff_dir,
@@ -317,26 +318,18 @@ def validate_pipeline_with_docker(
                 write_generated_files(workspace, artifact)
 
                 inherited_inputs: list[FileDescriptor] = []
-                for parent_id, outputs in produced_outputs.items():
-                    for output in outputs:
-                        source_path = existing_sample_file(output.sample)
-                        if source_path is not None:
-                            relative = Path(parent_id) / source_path.name
-                            target_path = inputs_dir / relative
-                            target_path.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy2(source_path, target_path)
-                            inherited_inputs.append(
-                                FileDescriptor(
-                                    filename=str(relative),
-                                    kind=output.kind,
-                                    format=output.format,
-                                    columns=output.columns,
-                                    required_columns=output.required_columns,
-                                    schema=output.schema,
-                                    semantic_role=output.semantic_role,
-                                    sample=FileSample(text=str(target_path)),
-                                )
-                            )
+                for expected in artifact.data_contract.inputs:
+                    if not expected.source_node:
+                        continue
+                    upstream = produced_outputs.get(expected.source_node, [])
+                    if len(upstream) != 1:
+                        errors.append(f"Node {flow_id}, connection {expected.connection_id}: expected one published artifact from {expected.source_node}")
+                        break
+                    inherited_inputs.append(FileDescriptor(
+                        **{key: value for key, value in expected.model_dump(mode="json").items()
+                           if key in FileDescriptor.model_fields}, sample=upstream[0].sample))
+                if errors:
+                    break
 
                 manifest_path = inputs_dir / "input_manifest.json"
                 write_sample_inputs(
@@ -350,7 +343,7 @@ def validate_pipeline_with_docker(
                     inputs_dir=inputs_dir,
                     outputs_dir=outputs_dir,
                     input_manifest_path=manifest_path,
-                    output_manifest_path=outputs_dir / "output_manifest.json",
+                    output_manifest_path=workspace / "runtime" / "outputs.json",
                     context_path=context_path,
                     expected_outputs=artifact.data_contract.outputs,
                     timeout_seconds=timeout_seconds,
@@ -363,7 +356,7 @@ def validate_pipeline_with_docker(
                 if report.status == "valid":
                     produced_outputs[flow_id] = persist_descriptors_for_handoff(
                         output_descriptors_from_manifest(
-                            outputs_dir / "output_manifest.json",
+                            workspace / "runtime" / "outputs.json",
                             outputs_dir,
                         ),
                         handoff_root / flow_id,
@@ -388,10 +381,18 @@ def persist_descriptors_for_handoff(
             continue
         handoff_dir.mkdir(parents=True, exist_ok=True)
         target_path = handoff_dir / source_path.name
-        shutil.copy2(source_path, target_path)
+        if source_path.is_dir():
+            shutil.copytree(source_path, target_path)
+        else:
+            shutil.copy2(source_path, target_path)
         persisted.append(
             FileDescriptor(
                 filename=descriptor.filename,
+                source_node=descriptor.source_node,
+                connection_id=descriptor.connection_id,
+                target_port=descriptor.target_port,
+                representation=descriptor.representation,
+                members=descriptor.members,
                 kind=descriptor.kind,
                 format=descriptor.format,
                 columns=descriptor.columns,
@@ -462,7 +463,7 @@ def existing_sample_file(sample: FileSample | None) -> Path | None:
         return None
     try:
         candidate = Path(raw_path)
-        return candidate if candidate.is_file() else None
+        return candidate if candidate.is_file() or candidate.is_dir() else None
     except (OSError, ValueError):
         # JSON/text descriptors store literal content in ``sample.text``. Long or
         # multi-line values are valid samples but are not valid filesystem paths.
@@ -484,7 +485,10 @@ def write_sample_inputs(
             if file_item.sample and file_item.sample.content_base64 is not None:
                 write_embedded_media(path, file_item)
             elif sample_path is not None:
-                shutil.copy2(sample_path, path)
+                if sample_path.is_dir():
+                    shutil.copytree(sample_path, path)
+                else:
+                    shutil.copy2(sample_path, path)
             elif write_embedded_media(path, file_item) or fetch_configured_input(path, file_item):
                 pass
             else:
@@ -492,6 +496,11 @@ def write_sample_inputs(
         entries.append(
             {
                 "name": Path(file_item.filename).stem,
+                "source_node": file_item.source_node,
+                "connection_id": file_item.connection_id,
+                "target_port": file_item.target_port,
+                "representation": file_item.representation,
+                "members": file_item.members,
                 "filename": file_item.filename,
                 "path": f"/inlumen/inputs/{file_item.filename}",
                 "kind": file_item.kind or "binary",
@@ -732,6 +741,7 @@ def validate_pipeline_program_with_docker(
         "pipeline_dependency_image_cache",
         "pipeline_sample_input_manifest",
         "whole_pipeline_sample_run",
+        "compiled_packages_artifact_handoff",
         "per_node_output_manifest_contract",
         "per_node_output_file_shape",
     ]
@@ -889,7 +899,7 @@ def validate_pipeline_program_with_docker(
                 for item in node.get("outputs") or []
             ]
             node_errors = validate_output_manifest(
-                output_manifest_path=node_dir / "output_manifest.json",
+                output_manifest_path=(outputs_dir / ".runtime" / (flow_id + ".json") if plan.get("schema_version") == "inlumen.pipeline-plan@2" else node_dir / "output_manifest.json"),
                 outputs_dir=node_dir,
                 expected_outputs=expected,
             )
@@ -1117,6 +1127,17 @@ def run_docker_validation(
         runtime = manifest.get("runtime") if isinstance(manifest, dict) else None
         if isinstance(runtime, dict) and str(runtime.get("base_image") or "").strip():
             base_image = str(runtime["base_image"]).strip()
+    contract = manifest.get("data_contract", {}) if manifest_path.is_file() else {}
+    strict = contract.get("contract_id") == CONTRACT_ID
+    work_dir = workspace / "runtime"
+    work_dir.mkdir(exist_ok=True)
+    if strict:
+        context_path.write_text(json.dumps({"data_contract": contract, "parameters": parameters or {}}))
+        try:
+            for item in contract.get("inputs", []):
+                validate_artifact(inputs_dir, item)
+        except ArtifactContractError as exc:
+            return ValidationReport(status="invalid", checks=checks, errors=[str(exc)])
     requirements_path = workspace / "requirements.txt"
     requirements = (
         [
@@ -1155,7 +1176,8 @@ def run_docker_validation(
             "INLUMEN_FLOW_ID": flow_id,
             "INLUMEN_INPUT_MANIFEST": "/inlumen/inputs/input_manifest.json",
             "INLUMEN_OUTPUT_DIR": "/inlumen/outputs",
-            "INLUMEN_OUTPUT_MANIFEST": "/inlumen/outputs/output_manifest.json",
+            "INLUMEN_OUTPUT_MANIFEST": "/inlumen/runtime/outputs.json",
+            "PIPELINE_WORK_DIR": "/inlumen/runtime",
             "INLUMEN_CONTEXT_PATH": "/inlumen/context.json",
         }
         if runtime_parameters:
@@ -1195,6 +1217,7 @@ def run_docker_validation(
                 str(inputs_dir): {"bind": "/inlumen/inputs", "mode": "ro"},
                 str(outputs_dir): {"bind": "/inlumen/outputs", "mode": "rw"},
                 str(context_path): {"bind": "/inlumen/context.json", "mode": "ro"},
+                str(work_dir): {"bind": "/inlumen/runtime", "mode": "rw"},
             },
             stdout=True,
             stderr=True,
@@ -1246,6 +1269,20 @@ def run_docker_validation(
                 client.close()
             except DockerException:
                 pass
+
+    if strict and expected_outputs:
+        try:
+            actual = json.loads(output_manifest_path.read_text()).get("outputs") if output_manifest_path.is_file() else None
+            if isinstance(actual, list):
+                actual = [dict(item) if isinstance(item, dict) else item for item in actual]
+                for item in actual:
+                    if isinstance(item, dict) and str(item.get("path", "")).startswith("/inlumen/outputs/"):
+                        item["path"] = str(outputs_dir / Path(item["path"]).relative_to("/inlumen/outputs"))
+            checked = validate_result(outputs_dir, [item.model_dump(mode="json") for item in expected_outputs], actual, producer=flow_id)
+            atomic_json(output_manifest_path, {"outputs": checked})
+            return ValidationReport(status="valid", checks=[*checks, "shared_artifact_boundary"], warnings=warnings)
+        except (ArtifactContractError, ValueError) as exc:
+            return ValidationReport(status="invalid", checks=checks, errors=[str(exc)], warnings=warnings)
 
     errors.extend(
         validate_output_manifest(
@@ -1535,9 +1572,8 @@ def output_descriptors_from_manifest(
         if not raw_path:
             continue
         path = Path(str(raw_path))
-        host_path = (
-            outputs_dir / path.name if path.is_absolute() else outputs_dir / path
-        )
+        filename = item.get("filename") or path.name
+        host_path = outputs_dir / filename
         columns = item.get("columns") if isinstance(item.get("columns"), list) else []
         if not columns and (
             item.get("kind") == "table" and item.get("format") in {"csv", "tsv"}
@@ -1545,7 +1581,12 @@ def output_descriptors_from_manifest(
             columns = table_columns(host_path, str(item.get("format") or "csv"))
         descriptors.append(
             FileDescriptor(
-                filename=path.name,
+                filename=filename,
+                representation=item.get("representation", "file"),
+                members=item.get("members") or [],
+                source_node=str(item.get("source_node", "")),
+                connection_id=str(item.get("connection_id", "")),
+                target_port=str(item.get("target_port", "")),
                 kind=item.get("kind") or "binary",
                 format=item.get("format"),
                 columns=columns,

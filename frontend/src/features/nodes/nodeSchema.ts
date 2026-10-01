@@ -190,7 +190,7 @@ export const withoutSensitiveParameterValues = (
 export type NodeConfigurationStatus = "unconfigured" | "valid" | "invalid";
 
 export type GeneratedArtifact = {
-  status?: "current" | "stale";
+  status?: "current" | "stale" | "package_validated";
   generator?: string;
   generator_version?: string;
   configuration_hash?: string;

@@ -629,7 +629,7 @@ def build_pipeline_editor_tools(
                 WITH candidate, count(candidateStep) AS step_count
                 ORDER BY step_count DESC, candidate.updated_at DESC
                 WITH collect(candidate)[0] AS p
-                MATCH (p)-[:HAS_STEP]->(source:STEP {{flow_id:'{_cypher_string(after_flow_id)}'}})
+                MATCH (p:PIPELINE)-[:HAS_STEP]->(source:STEP {{flow_id:'{_cypher_string(after_flow_id)}'}})
                 RETURN {{
                   pipeline_uid: p.uid,
                   flow_id: source.flow_id,
@@ -1695,7 +1695,7 @@ def build_pipeline_editor_tools(
             ORDER BY step_count DESC, candidate.updated_at DESC
             WITH collect(candidate)[0] AS p
             WHERE p IS NOT NULL
-            OPTIONAL MATCH (p)-[:HAS_STEP]->(s:STEP)
+            OPTIONAL MATCH (p:PIPELINE)-[:HAS_STEP]->(s:STEP)
             WITH p, collect(DISTINCT s) AS steps
             WITH p, steps, size(steps) AS deleted_step_count
             CALL {

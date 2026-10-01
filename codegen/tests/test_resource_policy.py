@@ -1,7 +1,9 @@
 import json
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import pytest
 
 from app.resource_policy import (
     GIB,
@@ -108,3 +110,70 @@ def test_admission_waits_fifo_until_capacity_is_released():
 
 def test_global_admission_controller_is_available():
     assert isinstance(RESOURCE_ADMISSION, ResourceAdmissionController)
+
+
+def test_twenty_vm_jobs_share_bounded_execution_budget(monkeypatch):
+    monkeypatch.setenv("CODEGEN_EXECUTION_CPU_BUDGET", "4")
+    monkeypatch.setenv("CODEGEN_EXECUTION_MEMORY_GIB", "8")
+    monkeypatch.setenv("CODEGEN_ML_CPU_THREADS", "2")
+    monkeypatch.setenv("CODEGEN_EXECUTION_MAX_ACTIVE_RUNS", "2")
+    capacity = host_allocatable_resources({"NCPU": 8, "MemTotal": 30 * GIB})
+    allocation = profile_allocation(RESOURCE_PROFILES["ml_cpu"], capacity, reason="VM session")
+    assert allocation["cpu"] == 2 and allocation["memory_bytes"] == 4 * GIB
+    controller = ResourceAdmissionController()
+    barrier = threading.Barrier(20)
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+    waits = []
+
+    def execute(index):
+        nonlocal active, peak
+        barrier.wait(timeout=5)
+        admitted = controller.acquire(str(index), allocation, deadline=time.monotonic() + 5,
+            cancelled=lambda: False, on_wait=lambda available: waits.append(available))
+        assert admitted is not None
+        try:
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                assert active * admitted["cpu"] <= 4
+                assert active * admitted["memory_bytes"] <= 8 * GIB
+            time.sleep(.01)
+        finally:
+            with lock:
+                active -= 1
+            controller.release(str(index))
+        return index
+
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        assert sorted(pool.map(execute, range(20))) == list(range(20))
+    assert peak == 2 and waits
+    assert not controller._active and not controller._waiting
+
+
+def test_active_run_limit_applies_even_when_small_jobs_fit():
+    controller = ResourceAdmissionController(max_active_runs=1)
+    capacity = host_allocatable_resources({"NCPU": 8, "MemTotal": 30 * GIB})
+    allocation = profile_allocation(RESOURCE_PROFILES["lightweight"], capacity, reason="small")
+    assert controller.acquire("first", allocation, deadline=time.monotonic() + 1,
+        cancelled=lambda: False, on_wait=lambda available: None)
+    assert controller.acquire("cancelled", allocation, deadline=time.monotonic() + 1,
+        cancelled=lambda: True, on_wait=lambda available: None) is None
+    assert controller.acquire("expired", allocation, deadline=time.monotonic() + .01,
+        cancelled=lambda: False, on_wait=lambda available: None) is None
+    assert controller._waiting == []
+    controller.release("first")
+    assert controller.acquire("next", allocation, deadline=time.monotonic() + 1,
+        cancelled=lambda: False, on_wait=lambda available: None)
+    controller.release("next")
+
+
+@pytest.mark.parametrize("name", ["CODEGEN_EXECUTION_CPU_BUDGET", "CODEGEN_EXECUTION_MEMORY_GIB", "CODEGEN_EXECUTION_MAX_ACTIVE_RUNS", "CODEGEN_ML_CPU_THREADS"])
+@pytest.mark.parametrize("value", ["0", "-1", "invalid"])
+def test_bad_execution_settings_fail_closed(monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match=name):
+        controller = ResourceAdmissionController()
+        capacity = host_allocatable_resources({"NCPU": 8, "MemTotal": 30 * GIB})
+        profile_allocation(RESOURCE_PROFILES["ml_cpu"], capacity, reason="invalid")

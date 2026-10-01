@@ -87,7 +87,12 @@ class FileSample(BaseModel):
 
 
 class FileDescriptor(BaseModel):
+    members: list[dict[str, Any]] = Field(default_factory=list)
     filename: str
+    source_node: str = ""
+    connection_id: str = ""
+    target_port: str = ""
+    representation: Literal["file", "directory"] = "file"
     bucket: str | None = None
     content_type: str | None = None
     kind: ArtifactKind | None = None
@@ -115,6 +120,7 @@ class NodeDescriptor(BaseModel):
 
 
 class GraphEdge(BaseModel):
+    id: str = ""
     source: str
     target: str
     source_port: str = ""
@@ -147,6 +153,11 @@ class RuntimeConstraints(BaseModel):
 
 
 class ExpectedArtifact(BaseModel):
+    members: list[dict[str, Any]] = Field(default_factory=list)
+    source_node: str = ""
+    connection_id: str = ""
+    target_port: str = ""
+    representation: Literal["file", "directory"] = "file"
     name: str
     kind: ArtifactKind
     format: str | None = None
@@ -164,7 +175,7 @@ class GenerationContext(BaseModel):
     pipeline: dict[str, Any] = Field(default_factory=dict)
     graph: GraphContext = Field(default_factory=GraphContext)
     available_inputs: list[FileDescriptor] = Field(default_factory=list)
-    expected_outputs: list[ExpectedArtifact] = Field(default_factory=list)
+    expected_outputs: list[ExpectedArtifact] = Field(default_factory=list, max_length=1)
     runtime_constraints: RuntimeConstraints = Field(default_factory=RuntimeConstraints)
 
 
@@ -209,11 +220,12 @@ class GeneratedFile(BaseModel):
 
 
 class DataContract(BaseModel):
-    contract_id: str = "inlumen.generic-node@1"
-    input_manifest_env: str = "PIPELINE_INPUT_DIR"
+    contract_id: str = "inlumen.generic-node@2"
+    version: str = "2"
+    input_manifest_env: str = "INLUMEN_INPUT_MANIFEST"
     output_dir_env: str = "PIPELINE_OUTPUT_DIR"
-    output_manifest_env: str = ""
-    context_path_env: str = ""
+    output_manifest_env: str = "INLUMEN_OUTPUT_MANIFEST"
+    context_path_env: str = "INLUMEN_CONTEXT_PATH"
     inputs: list[ExpectedArtifact] = Field(default_factory=list)
     outputs: list[ExpectedArtifact] = Field(default_factory=list)
 
@@ -294,6 +306,9 @@ class ResumePipelineGenerationRunRequest(BaseModel):
 
 
 class EdgeDataContract(BaseModel):
+    connection_id: str = ""
+    source_port: str = ""
+    target_port: str = ""
     source: str
     target: str
     outputs: list[ExpectedArtifact] = Field(default_factory=list)

@@ -47,7 +47,7 @@ class PipelineCodegenPromptTests(unittest.TestCase):
         self.assertIn("user supplies input files", instruction)
         self.assertIn("PIPELINE_INPUT_DIR", instruction)
         self.assertIn("PIPELINE_OUTPUT_DIR", instruction)
-        self.assertIn("finite, non-interactive batch program", instruction)
+        self.assertIn("finite, non-interactive Python 3.11 batch program", instruction)
         self.assertIn("before loading large models", instruction)
         self.assertIn("Design the entire pipeline as one coherent program", instruction)
         self.assertIn("self-check every graph edge", instruction)
@@ -64,7 +64,7 @@ class PipelineCodegenPromptTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "Create the files needed to run every pipeline node",
+            "Every Task folder requires main.py and inlumen.task.json",
             codegen_payload["options"]["user_instruction"],
         )
         self.assertEqual("", metadata["high_level_prompt"])
@@ -109,7 +109,7 @@ class PipelineCodegenPromptTests(unittest.TestCase):
         self.assertIn("Build a PDF question-answering pipeline.", prompt)
         self.assertIn("main.py", prompt)
         self.assertIn("requirements.txt", prompt)
-        self.assertIn("one ZIP", prompt)
+        self.assertIn("a ZIP", prompt)
         self.assertIn("nodes/<flow_id>/", prompt)
         self.assertIn('"flow_id": "pdf"', prompt)
         self.assertIn('"flow_id": "answer"', prompt)
@@ -117,12 +117,11 @@ class PipelineCodegenPromptTests(unittest.TestCase):
         self.assertIn('"target": "answer"', prompt)
         self.assertIn("customer-document.pdf", prompt)
         self.assertNotIn("existing_runtime.py", prompt)
-        self.assertIn("Return code files only", prompt)
-        self.assertIn("Never create or return input data", prompt)
-        self.assertIn("must not call input()", prompt)
-        self.assertIn("invalid inputs must fail immediately", prompt)
-        self.assertIn("SOURCE INPUT MAP", prompt)
-        self.assertIn("attaches these files to the corresponding Source node", prompt)
+        self.assertIn("Include the public manifest", prompt)
+        self.assertIn("do not include platform node-manifest.json", prompt)
+        self.assertIn("non-interactive", prompt)
+        self.assertIn("Fail with a nonzero exit code", prompt)
+        self.assertIn("PIPELINE GRAPH", prompt)
         self.assertIn("Design the entire pipeline as one coherent program", prompt)
         self.assertIn("source chunks or records alongside vectors", prompt)
 
@@ -200,3 +199,25 @@ class PipelineCodegenResponseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_external_prompt_contains_authoritative_schema_exact_folders_and_model_contract():
+    import json
+    from task_package_contract import TASK_SCHEMA
+    graph = {'nodes': [
+        {'id': 'source', 'data': {'type': 'source', 'label': 'Audio'}},
+        {'id': '2', 'data': {'type': 'task', 'label': 'Transcribe'}},
+        {'id': 'destination', 'data': {'type': 'destination', 'label': 'Result'}},
+    ], 'edges': []}
+    prompt = inlumen_api._build_external_ai_runtime_prompt(graph)
+    schema = prompt.split('AUTHORITATIVE inlumen.task.json SCHEMA (Draft 2020-12):\n')[1].split('\n\nRUNTIME CONSTRAINTS:')[0]
+    assert json.loads(schema) == TASK_SCHEMA
+    folders = prompt.split('REQUIRED TASK FOLDERS (do not rename or create connector packages):\n')[1].split('\n\nAUTHORITATIVE')[0]
+    assert json.loads(folders) == [{'folder': 'nodes/Transcribe--2/', 'flow_id': '2', 'label': 'Transcribe'}]
+    assert 'not an execution order' in prompt
+    assert 'Parallel branches remain separate Tasks' in prompt
+    assert 'never main' in prompt
+    assert 'HfApi().model_info' in prompt
+    assert 'does not supply INLUMEN_MODEL_0_PATH' in prompt
+    assert 'local_files_only=True' in prompt
+    assert '"data" is not a supported kind' in prompt

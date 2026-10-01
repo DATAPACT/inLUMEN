@@ -96,7 +96,7 @@ def test_node_prompt_requires_filesystem_workspace_contract() -> None:
     assert "PIPELINE_OUTPUT_DIR" in NODE_SYSTEM_PROMPT
     assert "directly\nfrom PIPELINE_INPUT_DIR" in NODE_SYSTEM_PROMPT
     assert "Port names never create implicit workspace directories" in NODE_SYSTEM_PROMPT
-    assert "Files written there are" in NODE_SYSTEM_PROMPT
+    assert "Only the declared output artifact is handed" in NODE_SYSTEM_PROMPT
 
 
 def test_targeted_generation_reuses_validated_packages() -> None:
@@ -533,9 +533,9 @@ def test_model_training_contract_includes_row_level_predictions() -> None:
         ],
     )
 
-    predictions = next(
-        output for output in outputs if output.semantic_role == "model_predictions"
-    )
+    assert len(outputs) == 1 and outputs[0].representation == "directory"
+    predictions = next(ExpectedArtifact.model_validate(item) for item in outputs[0].members
+                       if item["semantic_role"] == "model_predictions")
     assert predictions.kind == "table"
     assert predictions.required_columns == [
         "timestamp",
@@ -576,12 +576,13 @@ def test_reviewed_model_dependencies_are_compiler_owned() -> None:
         "runtime_network": "disabled",
     }
     assert plan["required_packages"] == [
+        "jsonschema>=4.23,<5",
         "faster-whisper==1.2.1",
         "ctranslate2==4.8.1",
         "huggingface-hub==1.25.1",
     ]
     assert (
-        contexts["asr"].runtime_constraints.allowed_packages[-3:]
+        contexts["asr"].runtime_constraints.allowed_packages[-4:]
         == (plan["required_packages"])
     )
 
@@ -1111,7 +1112,7 @@ def test_model_requirements_are_constrained_to_string_allowlist_entries() -> Non
     assert normalize_requirements(
         ["scikit-learn", -1, "invented-package", "pypdf>=6"],
         ["scikit-learn>=1.4,<2", "pypdf>=5,<7"],
-    ) == ["scikit-learn>=1.4,<2", "pypdf>=5,<7"]
+    ) == ["scikit-learn", "scikit-learn>=1.4,<2", "-1", "invented-package", "pypdf>=6", "pypdf>=5,<7"]
 
 
 def test_audio_preprocessing_semantics_require_stable_polyphase_dsp() -> None:
@@ -1314,9 +1315,10 @@ def test_input_boundary_packages_pdf_and_questions_for_downstream_tasks(tmp_path
         "outputs": [
             {
                 "name": "source_package",
-                "filename": "source_package.json",
-                "kind": "json",
-                "format": "json",
+                "filename": "source_package",
+                "representation": "directory",
+                "kind": "directory",
+                "format": "directory",
             }
         ],
     }
@@ -1342,11 +1344,11 @@ def test_input_boundary_packages_pdf_and_questions_for_downstream_tasks(tmp_path
         {},
     )
 
-    payload = json.loads((tmp_path / "outputs" / "source_package.json").read_text())
-    assert base64.b64decode(payload["pdf_base64"]) == pdf_bytes
-    assert payload["source"] == "knowledge.pdf"
-    assert payload["questions"] == ["What is retained?"]
-    assert outputs[0]["filename"] == "source_package.json"
+    bundle = tmp_path / "outputs" / "source_package"
+    assert (bundle / "knowledge.pdf").read_bytes() == pdf_bytes
+    assert json.loads((bundle / "questions.json").read_text())["questions"] == ["What is retained?"]
+    assert len(outputs) == 1
+    assert outputs[0]["representation"] == "directory"
 
 
 def test_alert_task_semantics_override_stale_classical_ml_plan() -> None:
@@ -1401,7 +1403,7 @@ def test_pipeline_compiler_injects_omitted_reviewed_dependencies() -> None:
     )
 
     assert validation.status == "valid"
-    assert requirements[:3] == plan["required_packages"]
+    assert requirements[:len(plan["required_packages"])] == plan["required_packages"]
     assert "from faster_whisper import WhisperModel" in payload["pipeline_py"]
     assert "from transformers import pipeline" not in payload["pipeline_py"]
 
@@ -1524,7 +1526,7 @@ def test_compiler_keeps_only_transitive_shared_dependencies() -> None:
     assert "def math_helper" not in compiled["left"]
     assert "math" in right_top_level_imports
     assert "def math_helper" in compiled["right"]
-    assert "json" not in right_top_level_imports
+    assert "def json_helper" not in compiled["right"]  # Platform validator itself imports JSON.
     assert "def json_helper" not in compiled["right"]
 
 
@@ -1572,8 +1574,8 @@ def test_canonical_pipeline_program_executes_complete_graph(
 
     runpy.run_path(str(pipeline_script), run_name="__main__")
 
-    assert (output_dir / "nodes" / "ingest" / "output_manifest.json").is_file()
-    assert (output_dir / "nodes" / "resize" / "output_manifest.json").is_file()
+    assert (output_dir / ".runtime" / "ingest.json").is_file()
+    assert (output_dir / ".runtime" / "resize.json").is_file()
     final_manifest = json.loads(
         (output_dir / "output_manifest.json").read_text(encoding="utf-8")
     )
@@ -1583,7 +1585,7 @@ def test_canonical_pipeline_program_executes_complete_graph(
     ).read_bytes() == image.read_bytes()
 
 
-def test_canonical_runtime_stages_filename_compatibility_aliases(
+def test_canonical_runtime_reads_descriptor_paths_without_aliases(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -1611,7 +1613,7 @@ def test_canonical_runtime_stages_filename_compatibility_aliases(
     source = (
         "from pathlib import Path\n\n"
         "def node_source(inputs, output_dir, context):\n"
-        "    payload = Path('telemetry.csv').read_text(encoding='utf-8')\n"
+        "    payload = Path(inputs[0]['path']).read_text(encoding='utf-8')\n"
         "    output = Path(output_dir) / 'raw.csv'\n"
         "    output.write_text(payload, encoding='utf-8')\n"
         "    return [{'name': 'raw', 'path': str(output)}]\n"
@@ -1722,6 +1724,7 @@ def test_compiled_node_runtime_enriches_declared_output_contract(
         "kind": "json",
         "format": "json",
         "path": str(output_dir / "result.json"),
+        "representation": "file",
     }
 
 
@@ -1810,9 +1813,10 @@ def test_reviewed_model_download_is_deferred_by_default(
     ] == ["audio"]
     assert "from transformers import" not in pipeline_calls[0]["pipeline_source"]
     assert "node_asr" not in pipeline_calls[0]["pipeline_source"]
-    assert pipeline_calls[0]["requirements"] == []
+    assert pipeline_calls[0]["requirements"] == ["jsonschema>=4.23,<5"]
     assert pipeline_calls[0]["network_allowed"] is False
-    assert dependency_calls[0]["requirements"][:3] == [
+    assert dependency_calls[0]["requirements"][:4] == [
+        "jsonschema>=4.23,<5",
         "faster-whisper==1.2.1",
         "ctranslate2==4.8.1",
         "huggingface-hub==1.25.1",

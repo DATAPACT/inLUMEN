@@ -1,3 +1,4 @@
+import { installConversationFixture } from './helpers/conversation';
 import { test, expect } from '@playwright/test';
 
 test('application LLM is selected automatically, read-only, and sends only a credential reference', async ({ page }) => {
@@ -28,6 +29,7 @@ test('application LLM is selected automatically, read-only, and sends only a cre
     sentConfig = route.request().postDataJSON().llm_config;
     await route.fulfill({ json: { assistant_message: 'Application model is ready.' } });
   });
+  await installConversationFixture(page);
   await page.goto('/');
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   const settings = page.getByRole('dialog');

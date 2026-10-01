@@ -418,6 +418,34 @@ class PipelineGraphValidationTest(unittest.TestCase):
 
 
 class PipelineAgentGuardrailTest(unittest.TestCase):
+    def test_partial_compound_insertion_requires_missing_step_and_repeat_is_safe(self):
+        before = {"nodes": [node(1, "source", "Input"), node(2, "task", "Parsing"), node(3, "destination", "Output")],
+                  "edges": [edge(1, 2, "data", "input"), edge(2, 3, "output", "data")]}
+        partial = {"nodes": [*before["nodes"], node(4, "task", "Validation")],
+                   "edges": [edge(1, 2, "data", "input"), edge(2, 4, "output", "input"), edge(4, 3, "output", "data")]}
+        complete = {"nodes": [*partial["nodes"], node(5, "task", "Normalization")],
+                    "edges": [edge(1, 2, "data", "input"), edge(2, 4, "output", "input"), edge(4, 5, "output", "input"), edge(5, 3, "output", "data")]}
+        request = "Extend the pipeline by adding validation after parsing, followed by normalization before output."
+        failed = _build_graph_sync_guardrail(before, partial, request)
+        self.assertFalse(failed["guardrail_passed"])
+        self.assertIn("normalization", " ".join(failed["validation_errors"]))
+        self.assertTrue(_build_graph_sync_guardrail(before, complete, request)["guardrail_passed"])
+        self.assertTrue(_build_graph_sync_guardrail(complete, complete, request)["guardrail_passed"])
+        self.assertFalse(_build_graph_sync_guardrail(before, before, request)["guardrail_passed"])
+        for informational in ("Explain how adding validation after parsing, followed by normalization before output would work.",
+                              "Please explain adding validation after parsing, followed by normalization before output.",
+                              "Extend the pipeline without changes, adding validation after parsing, followed by normalization before output."):
+            self.assertTrue(_build_graph_sync_guardrail(before, before, informational)["guardrail_passed"])
+
+    def test_compound_insertion_accepts_abbreviated_and_paraphrased_complete_labels(self):
+        from pipeline_agent.guardrails import _incomplete_ordered_addition_errors
+        request = "Extend the pipeline by adding named entity recognition after transcription, followed by data anonymization before sentiment analysis."
+        before = {"nodes": [node(1, "task", "Transcription"), node(2, "task", "Sentiment Analysis")]}
+        partial = {"nodes": [*before["nodes"], node(3, "task", "NER Tagging")]}
+        complete = {"nodes": [*partial["nodes"], node(4, "task", "Redact PII")]}
+        self.assertTrue(_incomplete_ordered_addition_errors(before, partial, request))
+        self.assertEqual([], _incomplete_ordered_addition_errors(before, complete, request))
+
     def test_only_model_text_messages_can_become_chat_content(self):
         result = SimpleNamespace(messages=[
             SimpleNamespace(

@@ -25,6 +25,27 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
         self.assertIn("[:FLOWS_TO]->(:STEP)", captured[-1])
         self.assertNotEqual(_scope_cypher(captured[-1], "alice"), _scope_cypher(captured[-1], "bob"))
 
+    def test_explicit_predecessor_and_clear_pass_workspace_validation(self):
+        captured = []
+
+        async def run_query(query, query_type, **kwargs):
+            _validate_workspace_cypher(query)
+            captured.append(query_type)
+            if query_type == "resolve_step_predecessor":
+                return json.dumps([{"predecessor": {
+                    "pipeline_uid": "design", "flow_id": "2", "type": "task",
+                    "primary_output_port": "output",
+                }}])
+            return json.dumps([{"step": {"flow_id": "3"}}])
+
+        tools = {tool.__name__: tool for tool in build_pipeline_editor_tools()}
+        with patch("pipeline_agent.tools.run_neo4j_query", side_effect=run_query):
+            asyncio.run(tools["create_step"](json.dumps({
+                "type": "destination", "label": "Results", "after_flow_id": "2",
+            })))
+            asyncio.run(tools["delete_all_steps"]("{}"))
+        self.assertEqual(captured, ["resolve_step_predecessor", "create_step", "delete_all_steps"])
+
     def test_preview_uses_existing_reusable_catalog_but_rejects_new_catalog_writes(self):
         run_query = AsyncMock(return_value="[]")
         tools = build_pipeline_editor_tools(
@@ -61,6 +82,7 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
             try:
                 async def exercise():
                     workspace = ""
+                    created_workspaces = []
 
                     async def run_query(query, query_type, **kwargs):
                         _validate_workspace_cypher(query)
@@ -69,14 +91,33 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
                     with patch("pipeline_agent.tools.run_neo4j_query", side_effect=run_query):
                         for owner in ("alice", "bob"):
                             workspace = f"regression-{owner}-{uuid.uuid4()}"
+                            created_workspaces.append(workspace)
                             create_step = next(tool for tool in build_pipeline_editor_tools() if tool.__name__ == "create_step")
-                            for kind, label in (("source", "Audio upload"), ("task", "Transcription"), ("task", "Sentiment"), ("destination", "JSON output")):
-                                await create_step(json.dumps({"type": kind, "label": f"{owner}: {label}"}))
+                            for index, (kind, label) in enumerate((("source", "Audio upload"), ("task", "Transcription"), ("task", "Sentiment"), ("destination", "JSON output"))):
+                                await create_step(json.dumps({
+                                    "type": kind, "label": f"{owner}: {label}",
+                                    **({"after_flow_id": str(index)} if index else {}),
+                                }))
                             rows = tx.run(_scope_cypher("MATCH (p:PIPELINE)-[:HAS_STEP]->(s:STEP) RETURN s.label AS label", workspace)).data()
                             self.assertEqual(len(rows), 4)
                             self.assertTrue(all(row["label"].startswith(owner + ":") for row in rows))
                             edges = tx.run(_scope_cypher("MATCH (s:STEP)-[r:FLOWS_TO]->(t:STEP) RETURN count(r) AS count", workspace)).single()
                             self.assertEqual(edges["count"], 3)
+                            tools = {tool.__name__: tool for tool in build_pipeline_editor_tools()}
+                            for index, label in enumerate(("Entity Recognition", "Anonymization")):
+                                await tools["insert_step"](json.dumps({
+                                    "type": "task", "label": f"{owner}: {label}",
+                                    "after_flow_id": "2" if index == 0 else "5",
+                                    "before_flow_id": "3",
+                                }))
+                            rows = tx.run(_scope_cypher("MATCH (s:STEP) RETURN count(s) AS count", workspace)).single()
+                            self.assertEqual(rows["count"], 6)
+                            edges = tx.run(_scope_cypher("MATCH (s:STEP)-[r:FLOWS_TO]->(t:STEP) RETURN count(r) AS count", workspace)).single()
+                            self.assertEqual(edges["count"], 5)
+                        await tools["delete_all_steps"]("{}")
+                        self.assertEqual(tx.run(_scope_cypher("MATCH (s:STEP) RETURN count(s) AS count", workspace)).single()["count"], 0)
+                        alice_workspace = tx.run(_scope_cypher("MATCH (s:STEP) RETURN count(s) AS count", created_workspaces[0])).single()
+                        self.assertEqual(alice_workspace["count"], 6)
                 asyncio.run(exercise())
             finally:
                 tx.rollback()

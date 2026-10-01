@@ -54,3 +54,23 @@ describe('run result presentation', () => {
     expect(formatOutputSize(null)).toBe('');
   });
 });
+
+it('explains artifact boundary failures without hiding the connection', () => {
+  const message = 'Artifact contract violation at transcription: missing transcript.json';
+  const result = presentRunFailure(message);
+  expect(result.message).toBe(message);
+  expect(result.hint).toContain('declared artifact contract');
+});
+
+import { isWaitingForExecution, presentRunPhase } from './runPresentation';
+import type { PipelineRunRecord } from './pipelineRuns';
+it('shows a waiting worker as queued even if the lifecycle status is running', () => {
+  const run = { status: 'running', progress: { phase: 'waiting_for_capacity', queue_position: 12 } } as PipelineRunRecord;
+  expect(isWaitingForExecution(run)).toBe(true);
+  expect(presentRunPhase(run)).toBe('Queued');
+  run.progress = { phase: 'prefetching_models', admitted_at: '2026-10-01T12:00:00Z' };
+  expect(isWaitingForExecution(run)).toBe(false);
+  expect(presentRunPhase(run)).toBe('Loading models');
+  run.status = 'cancelled';
+  expect(presentRunPhase(run)).toBe('Cancelled');
+});

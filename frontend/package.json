@@ -15,6 +15,7 @@
     "test:e2e": "playwright test",
     "stress:users": "node loadtest/create-users.mjs",
     "stress": "node loadtest/run.mjs",
+    "stress:reset": "node loadtest/reset-workspaces.mjs",
     "test:stress": "node --test loadtest/tests/*.test.mjs"
   },
   "dependencies": {

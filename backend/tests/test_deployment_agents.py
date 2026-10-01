@@ -82,7 +82,7 @@ class DeploymentAgentsTest(unittest.TestCase):
         storage_files = {item["filename"]: item for item in storage_artifact["files"]}
         self.assertIn("minio", storage_files["requirements.txt"]["content"])
         self.assertEqual(
-            [{"name": "input_artifacts", "kind": "artifact"}],
+            [],
             storage_artifact["data_contract"]["inputs"],
         )
 
@@ -273,7 +273,7 @@ class DeploymentAgentsTest(unittest.TestCase):
                         "label": "Risk Threshold Check",
                         "type": "flow",
                         "template_label": "Condition",
-                        "param": {"expression": "value.risk_score > 0.8"},
+                        "param": {"expression": "value.risk_score > 0.8", "output_artifact": {"name": "risk", "filename": "risk.json", "kind": "json", "format": "json", "representation": "file"}},
                     },
                 },
                 {

@@ -16,6 +16,11 @@ import { cn } from '@/lib/utils';
 import { AssistantMessageContent } from './AssistantMessageContent';
 
 type ChatPanelProps = {
+  canSend?: boolean;
+  historyError?: string;
+  hasOlder?: boolean;
+  loadingOlder?: boolean;
+  onLoadOlder?: () => void;
   activeConfig: ChatbotConfig;
   conversation: ChatMessage[];
   conversationEndRef: React.RefObject<HTMLDivElement>;
@@ -34,6 +39,11 @@ type ChatPanelProps = {
 };
 
 export const ChatPanel = ({
+  canSend = true,
+  historyError = '',
+  hasOlder = false,
+  loadingOlder = false,
+  onLoadOlder,
   activeConfig,
   conversation,
   conversationEndRef,
@@ -135,13 +145,17 @@ export const ChatPanel = ({
         </div>
       </div>
 
+      {historyError && <p role="alert" className="px-3 py-2 text-xs text-amber-600">{historyError}</p>}
       <div className="flex min-h-0 flex-1 flex-col">
         <ScrollArea className="min-h-0 flex-1">
           {hasConversation ? (
             <div className="space-y-4 px-3 py-3">
+              {hasOlder && <Button variant="outline" size="sm" onClick={onLoadOlder} disabled={loadingOlder}>
+                {loadingOlder ? 'Loading…' : 'Load older messages'}
+              </Button>}
               {conversation.map((msg, index) => (
                 <div
-                  key={index}
+                  key={msg.id || index}
                   className={cn("flex", msg.role === 'user' ? "justify-end" : "justify-start")}
                 >
                   <div className="max-w-[92%] space-y-1.5">
@@ -181,6 +195,9 @@ export const ChatPanel = ({
                           {msg.graphProposalStatus === 'discarded' && 'Proposal discarded · canvas unchanged'}
                         </div>
                       )}
+                      {(msg.status === 'failed' || msg.status === 'cancelled') && <p className="mb-1 text-xs text-muted-foreground">
+                        {msg.status === 'failed' ? 'Request failed' : 'Stopped'}
+                      </p>}
                       {msg.role === 'assistant' ? (
                         <AssistantMessageContent
                           content={sanitizeAssistantMessage(msg.content)}
@@ -258,7 +275,7 @@ export const ChatPanel = ({
             <div className="mt-2 flex items-center justify-end border-t border-border pt-2">
               <Button
                 onClick={isProcessing ? onStopProcessing : onSendMessage}
-                disabled={!isProcessing && !userInput.trim()}
+                disabled={!isProcessing && (!canSend || !userInput.trim())}
                 className={cn(
                   "h-9 rounded-xl px-3.5 font-semibold hover:opacity-95",
                   isProcessing

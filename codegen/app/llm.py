@@ -200,8 +200,11 @@ PEP 508 strings), outputs (array), implementation_plan (object), and notes
 main.py in a standard workspace. The program must read upstream files directly
 from PIPELINE_INPUT_DIR and write every downstream artifact directly beneath
 PIPELINE_OUTPUT_DIR. Port names never create implicit workspace directories.
-Files written there are the complete hand-off to downstream nodes; do not
-depend on metadata files.
+Use the input descriptors in INLUMEN_INPUT_MANIFEST to open their explicit paths.
+There is exactly one descriptor per incoming connection, identified by
+consumer target_port and declared artifact name or filename. Runtime connection_id and source_node are diagnostic identities; do not hard-code their graph-specific values. Never discover inputs by scanning a directory or
+selecting the first matching file. Only the declared output artifact is handed
+to the next step; platform metadata lives outside it.
 Regular node
 parameters are available under their exact safe parameter names (for example,
 QUESTION), as JSON in PIPELINE_PARAMS_JSON, and individually as
@@ -209,9 +212,8 @@ PIPELINE_PARAM_<NAME>. Preserve deliberate artifact-relative paths but do not
 depend on the source connector or an orchestration port name. Sensitive
 parameter names are listed in target_node.secret_parameters; their values are
 available only from the corresponding PIPELINE_PARAM_<NAME> environment variable
-at runtime. Never print, persist, or return a sensitive value. Files themselves
-are the complete hand-off. Write artifacts beneath output_dir, optionally
-grouped by output port. Use only allowed packages and honor reviewed
+at runtime. Never print, persist, or return a sensitive value. Publish exactly one declared file or directory bundle beneath PIPELINE_OUTPUT_DIR.
+Keep scratch files in PIPELINE_WORK_DIR. Never group results by orchestration port. Use only allowed packages and honor reviewed
 implementation constraints. Do not use subprocess, eval, exec, os.system, or
 undeclared network access."""
 
@@ -223,7 +225,12 @@ exactly one JSON object with pipeline_py (string), requirements (array of PEP
 Dockerfile. Define every requested node function exactly once with signature
 (inputs, output_dir, context). Functions must be synchronous, must not call
 other node functions, must materialize their declared artifacts in output_dir,
-and must return a list of output descriptor dictionaries. Top-level code may
+and must return a list containing exactly one declared output descriptor (terminal
+destinations may return no artifact). A directory bundle is one descriptor.
+Inputs are explicitly bound by the runtime. Select by consumer target_port and,
+when needed, declared artifact name or filename. Never hard-code graph-specific
+connection_id or source_node values; they are diagnostic identities. Select the bound
+input; never scan for the first matching file or assume a bundle is multiple inputs. Top-level code may
 contain imports, literal constants, classes, and function definitions only.
 Every input is a descriptor dictionary. Read its `path` value; never assume a
 descriptor `filename` exists in the process working directory and never open a
@@ -231,6 +238,9 @@ hard-coded input filename directly. Read node parameters from
 context["parameters"]. Boundary source and destination functions
 may be replaced by compiler-owned adapters, while task functions remain the
 coding model's implementation.
+For transcript JSON, transcript is the canonical downstream text field. Transformations
+that change text must keep any text aliases and segment text consistent or remove stale
+aliases. Never let consumers select an original alias in preference to a transformed transcript.
 Keep the module concise and return complete, valid Python: close every string,
 bracket, call, and function body. The requirements array may contain only
 package strings copied from pipeline_plan.required_packages or the supplied

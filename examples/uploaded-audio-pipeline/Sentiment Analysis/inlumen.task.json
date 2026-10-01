@@ -1,0 +1,34 @@
+{
+  "execution": {
+    "adapter": "filesystem"
+  },
+  "data_contract": {
+    "contract_id": "inlumen.generic-node@2",
+    "version": "2",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "sentiment",
+        "filename": "sentiment.json",
+        "representation": "file",
+        "kind": "json",
+        "format": "json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "text",
+            "sentiment"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "sentiment": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    ]
+  }
+}

@@ -1,6 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { positiveInteger, validatedURL, validateAccounts, validateSessions, validateGraph, summarize, safeFailure } from '../core.mjs';
+import { positiveInteger, validatedURL, validateAccounts, validateSessions, validateGraph, graphRevision, summarize, safeFailure } from '../core.mjs';
+
+test('uses application revisions across compression proxies without accepting arbitrary validators', () => {
+  assert.equal(graphRevision({ etag: 'W/"41"', 'x-inlumen-graph-revision': '42' }), '"42"');
+  assert.equal(graphRevision({ etag: 'W/"41"' }), '"41"');
+  assert.equal(graphRevision({ etag: '"41"' }), '"41"');
+  for (const headers of [{}, { etag: '"arbitrary"' }, { etag: 'W/41' }, { etag: '"41"', 'x-inlumen-graph-revision': 'bad' }]) {
+    assert.throws(() => graphRevision(headers));
+  }
+});
 
 test('rejects unsafe URLs, duplicate users and invalid counts', () => {
   assert.equal(validatedURL('https://app.example.com/'), 'https://app.example.com');

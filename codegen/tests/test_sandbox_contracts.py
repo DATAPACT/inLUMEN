@@ -288,8 +288,7 @@ def test_validate_output_shape_rejects_missing_nested_citation_source(tmp_path) 
     )
 
     assert (
-        "JSON output answer key citations[0] is missing required keys: source"
-        in errors
+        "JSON output answer key citations[0] is missing required keys: source" in errors
     )
 
 
@@ -339,3 +338,31 @@ def test_sample_rows_for_descriptor_reads_json_object(tmp_path) -> None:
     )
 
     assert rows == [{"metrics": {"accuracy": 1}, "target_column": "label"}]
+
+
+def test_bundle_handoff_preserves_identity_and_contents(tmp_path):
+    bundle = tmp_path / "original"
+    bundle.mkdir()
+    (bundle / "weights.bin").write_bytes(b"weights")
+    (bundle / "settings.json").write_text("{}")
+    descriptor = FileDescriptor(
+        filename="model",
+        kind="directory",
+        representation="directory",
+        source_node="train",
+        connection_id="train->predict",
+        target_port="model",
+        sample=FileSample(text=str(bundle)),
+    )
+    outputs = persist_descriptors_for_handoff([descriptor], tmp_path / "handoff")
+    inputs_dir = tmp_path / "inputs"
+    inputs_dir.mkdir()
+    manifest = tmp_path / "inputs.json"
+    write_sample_inputs(manifest, inputs_dir, outputs)
+    entries = json.loads(manifest.read_text())["inputs"]
+    assert len(entries) == 1
+    assert entries[0]["connection_id"] == "train->predict"
+    assert entries[0]["source_node"] == "train"
+    assert entries[0]["representation"] == "directory"
+    assert (inputs_dir / "model" / "weights.bin").read_bytes() == b"weights"
+    assert (inputs_dir / "model" / "settings.json").read_text() == "{}"

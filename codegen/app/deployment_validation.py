@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import docker
-from docker.errors import DockerException
+from docker.errors import DockerException, ImageNotFound
 from requests.exceptions import ReadTimeout
 
 from .resource_policy import (
@@ -37,10 +37,10 @@ except ImportError:  # pragma: no cover - service image installs PyYAML.
 
 
 SUPPORTED_BUNDLE_MANIFEST_VERSIONS = frozenset(
-    {"inlumen.deployment-bundle@1", "inlumen.deployment-bundle@2"}
+    {"inlumen.deployment-bundle@1", "inlumen.deployment-bundle@2", "inlumen.deployment-bundle@3"}
 )
 SUPPORTED_RUN_SPEC_VERSIONS = frozenset(
-    {"inlumen.run-spec@1", "inlumen.run-spec@2", "inlumen.run-spec@3"}
+    {"inlumen.run-spec@1", "inlumen.run-spec@2", "inlumen.run-spec@3", "inlumen.run-spec@4"}
 )
 
 _ACTIVE_DEPLOYMENT_PROCESSES: dict[str, subprocess.Popen[str]] = {}
@@ -118,6 +118,12 @@ def deployment_execution_progress(execution_id: str) -> dict[str, Any]:
             }
         )
     payload["observed_at"] = _utc_now_iso()
+    queue = RESOURCE_ADMISSION.snapshot(execution_id)
+    payload["queue_position"] = queue["queue_position"]
+    if queue["queue_position"] is not None:
+        payload.update(phase="waiting_for_capacity", message="Waiting for execution capacity. Your run will start automatically.")
+        # Waiting jobs have no containers. Avoid inspecting Docker for every waiter.
+        return payload
     client = None
     try:
         client = docker.from_env()
@@ -167,21 +173,17 @@ def _isolated_runtime_environment(
         "TMPDIR": "/runtime/tmp",
         "HF_HOME": "/runtime/huggingface",
         "HF_HUB_CACHE": "/runtime/huggingface/hub",
+        "HF_HUB_OFFLINE": str((runtime_secrets or {}).get("HF_HUB_OFFLINE", "0")),
+        "TRANSFORMERS_OFFLINE": str((runtime_secrets or {}).get("TRANSFORMERS_OFFLINE", "0")),
+        "HF_HUB_DISABLE_XET": str((runtime_secrets or {}).get("HF_HUB_DISABLE_XET", "1")),
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONUNBUFFERED": "1",
     }
     if has_models:
-        # Offline Hub lookups must see the prefetched snapshots. Other library
-        # caches remain writable under HF_HOME; reviewed adapters also resolve
-        # their snapshots directly through INLUMEN_MODEL_ROOT.
-        environment.update(
-            {
-                "HF_HUB_CACHE": "/models/huggingface",
-                "HF_HUB_OFFLINE": "1",
-                "TRANSFORMERS_OFFLINE": "1",
-                "INLUMEN_MODEL_ROOT": "/models",
-            }
-        )
+        # Reviewed adapters resolve pinned snapshots directly from this read-only
+        # store. Its presence does not mean every uploaded Task's model is cached.
+        # Keep Hub downloads enabled and pointed at the writable job cache.
+        environment["INLUMEN_MODEL_ROOT"] = "/models"
     return environment
 
 
@@ -539,6 +541,7 @@ def _isolated_dagster_execution(
             resource_memory_bytes=allocation["memory_bytes"],
             resource_reason=allocation["reason"],
             queue_position=None,
+            admitted_at=_utc_now_iso(),
         )
         snapshot_digest = hashlib.sha256()
         for snapshot_file in sorted(
@@ -555,14 +558,29 @@ def _isolated_dagster_execution(
             snapshot_digest.update(b"\0")
         snapshot_hash = snapshot_digest.hexdigest()[:20]
         image_tag = f"inlumen-dagster-run:{snapshot_hash}"
-        image, build_logs = client.images.build(
-            path=str(bundle_root),
-            dockerfile=dockerfile_relative,
-            tag=image_tag,
-            rm=True,
-            forcerm=True,
-            labels={"inlumen.pipeline.snapshot": snapshot_hash},
-        )
+        image_started = time.monotonic()
+        try:
+            image = client.images.get(image_tag)
+            if image.attrs.get("Config", {}).get("Labels", {}).get("inlumen.pipeline.snapshot") != snapshot_hash:
+                image = None
+        except ImageNotFound:
+            image = None
+        image_cache_hit = image is not None
+        build_logs = []
+        if image is None:
+            image, build_logs = client.images.build(
+                path=str(bundle_root),
+                dockerfile=dockerfile_relative,
+                tag=image_tag,
+                rm=True,
+                forcerm=True,
+                container_limits={
+                    "memory": int(allocation["memory_bytes"]),
+                    "memswap": int(allocation["memory_bytes"]),
+                    "cpusetcpus": ",".join(str(cpu) for cpu in range(int(allocation["cpu"]))),
+                },
+                labels={"inlumen.pipeline.snapshot": snapshot_hash},
+            )
         build_output = "\n".join(
             str(item.get("stream") or item.get("error") or "").rstrip()
             for item in build_logs
@@ -572,6 +590,8 @@ def _isolated_dagster_execution(
         report["steps"].append(
             {
                 "name": "image_build",
+                "duration_seconds": round(time.monotonic() - image_started, 3),
+                "cache_hit": image_cache_hit,
                 "command": ["docker", "build", "-f", dockerfile_relative, "."],
                 "returncode": 0,
                 "output": build_output[-12000:],
@@ -589,6 +609,7 @@ def _isolated_dagster_execution(
         model_volume += "-ws-" + hashlib.sha256(EXECUTION_WORKSPACE.get().encode()).hexdigest()[:20]
         has_models = model_requirements.is_file() and model_prefetch.is_file()
         if has_models:
+            model_started = time.monotonic()
             _set_deployment_progress(
                 execution_id,
                 "prefetching_models",
@@ -622,6 +643,7 @@ def _isolated_dagster_execution(
                 security_opt=["no-new-privileges"],
                 pids_limit=256,
                 mem_limit=int(allocation["memory_bytes"]),
+                memswap_limit=int(allocation["memory_bytes"]),
                 nano_cpus=int(allocation["cpu"]) * 1_000_000_000,
                 tmpfs={"/tmp": "rw,noexec,nosuid,size=256m"},
                 environment=prefetch_environment,
@@ -647,6 +669,7 @@ def _isolated_dagster_execution(
             report["steps"].append(
                 {
                     "name": "model_prefetch",
+                    "duration_seconds": round(time.monotonic() - model_started, 3),
                     "command": [
                         "python",
                         "/workspace/dagster/model_prefetch.py",
@@ -670,6 +693,10 @@ def _isolated_dagster_execution(
             runtime_secrets,
             has_models=has_models,
         )
+        environment.update({
+            name: str(allocation["cpu"])
+            for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS")
+        })
         execution_volumes = {
             str(runtime_dir.resolve()): {
                 "bind": "/runtime",
@@ -705,6 +732,7 @@ def _isolated_dagster_execution(
             security_opt=["no-new-privileges"],
             pids_limit=256,
             mem_limit=int(allocation["memory_bytes"]),
+            memswap_limit=int(allocation["memory_bytes"]),
             nano_cpus=int(allocation["cpu"]) * 1_000_000_000,
             tmpfs={"/tmp": "rw,noexec,nosuid,size=256m,mode=1777"},
             environment=environment,
@@ -1123,19 +1151,20 @@ def _validate_bundle_structure(
             if isinstance(run_spec.get("artifact_contract"), dict)
             else {}
         )
-        if manifest_version == "inlumen.deployment-bundle@2":
-            if run_spec_version != "inlumen.run-spec@3":
+        if manifest_version in {"inlumen.deployment-bundle@2", "inlumen.deployment-bundle@3"}:
+            expected_run = "inlumen.run-spec@4" if manifest_version.endswith("@3") else "inlumen.run-spec@3"
+            expected_contract = "inlumen.artifact-contract@4" if manifest_version.endswith("@3") else "inlumen.artifact-contract@3"
+            if run_spec_version != expected_run:
                 errors.append(
-                    "inlumen.deployment-bundle@2 requires inlumen.run-spec@3."
+                    f"{manifest_version} requires {expected_run}."
                 )
             for location, contract in (
                 ("bundle-manifest.json", manifest_artifact_contract),
                 ("run-spec.json", run_artifact_contract),
             ):
-                if contract.get("schema_version") != "inlumen.artifact-contract@3":
+                if contract.get("schema_version") != expected_contract:
                     errors.append(
-                        f"{location} must use inlumen.artifact-contract@3 for "
-                        "inlumen.deployment-bundle@2."
+                        f"{location} must use {expected_contract} for {manifest_version}."
                     )
                 if contract.get("port_namespaced") is not False:
                     errors.append(

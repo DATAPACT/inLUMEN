@@ -355,7 +355,7 @@ def filesystem_shell_component_source() -> str:
     the small runtime implementation is emitted as source rather than imported
     from this module.
     """
-    return r'''import hashlib
+    return Path(__file__).with_name('artifact_runtime.py').read_text() + '\n' + r'''import hashlib
 import json
 import mimetypes
 import os
@@ -587,6 +587,8 @@ def _validate_output_ports(output_dir, required_ports):
 
 class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
     asset_key: str
+    data_contract: dict = {}
+    artifact_bindings: list[dict] = []
     script_path: str
     upstream_assets: list[str] = []
     input_dirs: list[str] = []
@@ -624,7 +626,23 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
                     source_dir = source_dir / run_scope
                 binding["source_dir"] = str(source_dir)
                 bindings.append(binding)
-            if bindings:
+            strict = self.data_contract.get("contract_id") == CONTRACT_ID
+            if strict and output_dir.exists():
+                shutil.rmtree(output_dir)
+            bound_inputs = []
+            if strict and self.artifact_bindings:
+                bound_bindings = []
+                for raw in self.artifact_bindings:
+                    binding = dict(raw)
+                    root = resolve(binding["source_dir"])
+                    if binding.get("run_scoped", True):
+                        root = root / run_scope
+                    if binding.get("source_port"):
+                        root = root / binding["source_port"]
+                    binding["source_dir"] = str(root)
+                    bound_bindings.append(binding)
+                bound_inputs = stage_bound_artifacts(bound_bindings, input_dir)
+            elif bindings:
                 _stage_input_bindings(bindings, input_dir)
             else:
                 _stage_inputs([resolve(value) for value in self.input_dirs], input_dir)
@@ -632,7 +650,20 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
                 shutil.rmtree(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
 
+            published_dir = output_dir
+            work_dir = input_dir.parent.parent / "runtime" / run_scope
+            if strict:
+                if work_dir.exists():
+                    shutil.rmtree(work_dir)
+                work_dir.mkdir(parents=True, exist_ok=True)
+                output_dir = work_dir / "publish"
+                output_dir.mkdir()
+                if not self.artifact_bindings:
+                    bound_inputs = [validate_artifact(input_dir, item) for item in self.data_contract.get("inputs", [])]
             env = dict(os.environ)
+            if strict:
+                env.update(prepare_node_environment(input_dir, output_dir, work_dir,
+                    bound_inputs, self.data_contract, self.parameters))
             env.update({
                 "PIPELINE_INPUT_DIR": str(input_dir.resolve()),
                 "PIPELINE_OUTPUT_DIR": str(output_dir.resolve()),
@@ -686,6 +717,11 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
                     + ", ".join(sorted(missing_required))
                 )
 
+            if strict:
+                context.log.info("Artifact input bindings: " + json.dumps([
+                    {key: item.get(key) for key in ("source_node", "connection_id", "filename")}
+                    for item in bound_inputs
+                ], sort_keys=True))
             started_at = time.monotonic()
             process = subprocess.Popen(
                 [sys.executable, str(resolve(self.script_path)), *self.arguments],
@@ -730,6 +766,19 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
                     f"{process.returncode}:\\n{diagnostic}"
                 )
             reader.join(timeout=1.0)
+            if strict:
+                declarations = self.data_contract.get("outputs", [])
+                receipt = work_dir / "outputs.json"
+                actual = json.loads(receipt.read_text()).get("outputs") if receipt.is_file() else None
+                if declarations or self.output_ports:
+                    validate_result(output_dir, declarations, actual, producer=self.asset_key)
+                port_root = published_dir / self.output_ports[0] if self.output_ports else published_dir / "result"
+                publish_artifact_directory(output_dir, port_root)
+                artifacts = _artifacts(published_dir)
+                return dg.MaterializeResult(metadata={
+                    "input_dir": str(input_dir), "output_dir": str(published_dir),
+                    "artifact_count": len(declarations), "artifacts": dg.MetadataValue.json(artifacts),
+                })
             moved = (
                 _normalize_single_output_port(output_dir, self.output_ports)
                 if self.output_ports

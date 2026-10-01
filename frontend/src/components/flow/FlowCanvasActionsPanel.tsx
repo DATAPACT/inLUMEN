@@ -151,13 +151,13 @@ export const FlowCanvasActionsPanel = ({
             ? "flex h-8 items-center gap-2 border-amber-500/60 bg-card/90 px-3 text-amber-500 shadow-lg backdrop-blur-md hover:bg-amber-500/10 hover:text-amber-500"
             : "flex h-8 items-center gap-2 border-emerald-500/50 bg-card/90 px-3 text-emerald-500 shadow-lg backdrop-blur-md hover:bg-emerald-500/10 hover:text-emerald-500"}
         onClick={onValidationClick}
-        title="Open pipeline validation"
+        title="Graph checks only. Validate Task packages and run the pipeline to verify execution."
         aria-label="Open pipeline validation"
       >
         {validationErrors > 0 || validationWarnings > 0
           ? <AlertTriangle className="h-3.5 w-3.5" />
           : <ShieldCheck className="h-3.5 w-3.5" />}
-        <span className="font-medium">Validation</span>
+        <span className="font-medium">Graph validation</span>
         <span>
           {validationErrors > 0
             ? `${validationErrors} error${validationErrors === 1 ? "" : "s"}${validationWarnings > 0 ? ` · ${validationWarnings} warning${validationWarnings === 1 ? "" : "s"}` : ""}`

@@ -1,3 +1,6 @@
+import JSZip from 'jszip';
+import { checkTaskPackages, importTaskPackages } from '@/features/flow/taskPackages';
+import { TaskPackageHelp } from '@/components/TaskPackageHelp';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ReusablePipelineViewerDialog } from '@/components/subpipeline/ReusablePipelineViewerDialog';
 import { Textarea } from "@/components/ui/textarea";
@@ -94,7 +97,7 @@ import {
 type NodeParamMap = Record<string, unknown>;
 const FLOW_PARAMETER_KEYS = new Set(["expression", "max_concurrency", "failure_policy"]);
 const USER_PARAMETER_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
-const USER_CODE_FILE_PATTERN = /^(?:main\.py|requirements\.txt)$/;
+const USER_CODE_FILE_PATTERN = /^[^/\\]+$/;
 
 export type PropertyNodeData = {
   label?: string;
@@ -665,24 +668,23 @@ export function PropertiesPanel({
     const picked = e.target.files ? Array.from(e.target.files) : [];
     if (picked.length === 0) return;
     if (role === "code") {
-      const invalid = picked.find((file) => !USER_CODE_FILE_PATTERN.test(file.name));
-      if (invalid) {
-        toast.error(`Could not upload ${invalid.name}`, {
-          description: "Upload main.py and, only when needed, requirements.txt.",
-        });
-        e.target.value = "";
-        return;
-      }
-      const incorrectlyCasedEntrypoint = picked.find((file) => (
-        file.name.toLowerCase() === "main.py" && file.name !== "main.py"
-      ));
-      if (incorrectlyCasedEntrypoint) {
-        toast.error("Rename the entrypoint to main.py", {
-          description: "The Python entrypoint filename is case-sensitive.",
-        });
-        e.target.value = "";
-        return;
-      }
+      try {
+        const archive = new JSZip();
+        for (const file of picked) archive.file(`Task/${file.name}`, file);
+        const bundle = new File([await archive.generateAsync({type:'blob'})], 'task.zip', {type:'application/zip'});
+        const report = await checkTaskPackages(bundle, {Task: selectedNode.id});
+        if (!report.valid) throw new Error(report.errors.map(error => error.message).join('\n'));
+        const result = await importTaskPackages(bundle, report);
+        const attached = result.packages[0];
+        if (latestSelectedNodeRef.current?.id === selectedNode.id) {
+          setFiles(attached.files);
+          pushNodeUpdate({files: attached.files, generated_artifact: attached.artifact});
+        }
+        toast.success('Package validated and imported', {description: 'The complete package replaced previous code. Run it to verify execution.'});
+      } catch (error) {
+        toast.error('Package was not replaced', {description: error instanceof Error ? error.message : 'Validation failed'});
+      } finally { e.target.value = ''; }
+      return;
     }
     const existing = files;
     // Map filename -> index in existing array
@@ -1054,7 +1056,6 @@ export function PropertiesPanel({
         ref={inputRef}
         type="file"
         multiple
-        accept={role === "code" ? ".py,.pyi,.txt,.json,.toml,.yaml,.yml,.sql,.sh" : undefined}
         onChange={(event) => { void handleFileUpload(event, role); }}
         className="hidden"
       />
@@ -1066,7 +1067,7 @@ export function PropertiesPanel({
         className="w-full"
       >
         <Upload className="mr-2 h-4 w-4" />
-        {role === "code" ? "Upload your Python code" : `Upload ${attachmentLabel} Files`}
+        {role === "code" ? "Upload Task package files" : `Upload ${attachmentLabel} Files`}
       </Button>
 
       {indexedFiles.length === 0 ? (
@@ -1138,7 +1139,7 @@ export function PropertiesPanel({
       issue.category === "implementation" && issue.severity === "error"
     )),
   });
-  const implementationStatusLabel = {
+  const implementationStatusLabel = selectedNode?.data.generated_artifact?.status === "package_validated" ? "Package validated" : {
     missing: "Not added",
     generating: "Generating",
     current: "Current",
@@ -1555,7 +1556,7 @@ export function PropertiesPanel({
               <InspectorSection
                 id="inspector-implementation"
                 title="Implementation"
-                description="Generate the code with AI or upload main.py with an optional requirements.txt file."
+                description="Generate a Task package or upload main.py and inlumen.task.json with optional dependencies and helper files."
                 status={implementationStatus === "invalid" ? "error" : sectionStatus("implementation")}
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1590,14 +1591,7 @@ export function PropertiesPanel({
                   </p>
                 )}
                 {renderFileArea("code", indexedCodeFiles, codeFileInputRef)}
-                <p className="text-[11px] text-muted-foreground">
-                  The only required file is <code className="rounded bg-muted px-1">main.py</code>.
-                  Add <code className="rounded bg-muted px-1">requirements.txt</code> only when third-party packages are needed.
-                </p>
-                <div className="rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
-                  <p className="font-medium text-foreground">Task runtime contract</p>
-                  <p className="mt-1">Your code runs with a flat standard workspace. Upstream files are placed directly in <code className="rounded bg-background px-1">PIPELINE_INPUT_DIR</code>; write every result directly to <code className="rounded bg-background px-1">PIPELINE_OUTPUT_DIR</code>. Port names never create implicit subdirectories.</p>
-                </div>
+                <TaskPackageHelp />
               </InspectorSection>
             )}
 

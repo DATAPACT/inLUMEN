@@ -95,50 +95,17 @@ def input_boundary_function_source(node: dict[str, Any]) -> str:
                 )
             output_path = Path(output_dir) / str(output["filename"])
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            if (
-                len(readable) > 1
-                and (
-                    str(output.get("kind") or "") == "json"
-                    or str(output.get("format") or "") == "json"
-                )
-            ):
-                package = {{"files": []}}
-                json_documents = []
+            if output.get("representation") == "directory" or output.get("kind") == "directory":
+                output_path.mkdir(parents=True, exist_ok=True)
                 for item, path in readable:
-                    filename = str(item.get("filename") or path.name)
-                    kind = str(item.get("kind") or "binary")
-                    file_format = str(item.get("format") or path.suffix.lstrip(".")).lower()
-                    package["files"].append({{
-                        "filename": filename,
-                        "kind": kind,
-                        "format": file_format,
-                        "size_bytes": path.stat().st_size,
-                    }})
-                    if file_format == "pdf":
-                        package.setdefault(
-                            "pdf_base64",
-                            base64.b64encode(path.read_bytes()).decode("ascii"),
-                        )
-                        package.setdefault("source", filename)
-                    elif kind == "json" or file_format == "json":
-                        value = json.loads(path.read_text(encoding="utf-8"))
-                        json_documents.append({{"filename": filename, "data": value}})
-                        if isinstance(value, dict):
-                            for key, nested_value in value.items():
-                                package.setdefault(str(key), nested_value)
-                    elif kind == "text" or file_format in {{"txt", "md"}}:
-                        package.setdefault("text", path.read_text(encoding="utf-8"))
-                    else:
-                        package.setdefault(
-                            "content_base64",
-                            base64.b64encode(path.read_bytes()).decode("ascii"),
-                        )
-                if json_documents:
-                    package["json_documents"] = json_documents
-                output_path.write_text(
-                    json.dumps(package, indent=2, sort_keys=True) + "\\n",
-                    encoding="utf-8",
-                )
+                    relative = Path(str(item.get("filename") or path.name))
+                    if relative.is_absolute() or ".." in relative.parts:
+                        raise ValueError("Unsafe bundle member path")
+                    target = output_path / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, target)
+            elif len(readable) != 1:
+                raise ValueError("Source requires one file or an explicitly declared directory bundle")
             else:
                 shutil.copy2(readable[0][1], output_path)
             return [{{**output, "path": str(output_path)}}]
@@ -215,7 +182,7 @@ def output_boundary_function_source(node: dict[str, Any]) -> str:
                         "The destination adapter did not receive a readable artifact."
                     )
                 shutil.copy2(source_path, output_path)
-            return [{{**output, "path": str(output_path)}}]
+            return [{{**output, "path": str(output_path)}}] if {bool(node.get("outputs"))!r} else []
         """
     ).strip()
 
@@ -936,7 +903,11 @@ def roberta_sentiment_function_source(node: dict[str, Any]) -> str:
                 if isinstance(value, str):
                     return value
                 if isinstance(value, dict):
-                    for key in ("text", "transcript", "content"):
+                    if "transcript" in value:
+                        if not isinstance(value["transcript"], str):
+                            raise ValueError("Canonical transcript must be a string")
+                        return value["transcript"]
+                    for key in ("text", "content"):
                         candidate = value.get(key)
                         if isinstance(candidate, str) and candidate.strip():
                             return candidate
@@ -952,24 +923,13 @@ def roberta_sentiment_function_source(node: dict[str, Any]) -> str:
                     )
                 return ""
 
-            transcript = ""
-            source_path = None
-            for item in inputs:
-                if not isinstance(item, dict):
-                    continue
-                path = Path(str(item.get("path") or ""))
-                if not path.is_file():
-                    continue
-                try:
-                    content = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                    continue
-                transcript = extract_text(content).strip()
-                if transcript:
-                    source_path = path
-                    break
+            if len(inputs) != 1 or not isinstance(inputs[0], dict):
+                raise ValueError("Sentiment analysis requires exactly one bound transcript artifact.")
+            source_path = Path(str(inputs[0].get("path") or ""))
+            content = json.loads(source_path.read_text(encoding="utf-8"))
+            transcript = extract_text(content).strip()
             if not transcript:
-                raise ValueError("No non-empty transcript was supplied to sentiment analysis.")
+                raise ValueError("Bound transcript artifact contains no non-empty text.")
 
             snapshot_path, model_tree_sha256 = resolve_local_model(
                 model_id,

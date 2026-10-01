@@ -32,7 +32,7 @@ export const apiFetch = (
   if (_workspaceId) headers.set('X-InLumen-Workspace-Id', _workspaceId);
   const path = new URL(url, window.location.origin).pathname;
   const mutation = !['GET', 'HEAD', 'OPTIONS'].includes((init?.method || 'GET').toUpperCase());
-  const graph = /^\/api\/(graph\/|pipeline\/(graph|history\/restore|versions|overview)(\/|$)|reusable-pipelines(\/|$)|nodes\/[^/]+\/files(\/text)?$)/.test(path);
+  const graph = /^\/api\/(graph\/|pipeline\/(task-packages\/import|graph|history\/restore|versions|overview)(\/|$)|reusable-pipelines(\/|$)|nodes\/[^/]+\/files(\/text)?$)/.test(path);
   const send = () => fetch(url, (AUTH_ENABLED && _token) || _workspaceId || headers.has("If-Match") ? { ...init, headers } : init);
   if (mutation && graph) return graphWrite((revision) => {
     const expectedRevision = options.expectedGraphRevision === undefined
@@ -54,7 +54,7 @@ export const apiFetch = (
     } : {}),
     preservesGraph: path === '/api/reusable-pipelines',
     // Rejected files and reusable pipelines belong to their forms; no graph write occurred.
-    validationStatuses: /^\/api\/(nodes\/[^/]+\/files(\/text)?|reusable-pipelines(\/.*)?)$/.test(path) ? [400, 404, 413, 415, 422] : undefined,
+    validationStatuses: path.endsWith('/task-packages/import') ? [400, 404, 413, 415, 422] : /^\/api\/(nodes\/[^/]+\/files(\/text)?|reusable-pipelines(\/.*)?)$/.test(path) ? [400, 404, 413, 415, 422] : undefined,
   });
   return send();
 };

@@ -25,3 +25,4 @@ psycopg[binary]>=3.2.0,<4
 SQLAlchemy>=2.0.36,<3
 gunicorn>=23.0.0,<24
 asgiref>=3.8.0,<4
+jsonschema>=4.23,<5

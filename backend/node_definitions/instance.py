@@ -180,7 +180,7 @@ def definition_data_from_properties(properties: Any) -> dict[str, Any]:
         artifact_hash = str(generated_artifact.get("configuration_hash") or "")
         contract = generated_artifact.get("data_contract")
         contract_version = (
-            str(contract.get("version") or "")
+            str(contract.get("version") or contract.get("contract_id") or "")
             if isinstance(contract, dict)
             else ""
         )
@@ -194,8 +194,9 @@ def definition_data_from_properties(properties: Any) -> dict[str, Any]:
             ),
             contract_version=contract_version,
         )
-        generated_artifact["status"] = (
-            "current" if artifact_hash and artifact_hash == current_hash else "stale"
+        package_validated = generated_artifact.get("status") == "package_validated" and generated_artifact.get("package_digest") and isinstance(contract, dict) and contract.get("contract_id") == "inlumen.generic-node@2"
+        generated_artifact["status"] = "package_validated" if package_validated else (
+            "current" if artifact_hash and artifact_hash == current_hash and isinstance(contract, dict) and contract.get("contract_id") == "inlumen.generic-node@2" else "stale"
         )
         data["generated_artifact"] = generated_artifact
     for property_name, data_name in (

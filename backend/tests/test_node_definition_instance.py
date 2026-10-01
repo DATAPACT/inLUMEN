@@ -152,7 +152,7 @@ class NodeDefinitionInstanceTest(unittest.TestCase):
             implementation=model_plan,
             generator="inlumen-codegen-service",
             generator_version="0.1.0",
-            contract_version="1",
+            contract_version="2",
         )
         properties = {
             "flow_id": "3",
@@ -162,7 +162,7 @@ class NodeDefinitionInstanceTest(unittest.TestCase):
                     "configuration_hash": artifact_hash,
                     "generator": "inlumen-codegen-service",
                     "generator_version": "0.1.0",
-                    "data_contract": {"version": "1"},
+                    "data_contract": {"version": "2", "contract_id": "inlumen.generic-node@2"},
                 }
             ),
         }

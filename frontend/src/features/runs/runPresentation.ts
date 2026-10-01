@@ -1,4 +1,22 @@
-import type { PipelineRunEvent } from '@/features/runs/pipelineRuns';
+import type { PipelineRunEvent, PipelineRunRecord } from '@/features/runs/pipelineRuns';
+
+export const isWaitingForExecution = (run: PipelineRunRecord) =>
+  ['queued', 'preparing', 'running'].includes(run.status)
+  && !run.progress?.admitted_at
+  && ['queued', 'accepted', 'pending', 'selecting_resources', 'waiting_for_capacity'].includes(run.progress?.phase || 'queued');
+
+export const presentRunPhase = (run: PipelineRunRecord) => {
+  if (run.status === 'succeeded') return 'Completed';
+  if (run.status === 'failed' || run.status === 'partial') return 'Failed';
+  if (run.status === 'cancelled') return 'Cancelled';
+  if (run.status === 'cancelling') return 'Cancelling';
+  if (isWaitingForExecution(run)) return 'Queued';
+  if (run.progress?.phase === 'building_runtime') return 'Preparing runtime';
+  if (run.progress?.phase === 'prefetching_models') return 'Loading models';
+  if (run.progress?.active_node_name) return run.progress.active_node_name;
+  if (run.progress?.phase === 'completed') return 'Collecting results';
+  return 'Processing pipeline';
+};
 
 export type RunOutput = Record<string, unknown>;
 
@@ -101,6 +119,12 @@ export const presentRunFailure = (message: string, logs: string[] = []) => {
     };
   }
   const normalized = message.toLowerCase();
+  if (/artifact contract|artifactcontracterror|artifact declaration|incompatible artifact connection/.test(details)) {
+    return {
+      message,
+      hint: 'A step did not satisfy its declared artifact contract. Check the producer and connection named above. Regenerate older task code before starting a new run.',
+    };
+  }
   if (normalized.includes('huggingface') || normalized.includes('cached files')) {
     return { message, hint: 'Model loading failed. Check Technical logs for download, storage, or model-file errors.' };
   }

@@ -4,6 +4,9 @@ import json
 import os
 import time
 import uuid
+import contextvars
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from collections import OrderedDict
 from datetime import UTC, datetime
 from contextlib import asynccontextmanager
@@ -11,7 +14,8 @@ from typing import Annotated, Any
 
 from .request_diagnostics import RequestDiagnosticsMiddleware
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import JSONResponse
 
 from .deployment_validation import (
     cancel_deployment_execution,
@@ -46,7 +50,15 @@ from .security import (
     service_auth_configuration_error,
     workspace_context,
 )
+from .resource_policy import RESOURCE_ADMISSION
 from .validation import validate_generated_files
+
+# These threads wait on bounded resource admission; control traffic uses separate pools.
+DEPLOYMENT_PENDING_LIMIT = int(os.getenv("CODEGEN_EXECUTION_MAX_PENDING_RUNS", "50"))
+if not 1 <= DEPLOYMENT_PENDING_LIMIT <= 100:
+    raise ValueError("CODEGEN_EXECUTION_MAX_PENDING_RUNS must be between 1 and 100")
+DEPLOYMENT_POOL = ThreadPoolExecutor(max_workers=DEPLOYMENT_PENDING_LIMIT, thread_name_prefix="inlumen-execution")
+DEPLOYMENT_TASKS: dict[str, asyncio.Task] = {}
 
 PIPELINE_JOB_STORE = PipelineJobStore(
     os.getenv("DATABASE_URL")
@@ -74,6 +86,10 @@ async def lifespan(_app):
     finally:
         recovery.cancel()
         await asyncio.gather(recovery, return_exceptions=True)
+        pending = list(DEPLOYMENT_TASKS.values())
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 app = FastAPI(
@@ -854,11 +870,14 @@ def validate_node_script(request: ValidateNodeScriptRequest) -> ValidationReport
 async def validate_deployment_bundle_endpoint(
     request: DeploymentBundleValidationRequest,
     workspace_id: Annotated[str, Depends(workspace_context)],
-) -> dict[str, Any]:
+    background: bool = Query(default=False),
+) -> Any:
     """Validate deployment artifacts inside the private codegen service."""
     request = request.model_copy(update={"execution_id": scoped_execution_id(
         request.execution_id or uuid.uuid4().hex, workspace_id
     )})
+    if len(DEPLOYMENT_TASKS) >= DEPLOYMENT_PENDING_LIMIT and EXECUTION_STORE.get(request.execution_id) is None:
+        raise HTTPException(429, "Execution queue is full.", headers={"Retry-After": "5"})
     try:
         fresh = EXECUTION_STORE.start(request.execution_id, request.model_dump(), request.timeout_seconds)
     except ValueError as exc:
@@ -868,10 +887,24 @@ async def validate_deployment_bundle_endpoint(
         if receipt and receipt.get("result") is not None:
             return receipt["result"]
         raise HTTPException(409, "Execution was already submitted. Observe its result; it will not be replayed.")
+    prepare_deployment_execution(request.execution_id)
+    if request.validate_dagster and request.targets.get("dagster", False):
+        RESOURCE_ADMISSION.enqueue(request.execution_id)
+    task = asyncio.create_task(_execute_registered_deployment(request))
+    DEPLOYMENT_TASKS[request.execution_id] = task
+    def completed(done):
+        DEPLOYMENT_TASKS.pop(request.execution_id, None)
+        if not done.cancelled():
+            done.exception()  # The durable receipt carries failures; consume the task exception.
+    task.add_done_callback(completed)
+    if background:
+        return JSONResponse({"status": "accepted"}, status_code=202)
+    return await asyncio.shield(task)
+
+
+async def _execute_registered_deployment(request: DeploymentBundleValidationRequest) -> dict[str, Any]:
     try:
-        if request.execution_id:
-            prepare_deployment_execution(request.execution_id)
-        result = await asyncio.to_thread(
+        worker = partial(
             validate_deployment_bundle_files,
             request.files,
             targets=request.targets,
@@ -887,6 +920,17 @@ async def validate_deployment_bundle_endpoint(
             runtime_secrets=request.runtime_secrets,
             execution_id=request.execution_id,
         )
+        future = asyncio.get_running_loop().run_in_executor(
+            DEPLOYMENT_POOL, contextvars.copy_context().run, worker
+        )
+        try:
+            result = await asyncio.shield(future)
+        except asyncio.CancelledError:
+            # A cancelled coroutine does not stop its worker thread. Signal the
+            # sandbox and wait before releasing admission or clearing secrets.
+            await asyncio.gather(asyncio.to_thread(cancel_deployment_execution, request.execution_id),
+                                 asyncio.to_thread(cancel_sandbox_run, request.execution_id))
+            result = await asyncio.shield(future)
         result = EXECUTION_STORE.finish(request.execution_id, result, request.runtime_secrets)
         finish_deployment_execution(
             request.execution_id,
@@ -901,6 +945,15 @@ async def validate_deployment_bundle_endpoint(
         EXECUTION_STORE.finish(request.execution_id, {"ok": False, "validation_report": {"errors": ["Execution worker failed."]}}, {})
         finish_deployment_execution(request.execution_id, succeeded=False)
         raise
+    finally:
+        RESOURCE_ADMISSION.release(request.execution_id)
+        request.runtime_secrets.clear()
+
+
+@app.get("/v1/execution-workload", dependencies=SERVICE_AUTH)
+def execution_workload(workspace_id: Annotated[str, Depends(workspace_context)]) -> dict[str, Any]:
+    return {**RESOURCE_ADMISSION.snapshot(), "observed_at": datetime.now(UTC).isoformat(),
+            "pending_limit": DEPLOYMENT_PENDING_LIMIT}
 
 
 @app.get("/v1/validate/deployment-bundle/{execution_id}/result", dependencies=SERVICE_AUTH)

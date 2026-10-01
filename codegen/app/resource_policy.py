@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -62,6 +63,17 @@ _STANDARD_REQUIREMENT_MARKERS = (
 )
 
 
+def _positive_setting(name: str, default: int) -> int:
+    value = os.environ.get(name, str(default))
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return parsed
+
+
 def _requirements_text(project_root: Path) -> str:
     path = project_root / "requirements.txt"
     return path.read_text(encoding="utf-8").lower() if path.is_file() else ""
@@ -116,16 +128,23 @@ def host_allocatable_resources(docker_info: dict[str, Any]) -> dict[str, int]:
         max(total_memory - 512 * MIB, 0),
         max(2 * GIB, math.ceil(total_memory * 0.30)),
     )
+    automatic_cpu = max(total_cpu - reserved_cpu, 1)
+    automatic_memory = max(total_memory - reserved_memory, 512 * MIB)
+    cpu_budget = min(
+        automatic_cpu,
+        _positive_setting("CODEGEN_EXECUTION_CPU_BUDGET", automatic_cpu),
+    )
+    memory_budget = min(
+        automatic_memory,
+        _positive_setting("CODEGEN_EXECUTION_MEMORY_GIB", max(1, total_memory // GIB)) * GIB,
+    )
     return {
         "host_cpu": total_cpu,
         "host_memory_bytes": total_memory,
         "reserved_cpu": reserved_cpu,
         "reserved_memory_bytes": reserved_memory,
-        "allocatable_cpu": max(total_cpu - reserved_cpu, 1),
-        "allocatable_memory_bytes": max(
-            total_memory - reserved_memory,
-            512 * MIB,
-        ),
+        "allocatable_cpu": cpu_budget,
+        "allocatable_memory_bytes": memory_budget,
     }
 
 
@@ -135,7 +154,11 @@ def profile_allocation(
     *,
     reason: str,
 ) -> dict[str, Any]:
-    cpu = min(profile.cpu, capacity["allocatable_cpu"])
+    requested_cpu = (
+        _positive_setting("CODEGEN_ML_CPU_THREADS", profile.cpu)
+        if profile.name == "ml_cpu" else profile.cpu
+    )
+    cpu = min(requested_cpu, capacity["allocatable_cpu"])
     memory_bytes = min(
         profile.memory_bytes,
         capacity["allocatable_memory_bytes"],
@@ -153,10 +176,33 @@ def profile_allocation(
 class ResourceAdmissionController:
     """FIFO admission control for one execution-worker process."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_active_runs: int | None = None) -> None:
+        self.max_active_runs = (
+            max_active_runs if max_active_runs is not None else
+            _positive_setting("CODEGEN_EXECUTION_MAX_ACTIVE_RUNS", 10000)
+        )
+        if self.max_active_runs <= 0:
+            raise ValueError("max_active_runs must be positive")
         self._condition = threading.Condition(threading.RLock())
         self._active: dict[str, dict[str, Any]] = {}
         self._waiting: list[str] = []
+
+    def enqueue(self, execution_id: str) -> None:
+        """Register arrival before a worker thread or bundle preparation starts."""
+        with self._condition:
+            if execution_id not in self._active and execution_id not in self._waiting:
+                self._waiting.append(execution_id)
+
+    def snapshot(self, execution_id: str | None = None) -> dict[str, Any]:
+        """Expose counts and only the caller's position, never other run IDs."""
+        with self._condition:
+            return {
+                "active_runs": len(self._active),
+                "queued_runs": len(self._waiting),
+                "max_active_runs": self.max_active_runs,
+                "queue_position": self._waiting.index(execution_id) + 1
+                if execution_id in self._waiting else None,
+            }
 
     def acquire(
         self,
@@ -167,11 +213,10 @@ class ResourceAdmissionController:
         cancelled: Callable[[], bool],
         on_wait: Callable[[dict[str, int]], None],
     ) -> dict[str, Any] | None:
+        self.enqueue(execution_id)
         with self._condition:
             if execution_id in self._active:
                 return dict(self._active[execution_id])
-            if execution_id not in self._waiting:
-                self._waiting.append(execution_id)
 
         while True:
             if cancelled() or time.monotonic() >= deadline:
@@ -189,10 +234,12 @@ class ResourceAdmissionController:
                         0,
                     ),
                     "queue_position": self._waiting.index(execution_id) + 1,
+                    "active_runs": len(self._active),
                 }
                 is_next = self._waiting[0] == execution_id
                 fits = (
-                    int(allocation["cpu"]) <= available["cpu"]
+                    len(self._active) < self.max_active_runs
+                    and int(allocation["cpu"]) <= available["cpu"]
                     and int(allocation["memory_bytes"]) <= available["memory_bytes"]
                 )
                 if is_next and fits:

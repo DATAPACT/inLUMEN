@@ -1643,6 +1643,14 @@ def _ui_api_openapi_paths(
                 },
             },
         },
+        "/api/pipeline-runs/workload": {
+            "get": {
+                "tags": ["Pipeline Runs"],
+                "summary": "Observe anonymous global execution and queue counts",
+                "operationId": "getExecutionWorkload",
+                "responses": {"200": _json_response("#/components/schemas/ExecutionWorkload"), **protected_responses},
+            },
+        },
         "/api/pipeline-runs": {
             "get": {
                 "tags": ["Pipeline Runs"],
@@ -2318,6 +2326,8 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                             "type": "integer", "minimum": 1, "nullable": True,
                         },
                         "resource_reason": {"type": "string", "nullable": True},
+                        "admitted_at": {"type": "string", "format": "date-time", "nullable": True},
+                        "observed_at": {"type": "string", "format": "date-time", "nullable": True},
                         "queue_position": {
                             "type": "integer", "minimum": 1, "nullable": True,
                         },
@@ -2361,6 +2371,19 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
                     "items": {"$ref": "#/components/schemas/PipelineRunEvent"},
                 },
                 "next_cursor": {"type": "integer", "minimum": 0},
+            },
+        },
+        "ExecutionWorkload": {
+            "type": "object",
+            "required": ["outstanding_runs", "max_outstanding_runs", "worker_available"],
+            "properties": {
+                "outstanding_runs": {"type": "integer", "minimum": 0},
+                "max_outstanding_runs": {"type": "integer", "minimum": 1},
+                "worker_available": {"type": "boolean"},
+                "active_runs": {"type": "integer", "minimum": 0},
+                "queued_runs": {"type": "integer", "minimum": 0},
+                "max_active_runs": {"type": "integer", "minimum": 1},
+                "observed_at": {"type": "string", "format": "date-time"},
             },
         },
         "RunnerCapabilities": {

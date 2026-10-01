@@ -1,8 +1,10 @@
 import { GraphSaveStatus } from '@/components/flow/GraphSaveStatus';
-import { codeZipFolder } from '@/features/flow/codeZip';
+import { TaskPackageHelp } from '@/components/TaskPackageHelp';
+import { checkTaskPackages, taskPackageFolder, taskDisplayName, taskConnections, copyExternalPrompt, pipelinePackageIssues, PackageImportError, importTaskPackages as commitTaskPackages, type PackageReport } from '@/features/flow/taskPackages';
 import { clearPersistenceError, reportPersistenceError, getPersistenceState, graphReadTicket, acknowledgeGraphRead, persistenceEpoch } from '@/features/flow/persistenceState';
 import { readStoredArray, releaseDraftProtection } from '@/utils/workspaceStorage';
 import { getWorkspaceStorage } from '@/utils/workspaceStorage';
+import { startPolling } from '@/utils/polling';
 import React, { useState, useCallback, useRef, useEffect, forwardRef, useImperativeHandle, useMemo } from 'react';
 import { ChatbotConfig } from '@/services/chatbotService';
 import ReactFlow, {
@@ -164,6 +166,7 @@ let nodeId = 1;
 const CODEGEN_RUNTIME_FILENAMES = new Set([
   "main.py",
   "requirements.txt",
+  "inlumen.task.json",
   "node-manifest.json",
   "validation-report.json",
 ]);
@@ -199,45 +202,8 @@ const graphLayoutSignature = (graphNodes: Node[]) => graphNodes
   .sort()
   .join("|");
 
-const taskPackageName = (value: unknown) => String(value || "")
-  .toLowerCase()
-  .replace(/[^a-z0-9]+/g, " ")
-  .trim();
+type TaskPackageReview = { archive: File; report: PackageReport };
 
-const packageMatch = (folder: string, taskNodes: Node[]) => {
-  const exportedTask = taskNodes.find((node) => codeZipFolder(node) === folder);
-  if (exportedTask) return exportedTask;
-  const tokens = new Set(taskPackageName(folder).split(" ").filter(Boolean));
-  const scored = taskNodes.map((node) => {
-    const candidate = taskPackageName(`${node.data?.label || ""} ${node.data?.description || ""}`);
-    const candidateTokens = new Set(candidate.split(" ").filter(Boolean));
-    const overlap = [...tokens].filter((token) => candidateTokens.has(token)).length;
-    const score = taskPackageName(folder) === taskPackageName(node.data?.label)
-      ? 100
-      : overlap / Math.max(tokens.size, 1);
-    return { node, score };
-  }).sort((left, right) => right.score - left.score);
-  if (!scored[0] || scored[0].score < 0.5) return null;
-  if (scored[1] && scored[0].score === scored[1].score) return null;
-  return scored[0].node;
-};
-
-type PendingTaskPackage = {
-  folder: string;
-  files: Array<{ name: string; blob: Blob }>;
-  node: Node;
-};
-
-type SkippedTaskPackage = {
-  folder: string;
-  files: string[];
-  reason: string;
-};
-
-type TaskPackageReview = {
-  matches: PendingTaskPackage[];
-  skipped: SkippedTaskPackage[];
-};
 
 const generationModeOptions: Array<{
   value: PipelineScriptGenerationMode;
@@ -600,6 +566,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const [isTaskPackageGuideOpen, setIsTaskPackageGuideOpen] = useState(false);
   const [taskPackageReview, setTaskPackageReview] = useState<TaskPackageReview | null>(null);
   const [isTaskPackageImporting, setIsTaskPackageImporting] = useState(false);
+  const [isTaskPackageValidating, setIsTaskPackageValidating] = useState(false);
   const [scriptGenerationScope, setScriptGenerationScope] =
     useState<PipelineScriptGenerationScope>("missing_changed");
   const [scriptGenerationSelectedFlowIds, setScriptGenerationSelectedFlowIds] =
@@ -948,14 +915,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         const updatedAt = await fetchPipelineUpdatedAt();
         if (cancelled) return;
         markSyncHealthy();
-        if (lastSeenUpdatedAtRef.current === null) {
-          if (updatedAt) {
-            await fetchGraphAndApply();
-          }
-          return;
-        }
-        if (updatedAt && updatedAt !== lastSeenUpdatedAtRef.current) {
-          await fetchGraphAndApply();
+        if (updatedAt !== lastSeenUpdatedAtRef.current) {
+          const ticket = graphReadTicket();
+          const data = await fetchPipelineGraph();
+          // An edit/save can begin while the read is in flight. Preserve it.
+          if (cancelled || ticket !== graphReadTicket() || getPersistenceState().pending
+            || getPersistenceState().error || Date.now() < refreshCooldownUntilRef.current) return;
+          applyGraph(data);
         }
       } catch (e) {
         scheduleSyncRetry("Backend poll tick failed", e);
@@ -963,15 +929,16 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     };
     // Load once at mount, then poll
     initialLoad();
-    const id = window.setInterval(tick, 1500);
+    const stop = startPolling(tick);
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      stop();
     };
   }, [
     fetchGraphAndApply,
     markSyncHealthy,
     scheduleSyncRetry,
+    applyGraph,
   ]);
 
   useEffect(() => {
@@ -1164,113 +1131,75 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const openTaskPackageImport = useCallback(() => setIsTaskPackageGuideOpen(true), []);
 
   const taskPackageExample = useMemo(() => {
-    const taskNames = nodes
-      .filter((node) => normalizeType(node.data?.type) === "task")
-      .slice(0, 2)
-      .map((node) => String(node.data?.label || node.id).replace(/[\\/]/g, "-").trim())
-      .filter(Boolean);
-    const examples = taskNames.length ? taskNames : ["Task name", "Another Task"];
-    const lines = ["pipeline-code.zip"];
-    examples.forEach((name, index) => {
-      const isLast = index === examples.length - 1;
-      lines.push(`${isLast ? "└" : "├"}── ${name}/`);
-      if (index === 0) {
-        lines.push(`${isLast ? " " : "│"}   ├── main.py`);
-        lines.push(`${isLast ? " " : "│"}   └── requirements.txt  (optional)`);
-      } else {
-        lines.push("    └── main.py");
-      }
+    const tasks = nodes.filter(node => normalizeType(node.data?.type) === 'task');
+    const folders = tasks.length ? tasks.map(node => taskPackageFolder(node.id, node.data?.label).slice('nodes/'.length)) : ['Task name--node-id'];
+    const lines = ['pipeline-code.zip', '└── nodes/'];
+    folders.forEach((folder, index) => {
+      const last = index === folders.length - 1;
+      const indent = last ? '        ' : '    │   ';
+      lines.push(`    ${last ? '└' : '├'}── ${folder}/`, `${indent}├── main.py`, `${indent}├── inlumen.task.json`, `${indent}└── requirements.txt  (optional)`);
     });
     return lines.join("\n");
   }, [nodes]);
 
   const importTaskPackages = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const archive = event.target.files?.[0];
-    event.target.value = "";
+    const archive = event.target.files?.[0]; event.target.value = '';
     if (!archive) return;
     setIsTaskPackageGuideOpen(false);
-    if (archive.size > 50 * 1024 * 1024) {
-      toast.error("Package archive is too large", { description: "Use a ZIP smaller than 50 MB." });
-      return;
-    }
+    setIsTaskPackageValidating(true);
+    const notification = toast.loading('Checking code ZIP…');
     try {
-      const { default: JSZip } = await import("jszip");
-      const zip = await JSZip.loadAsync(archive);
-      const packages = new Map<string, Array<{ name: string; blob: Blob }>>();
-      for (const entry of Object.values(zip.files)) {
-        if (entry.dir) continue;
-        const parts = entry.name.replace(/\\/g, "/").split("/").filter(Boolean);
-        if (parts.length < 2 || parts.includes("..") || parts[0] === "__MACOSX") continue;
-        const filename = parts.at(-1) || "";
-        if (!/^(main\.py|requirements\.txt|[\w.-]+\.(py|pyi|json|toml|ya?ml|sql|sh))$/i.test(filename)) continue;
-        // ZIPs commonly contain one archive-root directory.  The immediate
-        // parent of main.py/requirements.txt is the Task package name, not
-        // the archive root.
-        const folder = parts.at(-2) || "";
-        const files = packages.get(folder) || [];
-        files.push({ name: filename, blob: await entry.async("blob") });
-        packages.set(folder, files);
-      }
-      const tasks = nodes.filter((node) => normalizeType(node.data?.type) === "task");
-      const matches: PendingTaskPackage[] = [];
-      const skipped: SkippedTaskPackage[] = [];
-      const matchedTaskIds = new Set<string>();
-      for (const [folder, files] of packages.entries()) {
-        const filenames = files.map((file) => file.name);
-        if (!files.some((file) => file.name === "main.py")) {
-          skipped.push({ folder, files: filenames, reason: "This folder does not contain main.py." });
-          continue;
-        }
-        const node = packageMatch(folder, tasks);
-        if (!node) {
-          skipped.push({ folder, files: filenames, reason: "The folder name does not clearly match a Task in this pipeline." });
-          continue;
-        }
-        const hasCode = nodeFiles(node).some((file) => isCodegenRuntimeFile(typeof file === "string" ? file : file.filename || file.name));
-        if (hasCode) {
-          skipped.push({ folder, files: filenames, reason: `“${String(node.data?.label || node.id)}” already has code.` });
-          continue;
-        }
-        if (matchedTaskIds.has(node.id)) {
-          skipped.push({ folder, files: filenames, reason: `Another folder already matches “${String(node.data?.label || node.id)}”.` });
-          continue;
-        }
-        matchedTaskIds.add(node.id);
-        matches.push({ folder, files, node });
-      }
-      if (!packages.size) {
-        skipped.push({
-          folder: archive.name,
-          files: [],
-          reason: "No Task folders containing supported code files were found.",
-        });
-      }
-      setTaskPackageReview({ matches, skipped });
-    } catch (error) {
-      toast.error("Could not read code ZIP", { description: error instanceof Error ? error.message : "The ZIP could not be read." });
+      const report = await checkTaskPackages(archive);
+      setTaskPackageReview({archive, report});
+    } catch (e) {
+      setTaskPackageReview(null);
+      toast.error('Could not validate code ZIP', {description: e instanceof Error ? e.message : 'Invalid ZIP'});
     }
+    finally { toast.dismiss(notification); setIsTaskPackageValidating(false); }
   };
-
+  const mapTaskPackage = async (folder: string, nodeId: string) => {
+    if (!taskPackageReview) return;
+    setIsTaskPackageValidating(true);
+    try {
+      const mappings = Object.fromEntries(taskPackageReview.report.packages.filter(p => p.node_id).map(p => [p.folder, p.node_id! ]));
+      mappings[folder] = nodeId;
+      const report = await checkTaskPackages(taskPackageReview.archive, mappings);
+      setTaskPackageReview({...taskPackageReview, report});
+    } catch(e) { toast.error(e instanceof Error ? e.message : 'Mapping failed'); }
+    finally { setIsTaskPackageValidating(false); }
+  };
+  const recheckTaskPackages = async () => {
+    if (!taskPackageReview) return;
+    setIsTaskPackageValidating(true);
+    try {
+      const mappings = Object.fromEntries(taskPackageReview.report.packages.filter(p => p.node_id).map(p => [p.folder, p.node_id!]));
+      const report = await checkTaskPackages(taskPackageReview.archive, mappings);
+      setTaskPackageReview({ ...taskPackageReview, report });
+    } catch (e) { toast.error(e instanceof Error ? e.message : 'Validation failed'); }
+    finally { setIsTaskPackageValidating(false); }
+  };
+  const copyTaskPackageRepairPrompt = async () => {
+    if (!taskPackageReview) return;
+    try {
+      await copyExternalPrompt(taskPackageReview.report);
+      toast.success('Repair prompt copied', { description: 'Paste it into your coding assistant and attach the original ZIP.' });
+    } catch (e) { toast.error(e instanceof Error ? e.message : 'Could not copy repair prompt'); }
+  };
   const confirmTaskPackageImport = async () => {
-    const matches = taskPackageReview?.matches ?? [];
-    if (!matches.length) return;
+    if (!taskPackageReview?.report.valid || isTaskPackageValidating || isTaskPackageImporting) return;
     setIsTaskPackageImporting(true);
     try {
-      let uploaded = 0;
-      for (const { node, files } of matches) {
-        for (const file of files) {
-          await uploadNodeFile(node.id, new File([file.blob], file.name, { type: file.blob.type || "text/plain" }), "code");
-          uploaded += 1;
-        }
-      }
+      await commitTaskPackages(taskPackageReview.archive, taskPackageReview.report);
       await syncFromBackend();
-      toast.success("Code uploaded", { description: `${uploaded} file${uploaded === 1 ? "" : "s"} uploaded to ${matches.length} Task${matches.length === 1 ? "" : "s"}.` });
+      toast.success('Packages validated and imported', {description:'Run the pipeline to verify model availability and execution.'});
       setTaskPackageReview(null);
-    } catch (error) {
-      toast.error("Could not upload code", { description: error instanceof Error ? error.message : "The code upload failed." });
-    } finally {
-      setIsTaskPackageImporting(false);
+    } catch(e) {
+      if (e instanceof PackageImportError && e.requiresRevalidation) {
+        setTaskPackageReview(current => current ? { ...current, report: e.report || { ...current.report, valid: false, errors: [{ message: e.message }] } } : current);
+      }
+      toast.error('Import failed', {description:e instanceof Error ? e.message : 'Import failed'});
     }
+    finally { setIsTaskPackageImporting(false); }
   };
 
   const createSerializableFlow = useCallback((): PipelineVersionGraph => {
@@ -2273,7 +2202,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       />
 
       <Dialog open={isTaskPackageGuideOpen} onOpenChange={setIsTaskPackageGuideOpen}>
-        <DialogContent className="sm:max-w-lg">
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>Upload code ZIP</DialogTitle>
             <DialogDescription>
@@ -2283,20 +2212,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           <div className="space-y-4 text-sm">
             <p className="leading-relaxed text-muted-foreground">
               Create one folder for each <span className="font-medium text-foreground">Task</span> in your pipeline.
-              Name each folder after the Task and put that Task&apos;s scripts directly inside it.
+              Folders include the Task name and a stable ID so they match automatically, even when names repeat. IDs are not step numbers: connections determine execution, including parallel branches.
             </p>
             <div className="rounded-lg border border-border bg-muted/30 p-3">
               <p className="mb-2 text-xs font-medium text-foreground">Example ZIP structure</p>
               <pre className="overflow-x-auto whitespace-pre text-xs leading-5 text-muted-foreground">{taskPackageExample}</pre>
             </div>
-            <p className="text-xs text-muted-foreground">
-              Every Task folder needs a <code className="rounded bg-muted px-1 py-0.5 text-foreground">main.py</code> file.
-              The ZIP must be smaller than 50 MB.
-            </p>
-            <p className="text-sm text-muted-foreground">
-              Attach input data separately to each file-based Source node before running.
-              Upload code ZIP adds Task code; database and API Sources use their configured connections.
-            </p>
+            <TaskPackageHelp />
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setIsTaskPackageGuideOpen(false)}>Cancel</Button>
@@ -2307,65 +2229,54 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
       <Dialog
         open={taskPackageReview !== null}
-        onOpenChange={(open) => { if (!open && !isTaskPackageImporting) setTaskPackageReview(null); }}
+        onOpenChange={(open) => { if (!open && !isTaskPackageImporting && !isTaskPackageValidating) setTaskPackageReview(null); }}
       >
-        <DialogContent className="sm:max-w-xl">
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
           <DialogHeader>
             <DialogTitle>Review code ZIP</DialogTitle>
             <DialogDescription>
-              Check how the folders match your pipeline before uploading.
+              Review task matches and fix any issues before importing. Validation does not execute code.
             </DialogDescription>
+            <p className="break-all text-xs text-muted-foreground">{taskPackageReview?.archive.name}</p>
           </DialogHeader>
+          <p role="status" className="text-sm text-muted-foreground">
+            {isTaskPackageValidating ? 'Checking ZIP…' : taskPackageReview?.report.valid
+              ? `${taskPackageReview.report.packages.length} Task packages ready to import`
+              : `${taskPackageReview?.report.errors.length || 0} issues to resolve. Fix the ZIP, then choose the replacement.`}
+          </p>
           <div className="max-h-[50vh] space-y-4 overflow-y-auto pr-1">
-            {taskPackageReview?.matches.length ? (
-              <section className="space-y-2">
-                <h3 className="flex items-center gap-2 text-sm font-medium">
-                  <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                  Ready to upload ({taskPackageReview.matches.length})
-                </h3>
-                {taskPackageReview.matches.map(({ folder, files, node }) => (
-                  <div key={`${folder}-${node.id}`} className="rounded-md border border-emerald-500/25 bg-emerald-500/5 p-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <code className="min-w-0 truncate text-xs font-medium">{folder}</code>
-                      <span className="text-xs text-muted-foreground">→</span>
-                      <span className="min-w-0 truncate text-sm font-medium">{String(node.data?.label || node.id)}</span>
-                    </div>
-                    <p className="mt-2 truncate text-xs text-muted-foreground">{files.map((file) => file.name).join(", ")}</p>
-                  </div>
-                ))}
-              </section>
-            ) : null}
-            {taskPackageReview?.skipped.length ? (
-              <section className="space-y-2">
-                <h3 className="flex items-center gap-2 text-sm font-medium">
-                  <AlertCircle className="h-4 w-4 text-amber-500" />
-                  Needs attention ({taskPackageReview.skipped.length})
-                </h3>
-                {taskPackageReview.skipped.map(({ folder, files, reason }) => (
-                  <div key={`${folder}-${reason}`} className="rounded-md border border-amber-500/25 bg-amber-500/5 p-3">
-                    <code className="block truncate text-xs font-medium">{folder}</code>
-                    <p className="mt-1 text-xs text-muted-foreground">{reason}</p>
-                    {files.length ? <p className="mt-2 truncate text-xs text-muted-foreground">{files.join(", ")}</p> : null}
-                  </div>
-                ))}
-              </section>
-            ) : null}
-            {!taskPackageReview?.matches.length ? (
-              <p className="rounded-md border border-border bg-muted/30 p-3 text-sm text-muted-foreground">
-                Nothing can be uploaded yet. Fix the ZIP structure and try again.
-              </p>
-            ) : null}
+            {taskPackageReview?.report.packages.map(pkg => {
+              const target = nodes.find(node => node.id === pkg.node_id);
+              const connections = pkg.node_id ? taskConnections(pkg.node_id, nodes, edges) : null;
+              return <div key={pkg.folder} className="rounded border p-3 space-y-2">
+              <p className="font-medium">{target ? taskDisplayName(target, nodes) : 'Unmatched Task'}</p>
+              <p className="break-all text-xs text-muted-foreground">{pkg.folder}</p>
+              <select aria-label={`Target Task for ${pkg.folder}`} className="w-full rounded border bg-background p-2" value={pkg.node_id || ''} disabled={isTaskPackageImporting || isTaskPackageValidating}
+                onChange={event => void mapTaskPackage(pkg.folder,event.target.value)}>
+                <option value="">Choose Task</option>
+                {nodes.filter(n => normalizeType(n.data?.type) === 'task').map(n => <option key={n.id} value={n.id}>{taskDisplayName(n, nodes)}</option>)}
+              </select>
+              {connections && <div className="text-xs text-muted-foreground">
+                <p>Receives from: {connections.incoming.join(', ') || 'No incoming connections'}</p>
+                <p>Sends to: {connections.outgoing.join(', ') || 'No outgoing connections'}</p>
+              </div>}
+              <p className="text-xs text-muted-foreground">{pkg.files.join(', ')}</p>
+              {pkg.replaces_code && <p className="text-xs text-amber-600">Replaces the complete attached package, including dependencies and helper files.</p>}
+              {pkg.errors.map((e,i) => <div key={i} role="alert" className="break-words text-xs text-destructive"><p>{e.message}</p>{e.hint && <p className="mt-1 text-foreground">{e.hint}</p>}</div>)}
+              {pkg.warnings.map((warning,i) => <p key={i} className="text-xs text-muted-foreground">{warning}</p>)}
+              {!pkg.errors.length && <p className="text-xs text-emerald-600">Package validated; execution not tested.</p>}
+            </div>; })}
+            {taskPackageReview && pipelinePackageIssues(taskPackageReview.report).map((error, index) => <p key={index} role="alert" className="text-sm text-destructive">{error.message}</p>)}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" onClick={triggerTaskPackageImport} disabled={isTaskPackageImporting || isTaskPackageValidating}>Choose replacement ZIP</Button>
+            <Button size="sm" variant="outline" onClick={() => void recheckTaskPackages()} disabled={isTaskPackageImporting || isTaskPackageValidating}>Revalidate</Button>
+            {!taskPackageReview?.report.valid && <Button size="sm" variant="outline" onClick={() => void copyTaskPackageRepairPrompt()} disabled={isTaskPackageImporting || isTaskPackageValidating}>Copy repair prompt</Button>}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setTaskPackageReview(null)} disabled={isTaskPackageImporting}>Cancel</Button>
-            <Button
-              onClick={() => { void confirmTaskPackageImport(); }}
-              disabled={isTaskPackageImporting || !taskPackageReview?.matches.length}
-            >
-              {isTaskPackageImporting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-              {taskPackageReview?.matches.length
-                ? `Upload to ${taskPackageReview.matches.length} Task${taskPackageReview.matches.length === 1 ? "" : "s"}`
-                : "Upload code"}
+            <Button variant="outline" onClick={() => setTaskPackageReview(null)} disabled={isTaskPackageImporting || isTaskPackageValidating}>Cancel</Button>
+            <Button onClick={() => void confirmTaskPackageImport()} disabled={isTaskPackageImporting || isTaskPackageValidating || !taskPackageReview?.report.valid}>
+              {isTaskPackageImporting ? 'Importing…' : isTaskPackageValidating ? 'Checking…' : `Import ${taskPackageReview?.report.packages.length || 0} Task packages`}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -2377,7 +2288,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
             <DialogTitle>Pipeline validation</DialogTitle>
             <DialogDescription>
               {designValidation.issues.length === 0
-                ? "The pipeline contract is valid."
+                ? "The graph structure is valid. Task packages and execution are checked separately."
                 : `${validationErrors} error${validationErrors === 1 ? "" : "s"} and ${validationWarnings} warning${validationWarnings === 1 ? "" : "s"} need attention.`}
             </DialogDescription>
           </DialogHeader>

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inlumen:schema:pipeline-plan:2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "nodes",
+    "edges"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "inlumen.pipeline-plan@2"
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "flow_id",
+          "function_name",
+          "inputs",
+          "outputs"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "function_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "inputs": {
+            "type": "array"
+          },
+          "outputs": {
+            "type": "array",
+            "maxItems": 1
+          },
+          "downstream_contracts": {
+            "type": "array"
+          }
+        }
+      }
+    },
+    "edges": {
+      "type": "array"
+    }
+  }
+}

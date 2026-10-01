@@ -1,0 +1,79 @@
+{
+  "valid": [
+    {
+      "version": 1,
+      "output": {
+        "type": "file",
+        "path": "result.json"
+      }
+    },
+    {
+      "version": 1,
+      "output": {
+        "type": "directory",
+        "path": "model"
+      }
+    },
+    {
+      "version": 1,
+      "inputs": [
+        {
+          "port": "input",
+          "type": "file",
+          "format": "json"
+        }
+      ],
+      "output": {
+        "type": "file",
+        "path": "nested/result.json",
+        "format": "json",
+        "schema": {
+          "type": "object"
+        }
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "version": 1,
+      "output": {
+        "type": "file",
+        "path": "../result.json"
+      }
+    },
+    {
+      "version": 1,
+      "output": {
+        "type": "file",
+        "path": "*.json"
+      }
+    },
+    {
+      "version": 1,
+      "output": {
+        "type": "unknown",
+        "path": "out"
+      }
+    },
+    {
+      "version": 1,
+      "outputs": []
+    },
+    {
+      "version": 1,
+      "output": {
+        "type": "file",
+        "path": "out.json"
+      },
+      "data_contract": {}
+    },
+    {
+      "version": 1,
+      "output": {
+        "type": "file",
+        "path": "out.json",
+        "typo": true
+      }
+    }
+  ]
+}

@@ -13,6 +13,9 @@ const GraphChangePreviewDialog = lazy(() => import('@/components/chat/GraphChang
 const VersionsPanel = lazy(() => import('@/components/versions/VersionsPanel').then((module) => ({ default: module.VersionsPanel })));
 import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
 import { sanitizeAssistantMessage } from '@/features/chat/messageSafety';
+import { useConversationSync } from '@/features/chat/useConversationSync';
+import { clearConversation, updateProposal } from '@/features/chat/conversationService';
+import { graphPreviewDefault, graphPreviewPreference } from '@/features/chat/graphPreviewPreference';
 import { CHAT_PROMPT_SUGGESTIONS } from '@/features/chat/promptSuggestions';
 import {
   MAIN_PIPELINE_VERSION_UID,
@@ -87,6 +90,7 @@ const PIPELINE_PROMPT_KEY = "inlumen-pipeline-high-level-prompt";
 const PANEL_STATE_KEY = "inlumen-panel-preferences";
 const THEME_KEY = "inlumen-theme";
 const GRAPH_PREVIEW_KEY = "inlumen-preview-graph-changes";
+const GRAPH_PREVIEW_DEFAULT_KEY = "inlumen-preview-graph-default";
 const CHAT_PROCESSING_TOAST_ID = "pipeline-chat-processing";
 const createChatTurnId = () => {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -102,6 +106,7 @@ type PanelPreferences = {
 };
 
 type PendingGraphPreview = {
+  messageId?: string;
   baseline: unknown;
   proposal: unknown;
   expectedRevision: string | null;
@@ -147,9 +152,9 @@ const readSavedTheme = (workspaceStorage: WorkspaceStorage = getWorkspaceStorage
 
 const readGraphPreviewPreference = (workspaceStorage: WorkspaceStorage = getWorkspaceStorage()) => {
   try {
-    return workspaceStorage.getItem(GRAPH_PREVIEW_KEY) !== "false";
+    return graphPreviewPreference(workspaceStorage.getItem(GRAPH_PREVIEW_KEY), workspaceStorage.getItem(GRAPH_PREVIEW_DEFAULT_KEY));
   } catch {
-    return true;
+    return graphPreviewDefault();
   }
 };
 
@@ -174,24 +179,6 @@ const graphNodeCount = (graph: unknown) =>
     ? (graph as { nodes: unknown[] }).nodes.length
     : 0;
 
-const describeGraphForChat = (graph: unknown) => {
-  const normalized = normalizeGraph(graph);
-  const labels = [...normalized.nodes]
-    .sort((a, b) => (
-      Number(a.position?.x || 0) - Number(b.position?.x || 0)
-      || Number(a.position?.y || 0) - Number(b.position?.y || 0)
-      || String(a.id).localeCompare(String(b.id))
-    ))
-    .map((node) => String(node.data?.label || node.id || "Untitled step").trim())
-    .filter(Boolean);
-  return labels.length > 0 ? labels.join(" → ") : "an empty pipeline";
-};
-
-const discardedProposalMessage = (baseline: unknown) => (
-  `The proposal was discarded. Your saved pipeline was left unchanged. `
-  + `Current pipeline: ${describeGraphForChat(baseline)}.`
-);
-
 const downloadBlob = (blob: Blob, filename: string) => {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -201,46 +188,6 @@ const downloadBlob = (blob: Blob, filename: string) => {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
-};
-
-const normalizeSavedConversation = (value: unknown): ChatMessage[] => {
-  const messages = Array.isArray(value)
-    ? value
-    : value && typeof value === "object" && Array.isArray((value as { conversation?: unknown }).conversation)
-      ? (value as { conversation: unknown[] }).conversation
-      : [];
-
-  return messages.flatMap((message) => {
-    if (!message || typeof message !== "object") return [];
-    const entry = message as Partial<ChatMessage>;
-    if (entry.role !== "user" && entry.role !== "assistant") return [];
-    if (typeof entry.content !== "string") return [];
-    const graphProposalStatus = entry.graphProposalStatus === "pending"
-      || entry.graphProposalStatus === "applied"
-      || entry.graphProposalStatus === "discarded"
-      ? entry.graphProposalStatus
-      : undefined;
-    return [{
-      role: entry.role,
-      content: entry.role === "assistant"
-        ? sanitizeAssistantMessage(entry.content)
-        : entry.content,
-      ...(graphProposalStatus ? { graphProposalStatus } : {}),
-    }];
-  });
-};
-
-const readSavedConversation = (workspaceStorage: WorkspaceStorage = getWorkspaceStorage()): ChatMessage[] => {
-  try {
-    const savedHistory = workspaceStorage.getItem(CHAT_HISTORY_KEY);
-    if (savedHistory) return normalizeSavedConversation(JSON.parse(savedHistory));
-
-    const savedTranscript = workspaceStorage.getItem(CHAT_TRANSCRIPT_KEY);
-    if (savedTranscript) return normalizeSavedConversation(JSON.parse(savedTranscript));
-  } catch {
-    return [];
-  }
-  return [];
 };
 
 type FlowNodeData = PropertyNodeData;
@@ -253,6 +200,8 @@ type DragNodeType = {
 };
 
 type ChatApiResponse = {
+  assistant_message_id?: string;
+  user_message_id?: string;
   turn_id?: string;
   session_id?: string;
   status?: string;
@@ -282,7 +231,8 @@ const Index = () => {
   const [userInput, setUserInput] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [flowNodes, setFlowNodes] = useState<FlowNode[]>([]);
-  const [conversation, setConversation] = useState<ChatMessage[]>(readSavedConversation);
+  const serverChat = useConversationSync(isProcessing);
+  const { messages: conversation, setMessages: setConversation, conversationId: chatSessionId, setConversationId: setChatSessionId, reset: resetServerChat } = serverChat;
   const [canvasSyncStatus, setCanvasSyncStatus] = useState<CanvasSyncStatus>({
     state: 'idle',
     message: 'Canvas is ready',
@@ -308,6 +258,7 @@ const Index = () => {
     previewBaseRevision: string | null;
   } | null>(null);
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
+  const lastChatScrollRef = useRef('');
   const [pipelineLastUpdate, setPipelineLastUpdate] = useState<string>('Never');
   const [pipelineCreatedAt, setPipelineCreatedAt] = useState<string>('Never');
   const [configs, setConfigs] = useState<ChatbotConfig[]>([]);
@@ -351,11 +302,6 @@ const Index = () => {
     if (!rightPanel && panel.isExpanded()) panel.collapse();
   }, [rightPanel]);
 
-  // Backend session id
-  const [chatSessionId, setChatSessionId] = useState<string>(() => {
-    return workspaceStorage.getItem(CHAT_SESSION_KEY) || "";
-  });
-
   useEffect(() => {
     if (chatSessionId) {
       workspaceStorage.setItem(CHAT_SESSION_KEY, chatSessionId);
@@ -373,6 +319,7 @@ const Index = () => {
 
   useEffect(() => {
     workspaceStorage.setItem(GRAPH_PREVIEW_KEY, String(previewGraphChanges));
+    workspaceStorage.setItem(GRAPH_PREVIEW_DEFAULT_KEY, String(graphPreviewDefault()));
   }, [workspaceStorage, previewGraphChanges]);
 
   useEffect(() => {
@@ -468,11 +415,15 @@ const Index = () => {
   }, [workspaceStorage, loadConfigurations]);
 
   useEffect(() => {
+    const last = conversation[conversation.length - 1];
+    const fingerprint = JSON.stringify([last?.id, last?.content, last?.status, isProcessing, serverChat.pendingTurnId]);
+    if (fingerprint === lastChatScrollRef.current) return;
+    lastChatScrollRef.current = fingerprint;
     conversationEndRef.current?.scrollIntoView({
       behavior: conversation.length > 1 || isProcessing ? "smooth" : "auto",
       block: "end",
     });
-  }, [conversation, isProcessing]);
+  }, [conversation, isProcessing, serverChat.pendingTurnId]);
 
   const updateActiveVersionName = useCallback((name: string) => {
     activeVersionNameRef.current = name;
@@ -586,7 +537,7 @@ const Index = () => {
   const hasActiveConfiguration = Boolean(activeConfig.id && configs.some((config) => config.id === activeConfig.id));
 
   const handleSendMessage = async () => {
-    if (isProcessing) return;
+    if (isProcessing || serverChat.pendingTurnId || !serverChat.ready || serverChat.error) return;
     const messageText = userInput;
 
     if (!messageText.trim()) {
@@ -603,10 +554,10 @@ const Index = () => {
       description: "AI is thinking...",
     });
 
-    const newUserMessage = { role: 'user' as const, content: messageText };
+    const turnId = createChatTurnId();
+    const newUserMessage = { role: 'user' as const, content: messageText, turnId };
     const updatedConversation = [...conversation, newUserMessage];
     setConversation(updatedConversation);
-    const turnId = createChatTurnId();
     const controller = new AbortController();
     const canvasGraph = flowCanvasRef.current?.getCurrentGraph() ?? null;
     const baselinePreviewGraph = flowCanvasRef.current?.getCurrentVersionGraph() ?? canvasGraph;
@@ -622,10 +573,10 @@ const Index = () => {
     };
 
     try {
+      // Finish the previous canvas snapshot before the agent starts mutating
+      // its graph, in both direct and preview modes.
+      await flushActiveVersionSnapshot();
       if (previewGraphChanges) {
-        // Include any queued active-version snapshot in the preview's base
-        // revision before asking the assistant to draft against this canvas.
-        await flushActiveVersionSnapshot();
         previewBaseRevision = getGraphRevision();
         if (activeChatTurnRef.current?.turnId === turnId) {
           activeChatTurnRef.current.previewBaseRevision = previewBaseRevision;
@@ -640,6 +591,7 @@ const Index = () => {
         body: JSON.stringify({
           turn_id: turnId,
           session_id: chatSessionId || null,
+          conversation_id: chatSessionId || null,
           user_message: messageText,
           canvas_graph: canvasGraph,
           preview_changes: previewGraphChanges,
@@ -704,7 +656,10 @@ const Index = () => {
         && meaningfulGraphChange,
       );
       const responseText = sanitizeAssistantMessage(data.assistant_message);
-      setConversation(prev => [...prev, {
+      setConversation(prev => [...prev.map(message => message.turnId === turnId && message.role === 'user'
+        ? { ...message, id: data.user_message_id } : message), {
+        id: data.assistant_message_id,
+        turnId,
         role: 'assistant',
         content: responseText,
         ...(isPreviewProposal ? { graphProposalStatus: 'pending' as const } : {}),
@@ -742,6 +697,7 @@ const Index = () => {
         && meaningfulGraphChange
       ) {
         setPendingGraphPreview({
+          messageId: data.assistant_message_id,
           baseline: baselinePreviewGraph || { nodes: [], edges: [] },
           proposal: data.graph,
           expectedRevision: activeChatTurnRef.current.previewBaseRevision,
@@ -830,14 +786,14 @@ const Index = () => {
     const preview = pendingGraphPreview;
     if (!preview) return;
     setConversation((current) => current.map((message, index) => (
-      index === preview.conversationMessageIndex
+      (preview.messageId ? message.id === preview.messageId : index === preview.conversationMessageIndex)
         ? {
             ...message,
-            content: discardedProposalMessage(preview.baseline),
             graphProposalStatus: 'discarded' as const,
           }
         : message
     )));
+    void updateProposal(preview.messageId, 'discarded').catch(error => toast.warning(error.message));
     setPendingGraphPreview(null);
     setCanvasSyncStatus({ state: 'idle', message: 'Canvas is ready' });
     toast.info("Proposal discarded", { description: "Your saved pipeline was left unchanged." });
@@ -863,10 +819,11 @@ const Index = () => {
       }
       scheduleActiveVersionSnapshot();
       setConversation((current) => current.map((message, index) => (
-        index === preview.conversationMessageIndex
+        (preview.messageId ? message.id === preview.messageId : index === preview.conversationMessageIndex)
           ? { ...message, graphProposalStatus: 'applied' as const }
           : message
       )));
+      await updateProposal(preview.messageId, 'applied');
       setPendingGraphPreview(null);
       setCanvasSyncStatus({ state: 'idle', message: 'Graph proposal applied to the canvas.' });
       toast.success("Graph proposal applied", {
@@ -894,7 +851,15 @@ const Index = () => {
 
   const handleStopProcessing = () => {
     const activeTurn = activeChatTurnRef.current;
-    if (!activeTurn) return;
+    if (!activeTurn) {
+      if (serverChat.pendingTurnId) {
+        void apiFetch(`${INLUMEN_API_URL}/simple_chat/cancel`, { method: 'POST',
+          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ turn_id: serverChat.pendingTurnId }) })
+          .then(response => { if (!response.ok) throw new Error('The running request could not be stopped.'); })
+          .catch(error => toast.error(error.message));
+      }
+      return;
+    }
 
     // A preview never changed the live graph, so cancellation should leave any
     // local user edits made while the assistant was working alone.
@@ -946,8 +911,7 @@ const Index = () => {
   };
 
   const resetLocalConversation = useCallback(() => {
-    setConversation([]);
-    setChatSessionId("");
+    resetServerChat();
     workspaceStorage.removeItem(CHAT_SESSION_KEY);
     workspaceStorage.removeItem(CHAT_HISTORY_KEY);
     workspaceStorage.removeItem(CHAT_TRANSCRIPT_KEY);
@@ -955,24 +919,15 @@ const Index = () => {
       state: 'idle',
       message: 'Canvas is ready',
     });
-  }, [workspaceStorage]);
+  }, [workspaceStorage, resetServerChat]);
 
   const handleClearConversation = async () => {
-    resetLocalConversation();
-    toast.success("Conversation cleared", {
-      description: "Your conversation history has been reset",
-    });
-
-    if (chatSessionId) {
-      try {
-        await apiFetch(`${INLUMEN_API_URL}/simple_chat/reset`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id: chatSessionId }),
-        });
-      } catch (e) {
-        console.warn("Failed to reset backend chat session:", e);
-      }
+    try {
+      await clearConversation(chatSessionId);
+      resetLocalConversation();
+      toast.success('Conversation cleared');
+    } catch (failure) {
+      toast.error(failure instanceof Error ? failure.message : 'Conversation could not be cleared.');
     }
   };
 
@@ -1559,12 +1514,17 @@ const Index = () => {
                       activeChatbotConfig={activeConfig}
                     /></Suspense>
                   ) : rightPanel === 'chat' ? (
-                    <ChatPanel
+                  <ChatPanel
                       activeConfig={activeConfig}
                       conversation={conversation}
                       conversationEndRef={conversationEndRef}
                   canvasSyncStatus={canvasSyncStatus}
-                  isProcessing={isProcessing}
+                  isProcessing={isProcessing || Boolean(serverChat.pendingTurnId)}
+                  canSend={serverChat.ready && !serverChat.error}
+                  historyError={serverChat.error}
+                  hasOlder={serverChat.hasOlder}
+                  loadingOlder={serverChat.loadingOlder}
+                  onLoadOlder={() => { void serverChat.loadOlder(); }}
                   userInput={userInput}
                       promptSuggestions={CHAT_PROMPT_SUGGESTIONS}
                       formatConfigDescription={formatConfigDescription}

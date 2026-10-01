@@ -1,0 +1,21 @@
+# Task package v1
+
+Every Task folder requires main.py and inlumen.task.json. Add requirements.txt only for third-party dependencies; helper modules and supporting assets are allowed. Sources and Destinations are managed connectors and need no Task code.
+A Task publishes exactly one declared file or directory bundle. The output path is relative to PIPELINE_OUTPUT_DIR; it is not a glob. Directory bundles remain one artifact.
+The runtime stages one artifact per incoming graph connection in PIPELINE_INPUT_DIR, preserving declared paths. Port names create no implicit subdirectories. INLUMEN_INPUT_MANIFEST points to JSON with an inputs list; each descriptor includes path, filename, representation, source_node, connection_id, and target_port. Read the supplied path to select a particular input. Write only the declared result beneath PIPELINE_OUTPUT_DIR. Use PIPELINE_WORK_DIR for temporary files and logs.
+Run as a finite, non-interactive Python 3.11 batch program using python main.py. Fail with a nonzero exit code on invalid input or computation failure. Never create fake input data, credentials, model results, or fallback success outputs.
+A minimal inlumen.task.json is:
+{
+  "version": 1,
+  "output": {
+    "type": "file",
+    "path": "result.json"
+  }
+}
+Optional inputs declare consumer port, type, format and JSON schema; optional output format and schema add content validation. Optional output name and kind preserve logical identity and media classification during export. A .json output is syntax-checked even without a schema. No content schema means structural validation is unavailable. The platform supplies connection identity; never invent internal data_contract versions or absolute staging paths.
+Return a ZIP smaller than 50 MB, with one Task folder per node (use the supplied nodes/<Task name>--<node ID>/ paths). The name makes each Task recognizable; the ID is stable identity, never execution order. Graph edges alone define dependencies and parallel branches. Legacy nodes/<flow_id>/ paths remain accepted. Include the public manifest above; do not include platform node-manifest.json, Dockerfiles, orchestration files, or input data.
+Optional models list pinned local model_id/model_revision dependencies (and optional adapter_id, model_variants and runtime_selection); generated packages preserve these declarations for runtime preparation. Directory output members may declare relative member paths and schemas without splitting the bundle into multiple artifacts.
+Model dependencies: model_revision must be a verified immutable commit SHA (7–64 hexadecimal characters), never main, latest, a branch, a tag, or an invented hash. Resolve it before packaging, for example with huggingface_hub.HfApi().model_info(model_id, revision="main").sha, and embed the returned SHA in both the manifest and loading code. If verification is unavailable, report that blocker instead of producing a supposedly ready ZIP. Declare every required local model, including tokenizer dependencies from other repositories.
+Model loading: inLUMEN does not supply INLUMEN_MODEL_0_PATH or WHISPER_MODEL_PATH. Use an explicit pinned snapshot, not an unversioned model ID. With INLUMEN_MODEL_ROOT set, prepared Hugging Face snapshots are cached under <INLUMEN_MODEL_ROOT>/huggingface: use snapshot_download(repo_id=model_id, revision=model_revision, cache_dir=str(Path(os.environ["INLUMEN_MODEL_ROOT"]) / "huggingface"), local_files_only=True), and pass the returned path to the model library. Without a prepared model root, use snapshot_download with the same pinned revision and the normal Hugging Face cache if network is allowed. Include huggingface-hub and the model library in requirements.txt. Never fall back silently to main or a different model.
+For JSON outputs use kind "json" or omit kind; "data" is not a supported kind. Do not invent fields or enum values: validate every manifest against the supplied JSON Schema (Draft 2020-12).
+Before delivering: parse every Python file as Python 3.11, validate every manifest against the supplied schema, verify dependency versions and model revisions, and check every producer/consumer filename, port, format and JSON shape. State which checks were actually run. Package validation is not proof of successful model execution.
