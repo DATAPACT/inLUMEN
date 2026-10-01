@@ -4,6 +4,7 @@ import { checkTaskPackages, taskPackageFolder, taskDisplayName, taskConnections,
 import { clearPersistenceError, reportPersistenceError, getPersistenceState, graphReadTicket, acknowledgeGraphRead, persistenceEpoch } from '@/features/flow/persistenceState';
 import { readStoredArray, releaseDraftProtection } from '@/utils/workspaceStorage';
 import { getWorkspaceStorage } from '@/utils/workspaceStorage';
+import { startPolling } from '@/utils/polling';
 import React, { useState, useCallback, useRef, useEffect, forwardRef, useImperativeHandle, useMemo } from 'react';
 import { ChatbotConfig } from '@/services/chatbotService';
 import ReactFlow, {
@@ -914,14 +915,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         const updatedAt = await fetchPipelineUpdatedAt();
         if (cancelled) return;
         markSyncHealthy();
-        if (lastSeenUpdatedAtRef.current === null) {
-          if (updatedAt) {
-            await fetchGraphAndApply();
-          }
-          return;
-        }
-        if (updatedAt && updatedAt !== lastSeenUpdatedAtRef.current) {
-          await fetchGraphAndApply();
+        if (updatedAt !== lastSeenUpdatedAtRef.current) {
+          const ticket = graphReadTicket();
+          const data = await fetchPipelineGraph();
+          // An edit/save can begin while the read is in flight. Preserve it.
+          if (cancelled || ticket !== graphReadTicket() || getPersistenceState().pending
+            || getPersistenceState().error || Date.now() < refreshCooldownUntilRef.current) return;
+          applyGraph(data);
         }
       } catch (e) {
         scheduleSyncRetry("Backend poll tick failed", e);
@@ -929,15 +929,16 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     };
     // Load once at mount, then poll
     initialLoad();
-    const id = window.setInterval(tick, 1500);
+    const stop = startPolling(tick);
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      stop();
     };
   }, [
     fetchGraphAndApply,
     markSyncHealthy,
     scheduleSyncRetry,
+    applyGraph,
   ]);
 
   useEffect(() => {

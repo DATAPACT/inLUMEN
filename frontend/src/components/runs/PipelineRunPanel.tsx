@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { startPolling } from '@/utils/polling';
 import {
   AlertCircle,
   Ban,
@@ -105,6 +106,8 @@ export const PipelineRunPanel = () => {
   const [capabilities, setCapabilities] = useState<RunnerCapabilities | null>(null);
   const [runs, setRuns] = useState<PipelineRunRecord[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string>('');
+  const manuallySelected = useRef(false);
+  const listInFlight = useRef(false);
   const [events, setEvents] = useState<PipelineRunEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -144,6 +147,8 @@ export const PipelineRunPanel = () => {
   const globalCapacityFull = workloadFresh && workload !== null && workload.outstanding_runs >= workload.max_outstanding_runs;
 
   const loadInitial = useCallback(async () => {
+    if (listInFlight.current) return;
+    listInFlight.current = true;
     setLoading(true);
     setError('');
     try {
@@ -157,6 +162,7 @@ export const PipelineRunPanel = () => {
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Failed to load background runs.');
     } finally {
+      listInFlight.current = false;
       setLoading(false);
     }
   }, []);
@@ -164,6 +170,22 @@ export const PipelineRunPanel = () => {
   useEffect(() => {
     void loadInitial();
   }, [loadInitial]);
+
+  useEffect(() => {
+    let disposed = false;
+    const stop = startPolling(async () => {
+      if (listInFlight.current) return;
+      listInFlight.current = true;
+      try {
+        const recent = await listPipelineRuns();
+        if (disposed) return;
+        setRuns(recent);
+        setSelectedRunId(current => manuallySelected.current && recent.some(run => run.run_id === current)
+          ? current : recent[0]?.run_id || '');
+      } finally { listInFlight.current = false; }
+    }, 5000);
+    return () => { disposed = true; stop(); };
+  }, []);
 
   useEffect(() => {
     let stopped = false;
@@ -327,7 +349,7 @@ export const PipelineRunPanel = () => {
               <button
                 type="button"
                 key={run.run_id}
-                onClick={() => setSelectedRunId(run.run_id)}
+                onClick={() => { manuallySelected.current = true; setSelectedRunId(run.run_id); }}
                 className={cn(
                   'flex w-full items-center justify-between gap-2 rounded-md border px-2 py-2 text-left text-xs',
                   selectedRun?.run_id === run.run_id

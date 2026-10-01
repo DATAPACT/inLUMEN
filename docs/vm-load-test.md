@@ -299,6 +299,71 @@ To rehearse direct application without the Review AI dialog, pass `--review-ai-c
 
 ## Participant rehearsals and bulk reset
 
+### Bash launcher
+
+Run `bash scripts/stress-test.sh --help` from the repository root for all options.
+The launcher defaults to the deployed production app and realm, 39 users from
+the private participant roster, isolated rehearsal workspaces, one audio-session
+round, synchronized execution submissions, and Review AI off. File paths are
+resolved against the caller's working directory, so the launcher also works
+when invoked through an absolute path. Run it on a separate load-generator
+machine with Node.js, frontend dependencies and Playwright Chromium installed.
+
+```sh
+bash scripts/stress-test.sh --users 2 --preflight
+bash scripts/stress-test.sh --users 39 \
+  --accounts frontend/loadtest/accounts.participants.local.json \
+  --code-zip /path/pipeline-code.zip --audio-file /path/recording.wav \
+  --ssh-host operator@vm --warm-models-script /path/on/vm/warm-models.py \
+  --monitor-vm
+```
+
+`--url` and `--issuer` override the deployment. `--users`, `--accounts`,
+`--rounds`, `--scenario`, `--no-synchronized-run`, timeouts and allocation
+ceilings control the workload. The launcher does not alter VM worker limits.
+For the original disposable accounts, set `--users 20 --accounts
+frontend/loadtest/accounts.local.json`; isolated workspaces still remain the
+default. Choose `--workspace-mode default` only when their default workspace
+contents may be erased. Preflight defaults to existing workspaces and does not
+prepare caches, clear workspaces or send LLM requests. Explicit isolated
+preflight creates workspaces. `--dry-run` validates local inputs and prints
+the command without contacting the deployment or creating reports.
+
+To leave the stress-test pipeline and runs in the exact workspaces opened by
+normal participant login, add **`--workspace-mode default`**. This clears those
+participants' default workspace contents before each live round; isolated mode
+remains the safe default for rehearsals. The runner verifies the headerless
+`/api/session` workspace and user identity before clearing. Each round logs
+the username, test workspace ID and normal-login workspace ID; the report's
+`workspaces` entries retain `username`, `workspace_id` and `login_workspace_id`.
+In default mode the two IDs match. Compare this ID with **Current workspace**
+under the signed-in user's account menu. Reload an existing tab once after
+upgrading the application, then keep it open as an observer: saved chat and
+canvas changes refresh about every three seconds, and the Run panel discovers
+new workspace runs about every five seconds. Hidden tabs poll every fifteen
+seconds and refresh when shown. Select Run to observe execution/queue progress.
+With `--headed`, you can also watch the actual automated browser.
+
+Every live invocation uses a new private directory beneath `state/stress-tests`
+(override with `--output`). It contains `stress.log` and a nested
+`loadtest-*/report.json`; the test's exit status propagates to Bash. With
+`--monitor-vm`, `vmstat.log` records CPU, free memory and swap activity every
+five seconds, and `monitor-errors.log` captures SSH errors. The first vmstat
+CPU row is the average since boot; subsequent rows describe sample intervals.
+Monitoring is stopped when the launcher exits. These samples alone do not
+establish output correctness, OOM events or container restart counts.
+
+Fresh isolated workspaces have separate model stores. `--warm-models-script`
+invokes an **existing operator-provided Python preparer on the selected VM**,
+passing workspace mappings as JSON on stdin before workspace preparation each
+round. Both the SSH host and absolute preparer path are required; SSH must work
+without interactive authentication. The launcher does not install that script
+or copy model weights. The meeting VM already has its session cache preparer.
+Without it, cold workspaces may download models and use considerably more disk
+space; check VM disk capacity before a large cold-cache rehearsal. Keep cache
+preparers, participant identities and session assets private. The reusable CLI
+also exposes `--warm-models-host` and `--warm-models-script` for this hook.
+
 Keep the original 20 disposable accounts and the meeting roster in separate,
 private `loadtest/accounts*.local.json` files. Run the original 20-user scenario
 as before. For participant accounts, use **isolated** workspaces so rehearsals
@@ -348,8 +413,9 @@ it does not roll back previously completed resets. Re-preview before retrying.
 Reset removes graphs, uploaded code/data, outputs, provenance, run/generation
 history, server-side chat sessions and node secrets. It retains Keycloak users,
 passwords, workspace memberships, shared LLM configuration and model cache
-volumes. Browser-local chat/settings are not centrally erased; participants
-should reload and start a new conversation afterwards. Reset does not delete
+volumes. The reset clears durable chat transcripts too; open tabs recover the
+empty conversation on their next successful refresh. Browser-local settings and
+explicitly saved transcript copies remain on those browsers. Reset does not delete
 workspace memberships: rehearsal workspace shells remain listed. Never place
 rosters, credentials, audio, ZIPs or raw reports in Git.
 
@@ -394,3 +460,34 @@ The tested VM was left with `CODEGEN_EXECUTION_MAX_ACTIVE_RUNS=3`,
 Compose defaults remain two workers. Keep the measured VM limits configurable
 and retain the single codegen process. Private rosters, audio, ZIPs and raw
 reports are excluded from Git.
+
+
+### Durable chat and observation across browsers
+
+PostgreSQL stores visible chat messages separately from agent checkpoints. The
+backend derives workspace and owner IDs from the verified session, selects one
+active conversation per user/workspace, and assigns conversation/message UUIDs
+and ordered message sequences. A supplied conversation ID cannot grant access
+to another participant's messages. Separate users in a shared workspace retain
+private conversations, while canvas and run history remain workspace resources.
+
+The user message is committed before the model starts; the assistant reply,
+request status and response receipt are committed before returning success.
+Turn IDs prevent duplicate model calls when the same request is retried, and a
+workspace lease prevents competing chat edits across workers. Cancellation is
+stored centrally, checked every five seconds, and scoped to the same owner and
+workspace. A worker heartbeat older than two minutes marks an interrupted turn
+as failed rather than replaying a potentially paid request.
+
+History reads use revision cursors, stable message IDs and pages of at most 100
+messages. Older messages can be loaded from the chat panel. Failed polls preserve
+visible history and back off; an unsaved local canvas draft blocks background
+graph replacement. Reset refuses active chat turns before clearing workspace
+stores. Production uses the existing database/backup policy; unauthenticated
+local development uses `backend/state/conversations.sqlite3` (override with
+`INLUMEN_CHAT_DB_PATH`). Existing browser-only transcripts are not imported.
+
+Deploy the new backend migration before starting the upgraded backend/frontend.
+The new transcript tables are additive; no participant workspace is reset by
+this migration. This change supplies observation and recovery, not token-by-token
+streaming or an asynchronous replacement for the synchronous chat endpoint.

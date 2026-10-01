@@ -1,3 +1,4 @@
+import { installConversationFixture } from './helpers/conversation';
 import { test, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 
@@ -19,6 +20,7 @@ test('editor recovers from a conflicting save and remains keyboard accessible', 
       await route.fulfill({ json: { configs: [], runs: [], versions: [], definitions: [], nodes: [], edges: [] } });
     }
   });
+  await installConversationFixture(page);
   await page.goto('/');
   await expect(page.getByText('Input records', { exact: true }).first()).toBeVisible();
   conflict = true;
@@ -82,6 +84,7 @@ test('agent graph changes stay in preview until applied, then refresh the revisi
     const proposal = { nodes: [{ id: '1', type: 'source', position: { x: 150, y: 150 }, data: { type: 'source', label: 'Agent updated source' } }], edges: [], updated_at: '2026-01-02' };
     await route.fulfill({ json: { assistant_message: 'Updated the source.', graph: proposal, sync: { status: 'preview', guardrail_passed: true, graph_safe_to_apply: true, preview_pending: true } } });
   });
+  await installConversationFixture(page);
   await page.goto('/');
   await expect(page.getByText('Original source', { exact: true }).first()).toBeVisible();
   await page.getByRole('button', { name: 'Chat', exact: true }).click();
@@ -143,6 +146,7 @@ test('graph preview also works for a proposal on an empty canvas', async ({ page
       },
     } });
   });
+  await installConversationFixture(page);
   await page.goto('/');
   await page.getByRole('button', { name: 'Chat', exact: true }).click();
   await page.getByPlaceholder('Describe the pipeline...').fill('Create a simple input to output pipeline');
@@ -196,6 +200,7 @@ test('a discarded preview is clearly labeled and the next request uses the uncha
     } });
   });
 
+  await installConversationFixture(page);
   await page.goto('/');
   await page.getByRole('button', { name: 'Chat', exact: true }).click();
   await page.getByPlaceholder('Describe the pipeline...').fill('Make a first change');
@@ -248,6 +253,7 @@ test('a no-op response does not open a graph preview when Review AI is enabled',
     } });
   });
 
+  await installConversationFixture(page);
   await page.goto('/');
   await page.getByRole('button', { name: 'Chat', exact: true }).click();
   await page.getByPlaceholder('Describe the pipeline...').fill('Describe the current pipeline without making any changes.');
@@ -282,6 +288,7 @@ test('preview can be disabled for direct assistant edits', async ({ page }) => {
       sync: { guardrail_passed: true, graph_safe_to_apply: true },
     } });
   });
+  await installConversationFixture(page);
   await page.goto('/');
   await page.getByRole('button', { name: 'Chat', exact: true }).click();
   await page.getByRole('switch', { name: 'Preview AI graph changes before applying' }).click();
@@ -363,6 +370,7 @@ test('a follow-up direct edit waits for a queued snapshot after applying a graph
     } });
   });
 
+  await installConversationFixture(page);
   await page.goto('/');
   await expect(page.locator('#canvas-panel .react-flow__node').first()).toContainText('Original');
   await page.getByRole('button', { name: 'Chat', exact: true }).click();
@@ -424,6 +432,7 @@ test('a stale proposal cannot overwrite a graph changed while it was being revie
       sync: { status: 'preview', guardrail_passed: true, graph_safe_to_apply: true, preview_pending: true },
     } });
   });
+  await installConversationFixture(page);
   await page.goto('/');
   await page.getByRole('button', { name: 'Chat', exact: true }).click();
   await page.getByPlaceholder('Describe the pipeline...').fill('Rename the source');

@@ -157,6 +157,10 @@ validate_auth_mode_configuration()
 app.register_blueprint(create_public_api_blueprint())
 app.register_blueprint(create_node_definitions_blueprint())
 app.register_blueprint(create_generator_blueprint())
+from chat_routes import create_chat_blueprint
+from conversations import ConversationError, conversation_store
+from sqlalchemy.exc import SQLAlchemyError
+app.register_blueprint(create_chat_blueprint())
 app.add_url_rule(
     "/agentic_generate_dockerfiles",
     endpoint="agentic_generate_dockerfiles",
@@ -2546,6 +2550,17 @@ def workspace_clear_all():
         return _preflight_response()
 
     payload = _request_json()
+    try:
+        chat_store = conversation_store()
+        with chat_store.clear_guard(current_principal().workspace_id) as connection:
+            return _clear_workspace_stores(payload, chat_store, connection)
+    except ConversationError as exc:
+        return _json_error(exc.status, str(exc))
+    except SQLAlchemyError:
+        return _json_error(503, "Conversation history is unavailable; workspace reset was not completed.")
+
+
+def _clear_workspace_stores(payload, chat_store, connection):
     session_id = str(payload.get("session_id") or "").strip()
     graph_response = _proxy(
         dispatch_graph_request,
@@ -2580,6 +2595,7 @@ def workspace_clear_all():
         run_cleanup_ok = False
 
     chat_reset = clear_workspace_chat_states() > 0
+    chat_reset = chat_store.clear_locked(connection, current_principal().workspace_id) > 0 or chat_reset
     if session_id:
         clear_state_from_disk(session_id)
         chat_reset = True

@@ -1,6 +1,10 @@
 export type GraphProposalStatus = 'pending' | 'applied' | 'discarded';
 
 export type ChatMessage = {
+  id?: string;
+  turnId?: string;
+  sequence?: number;
+  status?: string;
   role: 'user' | 'assistant';
   content: string;
   graphProposalStatus?: GraphProposalStatus;
