@@ -82,6 +82,7 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
             try:
                 async def exercise():
                     workspace = ""
+                    created_workspaces = []
 
                     async def run_query(query, query_type, **kwargs):
                         _validate_workspace_cypher(query)
@@ -90,6 +91,7 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
                     with patch("pipeline_agent.tools.run_neo4j_query", side_effect=run_query):
                         for owner in ("alice", "bob"):
                             workspace = f"regression-{owner}-{uuid.uuid4()}"
+                            created_workspaces.append(workspace)
                             create_step = next(tool for tool in build_pipeline_editor_tools() if tool.__name__ == "create_step")
                             for index, (kind, label) in enumerate((("source", "Audio upload"), ("task", "Transcription"), ("task", "Sentiment"), ("destination", "JSON output"))):
                                 await create_step(json.dumps({
@@ -114,7 +116,7 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
                             self.assertEqual(edges["count"], 5)
                         await tools["delete_all_steps"]("{}")
                         self.assertEqual(tx.run(_scope_cypher("MATCH (s:STEP) RETURN count(s) AS count", workspace)).single()["count"], 0)
-                        alice_workspace = tx.run("MATCH (s:STEP) WHERE s.label STARTS WITH 'alice:' RETURN count(s) AS count").single()
+                        alice_workspace = tx.run(_scope_cypher("MATCH (s:STEP) RETURN count(s) AS count", created_workspaces[0])).single()
                         self.assertEqual(alice_workspace["count"], 6)
                 asyncio.run(exercise())
             finally:

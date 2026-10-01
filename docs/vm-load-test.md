@@ -352,3 +352,45 @@ volumes. Browser-local chat/settings are not centrally erased; participants
 should reload and start a new conversation afterwards. Reset does not delete
 workspace memberships: rehearsal workspace shells remain listed. Never place
 rosters, credentials, audio, ZIPs or raw reports in Git.
+
+### Measured rehearsal on 1 October 2026
+
+The 8-vCPU/30-GiB VM passed the original 20-account audio workflow with two
+workers and the final 39-participant workflow with three workers. The 39 Run
+clicks were synchronized. Both used the same provided ZIP and unchanged
+196.16-second WAV, with Review AI off. All four Task outputs and downstream
+artifact handoffs were verified for every successful workflow.
+
+| Passed workflow | Time from first design request to last completed user | Mean user workflow | Mean worker job |
+| --- | --- | --- | --- |
+| 20 users, two workers | 7m 38s | 5m 5s | 35.4s |
+| 39 users, three workers | 11m 19s | 7m 11s | 42.8s |
+
+Including browser login, preparation and rehearsal model-cache provisioning,
+the load-generator totals were 7m 56s and 13m 1s respectively. Participant
+session workspaces were preserved; their model caches were prepared separately.
+
+Earlier synchronized execution batches completed 37 jobs in 680.9 seconds
+with two workers and 35 jobs in 487.3 seconds with three workers. Normalizing
+by completed jobs gives approximately 32% more throughput with three workers.
+This comparison is approximate: successful-user counts and run times differed.
+Earlier design failures exposed a rejected scoped predecessor query and missing
+steps in compound insertion requests; both have regression fixes. Two chat
+HTTP 500 responses in the intermediate rehearsal did not recur in the final
+39-user run; their original response bodies were unavailable for diagnosis.
+The final run passed all 78 design requests, 39 ZIP imports, 39 audio uploads
+and 39 executions, including one automatic compound-insertion repair.
+
+For the final 39-user workload, sampled host CPU peaked at 93.4%, available
+memory stayed above 12.01 GiB, swap usage increased by 422.75 MiB, and there
+were no OOM kills or application restarts. The observed maximum was three
+execution containers, each bounded to 2 CPUs and 4 GiB. Mean admission wait
+was 4m 7s; the last execution finished about 9m 5s after the first was submitted.
+Live UI checks verified anonymous workload counts, queue position, reload
+recovery without another submission, and queued cancellation.
+
+The tested VM was left with `CODEGEN_EXECUTION_MAX_ACTIVE_RUNS=3`,
+`CODEGEN_EXECUTION_CPU_BUDGET=6` and `CODEGEN_EXECUTION_MEMORY_GIB=12`. Portable
+Compose defaults remain two workers. Keep the measured VM limits configurable
+and retain the single codegen process. Private rosters, audio, ZIPs and raw
+reports are excluded from Git.
