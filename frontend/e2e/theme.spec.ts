@@ -38,6 +38,8 @@ for (const theme of ['dark', 'light'] as const) {
     });
     const notification = page.locator('[data-sonner-toast]').filter({ hasText: 'Failed to import flow' });
     await expect(notification).toBeVisible();
+    await expect(page.locator('#root .h-screen').first()).toHaveCSS('opacity', '1');
+    await expect(notification).toHaveCSS('opacity', '1');
 
     for (const element of [control, notification]) {
       const rendered = await colors(element);
