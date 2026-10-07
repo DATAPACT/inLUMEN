@@ -7,7 +7,6 @@ import ReactFlow, {
   Node,
   ReactFlowProvider,
 } from "reactflow";
-import "reactflow/dist/style.css";
 import { ArrowRight, Check, CircleAlert, Minus, Plus, RefreshCw } from "lucide-react";
 import { nodeTypes } from "@/components/NodeTypes";
 import { Badge } from "@/components/ui/badge";
@@ -216,7 +215,7 @@ export const GraphChangePreviewDialog = ({
 
         <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(0,1fr)_minmax(0,0.65fr)] lg:grid-cols-[minmax(0,1fr)_300px] lg:grid-rows-1">
           <div className="relative min-h-0 bg-muted/20">
-            <div className="absolute left-3 top-3 z-10 flex flex-wrap gap-2 rounded-lg border border-border bg-background/90 px-2.5 py-2 text-[11px] shadow-sm backdrop-blur">
+            <div className="absolute left-3 top-3 z-10 flex flex-wrap gap-2 rounded-lg border border-border bg-background/90 px-2.5 py-2 text-[11px] shadow-xs backdrop-blur-sm">
               <span className="flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-sm bg-emerald-400" />Added</span>
               <span className="flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-sm bg-amber-400" />Updated</span>
               <span className="flex items-center gap-1.5"><ArrowRight className="h-3 w-3" />Flow direction</span>

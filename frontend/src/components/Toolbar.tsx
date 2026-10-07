@@ -91,7 +91,7 @@ export function Toolbar({
   const currentVersionName = activeVersionName?.trim() || "Main";
 
   return (
-    <div className={cn("relative min-h-14 shrink-0 flex-wrap py-2 border-b border-border bg-card/95 flex items-center px-3 gap-2 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-card/80", className)}>
+    <div className={cn("relative min-h-14 shrink-0 flex-wrap py-2 border-b border-border bg-card/95 flex items-center px-3 gap-2 shadow-xs backdrop-blur-sm supports-backdrop-filter:bg-card/80", className)}>
       <div className="flex shrink-0 min-w-0 items-center gap-2 pr-2">
         <img src={inlumenLogo} alt="inLUMEN" className="h-8 w-8 shrink-0 rounded-lg" />
         <div className="hidden min-w-0 flex-col justify-center xl:flex">
@@ -108,7 +108,7 @@ export function Toolbar({
       <Separator orientation="vertical" className="hidden h-6 sm:block" />
 
       <div className="pointer-events-none hidden shrink-0 2xl:flex">
-        <div className="max-w-[min(40vw,20rem)] rounded-full border border-border bg-background/60 px-3 py-1 text-xs text-muted-foreground shadow-sm">
+        <div className="max-w-[min(40vw,20rem)] rounded-full border border-border bg-background/60 px-3 py-1 text-xs text-muted-foreground shadow-xs">
           <span className="block truncate text-foreground">{currentVersionName}</span>
         </div>
       </div>

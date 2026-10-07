@@ -154,6 +154,10 @@ inLUMEN's core functionality is provided by LLM-powered agents that serve as hel
 
 ## **Development and test suite**
 
+The frontend uses Tailwind CSS 4 through `@tailwindcss/postcss`, with theme
+configuration in `frontend/src/index.css`. It requires Safari 16.4+, Chrome
+111+, or Firefox 128+; use an up-to-date browser for evaluation sessions.
+
 The consolidated regression suite covers backend units and gateway APIs,
 deployment bundle validation, frontend graph and configuration behavior,
 runner lifecycle and artifact handling, frontend lint/type/build checks, and both

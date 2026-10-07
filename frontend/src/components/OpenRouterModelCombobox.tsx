@@ -212,7 +212,7 @@ export function OpenRouterModelCombobox({
       </Popover>
 
       {selectedModel ? (
-        <div className="rounded-xl border border-border/70 bg-gradient-to-br from-muted/70 to-muted/30 p-3">
+        <div className="rounded-xl border border-border/70 bg-linear-to-br from-muted/70 to-muted/30 p-3">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <span>{formatContextLength(selectedModel.contextLength)}</span>

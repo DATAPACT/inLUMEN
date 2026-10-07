@@ -6,7 +6,7 @@ type AssistantMessageContentProps = {
 };
 
 export const AssistantMessageContent = ({ content }: AssistantMessageContentProps) => (
-  <div className="min-w-0 break-words text-[13px] leading-6">
+  <div className="min-w-0 wrap-break-word text-[13px] leading-6">
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       components={{

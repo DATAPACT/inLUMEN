@@ -473,7 +473,7 @@ export const PipelineRunPanel = () => {
                 <AlertCircle className="h-3.5 w-3.5" />
                 What went wrong
               </div>
-              <div className="mt-1 break-words">{failure.message}</div>
+              <div className="mt-1 wrap-break-word">{failure.message}</div>
               <div className="mt-1.5 text-[11px] leading-relaxed text-red-200/80">
                 {failure.hint}
               </div>
@@ -605,7 +605,7 @@ export const PipelineRunPanel = () => {
                   </div>
                   <div className="max-h-64 space-y-2 overflow-auto">
                     {technicalLogs.map((event) => (
-                      <pre key={event.id} className="whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed">
+                      <pre key={event.id} className="whitespace-pre-wrap wrap-break-word font-mono text-[10px] leading-relaxed">
                         {event.message || event.type}
                       </pre>
                     ))}

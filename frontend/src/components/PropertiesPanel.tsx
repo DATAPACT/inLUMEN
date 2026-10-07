@@ -1292,7 +1292,7 @@ export function PropertiesPanel({
           <div className="min-w-0">
             <h2 className="text-lg font-semibold">Properties</h2>
             {selectedNode && <>
-              <p className="mt-1 break-words text-sm font-medium">{label.trim() || `Untitled ${getStepTypeLabel(nodeType)}`}</p>
+              <p className="mt-1 wrap-break-word text-sm font-medium">{label.trim() || `Untitled ${getStepTypeLabel(nodeType)}`}</p>
               <p className="break-all text-xs text-muted-foreground">ID: {selectedNode.id}</p>
             </>}
             <p className="text-xs text-muted-foreground mt-1">
@@ -1527,7 +1527,7 @@ export function PropertiesPanel({
                       disabled={Object.prototype.hasOwnProperty.call(param, item.name) || secretParamKeys.includes(item.name)}
                       aria-label={`Add ${item.name} to Runtime parameters`}
                       key={String(item.name)}
-                      className="flex w-full flex-col items-start gap-2 rounded-md border border-amber-500/25 bg-amber-500/5 p-2 text-left transition-colors hover:bg-amber-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-60"
+                      className="flex w-full flex-col items-start gap-2 rounded-md border border-amber-500/25 bg-amber-500/5 p-2 text-left transition-colors hover:bg-amber-500/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-60"
                     >
                       <div className="min-w-0">
                         <p className="truncate font-mono text-xs font-medium">{item.name}</p>

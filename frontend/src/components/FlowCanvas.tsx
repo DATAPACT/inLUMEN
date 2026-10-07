@@ -25,7 +25,6 @@ import ReactFlow, {
   useNodesInitialized,
 } from 'reactflow';
 
-import 'reactflow/dist/style.css';
 import { nodeTypes } from './NodeTypes';
 import { PortDisplayContext } from '@/features/nodes/PortDisplayContext';
 import { toast } from 'sonner';
@@ -2266,7 +2265,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
               </div>}
               <p className="text-xs text-muted-foreground">{pkg.files.join(', ')}</p>
               {pkg.replaces_code && <p className="text-xs text-amber-600">Replaces the complete attached package, including dependencies and helper files.</p>}
-              {pkg.errors.map((e,i) => <div key={i} role="alert" className="break-words text-xs text-destructive"><p>{e.message}</p>{e.hint && <p className="mt-1 text-foreground">{e.hint}</p>}</div>)}
+              {pkg.errors.map((e,i) => <div key={i} role="alert" className="wrap-break-word text-xs text-destructive"><p>{e.message}</p>{e.hint && <p className="mt-1 text-foreground">{e.hint}</p>}</div>)}
               {pkg.warnings.map((warning,i) => <p key={i} className="text-xs text-muted-foreground">{warning}</p>)}
               {!pkg.errors.length && <p className="text-xs text-emerald-600">Package validated; execution not tested.</p>}
             </div>; })}
