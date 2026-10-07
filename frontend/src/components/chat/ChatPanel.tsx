@@ -99,7 +99,7 @@ export const ChatPanel = ({
                 )}
               >
                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                <span className="min-w-0 flex-1 break-words">
+                <span className="min-w-0 flex-1 wrap-break-word">
                   {canvasSyncStatus.message}
                 </span>
               </div>
@@ -175,7 +175,7 @@ export const ChatPanel = ({
                     </div>
                     <div
                       className={cn(
-                        "rounded-[18px] border px-3 py-2.5 text-sm leading-6 shadow-sm",
+                        "rounded-[18px] border px-3 py-2.5 text-sm leading-6 shadow-xs",
                         msg.role === 'user'
                           ? "border-emerald-400/25 bg-[linear-gradient(135deg,rgba(16,185,129,0.88),rgba(14,116,144,0.86))] text-white"
                         : "border-border bg-muted/55 text-foreground",
@@ -203,7 +203,7 @@ export const ChatPanel = ({
                           content={sanitizeAssistantMessage(msg.content)}
                         />
                       ) : (
-                        <div className="whitespace-pre-wrap break-words">
+                        <div className="whitespace-pre-wrap wrap-break-word">
                           {msg.content}
                         </div>
                       )}
@@ -219,7 +219,7 @@ export const ChatPanel = ({
                       <span className="h-2 w-2 rounded-full bg-sky-400" />
                       Pipeline Copilot
                     </div>
-                    <div className="rounded-[18px] border border-border bg-muted/55 px-3 py-2.5 text-sm text-muted-foreground shadow-sm">
+                    <div className="rounded-[18px] border border-border bg-muted/55 px-3 py-2.5 text-sm text-muted-foreground shadow-xs">
                       <div className="flex items-center gap-3">
                         <span className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-emerald-400" />
                         Working through the next pipeline revision...

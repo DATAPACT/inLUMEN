@@ -1713,7 +1713,7 @@ const Index = () => {
 
                 <DropdownMenuContent
                   align="start"
-                  className="w-[var(--radix-dropdown-menu-trigger-width)] min-w-[320px] rounded-xl border-border bg-popover p-2 text-popover-foreground"
+                  className="w-(--radix-dropdown-menu-trigger-width) min-w-[320px] rounded-xl border-border bg-popover p-2 text-popover-foreground"
                 >
                   <DropdownMenuLabel className="px-3 pt-2 text-xs uppercase tracking-[0.22em] text-muted-foreground">
                     Saved LLM Configurations
@@ -1724,7 +1724,7 @@ const Index = () => {
                     configs.map((config) => (
                       <DropdownMenuItem
                         key={config.id}
-                        className="flex cursor-pointer items-start justify-between gap-2 rounded-lg px-3 py-3 focus:bg-emerald-500/10 data-[highlighted]:bg-emerald-500/10"
+                        className="flex cursor-pointer items-start justify-between gap-2 rounded-lg px-3 py-3 focus:bg-emerald-500/10 data-highlighted:bg-emerald-500/10"
                         onClick={() => handleSelectConfig(config)}
                       >
                         <div className="min-w-0 flex-1">
@@ -1782,7 +1782,7 @@ const Index = () => {
 
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
-                    className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-3 text-emerald-600 focus:bg-emerald-500/10 data-[highlighted]:bg-emerald-500/10"
+                    className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-3 text-emerald-600 focus:bg-emerald-500/10 data-highlighted:bg-emerald-500/10"
                     onClick={handleCreateConfig}
                   >
                     <PlusCircle className="h-4 w-4" />

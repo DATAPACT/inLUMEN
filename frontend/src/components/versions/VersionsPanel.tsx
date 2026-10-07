@@ -151,13 +151,13 @@ export const VersionsPanel = ({
                     <div className="flex min-w-0 items-start gap-2 text-sm font-medium leading-snug">
                       {version.is_main && <GitBranch className="h-3.5 w-3.5 shrink-0 text-emerald-500" />}
                       {isActive && <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-sky-400" />}
-                      <span className="min-w-0 break-words">{version.name}</span>
+                      <span className="min-w-0 wrap-break-word">{version.name}</span>
                     </div>
                     <div className="text-xs text-muted-foreground">
                       {version.is_main ? 'Working version' : 'Saved'} {formatDate(version.updated_at ?? version.created_at)}
                     </div>
                   </div>
-                  <div className="flex w-[7.5rem] shrink-0 flex-col items-stretch gap-1">
+                  <div className="flex w-30 shrink-0 flex-col items-stretch gap-1">
                     {!version.is_main && (
                       <Button
                         type="button"

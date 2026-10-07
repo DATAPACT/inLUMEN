@@ -965,14 +965,14 @@ export function Sidebar({
                         <Calendar className="h-3.5 w-3.5 shrink-0" />
                         <span>Updated</span>
                       </div>
-                      <p className="break-words font-medium">{formatOverviewTimestamp(overview?.lastUpdate)}</p>
+                      <p className="wrap-break-word font-medium">{formatOverviewTimestamp(overview?.lastUpdate)}</p>
                     </div>
                     <div className="min-w-0">
                       <div className="mb-1 flex items-center gap-1.5 text-muted-foreground">
                         <Calendar className="h-3.5 w-3.5 shrink-0" />
                         <span>Created</span>
                       </div>
-                      <p className="break-words font-medium">{formatOverviewTimestamp(overview?.createdAt)}</p>
+                      <p className="wrap-break-word font-medium">{formatOverviewTimestamp(overview?.createdAt)}</p>
                     </div>
                   </div>
                 </div>

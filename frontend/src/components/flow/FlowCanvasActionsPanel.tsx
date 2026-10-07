@@ -49,7 +49,7 @@ export const FlowCanvasActionsPanel = ({
   onPreviewGraphChangesChange,
 }: FlowCanvasActionsPanelProps) => (
   <>
-    <Panel position="top-center" className="mt-2 w-max max-w-[calc(100%_-_1.5rem)]">
+    <Panel position="top-center" className="mt-2 w-max max-w-[calc(100%-1.5rem)]">
       <div className="flex flex-wrap items-center gap-1 rounded-xl border border-border/80 bg-card/85 p-1.5 text-xs shadow-xl shadow-black/10 backdrop-blur-md [&_button:hover]:bg-muted [&_button:hover]:text-foreground">
       <Button size="sm" variant="outline" onClick={onSave} className="flex h-7 items-center gap-1 px-2.5">
         <Save className="h-3.5 w-3.5" />

@@ -174,7 +174,7 @@ export const CustomNode: React.FC<NodeProps> = ({ id, data, selected }) => {
 
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-1.5 text-[9px] leading-3 text-slate-400">
-            <span className="shrink-0 font-semibold uppercase tracking-[0.1em]">
+            <span className="shrink-0 font-semibold uppercase tracking-widest">
               {getStepTypeLabel(visualType)}
             </span>
             {showTemplate && (

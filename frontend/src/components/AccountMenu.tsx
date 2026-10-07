@@ -22,11 +22,11 @@ export function AccountMenu() {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-72 max-w-[calc(100vw-2rem)]">
-        <DropdownMenuLabel className="break-words">{name}</DropdownMenuLabel>
+        <DropdownMenuLabel className="wrap-break-word">{name}</DropdownMenuLabel>
         <div className="space-y-3 px-2 pb-3 text-xs">
           <div>
             <p className="text-muted-foreground">Current workspace</p>
-            <p className="break-words font-medium">{workspace?.name || 'Workspace'}</p>
+            <p className="wrap-break-word font-medium">{workspace?.name || 'Workspace'}</p>
             <p className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{session?.active_workspace_id}</p>
           </div>
           <div>

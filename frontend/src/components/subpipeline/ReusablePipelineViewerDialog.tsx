@@ -1,6 +1,5 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import ReactFlow, { Background, Controls, ReactFlowProvider } from "reactflow";
-import "reactflow/dist/style.css";
 
 import { nodeTypes } from "@/components/NodeTypes";
 import { Button } from "@/components/ui/button";
@@ -90,7 +89,7 @@ function Viewer({ reference }: { reference: SubpipelineReference }) {
             {graph.nodes.map((node) => <option key={node.id} value={node.id}>{node.data.label || node.id}</option>)}
           </select>
         </div>
-        {selected ? <div className="space-y-4 break-words text-sm">
+        {selected ? <div className="space-y-4 wrap-break-word text-sm">
           <div><h3 className="font-semibold">{selected.data.label || selected.id}</h3>
             <p className="text-xs text-muted-foreground">{getStepTypeLabel(selected.data.type)} · ID: {selected.id}</p></div>
           {selected.data.description && <p className="whitespace-pre-wrap">{selected.data.description}</p>}
