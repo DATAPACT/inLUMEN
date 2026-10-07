@@ -119,6 +119,10 @@ import {
   Zap,
 } from 'lucide-react';
 
+// Start existing workspaces in Details too: the old key persisted Compact
+// automatically. Explicit choices made after this change remain remembered.
+const PORT_DETAILS_STORAGE_KEY = 'inlumen-show-port-details-v2';
+
 interface FlowCanvasProps {
   onNodeSelect: (node: Node | null, options?: { openInspector?: boolean }) => void;
   onNodesChange?: (nodes: Node[]) => void;
@@ -490,7 +494,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     return readStoredArray<Edge>(workspaceStorage, 'ai-flow-edges', (value): value is Edge => !!value && typeof value === 'object' && typeof (value as Edge).source === 'string' && typeof (value as Edge).target === 'string');
   });
   const [showPortDetails, setShowPortDetails] = useState(
-    () => workspaceStorage.getItem('inlumen-show-port-details') === 'true',
+    () => workspaceStorage.getItem(PORT_DETAILS_STORAGE_KEY) !== 'false',
   );
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
@@ -1441,7 +1445,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   }, [workspaceStorage, nodes, edges]);
 
   useEffect(() => {
-    workspaceStorage.setItem('inlumen-show-port-details', String(showPortDetails));
+    workspaceStorage.setItem(PORT_DETAILS_STORAGE_KEY, String(showPortDetails));
     onDisplayModeChange?.(showPortDetails);
   }, [workspaceStorage, onDisplayModeChange, showPortDetails]);
 

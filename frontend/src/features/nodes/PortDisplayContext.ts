@@ -7,6 +7,6 @@ export type PortDisplayState = {
 };
 
 export const PortDisplayContext = createContext<PortDisplayState>({
-  advanced: false,
+  advanced: true,
   validationByNode: {},
 });
