@@ -200,6 +200,27 @@ class GraphTransactionIntegrationTests(unittest.TestCase):
             self.assertEqual(len(current.json['nodes']), 1)
             self.assertEqual(current.headers['ETag'], saved.headers['ETag'])
 
+    def test_deleting_a_chain_step_removes_it_and_closes_the_gap(self):
+        def step(flow_id, x):
+            return {'id': flow_id, 'data': {'type': 'task', 'label': flow_id}, 'position': {'x': x, 'y': 0}}
+
+        def edge(source, target):
+            return {'id': f'{source}-{target}', 'source': source, 'target': target}
+
+        with patch.dict('os.environ', {'AUTH_ENABLED': 'false'}):
+            client = app.test_client()
+            synced = client.post('/neo4j_sync_graph', json={'graph': {
+                'nodes': [step('first', 0), step('middle', 300), step('last', 600)],
+                'edges': [edge('first', 'middle'), edge('middle', 'last')],
+            }})
+            self.assertEqual(synced.status_code, 200, synced.json)
+            deleted = client.delete('/neo4j_delete_node/middle')
+            self.assertEqual(deleted.status_code, 200, deleted.json)
+            graph = client.get('/neo4j_get_graph').json
+            positions = {node['id']: node['position']['x'] for node in graph['nodes']}
+            self.assertEqual(positions, {'first': 0, 'last': 300})
+            self.assertEqual(graph['edges'], [])
+
     def test_publication_updates_file_pointers_atomically(self):
         with patch.dict('os.environ', {'AUTH_ENABLED': 'false'}):
             client = app.test_client()

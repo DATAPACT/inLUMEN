@@ -1805,6 +1805,7 @@ def neo4j_delete_node(flow_id):
                 END |
                     SET node.x = coalesce(node.x, 0.0) - 300.0
                 )
+                WITH s
                 OPTIONAL MATCH (s)-[:HAS_FILE]->(f:FILE)
                 WITH s, collect(DISTINCT f) AS files
                 CALL {
