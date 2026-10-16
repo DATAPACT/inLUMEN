@@ -409,6 +409,9 @@ entire ownership list, cancels active pipeline/generation work, waits for it to
 stop, clears workspace content through the existing authenticated API, and
 verifies an empty graph. It refuses non-owned memberships and stops on errors;
 it does not roll back previously completed resets. Re-preview before retrying.
+The terminal reports each account sign-in, workspace ownership check, and reset.
+Authentication is sequential and finishes for the whole roster before clearing
+content. While cancelling active work, a waiting message appears every ten seconds.
 
 Reset removes graphs, uploaded code/data, outputs, provenance, run/generation
 history, server-side chat sessions and node secrets. It retains Keycloak users,
