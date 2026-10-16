@@ -61,6 +61,14 @@ class PipelineArtifactStore:
         output_root = self._run_root(run_id, workspace_id) / "artifacts"
         for entry in outputs:
             path = self._safe_relative(entry.get("path"))
+            if entry.get("storage") == "minio":
+                # Codegen already stored the bytes in object storage; keep the reference.
+                stored.append({
+                    key: deepcopy(value)
+                    for key, value in entry.items()
+                    if key not in {"content", "content_encoding"}
+                })
+                continue
             destination = (output_root / Path(*path.parts)).resolve()
             if output_root.resolve() not in destination.parents:
                 raise ValueError(f"Unsafe pipeline output path: {path}")

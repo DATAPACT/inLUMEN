@@ -562,6 +562,34 @@ def _artifacts(output_dir):
     return results
 
 
+STEP_RECEIPT = ".inlumen-step.json"
+
+
+def _write_step_receipt(root, asset_key, started_at, input_dir, bindings, artifacts):
+    """Record what a step read and published, for lineage and caching.
+
+    The receipt sits next to the published ports; the platform reads it after
+    the run and never hands it to downstream steps.
+    """
+    connections = [
+        {key: str(item.get(key) or "") for key in (
+            "source_node", "source_port", "connection_id", "target_port", "filename",
+        )}
+        for item in bindings or []
+        if isinstance(item, dict)
+    ]
+    atomic_json(Path(root) / STEP_RECEIPT, {
+        "schema_version": "inlumen.step-receipt@1",
+        "asset_key": asset_key,
+        "status": "succeeded",
+        "started_at": started_at,
+        "finished_at": time.time(),
+        "connections": connections,
+        "inputs": _artifacts(Path(input_dir)) if Path(input_dir).is_dir() else [],
+        "outputs": [item for item in artifacts if item["path"] != STEP_RECEIPT],
+    })
+
+
 def _validate_output_ports(output_dir, required_ports):
     for port in required_ports:
         root = output_dir / port
@@ -600,6 +628,7 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
         @dg.asset(name=self.asset_key, deps=deps)
         def run_script(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             project_root = Path.cwd()
+            started_at = time.time()
 
             def resolve(value):
                 path = Path(value)
@@ -775,6 +804,8 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
                     self.output_ports[0] if self.output_ports else "result",
                 )
                 artifacts = _artifacts(published_dir)
+                _write_step_receipt(published_dir, self.asset_key, started_at, input_dir,
+                                    bound_inputs, artifacts)
                 return dg.MaterializeResult(metadata={
                     "input_dir": str(input_dir), "output_dir": str(published_dir),
                     "artifact_count": len(declarations), "artifacts": dg.MetadataValue.json(artifacts),
@@ -794,6 +825,8 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
                 self.output_ports if self.required_output_ports is None else self.required_output_ports,
             )
             artifacts = _artifacts(output_dir)
+            _write_step_receipt(output_dir, self.asset_key, started_at, input_dir,
+                                bindings, artifacts)
             return dg.MaterializeResult(metadata={
                 "input_dir": str(input_dir),
                 "output_dir": str(output_dir),

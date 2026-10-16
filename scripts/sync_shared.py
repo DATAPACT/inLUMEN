@@ -9,6 +9,7 @@ COPIES = {
     'shared/task_package_spec.json': ['backend/task_package_spec.json', 'codegen/app/task_package_spec.json', 'frontend/src/features/flow/taskPackageGuide.generated.json'],
     'shared/task_package_contract.py': ['backend/task_package_contract.py', 'codegen/app/task_package_contract.py'],
     'shared/artifact_runtime.py': ['backend/artifact_runtime.py', 'codegen/app/artifact_runtime.py'],
+    'shared/run_artifact_names.py': ['backend/run_artifact_names.py', 'codegen/app/run_artifact_names.py'],
     'shared/request_diagnostics.py': ['runner/app/request_diagnostics.py', 'codegen/app/request_diagnostics.py'],
     'shared/leases.py': ['runner/app/leases.py', 'codegen/app/leases.py'],
     'backend/node_definitions/manifests/core.json': ['frontend/src/features/nodes/registry/core.generated.json'],

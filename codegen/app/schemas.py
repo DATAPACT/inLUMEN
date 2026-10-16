@@ -402,3 +402,6 @@ class DeploymentBundleValidationRequest(BaseModel):
     argo_dry_run: bool = False
     timeout_seconds: int = Field(default=900, ge=30, le=3600)
     runtime_secrets: dict[str, str] = Field(default_factory=dict, repr=False)
+    # Set by the API from the caller's workspace and run id; client values are replaced.
+    artifact_workspace_id: str | None = None
+    artifact_run_id: str | None = None

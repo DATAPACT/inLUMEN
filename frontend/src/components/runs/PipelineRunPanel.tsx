@@ -18,6 +18,7 @@ import { Button } from '@/components/ui/button';
 import {
   cancelPipelineRun,
   downloadPipelineRunBundle,
+  downloadPipelineRunLineage,
   downloadPipelineRunOutput,
   fetchPipelineRunEvents,
   fetchRunnerCapabilities,
@@ -669,6 +670,18 @@ export const PipelineRunPanel = () => {
                 <Download className="mr-1 h-3.5 w-3.5" />
                 Download tested snapshot
               </Button>
+              {selectedRun.result?.steps?.length ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-2 h-auto min-h-8 w-full whitespace-normal py-2"
+                  title="Which step used and produced which file, as PROV-O JSON-LD"
+                  onClick={() => { void downloadPipelineRunLineage(selectedRun.run_id); }}
+                >
+                  <Download className="mr-1 h-3.5 w-3.5" />
+                  Download run lineage
+                </Button>
+              ) : null}
               {technicalLogs.length > 0 && (
                 <div className="mt-2 border-t border-border pt-2">
                   <div className="mb-1 flex items-center gap-1 font-medium text-foreground">

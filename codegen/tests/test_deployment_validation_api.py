@@ -99,6 +99,8 @@ def test_deployment_validation_endpoint_forwards_every_option() -> None:
             timeout_seconds=120,
         runtime_secrets={},
         execution_id="run-1",
+        artifact_workspace_id="local-workspace",
+        artifact_run_id="run-1",
     )
 
 

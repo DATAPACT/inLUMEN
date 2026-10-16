@@ -4,6 +4,7 @@ import argparse
 import base64
 import hashlib
 
+from .run_artifact_store import RunArtifactStore
 from .security import EXECUTION_WORKSPACE
 import json
 import mimetypes
@@ -2149,18 +2150,57 @@ def _split_run_output_path(
     return "", rest
 
 
-def _read_run_output_files(bundle_root: Path) -> list[dict[str, Any]]:
+STEP_RECEIPT_FILENAME = ".inlumen-step.json"
+
+
+def _run_output_metadata(path: Path, bundle_root: Path) -> dict[str, Any]:
+    """Describe a run output without loading it into memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    content_type = _content_type_for_filename(
+        path.name,
+        "application/json" if path.suffix == ".json"
+        else "application/x-yaml;charset=utf-8" if path.suffix in {".yaml", ".yml"}
+        else "",
+    )
+    return {
+        "path": path.relative_to(bundle_root).as_posix(),
+        "filename": path.name,
+        "flow_id": "",
+        **_canonical_artifact(path.name),
+        "content_type": content_type,
+        "size_bytes": path.stat().st_size,
+        "sha256": f"sha256:{digest.hexdigest()}",
+        "role": "run-output",
+    }
+
+
+def _collect_run_outputs(
+    bundle_root: Path,
+) -> tuple[list[tuple[dict[str, Any], Path]], list[dict[str, Any]]]:
+    """Return (output metadata with local paths, step receipts) for a run."""
     output_root = bundle_root / "outputs"
     if not output_root.is_dir():
-        return []
+        return [], []
     nodes = _run_output_nodes(bundle_root)
-    entries = []
+    outputs: list[tuple[dict[str, Any], Path]] = []
+    receipts: list[dict[str, Any]] = []
     for path in sorted(item for item in output_root.rglob("*") if item.is_file()):
         if path.name == ".gitkeep":
             continue
-        entry = _artifact_file_entry(path, bundle_root, role="run-output")
         node_dir, *rest = path.relative_to(output_root).parts
         node = nodes.get(node_dir)
+        if path.name == STEP_RECEIPT_FILENAME:
+            try:
+                receipt = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if node is not None and isinstance(receipt, dict):
+                receipts.append({**receipt, "flow_id": node["flow_id"], "node_label": node["label"]})
+            continue
+        entry = _run_output_metadata(path, bundle_root)
         port, below_port = _split_run_output_path(tuple(rest), node)
         # Keep the port in the public path only when it disambiguates files.
         keep_port = bool(port) and node is not None and len(node["ports"]) > 1
@@ -2174,8 +2214,49 @@ def _read_run_output_files(bundle_root: Path) -> list[dict[str, Any]]:
             entry["source_node"] = node["flow_id"]
             entry["node_label"] = node["label"]
             entry["output_role"] = "final" if node["final"] else "intermediate"
-        entries.append(entry)
-    return entries
+        outputs.append((entry, path))
+    return outputs, receipts
+
+
+def _read_run_output_files(bundle_root: Path) -> list[dict[str, Any]]:
+    """Run outputs with their content inline (used when no object store is configured)."""
+    outputs, _receipts = _collect_run_outputs(bundle_root)
+    return [
+        {
+            **entry,
+            **_encode_artifact_bytes(
+                path.read_bytes(), filename=path.name, content_type=entry["content_type"]
+            ),
+        }
+        for entry, path in outputs
+    ]
+
+
+def _run_outputs_response(
+    bundle_root: Path,
+    *,
+    workspace_id: str | None,
+    run_id: str | None,
+) -> dict[str, Any]:
+    """Store a run's outputs by reference when possible, inline otherwise."""
+    outputs, receipts = _collect_run_outputs(bundle_root)
+    store = RunArtifactStore.from_environment() if workspace_id and run_id else None
+    if store is not None:
+        try:
+            return {
+                "run_outputs": store.publish(
+                    workspace_id=workspace_id, run_id=run_id, outputs=outputs, receipts=receipts,
+                ),
+                "step_receipts": receipts,
+            }
+        except Exception as exc:  # noqa: BLE001 - keep the run's results inline instead.
+            warning = f"Run outputs were kept inline because object storage failed: {exc}"
+            return {
+                "run_outputs": _read_run_output_files(bundle_root),
+                "step_receipts": receipts,
+                "artifact_storage_warning": warning,
+            }
+    return {"run_outputs": _read_run_output_files(bundle_root), "step_receipts": receipts}
 
 
 def validate_deployment_bundle_files(
@@ -2193,6 +2274,8 @@ def validate_deployment_bundle_files(
     timeout_seconds: int = 900,
     runtime_secrets: dict[str, str] | None = None,
     execution_id: str | None = None,
+    artifact_workspace_id: str | None = None,
+    artifact_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Materialize, validate, and optionally repair an uploaded bundle.
 
@@ -2270,8 +2353,12 @@ def validate_deployment_bundle_files(
             ),
             # Failed runs still return what earlier steps published, so users
             # can inspect partial results and see where the pipeline stopped.
-            "run_outputs": (
-                _read_run_output_files(bundle_root) if execution_requested else []
+            **(
+                _run_outputs_response(
+                    bundle_root, workspace_id=artifact_workspace_id, run_id=artifact_run_id
+                )
+                if execution_requested
+                else {"run_outputs": [], "step_receipts": []}
             ),
         }
 

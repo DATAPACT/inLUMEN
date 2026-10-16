@@ -52,6 +52,7 @@ export type PipelineRunRecord = {
   result?: {
     status?: string;
     outputs?: Array<Record<string, unknown>>;
+    steps?: Array<Record<string, unknown>>;
   } | null;
 };
 
@@ -170,6 +171,12 @@ const downloadRunFile = async (url: string, fallbackName: string): Promise<void>
   anchor.click();
   URL.revokeObjectURL(objectUrl);
 };
+
+export const downloadPipelineRunLineage = (runId: string): Promise<void> =>
+  downloadRunFile(
+    `${INLUMEN_API_URL}/api/provenance/prov-o?run_id=${encodeURIComponent(runId)}`,
+    `inlumen-run-lineage-${runId}.jsonld`,
+  );
 
 export const downloadPipelineRunBundle = (runId: string): Promise<void> =>
   downloadRunFile(

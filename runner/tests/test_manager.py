@@ -597,3 +597,50 @@ async def test_failed_run_keeps_outputs_of_completed_steps_and_maps_node_events(
     ]
     assert node_events
     assert {event.get("flow_id") for event in node_events} == {"1"}
+
+
+class ReferenceExecutor(FakeDagsterExecutor):
+    async def execute(self, run_id, files, runtime_secrets):
+        return {
+            "ok": True,
+            "validation_report": {"ok": True},
+            "run_outputs": [{
+                "path": "outputs/node-1/big.csv", "filename": "big.csv", "content_type": "text/csv",
+                "size_bytes": 10_000_000, "sha256": "sha256:abc", "source_node": "1",
+                "storage": "minio", "bucket": "run-artifacts-local", "key": f"runs/{run_id}/outputs/node-1/big.csv",
+            }],
+            "step_receipts": [{
+                "flow_id": "1", "node_label": "Clean", "status": "succeeded", "asset_key": "node_1_clean",
+                "started_at": 1.0, "finished_at": 2.0,
+                "connections": [{"source_node": "0", "source_port": "data", "target_port": "input",
+                                 "filename": "in.csv", "connection_id": "x"}],
+                "inputs": [{"path": "in.csv", "size_bytes": 5, "sha256": "aaa", "content_type": "text/csv"}],
+                "outputs": [{"path": "output/big.csv", "size_bytes": 10_000_000, "sha256": "abc"}],
+            }],
+            "artifact_storage_warning": "",
+        }
+
+
+@pytest.mark.asyncio
+async def test_object_stored_outputs_are_kept_as_references_with_step_lineage(tmp_path):
+    manager = PipelineRunManager(
+        PipelineRunStore(":memory:"),
+        adapter="dagster",
+        executor=ReferenceExecutor(),
+        artifact_store=PipelineArtifactStore(tmp_path / "artifacts"),
+    )
+    queued, _created = await manager.start(request(key="reference-run"))
+    await manager.tasks[queued["run_id"]]
+
+    run = manager.get(queued["run_id"])
+    [output] = run["result"]["outputs"]
+    assert (output["storage"], output["bucket"], output["key"]) == (
+        "minio", "run-artifacts-local", f"runs/{queued['run_id']}/outputs/node-1/big.csv",
+    )
+    assert manager.output(queued["run_id"], "outputs/node-1/big.csv") is None
+    assert not list((tmp_path / "artifacts").rglob("big.csv"))
+    [step] = run["result"]["steps"]
+    assert step["flow_id"] == "1"
+    assert step["connections"] == [{"source_node": "0", "source_port": "data", "target_port": "input", "filename": "in.csv"}]
+    assert step["inputs"] == [{"path": "in.csv", "size_bytes": 5, "sha256": "aaa"}]
+    assert "asset_key" not in step

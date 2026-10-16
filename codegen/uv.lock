@@ -346,6 +346,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "jsonschema" },
+    { name = "minio" },
     { name = "packaging" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
@@ -366,6 +367,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "jsonschema", specifier = ">=4.23,<5" },
+    { name = "minio", specifier = "==7.1.17" },
     { name = "packaging", specifier = ">=24.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2.0,<4" },
     { name = "pydantic", specifier = ">=2.7.0" },
@@ -402,6 +404,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/19/74/a633ee74eb36c44aa6d1095e7cc5569bebf04342ee146178e2d36600708b/jsonschema_specifications-2025.9.1.tar.gz", hash = "sha256:b540987f239e745613c7a9176f3edb72b832a4ac465cf02712288397832b5e8d", size = 32855, upload-time = "2025-09-08T01:34:59.186Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl", hash = "sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe", size = 18437, upload-time = "2025-09-08T01:34:57.871Z" },
+]
+
+[[package]]
+name = "minio"
+version = "7.1.17"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "certifi" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/68/72/b81f61f4d03d319022d52928177f8f32b598531d1cf02f13f06264df7a65/minio-7.1.17.tar.gz", hash = "sha256:b0b687c1ec9be422a1f8b04c65fb8e43a1c090f9508178db57c434a17341c404", size = 120501, upload-time = "2023-09-25T05:57:31.884Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a1/dc/a93d0b835ff6932f31a1eb7664539bc5eb4c4464a8a81c30eccab2915476/minio-7.1.17-py3-none-any.whl", hash = "sha256:0aa525d77a3bc61378444c2400b0ba2685ad4cd6ecb3fba4141a0d0765e25f40", size = 78307, upload-time = "2023-09-25T05:57:29.874Z" },
 ]
 
 [[package]]

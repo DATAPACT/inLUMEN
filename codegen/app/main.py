@@ -873,9 +873,12 @@ async def validate_deployment_bundle_endpoint(
     background: bool = Query(default=False),
 ) -> Any:
     """Validate deployment artifacts inside the private codegen service."""
-    request = request.model_copy(update={"execution_id": scoped_execution_id(
-        request.execution_id or uuid.uuid4().hex, workspace_id
-    )})
+    run_id = request.execution_id or uuid.uuid4().hex
+    request = request.model_copy(update={
+        "execution_id": scoped_execution_id(run_id, workspace_id),
+        "artifact_workspace_id": workspace_id,
+        "artifact_run_id": run_id,
+    })
     if len(DEPLOYMENT_TASKS) >= DEPLOYMENT_PENDING_LIMIT and EXECUTION_STORE.get(request.execution_id) is None:
         raise HTTPException(429, "Execution queue is full.", headers={"Retry-After": "5"})
     try:
@@ -919,6 +922,8 @@ async def _execute_registered_deployment(request: DeploymentBundleValidationRequ
             timeout_seconds=request.timeout_seconds,
             runtime_secrets=request.runtime_secrets,
             execution_id=request.execution_id,
+            artifact_workspace_id=request.artifact_workspace_id,
+            artifact_run_id=request.artifact_run_id,
         )
         future = asyncio.get_running_loop().run_in_executor(
             DEPLOYMENT_POOL, contextvars.copy_context().run, worker

@@ -13,7 +13,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from flask import Flask, Response, g, jsonify, make_response, request
+from flask import Flask, Response, g, jsonify, make_response, request, stream_with_context
+from minio.error import S3Error
 
 from artifact_contract import classify_artifact
 from artifact_runtime import ArtifactContractError
@@ -41,6 +42,7 @@ from analytics_api import (
 from attachment_validation import attachment_input_errors, read_attachment_probe
 from auth_middleware import (
     current_principal,
+    current_workspace_id,
     is_application_admin,
     is_auth_enabled,
     require_auth,
@@ -81,10 +83,17 @@ from pipeline_runner_client import (
     runner_raw_response,
     runner_request,
 )
-from provenance_provo import build_prov_o_jsonld, provenance_prov_o_filename
+from provenance_provo import build_prov_o_jsonld, build_run_prov_o_jsonld, provenance_prov_o_filename
 from provenance_report import build_provenance_pdf, provenance_report_filename
 from public_api import create_public_api_blueprint
 from run_output_preview import build_preview
+from run_artifact_access import (
+    RunArtifactReferenceError,
+    object_reference,
+    read_window,
+    remove_run_artifacts,
+    stream_object,
+)
 from runtime_environment import discover_runtime_environment, runtime_environment_from_files
 from runtime_config import add_cors_headers, get_service_port
 from step_types import normalize_step_type
@@ -2350,7 +2359,12 @@ def pipeline_runs():
         return _preflight_response()
     try:
         if request.method == "DELETE":
-            return jsonify(runner_request("DELETE", "/v1/pipeline-runs")), 200
+            cleared = runner_request("DELETE", "/v1/pipeline-runs")
+            try:
+                cleared["removed_artifact_objects"] = remove_run_artifacts(current_workspace_id())
+            except Exception as exc:  # noqa: BLE001 - runs are cleared; report leftover objects.
+                cleared["artifact_cleanup_error"] = str(exc)
+            return jsonify(cleared), 200
         if request.method == "GET":
             try:
                 limit = min(max(int(request.args.get("limit") or 20), 1), 100)
@@ -2460,6 +2474,21 @@ def _runner_output_path(run_id: str, output_path: str) -> str:
     )
 
 
+def _run_output_entry(run_id: str, output_path: str) -> dict[str, Any] | None:
+    """Return the run's own record of an output; only listed outputs are served."""
+    run = runner_request("GET", f"/v1/pipeline-runs/{quote(run_id, safe='')}")
+    outputs = ((run.get("result") or {}).get("outputs")) or []
+    return next(
+        (item for item in outputs if isinstance(item, dict) and item.get("path") == output_path),
+        None,
+    )
+
+
+def _safe_attachment_name(entry: dict[str, Any], output_path: str) -> str:
+    name = str(entry.get("filename") or output_path.rsplit("/", 1)[-1] or "output")
+    return name.replace('"', "").replace("\\", "")
+
+
 @app.route(
     "/api/pipeline-runs/<run_id>/outputs/<path:output_path>",
     methods=["GET", "OPTIONS"],
@@ -2472,21 +2501,41 @@ def pipeline_run_output(run_id: str, output_path: str):
     if disposition_mode not in {"attachment", "inline"}:
         return _json_error(400, "disposition must be 'attachment' or 'inline'.")
     try:
-        body, content_type, disposition = runner_raw_request(
-            "GET",
-            _runner_output_path(run_id, output_path),
-            params={"disposition": disposition_mode},
-        )
-        response = Response(body, status=200, content_type=content_type)
-        if disposition:
-            response.headers["Content-Disposition"] = disposition
+        entry = _run_output_entry(run_id, output_path)
+        if entry is None:
+            return _json_error(404, "Pipeline output was not found.")
+        reference = object_reference(entry, run_id, current_workspace_id())
+        if reference is not None:
+            chunks, size = stream_object(*reference)
+            response = Response(
+                stream_with_context(chunks),
+                status=200,
+                content_type=str(entry.get("content_type") or "application/octet-stream"),
+            )
+            response.headers["Content-Length"] = str(size)
+            response.headers["Content-Disposition"] = (
+                f'{disposition_mode}; filename="{_safe_attachment_name(entry, output_path)}"'
+            )
+        else:
+            body, content_type, disposition = runner_raw_request(
+                "GET",
+                _runner_output_path(run_id, output_path),
+                params={"disposition": disposition_mode},
+            )
+            response = Response(body, status=200, content_type=content_type)
+            if disposition:
+                response.headers["Content-Disposition"] = disposition
         if disposition_mode == "inline":
             # Previews render user-generated content; never let it run scripts.
             response.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
             response.headers["X-Content-Type-Options"] = "nosniff"
         return response
+    except RunArtifactReferenceError as exc:
+        return _json_error(403, str(exc))
     except PipelineRunnerError as exc:
         return _pipeline_runner_error_response(exc)
+    except S3Error as exc:
+        return _json_error(502, "Run output storage is unavailable.", exc.code)
 
 
 @app.route(
@@ -2505,20 +2554,12 @@ def pipeline_run_output_preview(run_id: str, output_path: str):
     if offset < 0 or (limit is not None and limit < 1):
         return _json_error(400, "offset must be >= 0 and limit >= 1.")
     try:
-        run = runner_request("GET", f"/v1/pipeline-runs/{quote(run_id, safe='')}")
-        outputs = ((run.get("result") or {}).get("outputs")) or []
-        entry = next(
-            (
-                item
-                for item in outputs
-                if isinstance(item, dict) and item.get("path") == output_path
-            ),
-            None,
-        )
+        entry = _run_output_entry(run_id, output_path)
         if entry is None:
             return _json_error(404, "Pipeline output was not found.")
+        reference = object_reference(entry, run_id, current_workspace_id())
 
-        def read_window(window_offset: int, length: int | None) -> tuple[bytes, int]:
+        def read_from_runner(window_offset: int, length: int | None) -> tuple[bytes, int]:
             params: dict[str, Any] = {"offset": window_offset}
             if length is not None:
                 params["length"] = length
@@ -2528,9 +2569,17 @@ def pipeline_run_output_preview(run_id: str, output_path: str):
             size = headers.get("X-InLumen-Output-Size")
             return body, int(size) if size and size.isdigit() else len(body)
 
-        return jsonify(build_preview(read_window, entry, offset=offset, limit=limit)), 200
+        def read_from_storage(window_offset: int, length: int | None) -> tuple[bytes, int]:
+            return read_window(*reference, window_offset, length)
+
+        read = read_from_storage if reference is not None else read_from_runner
+        return jsonify(build_preview(read, entry, offset=offset, limit=limit)), 200
+    except RunArtifactReferenceError as exc:
+        return _json_error(403, str(exc))
     except PipelineRunnerError as exc:
         return _pipeline_runner_error_response(exc)
+    except S3Error as exc:
+        return _json_error(502, "Run output storage is unavailable.", exc.code)
 
 
 @app.route("/api/pipeline/updated-at", methods=["GET", "OPTIONS"])
@@ -2752,6 +2801,25 @@ def provenance_report():
 def provenance_prov_o():
     if request.method == "OPTIONS":
         return _preflight_response()
+
+    run_id = str(request.args.get("run_id") or "").strip()
+    if run_id:
+        # Run lineage: which step used and generated which artifact.
+        try:
+            run = runner_request("GET", f"/v1/pipeline-runs/{quote(run_id, safe='')}")
+        except PipelineRunnerError as exc:
+            return _pipeline_runner_error_response(exc)
+        response = Response(
+            json.dumps(build_run_prov_o_jsonld(run), ensure_ascii=False, indent=2),
+            status=200,
+            mimetype="application/ld+json",
+        )
+        safe_run = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in run_id)
+        response.headers["Content-Disposition"] = (
+            f'attachment; filename="inlumen-run-lineage-{safe_run}.jsonld"'
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     version_uid = str(request.args.get("version_uid") or "").strip()
     params = {"version_uid": version_uid} if version_uid else {}
