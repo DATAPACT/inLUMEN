@@ -13,7 +13,7 @@ def node(flow_id, kind, *, parents=(), template="Custom Logic", execution="pytho
     }
 
 
-def write_bundle(root: Path, nodes, *, code="print(1)\n", params="parameters: {}\n"):
+def write_bundle(root: Path, nodes, *, code="print(1)\n", params="parameters: {}\n", inputs=("src",)):
     (root / "run-spec.json").write_text(json.dumps({"nodes": nodes}))
     (root / "bundle-manifest.json").write_text(json.dumps({"nodes": [
         {"flow_id": item["id"], "asset_key": f"node_{item['id']}", "implementation": item.get("implementation", {})}
@@ -25,6 +25,9 @@ def write_bundle(root: Path, nodes, *, code="print(1)\n", params="parameters: {}
         defs = root / f"dagster/src/inlumen_dagster_project/defs/node_{item['id']}"
         defs.mkdir(parents=True, exist_ok=True)
         (defs / "defs.yaml").write_text(params)
+    for flow_id in inputs:
+        (root / f"inputs/node-{flow_id}").mkdir(parents=True, exist_ok=True)
+        (root / f"inputs/node-{flow_id}/data.csv").write_text("a\n1\n")
     (root / "dagster").mkdir(exist_ok=True)
     (root / "dagster/requirements.txt").write_text("dagster==1\n")
 
@@ -53,17 +56,21 @@ def test_code_key_follows_code_parameters_and_runtime_only(tmp_path):
 def test_only_side_effect_free_steps_are_cacheable(tmp_path):
     nodes = [
         *PIPELINE,
-        node("api", "source", template="REST API", execution="managed-adapter"),
+        node("api", "source", template="REST API", execution="managed-adapter",
+             adapter={"parameters": {"url": "https://example.test"}, "settings": {}}),
+        node("custom", "source", template="Custom", execution="managed-adapter", adapter={"parameters": {}}),
+        node("empty", "source", template="File", execution="managed-adapter"),
         node("secret", "task", secret_parameters=[{"name": "API_KEY"}]),
         node("effects", "task", capabilities={"side_effects": ["sends email"]}),
         node("optout", "task", implementation={"cacheable": False}),
     ]
-    write_bundle(tmp_path, nodes)
+    write_bundle(tmp_path, nodes, inputs=("src", "api", "custom"))
     cacheable = {flow: step["cacheable"] for flow, step in
                  ((step["flow_id"], step) for step in plan_step_cache(tmp_path).steps.values())}
     assert cacheable == {
         "src": True, "a": True, "b": True, "c": True, "dest": False,
-        "api": False, "secret": False, "effects": False, "optout": False,
+        "api": False, "custom": True, "empty": False,
+        "secret": False, "effects": False, "optout": False,
     }
 
 

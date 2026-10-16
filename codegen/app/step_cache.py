@@ -40,7 +40,6 @@ SHARED_RUNTIME_FILES = (
     "dagster/constraints.txt",
     "dagster/src/inlumen_dagster_project/components/shell_command.py",
 )
-FILE_SOURCE_TEMPLATES = {"file", "files", "file upload", "upload"}
 
 
 def _int_setting(name: str, default: int) -> int:
@@ -87,7 +86,7 @@ def _files_under(bundle_root: Path, relative_dir: str) -> list[str]:
     return [path.relative_to(bundle_root).as_posix() for path in root.rglob("*") if path.is_file()]
 
 
-def _cacheable(node: dict[str, Any], manifest_node: dict[str, Any]) -> bool:
+def _cacheable(node: dict[str, Any], manifest_node: dict[str, Any], *, has_input_files: bool) -> bool:
     if (manifest_node.get("implementation") or {}).get("cacheable") is False:
         return False
     if node.get("secret_parameters"):
@@ -100,9 +99,11 @@ def _cacheable(node: dict[str, Any], manifest_node: dict[str, Any]) -> bool:
     if kind == "task":
         return execution.get("kind") == "python-package"
     if kind == "source":
-        # Uploaded files are hashed into the key; other connectors read
-        # external systems that may change between runs.
-        return str(node.get("template") or "").strip().lower() in FILE_SOURCE_TEMPLATES
+        # A source that only hands on files bundled with the run is as
+        # deterministic as its files, which are hashed into the key. Connector
+        # sources carry settings and read external systems at run time.
+        adapter = node.get("adapter") or {}
+        return has_input_files and not adapter.get("parameters") and not adapter.get("settings")
     return False
 
 
@@ -141,10 +142,11 @@ def plan_step_cache(
         if len(output_path.parts) != 2 or not flow_id:
             continue
         node_dir = output_path.parts[1]
-        cacheable = bool(asset_key) and _cacheable(node, manifest_node)
+        input_files = _files_under(bundle_root, f"inputs/{node_dir}")
+        cacheable = bool(asset_key) and _cacheable(node, manifest_node, has_input_files=bool(input_files))
         static_key = _hash_paths(bundle_root, [
             *_files_under(bundle_root, f"nodes/{node_dir}"),
-            *_files_under(bundle_root, f"inputs/{node_dir}"),
+            *input_files,
             f"{DEFS_ROOT}/{asset_key}/defs.yaml",
             *SHARED_RUNTIME_FILES,
         ]) if cacheable else ""
