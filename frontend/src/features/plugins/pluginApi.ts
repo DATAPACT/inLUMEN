@@ -89,11 +89,18 @@ const readJson = async <T>(response: Response, fallback: string): Promise<T> => 
   return payload as T;
 };
 
-export const fetchInstalledPlugins = async (signal?: AbortSignal) =>
-  readJson<InstalledPluginsResponse>(
+export const fetchInstalledPlugins = async (signal?: AbortSignal): Promise<InstalledPluginsResponse> => {
+  const response = await readJson<Partial<InstalledPluginsResponse>>(
     await apiFetch(`${INLUMEN_API_URL}/api/plugins`, { signal }),
     'Could not load plugins.',
   );
+  // A malformed payload must not crash the editor; treat it as "no plugins".
+  return {
+    ...response,
+    plugins: Array.isArray(response?.plugins) ? response.plugins : [],
+    can_manage: response?.can_manage === true,
+  } as InstalledPluginsResponse;
+};
 
 export const installPluginManifest = async (manifest: unknown) =>
   readJson<InstalledPlugin>(
