@@ -64,8 +64,13 @@ import {
   defaultParametersForTemplate,
   defaultTemplateForType,
   findTemplateForType,
+  pluginTemplatesForType,
   templateOptionsForType,
 } from '@/features/nodes/templateCatalog';
+import { PluginStepSettings } from '@/components/plugins/PluginStepSettings';
+import { PluginManagerDialog } from '@/components/plugins/PluginManagerDialog';
+import { usePluginRegistry } from '@/features/plugins/pluginRegistry';
+import { pluginIdFromTemplate } from '@/features/plugins/pluginTemplates';
 import {
   readNodeFile,
   removeNodeFile,
@@ -256,6 +261,23 @@ export function PropertiesPanel({
       || defaultTemplateForType(nodeType),
   );
   const canManageInputFiles = nodeSupportsInputFiles(nodeType, currentTemplate);
+  const pluginRegistry = usePluginRegistry();
+  const [isPluginManagerOpen, setIsPluginManagerOpen] = useState(false);
+  const activePluginId = pluginIdFromTemplate(currentTemplate);
+  const activePlugin = activePluginId
+    ? pluginRegistry.plugins.find((plugin) => plugin.id === activePluginId)
+    : undefined;
+  const pluginOptions = ["source", "task", "destination"].includes(nodeType)
+    ? pluginTemplatesForType(nodeType).map((template) => ({
+        value: template.value,
+        label: template.label,
+        description: template.description,
+      }))
+    : [];
+  const showPluginSection = ["source", "task", "destination"].includes(nodeType)
+    && (pluginOptions.length > 0 || Boolean(activePluginId) || pluginRegistry.canManage);
+  // A plugin-backed Task runs the managed plugin adapter, not uploaded code.
+  const showTaskImplementation = canManageImplementation && !activePluginId;
   const editableParamEntries: Array<[string, unknown]> = Object.entries(param).filter(([key]) => (
     key !== "model_plan" && !(nodeType === "flow" && FLOW_PARAMETER_KEYS.has(key))
   ));
@@ -502,7 +524,10 @@ export function PropertiesPanel({
     pushNodeUpdate({ description: e.target.value });
   };
 
-  const handleTemplateChange = (templateLabel: string) => {
+  const handleTemplateChange = (
+    templateLabel: string,
+    options: { replaceParameters?: boolean } = {},
+  ) => {
     const template = findTemplateForType(nodeType, templateLabel);
     const nextPorts = normalizeNodePorts(template?.ports, nodeType);
     const connected = selectedNode?.data.connected_ports || {};
@@ -522,15 +547,32 @@ export function PropertiesPanel({
           ...Object.fromEntries(Object.entries(param).filter(([key]) => !FLOW_PARAMETER_KEYS.has(key))),
           ...templateDefaults,
         }
-      : { ...templateDefaults, ...param };
+      : options.replaceParameters
+        // Switching tools: start from the new template's parameters and keep
+        // only values the user already set for parameters with the same name.
+        ? {
+            ...templateDefaults,
+            ...Object.fromEntries(Object.entries(param).filter(([key]) => key in templateDefaults && key !== "operation")),
+          }
+        : { ...templateDefaults, ...param };
     const nextSecretParams = Array.from(new Set([
-      ...secretParamKeys,
+      ...(options.replaceParameters ? [] : secretParamKeys),
       ...(template?.configurationFields || [])
         .filter((field) => field.secret)
         .map((field) => field.name),
     ])).filter((key) => key in nextParam);
     const replaceGenericFlowLabel = nodeType === "flow" && ["Flow", "Condition", "Parallel Map"].includes(label);
     const nextLabel = replaceGenericFlowLabel ? (template?.label || templateLabel) : label;
+    if (options.replaceParameters) {
+      // Stored credentials are keyed by node + name. Never let a credential
+      // entered for one tool be sent to another tool with a same-named secret.
+      for (const key of new Set([...secretParamKeys, ...configuredSecretParams])) {
+        if (selectedNode?.id) void deleteNodeSecret(selectedNode.id, key).catch(() => undefined);
+      }
+      setConfiguredSecretParams(new Set());
+      setSecretDrafts({});
+      setRevealedSecretParams(new Set());
+    }
     setPorts(nextPorts);
     setParam(nextParam);
     setSecretParamKeys(nextSecretParams);
@@ -546,6 +588,14 @@ export function PropertiesPanel({
       secret_params: nextSecretParams,
       ...(nodeType === "flow" ? { label: nextLabel } : {}),
     });
+  };
+
+  const handlePluginChange = (pluginTemplate: string | null) => {
+    if (!pluginTemplate) {
+      handleTemplateChange(defaultTemplateForType(nodeType), { replaceParameters: true });
+      return;
+    }
+    handleTemplateChange(pluginTemplate, { replaceParameters: true });
   };
 
   const setFlowParameter = (key: string, value: unknown) => {
@@ -1380,7 +1430,35 @@ export function PropertiesPanel({
 
             {canManageInputFiles && renderInputFilesSection()}
 
-            {["source", "destination"].includes(nodeType) && (
+            {showPluginSection && (
+              <InspectorSection
+                id="inspector-plugin"
+                title="Plugin"
+                description="Run this step with a third-party tool. inLUMEN calls the tool's deployed REST API."
+                status={activePluginId && !activePlugin ? "error" : undefined}
+              >
+                <PluginStepSettings
+                  options={pluginOptions}
+                  currentTemplate={currentTemplate}
+                  manifest={activePlugin?.manifest}
+                  missingPluginId={pluginRegistry.loaded && !pluginRegistry.error ? activePluginId : null}
+                  param={param}
+                  secretParamKeys={secretParamKeys}
+                  secretDrafts={secretDrafts}
+                  configuredSecrets={configuredSecretParams}
+                  revealedSecrets={revealedSecretParams}
+                  canManagePlugins={pluginRegistry.canManage}
+                  onSelectPlugin={handlePluginChange}
+                  onParameterChange={setParamValue}
+                  onSecretCommit={(name) => { void commitSecretValue(name); }}
+                  onToggleSecret={toggleSecretVisibility}
+                  onAddSecret={(name) => addParameter(name, true)}
+                  onManagePlugins={() => setIsPluginManagerOpen(true)}
+                />
+              </InspectorSection>
+            )}
+
+            {["source", "destination"].includes(nodeType) && !activePluginId && (
               <InspectorSection
                 id="inspector-connection"
                 title="Connection"
@@ -1510,9 +1588,9 @@ export function PropertiesPanel({
               </InspectorSection>
             )}
 
-            {canManageImplementation && renderParametersSection()}
+            {showTaskImplementation && renderParametersSection()}
 
-            {canManageImplementation && runtimeEnvironment.length > 0 && (
+            {showTaskImplementation && runtimeEnvironment.length > 0 && (
               <InspectorSection
                 id="inspector-runtime-environment"
                 title="Environment variables detected"
@@ -1552,7 +1630,7 @@ export function PropertiesPanel({
               </InspectorSection>
             )}
 
-            {canManageImplementation && (
+            {showTaskImplementation && (
               <InspectorSection
                 id="inspector-implementation"
                 title="Implementation"
@@ -1679,6 +1757,9 @@ export function PropertiesPanel({
         reference={isReusableViewerOpen ? selectedNode?.data.subpipeline?.reference || null : null}
         onClose={() => setIsReusableViewerOpen(false)}
       />
+      {isPluginManagerOpen && (
+        <PluginManagerDialog open onOpenChange={setIsPluginManagerOpen} />
+      )}
       <AlertDialog open={isAttachmentReviewOpen} onOpenChange={setIsAttachmentReviewOpen}>
         <AlertDialogContent className="max-w-2xl">
           <AlertDialogHeader>

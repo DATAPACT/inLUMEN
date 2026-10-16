@@ -1,4 +1,5 @@
 import type { NodePorts, StepType } from '@/features/nodes/nodeSchema';
+import type { PluginManifest } from '@/features/plugins/pluginApi';
 
 export type ComponentTemplate = {
   id: string;
@@ -15,6 +16,8 @@ export type ComponentTemplate = {
     placeholder?: string;
     secret?: boolean;
   }>;
+  /** Set for templates backed by an installed DataPACT plugin. */
+  plugin?: PluginManifest;
 };
 
 const field = (name: string, label: string, placeholder = "", secret = false) => ({
@@ -182,25 +185,50 @@ export const LEGACY_TASK_TEMPLATE_NAMES = new Set([
   "Custom Logic",
 ]);
 
+/**
+ * Templates contributed by installed plugins. They are loaded at runtime from
+ * GET /api/plugins and appended to the built-in catalog for their step type.
+ */
+let pluginTemplates: Partial<Record<StepType, ComponentTemplate[]>> = {};
+
+export const setPluginTemplates = (templates: ComponentTemplate[]) => {
+  const grouped: Partial<Record<StepType, ComponentTemplate[]>> = {};
+  for (const template of templates) {
+    const type = template.plugin?.step_type as StepType | undefined;
+    if (!type) continue;
+    grouped[type] = [...(grouped[type] || []), template];
+  }
+  pluginTemplates = grouped;
+};
+
+export const pluginTemplatesForType = (type: StepType): ComponentTemplate[] =>
+  pluginTemplates[type] || [];
+
+const templatesForType = (type: StepType): ComponentTemplate[] => [
+  ...COMPONENT_TEMPLATE_CATALOG[type],
+  ...pluginTemplatesForType(type),
+];
+
 export const defaultTemplateForType = (type: StepType) =>
   COMPONENT_TEMPLATE_CATALOG[type][0].value;
 
 export const templateOptionsForType = (type: StepType, current?: unknown) => {
-  const options = COMPONENT_TEMPLATE_CATALOG[type];
+  const options = templatesForType(type);
   const currentValue = typeof current === "string" ? current.trim() : "";
   if (!currentValue || options.some((option) => option.value === currentValue)) return options;
   const legacy = type === "task" && LEGACY_TASK_TEMPLATE_NAMES.has(currentValue);
+  const plugin = currentValue.toLowerCase().startsWith("plugin:");
   return [{
-    id: `${legacy ? "legacy" : "custom"}.${currentValue.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+    id: `${legacy ? "legacy" : plugin ? "plugin-missing" : "custom"}.${currentValue.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
     value: currentValue,
-    label: `${currentValue} (${legacy ? "legacy" : "custom"})`,
-    category: legacy ? "Legacy" : "Custom",
+    label: `${currentValue} (${legacy ? "legacy" : plugin ? "not installed" : "custom"})`,
+    category: legacy ? "Legacy" : plugin ? "Plugins" : "Custom",
   }, ...options];
 };
 
 export const findTemplateForType = (type: StepType, value: unknown) => {
   const normalized = String(value ?? "").trim();
-  return COMPONENT_TEMPLATE_CATALOG[type].find((template) =>
+  return templatesForType(type).find((template) =>
     template.value === normalized || template.id === normalized
   );
 };

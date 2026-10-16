@@ -276,7 +276,7 @@ def require_auth(f):
         realm_access = (claims or {}).get("realm_access")
         roles = realm_access.get("roles") if isinstance(realm_access, dict) else None
         g.inlumen_is_application_admin = isinstance(roles, list) and "inlumen-admin" in roles
-        if request.path == "/api/admin/application-llm":
+        if request.path == "/api/admin/application-llm" or request.path == "/api/admin/plugins" or request.path.startswith("/api/admin/plugins/"):
             if not is_application_admin():
                 return jsonify({"error": "Forbidden", "code": "application_admin_required"}), 403
             return f(*args, **kwargs)

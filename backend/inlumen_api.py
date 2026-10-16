@@ -157,6 +157,8 @@ validate_auth_mode_configuration()
 app.register_blueprint(create_public_api_blueprint())
 app.register_blueprint(create_node_definitions_blueprint())
 app.register_blueprint(create_generator_blueprint())
+from plugins.routes import create_plugins_blueprint
+app.register_blueprint(create_plugins_blueprint())
 from chat_routes import create_chat_blueprint
 from conversations import ConversationError, conversation_store
 from sqlalchemy.exc import SQLAlchemyError

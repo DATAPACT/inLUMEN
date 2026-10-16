@@ -221,4 +221,46 @@ describe("PropertiesPanel", () => {
     await act(async () => root.unmount());
     container.remove();
   });
+
+  it("configures a plugin-backed Task instead of uploaded code", async () => {
+    const { setPluginRegistryState } = await import("@/features/plugins/pluginRegistry");
+    const manifest = {
+      schema_version: "inlumen.plugin@1" as const,
+      id: "datapact.text-anonymizer",
+      version: "1.0.0",
+      name: "Text Anonymizer",
+      description: "Removes personal identifiers.",
+      step_type: "task" as const,
+      endpoint: { base_url: "http://tool.example" },
+      operations: [{ id: "anonymize", method: "POST", path: "/v1/anonymize" }],
+      parameters: [{ name: "entities", type: "string" as const, enum: ["email", "all"], default: "all" }],
+      secrets: [{ name: "api_key", label: "API key", required: true }],
+      ports: { inputs: [{ name: "text" }], outputs: [{ name: "anonymized" }] },
+    };
+    setPluginRegistryState({
+      plugins: [{
+        id: manifest.id, version: "1.0.0", name: manifest.name, description: manifest.description,
+        publisher: "", step_type: "task", template: "plugin:datapact.text-anonymizer",
+        source: "manual", installed_at: "", manifest,
+      }],
+      canManage: false,
+      error: "",
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(<PropertiesPanel selectedNode={{
+      id: "task-plugin", type: "custom", position: { x: 0, y: 0 },
+      data: {
+        type: "task", label: "Anonymize", template_label: "plugin:datapact.text-anonymizer",
+        param: { operation: "anonymize", entities: "email", api_key: "" }, secret_params: ["api_key"],
+      },
+    }} onNodeUpdate={vi.fn()} />));
+    expect(container.textContent).toContain("Text Anonymizer");
+    expect(container.textContent).toContain("http://tool.example/v1/anonymize");
+    expect(container.textContent).not.toContain("Generate with AI");
+    expect((container.querySelector("#plugin-parameter-entities") as HTMLSelectElement).value).toBe("email");
+    expect((container.querySelector("#plugin-parameter-api_key") as HTMLInputElement).type).toBe("password");
+    await act(async () => root.unmount());
+    setPluginRegistryState({ plugins: [] });
+  });
 });

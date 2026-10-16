@@ -12,6 +12,7 @@ import {
   defaultParametersForTemplate,
   defaultTemplateForType,
   findTemplateForType,
+  type ComponentTemplate,
 } from "@/features/nodes/templateCatalog";
 
 // Generated from the backend manifest; scripts/sync_shared.py --check enforces parity.
@@ -90,7 +91,31 @@ export const createNodeDataFromDefinition = (
   };
 };
 
-export const getNodeDefinitionEditorKind = (definitionId: string | undefined) => {
+/**
+ * Node data for a step backed by an installed plugin. The structural component
+ * stays the core Source/Task/Destination; the plugin is its template.
+ */
+export const createNodeDataFromPluginTemplate = (
+  definition: NodeDefinition,
+  template: ComponentTemplate,
+): NodeDefinitionData => {
+  const base = createNodeDataFromDefinition(definition);
+  const param = { ...(template.defaultParameters || {}) };
+  return {
+    ...base,
+    label: template.label,
+    description: template.description || base.description,
+    template_label: template.value,
+    template: { id: template.id, name: template.value },
+    ports: normalizeNodePorts(template.ports, definition.base_type),
+    param,
+    secret_params: (template.configurationFields || [])
+      .filter((field) => field.secret && field.name in param)
+      .map((field) => field.name),
+  };
+};
+
+export const getNodeDefinitionEditorKind =(definitionId: string | undefined) => {
   if (!definitionId) return "default";
   const registeredKind = definitionsById.get(definitionId)?.editor.kind;
   if (registeredKind) return registeredKind;

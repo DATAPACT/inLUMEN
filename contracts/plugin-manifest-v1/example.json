@@ -1,0 +1,121 @@
+{
+  "schema_version": "inlumen.plugin@1",
+  "id": "jsi.wikifier",
+  "version": "1.0.0",
+  "name": "JSI Wikifier",
+  "description": "Annotates text with the Wikipedia and Wikidata concepts it mentions (entity linking), with optional Wikidata classes and DBpedia types.",
+  "publisher": "Jožef Stefan Institute (JSI)",
+  "homepage": "https://wikifier.org/info.html",
+  "step_type": "task",
+  "endpoint": {
+    "base_url": "https://www.wikifier.org"
+  },
+  "operations": [
+    {
+      "id": "annotate",
+      "label": "Annotate text",
+      "description": "Sends the text of each input file and returns the Wikifier JSON (annotations, words, spaces).",
+      "method": "POST",
+      "path": "/annotate-article",
+      "request": {"body": "form", "input_field": "text"},
+      "response": {"format": "json", "filename": "annotations.json", "error_fields": ["status", "error"]},
+      "timeout_seconds": 120
+    }
+  ],
+  "parameters": [
+    {
+      "name": "lang",
+      "label": "Language",
+      "description": "ISO-639 code of the text (e.g. en, sl, it), or auto to detect it.",
+      "type": "string",
+      "default": "auto",
+      "location": "body"
+    },
+    {
+      "name": "secondaryAnnotLanguage",
+      "label": "Secondary language",
+      "description": "Also report each concept's title and link in this language's Wikipedia.",
+      "type": "string",
+      "default": "en",
+      "location": "body"
+    },
+    {
+      "name": "pageRankSqThreshold",
+      "label": "PageRank threshold",
+      "description": "Lower values keep fewer, more relevant annotations (e.g. 0.8). -1 disables pruning.",
+      "type": "number",
+      "default": 0.8,
+      "location": "body"
+    },
+    {
+      "name": "applyPageRankSqThreshold",
+      "label": "Drop annotations below the threshold",
+      "type": "boolean",
+      "enum": [true, false],
+      "default": true,
+      "location": "body"
+    },
+    {
+      "name": "nTopDfValuesToIgnore",
+      "label": "Ignore very frequent words",
+      "description": "Ignore phrases made only of the N most frequent words (200 is a good start, 0 disables).",
+      "type": "integer",
+      "default": 200,
+      "location": "body"
+    },
+    {
+      "name": "nWordsToIgnoreFromList",
+      "label": "Ignore words from stop list",
+      "type": "integer",
+      "default": 200,
+      "location": "body"
+    },
+    {
+      "name": "wikiDataClasses",
+      "label": "Include Wikidata classes",
+      "type": "boolean",
+      "enum": [true, false],
+      "default": false,
+      "location": "body"
+    },
+    {
+      "name": "support",
+      "label": "Include supporting text ranges",
+      "type": "boolean",
+      "enum": [true, false],
+      "default": false,
+      "location": "body"
+    },
+    {
+      "name": "includeCosines",
+      "label": "Include cosine similarities",
+      "type": "boolean",
+      "enum": [true, false],
+      "default": false,
+      "location": "body"
+    },
+    {
+      "name": "maxMentionEntropy",
+      "label": "Max mention entropy",
+      "description": "Ignore highly ambiguous mentions (e.g. 3). -1 disables.",
+      "type": "number",
+      "default": 3,
+      "location": "body"
+    }
+  ],
+  "auth": {"type": "api_key", "form_field": "userKey", "secret": "user_key"},
+  "secrets": [
+    {
+      "name": "user_key",
+      "label": "Wikifier user key",
+      "description": "30-character key from https://wikifier.org/register.html",
+      "required": true
+    }
+  ],
+  "ports": {
+    "inputs": [{"name": "text", "type": "Text", "description": "UTF-8 text document to annotate."}],
+    "outputs": [{"name": "annotations", "type": "Object", "description": "Wikifier JSON: annotations with Wikipedia/Wikidata links, plus the word split of the text."}]
+  },
+  "instructions": "Use for entity linking or concept extraction: finding which people, places, organisations and topics a text mentions and linking them to Wikipedia/Wikidata. Input must be plain UTF-8 text (convert PDFs or audio to text first). One call per input file; keep documents to a few tens of thousands of characters. Not for translation, summarisation or sentiment. The public service is occasionally down.",
+  "tags": ["nlp", "entity-linking", "wikipedia", "wikidata", "annotation"]
+}
