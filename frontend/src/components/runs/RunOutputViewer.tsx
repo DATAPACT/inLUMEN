@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDown, ArrowUp, ChevronRight, Download, FileText, Loader2 } from 'lucide-react';
 
 import { AssistantMessageContent } from '@/components/chat/AssistantMessageContent';
@@ -283,6 +283,11 @@ const PreviewBody = ({
   preview: RunOutputPreview;
 }) => {
   const [jsonQuery, setJsonQuery] = useState('');
+  const jsonRoot = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    // Bring the first match into view; matches deep in the tree are expanded but off-screen.
+    jsonRoot.current?.querySelector('mark')?.scrollIntoView?.({ block: 'center' });
+  }, [jsonQuery]);
   switch (preview.kind) {
     case 'table':
       return <TablePreview columns={preview.columns} rows={preview.rows} />;
@@ -296,7 +301,7 @@ const PreviewBody = ({
             aria-label="Search keys and values"
             className="h-8 max-w-xs text-xs"
           />
-          <div className="min-h-0 flex-1 overflow-auto rounded-md border p-2 font-mono text-xs leading-5">
+          <div ref={jsonRoot} className="min-h-0 flex-1 overflow-auto rounded-md border p-2 font-mono text-xs leading-5">
             <JsonTree value={preview.value} query={jsonQuery.trim().toLocaleLowerCase()} />
           </div>
         </div>
@@ -341,9 +346,13 @@ export const RunOutputViewer = ({
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
 
+  // The run list refreshes in the background and hands us new output arrays;
+  // only opening the viewer (or asking for another file) picks the selection.
+  const outputsRef = useRef(outputs);
+  outputsRef.current = outputs;
   useEffect(() => {
-    if (open) setSelectedPath(initialPath || outputs[0]?.path || '');
-  }, [initialPath, open, outputs]);
+    if (open) setSelectedPath(initialPath || outputsRef.current[0]?.path || '');
+  }, [initialPath, open]);
 
   const selected = outputs.find((output) => output.path === selectedPath) || null;
   const selectedOutputPath = selected?.path || '';
