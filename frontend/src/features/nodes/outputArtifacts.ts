@@ -1,4 +1,7 @@
 /** Output artifacts a Task publishes, one per output port. */
+
+/** Node parameter holding the declarations; codegen reads it, steps never receive it. */
+export const OUTPUT_ARTIFACTS_PARAMETER = 'output_artifacts';
 export type OutputArtifactDeclaration = {
   name: string;
   port: string;
