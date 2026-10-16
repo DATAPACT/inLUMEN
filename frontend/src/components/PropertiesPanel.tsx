@@ -32,6 +32,7 @@ import {
 } from 'lucide-react';
 import { toast } from "sonner";
 import { FilePreviewDialog, PreviewType } from '@/components/properties/FilePreviewDialog';
+import { NodeRunOutputs } from '@/components/runs/NodeRunOutputs';
 import { ChatbotConfig } from '@/services/chatbotService';
 import {
   normalizeType,
@@ -1740,6 +1741,7 @@ export function PropertiesPanel({
               </>
             )}
 
+            <NodeRunOutputs nodeId={selectedNode.id} />
           </div>
         </div>
       ) : (

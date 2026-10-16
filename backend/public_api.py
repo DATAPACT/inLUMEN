@@ -1761,11 +1761,48 @@ def _ui_api_openapi_paths(
                         "required": True,
                         "schema": {"type": "string", "minLength": 1},
                     },
+                    {
+                        "name": "disposition",
+                        "in": "query",
+                        "required": False,
+                        "description": "Use inline to display the artifact in the browser instead of saving it.",
+                        "schema": {"type": "string", "enum": ["attachment", "inline"], "default": "attachment"},
+                    },
                 ],
                 "responses": {
                     "200": {
                         "description": "Pipeline output artifact.",
                         "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}},
+                    },
+                    **not_found_responses,
+                },
+            },
+        },
+        "/api/pipeline-runs/{run_id}/preview/{output_path}": {
+            "get": {
+                "tags": ["Pipeline Runs"],
+                "summary": "Preview a produced pipeline artifact without downloading it",
+                "description": (
+                    "Returns a bounded preview: table rows (CSV, TSV, JSON Lines), a parsed JSON value, "
+                    "a text window, or metadata for media and binary files. Tables and text are paged by "
+                    "byte offset; pass next_offset from the previous response as offset to continue."
+                ),
+                "operationId": "previewPipelineRunOutput",
+                "parameters": [
+                    {"$ref": "#/components/parameters/RunId"},
+                    {
+                        "name": "output_path",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string", "minLength": 1},
+                    },
+                    {"name": "offset", "in": "query", "required": False, "schema": {"type": "integer", "minimum": 0}},
+                    {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer", "minimum": 1}},
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Bounded preview of the artifact.",
+                        "content": {"application/json": {"schema": {"type": "object", "additionalProperties": True}}},
                     },
                     **not_found_responses,
                 },

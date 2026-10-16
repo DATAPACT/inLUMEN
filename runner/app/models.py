@@ -55,6 +55,7 @@ class PipelineRunEvent(BaseModel):
     status: RunStatus | None = None
     message: str | None = None
     node_id: str | None = None
+    flow_id: str | None = None
 
 
 class PipelineRunError(BaseModel):

@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from app import main
 from app.manager import PipelineRunManager
@@ -15,6 +16,23 @@ class BlockingExecutor:
 
     async def cancel(self, run_id):
         return None
+
+
+class OutputExecutor(BlockingExecutor):
+    async def execute(self, run_id, files, runtime_secrets):
+        return {
+            "ok": True,
+            "validation_report": {"ok": True},
+            "run_outputs": [
+                {
+                    "path": "outputs/node-1/table.csv",
+                    "filename": "table.csv",
+                    "content": "a,b\n1,2\n3,4\n",
+                    "content_encoding": "utf-8",
+                    "content_type": "text/csv",
+                }
+            ],
+        }
 
 
 def request_payload():
@@ -151,3 +169,62 @@ def test_workload_outage_is_cached_instead_of_retrying_for_every_browser(monkeyp
             assert response.json()['worker_available'] is False
     assert len(calls) == 1
     main._WORKLOAD_CACHE.clear()
+
+
+def test_api_serves_output_windows_inline(monkeypatch):
+    monkeypatch.setenv("RUNNER_SERVICE_API_KEY", "test-token")
+    manager = PipelineRunManager(
+        PipelineRunStore(":memory:"),
+        adapter="dagster",
+        executor=OutputExecutor(),
+    )
+    monkeypatch.setattr(main, "RUN_MANAGER", manager)
+    headers = {"Authorization": "Bearer test-token"}
+    with TestClient(main.app) as client:
+        run_id = client.post(
+            "/v1/pipeline-runs", headers=headers, json=request_payload()
+        ).json()["run_id"]
+        for _ in range(100):
+            if client.get(f"/v1/pipeline-runs/{run_id}", headers=headers).json()["status"] == "succeeded":
+                break
+            time.sleep(0.02)
+        url = f"/v1/pipeline-runs/{run_id}/outputs/outputs/node-1/table.csv"
+
+        full = client.get(url, headers=headers)
+        assert full.status_code == 200
+        assert full.content == b"a,b\n1,2\n3,4\n"
+        assert full.headers["content-disposition"].startswith("attachment;")
+
+        window = client.get(
+            url, headers=headers, params={"offset": 4, "length": 4, "disposition": "inline"}
+        )
+        assert window.content == b"1,2\n"
+        assert window.headers["content-disposition"].startswith("inline;")
+        assert window.headers["x-inlumen-output-size"] == "12"
+        assert window.headers["x-inlumen-output-offset"] == "4"
+
+        assert client.get(url, headers=headers, params={"disposition": "evil"}).status_code == 422
+        assert client.get(url, headers=headers, params={"offset": 99}).content == b""
+        assert client.get(url, headers=headers, params={"offset": -1}).status_code == 422
+
+
+def test_api_events_include_canvas_flow_ids(monkeypatch):
+    monkeypatch.setenv("RUNNER_SERVICE_API_KEY", "test-token")
+    manager = PipelineRunManager(
+        PipelineRunStore(":memory:"), adapter="dagster", executor=BlockingExecutor()
+    )
+    monkeypatch.setattr(main, "RUN_MANAGER", manager)
+    headers = {"Authorization": "Bearer test-token"}
+    payload = request_payload()
+    payload["snapshot"]["bundle_manifest"]["nodes"] = [
+        {"flow_id": "orders", "asset_key": "node_orders_csv"}
+    ]
+    with TestClient(main.app) as client:
+        run_id = client.post("/v1/pipeline-runs", headers=headers, json=payload).json()["run_id"]
+        record = manager.store.get(run_id)
+        manager._append_event(record, "node.started", "running", "Orders started.", node_id="node_orders_csv")
+        manager.store.save(record)
+        events = client.get(f"/v1/pipeline-runs/{run_id}/events?after=0", headers=headers).json()["events"]
+        client.delete(f"/v1/pipeline-runs/{run_id}", headers=headers)
+    node_event = next(event for event in events if event["type"] == "node.started")
+    assert node_event["flow_id"] == "orders"

@@ -4880,12 +4880,14 @@ def build_deployment_bundle_files(
 
     bundle_files: List[dict] = []
     node_entries = []
+    asset_names = _dagster_asset_names([steps_by_id[step_id] for step_id in ordered_ids])
     for step_id in ordered_ids:
         step = steps_by_id[step_id]
         node_dir = _bundle_node_dir(step)
         node_entries.append(
             {
                 "flow_id": step_id,
+                "asset_key": asset_names[step_id],
                 "label": step.get("label") or "",
                 "type": step.get("type") or "task",
                 "template": step.get("template") or "",

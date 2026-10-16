@@ -78,11 +78,13 @@ from object_client import dispatch_object_request
 from pipeline_runner_client import (
     PipelineRunnerError,
     runner_raw_request,
+    runner_raw_response,
     runner_request,
 )
 from provenance_provo import build_prov_o_jsonld, provenance_prov_o_filename
 from provenance_report import build_provenance_pdf, provenance_report_filename
 from public_api import create_public_api_blueprint
+from run_output_preview import build_preview
 from runtime_environment import discover_runtime_environment, runtime_environment_from_files
 from runtime_config import add_cors_headers, get_service_port
 from step_types import normalize_step_type
@@ -2451,6 +2453,13 @@ def pipeline_run_bundle(run_id: str):
         return _pipeline_runner_error_response(exc)
 
 
+def _runner_output_path(run_id: str, output_path: str) -> str:
+    return (
+        f"/v1/pipeline-runs/{quote(run_id, safe='')}"
+        f"/outputs/{quote(output_path, safe='/')}"
+    )
+
+
 @app.route(
     "/api/pipeline-runs/<run_id>/outputs/<path:output_path>",
     methods=["GET", "OPTIONS"],
@@ -2459,15 +2468,67 @@ def pipeline_run_bundle(run_id: str):
 def pipeline_run_output(run_id: str, output_path: str):
     if request.method == "OPTIONS":
         return _preflight_response()
+    disposition_mode = request.args.get("disposition", "attachment")
+    if disposition_mode not in {"attachment", "inline"}:
+        return _json_error(400, "disposition must be 'attachment' or 'inline'.")
     try:
         body, content_type, disposition = runner_raw_request(
             "GET",
-            f"/v1/pipeline-runs/{run_id}/outputs/{quote(output_path, safe='/')}",
+            _runner_output_path(run_id, output_path),
+            params={"disposition": disposition_mode},
         )
         response = Response(body, status=200, content_type=content_type)
         if disposition:
             response.headers["Content-Disposition"] = disposition
+        if disposition_mode == "inline":
+            # Previews render user-generated content; never let it run scripts.
+            response.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+            response.headers["X-Content-Type-Options"] = "nosniff"
         return response
+    except PipelineRunnerError as exc:
+        return _pipeline_runner_error_response(exc)
+
+
+@app.route(
+    "/api/pipeline-runs/<run_id>/preview/<path:output_path>",
+    methods=["GET", "OPTIONS"],
+)
+@require_auth
+def pipeline_run_output_preview(run_id: str, output_path: str):
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    try:
+        offset = int(request.args.get("offset", 0))
+        limit = int(request.args["limit"]) if request.args.get("limit") else None
+    except ValueError:
+        return _json_error(400, "offset and limit must be integers.")
+    if offset < 0 or (limit is not None and limit < 1):
+        return _json_error(400, "offset must be >= 0 and limit >= 1.")
+    try:
+        run = runner_request("GET", f"/v1/pipeline-runs/{quote(run_id, safe='')}")
+        outputs = ((run.get("result") or {}).get("outputs")) or []
+        entry = next(
+            (
+                item
+                for item in outputs
+                if isinstance(item, dict) and item.get("path") == output_path
+            ),
+            None,
+        )
+        if entry is None:
+            return _json_error(404, "Pipeline output was not found.")
+
+        def read_window(window_offset: int, length: int | None) -> tuple[bytes, int]:
+            params: dict[str, Any] = {"offset": window_offset}
+            if length is not None:
+                params["length"] = length
+            body, headers = runner_raw_response(
+                "GET", _runner_output_path(run_id, output_path), params=params
+            )
+            size = headers.get("X-InLumen-Output-Size")
+            return body, int(size) if size and size.isdigit() else len(body)
+
+        return jsonify(build_preview(read_window, entry, offset=offset, limit=limit)), 200
     except PipelineRunnerError as exc:
         return _pipeline_runner_error_response(exc)
 

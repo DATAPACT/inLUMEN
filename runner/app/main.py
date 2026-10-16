@@ -257,15 +257,25 @@ def download_pipeline_run_output(
     run_id: str,
     output_path: str,
     workspace_id: Annotated[str, Depends(workspace_context)],
+    offset: Annotated[int, Query(ge=0)] = 0,
+    length: Annotated[int | None, Query(ge=0)] = None,
+    disposition: Annotated[str, Query(pattern="^(attachment|inline)$")] = "attachment",
 ) -> Response:
-    payload = RUN_MANAGER.output(run_id, output_path, workspace_id)
+    payload = RUN_MANAGER.output(
+        run_id, output_path, workspace_id, offset=offset, length=length
+    )
     if payload is None:
         raise HTTPException(status_code=404, detail="Pipeline output was not found.")
-    body, content_type, filename = payload
+    body, content_type, filename, size = payload
+    safe_filename = filename.replace('"', "").replace("\\", "")
     return Response(
         content=body,
         media_type=content_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'{disposition}; filename="{safe_filename}"',
+            "X-InLumen-Output-Size": str(size),
+            "X-InLumen-Output-Offset": str(min(offset, size)),
+        },
     )
 
 
