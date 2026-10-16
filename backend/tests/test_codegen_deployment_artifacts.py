@@ -528,7 +528,7 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             self.assertFalse((input_dir / "partial.txt").exists())
             self.assertTrue((output_dir / "result" / "merged.json").is_file())
 
-    def test_executable_tasks_must_have_one_logical_output_set(self):
+    def test_executable_tasks_accept_several_output_ports(self):
         graph = self.graph()
         graph["nodes"][1]["data"]["ports"] = {
             "inputs": [{"id": "input", "name": "input"}],
@@ -537,20 +537,26 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
                 {"id": "right", "name": "right"},
             ],
         }
+        build_argo_workflow_object(graph, codegen_payload())
+        build_dagster_project_files(graph, codegen_payload())
+        build_deployment_bundle_files(
+            graph, codegen_payload(), targets={"argo": True, "dagster": True}
+        )
+
+    def test_executable_tasks_must_have_an_output_port(self):
+        graph = self.graph()
+        graph["nodes"][1]["data"]["ports"] = {
+            "inputs": [{"id": "input", "name": "input"}],
+            "outputs": [],
+        }
         builders = (
             lambda: build_argo_workflow_object(graph, codegen_payload()),
             lambda: build_dagster_project_files(graph, codegen_payload()),
-            lambda: build_deployment_bundle_files(
-                graph,
-                codegen_payload(),
-                targets={"argo": True, "dagster": True},
-            ),
         )
         for build in builders:
             with self.subTest(builder=build):
                 with self.assertRaisesRegex(
-                    DeploymentArtifactValidationError,
-                    "exactly one logical output set",
+                    DeploymentArtifactValidationError, "declares no output port"
                 ):
                     build()
 

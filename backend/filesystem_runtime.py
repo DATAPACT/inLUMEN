@@ -243,19 +243,13 @@ def normalize_single_output_port(
 ) -> list[str]:
     """Move public root outputs into the orchestration-owned output port.
 
-    Task code always writes directly to ``PIPELINE_OUTPUT_DIR``.  For a Task
-    with one output port, the runner namespaces those artifacts only after the
-    process exits so downstream routing remains internal to the orchestrator.
-    Tasks with multiple logical output sets are rejected; model those results
-    with an explicit split Task instead.
+    Task code writes directly to ``PIPELINE_OUTPUT_DIR``.  For a Task with one
+    output port, the runner namespaces those artifacts only after the process
+    exits so downstream routing remains internal to the orchestrator.  A legacy
+    Task with several output ports must write each result into its port folder.
     """
     root = Path(output_dir)
     ports = [str(port).strip() for port in output_ports if str(port).strip()]
-    if len(ports) > 1:
-        raise RuntimeError(
-            "The flat Task workspace supports exactly one logical output set; "
-            "fan out one output to multiple consumers or add an explicit split Task."
-        )
     root.mkdir(parents=True, exist_ok=True)
     declared = set(ports)
     root_entries = [
@@ -269,7 +263,8 @@ def normalize_single_output_port(
         names = ", ".join(path.name for path in root_entries)
         raise RuntimeError(
             "Task wrote artifacts outside declared output-port directories: "
-            f"{names}."
+            f"{names}. With several output ports, write each result into "
+            "its port folder or declare the outputs in inlumen.task.json."
         )
     port_root = root / ports[0]
     port_root.mkdir(parents=True, exist_ok=True)
@@ -516,11 +511,6 @@ def _stage_input_bindings(bindings, input_dir):
 
 def _normalize_single_output_port(output_dir, output_ports):
     ports = [str(port).strip() for port in output_ports if str(port).strip()]
-    if len(ports) > 1:
-        raise RuntimeError(
-            "The flat Task workspace supports exactly one logical output set; "
-            "fan out one output to multiple consumers or add an explicit split Task."
-        )
     output_dir.mkdir(parents=True, exist_ok=True)
     declared = set(ports)
     root_entries = [
@@ -533,6 +523,8 @@ def _normalize_single_output_port(output_dir, output_ports):
         names = ", ".join(path.name for path in root_entries)
         raise RuntimeError(
             "Task wrote artifacts outside declared output-port directories: " + names
+            + ". With several output ports, write each result into its port "
+            "folder or declare the outputs in inlumen.task.json."
         )
     port_root = output_dir / ports[0]
     port_root.mkdir(parents=True, exist_ok=True)
@@ -770,10 +762,18 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
                 declarations = self.data_contract.get("outputs", [])
                 receipt = work_dir / "outputs.json"
                 actual = json.loads(receipt.read_text()).get("outputs") if receipt.is_file() else None
-                if declarations or self.output_ports:
+                validated = (
                     validate_result(output_dir, declarations, actual, producer=self.asset_key)
-                port_root = published_dir / self.output_ports[0] if self.output_ports else published_dir / "result"
-                publish_artifact_directory(output_dir, port_root)
+                    if declarations or self.output_ports
+                    else []
+                )
+                # Each declared output is published under its own port.
+                publish_port_artifacts(
+                    output_dir,
+                    validated,
+                    published_dir,
+                    self.output_ports[0] if self.output_ports else "result",
+                )
                 artifacts = _artifacts(published_dir)
                 return dg.MaterializeResult(metadata={
                     "input_dir": str(input_dir), "output_dir": str(published_dir),

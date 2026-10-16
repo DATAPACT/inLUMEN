@@ -2416,7 +2416,10 @@ async def _read_attached_python_runtime(
         )
 
     declared_data_contract = {}
-    if "data_contract" in declared_task_contract or "output" in declared_task_contract and "version" in declared_task_contract:
+    if "data_contract" in declared_task_contract or (
+        "version" in declared_task_contract
+        and ("output" in declared_task_contract or "outputs" in declared_task_contract)
+    ):
         try:
             declared_data_contract = task_data_contract(declared_task_contract)
         except ArtifactContractError as exc:

@@ -322,6 +322,9 @@ def validate_pipeline_with_docker(
                     if not expected.source_node:
                         continue
                     upstream = produced_outputs.get(expected.source_node, [])
+                    if len(upstream) > 1:
+                        # Several outputs: the connection reads its producer port's artifact.
+                        upstream = [item for item in upstream if item.port and item.port == expected.source_port]
                     if len(upstream) != 1:
                         errors.append(f"Node {flow_id}, connection {expected.connection_id}: expected one published artifact from {expected.source_node}")
                         break

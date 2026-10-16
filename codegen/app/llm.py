@@ -203,8 +203,8 @@ PIPELINE_OUTPUT_DIR. Port names never create implicit workspace directories.
 Use the input descriptors in INLUMEN_INPUT_MANIFEST to open their explicit paths.
 There is exactly one descriptor per incoming connection, identified by
 consumer target_port and declared artifact name or filename. Runtime connection_id and source_node are diagnostic identities; do not hard-code their graph-specific values. Never discover inputs by scanning a directory or
-selecting the first matching file. Only the declared output artifact is handed
-to the next step; platform metadata lives outside it.
+selecting the first matching file. Only the declared output artifacts are handed
+to the next steps; platform metadata lives outside them.
 Regular node
 parameters are available under their exact safe parameter names (for example,
 QUESTION), as JSON in PIPELINE_PARAMS_JSON, and individually as
@@ -212,8 +212,12 @@ PIPELINE_PARAM_<NAME>. Preserve deliberate artifact-relative paths but do not
 depend on the source connector or an orchestration port name. Sensitive
 parameter names are listed in target_node.secret_parameters; their values are
 available only from the corresponding PIPELINE_PARAM_<NAME> environment variable
-at runtime. Never print, persist, or return a sensitive value. Publish exactly one declared file or directory bundle beneath PIPELINE_OUTPUT_DIR.
-Keep scratch files in PIPELINE_WORK_DIR. Never group results by orchestration port. Use only allowed packages and honor reviewed
+at runtime. Never print, persist, or return a sensitive value. Publish every
+declared output artifact, and nothing else, at its declared filename beneath
+PIPELINE_OUTPUT_DIR. Usually there is one; when several are declared, each
+names the output port it feeds and the platform routes it there, so write
+each at its own declared path and never create port folders yourself.
+Keep scratch files in PIPELINE_WORK_DIR. Use only allowed packages and honor reviewed
 implementation constraints. Do not use subprocess, eval, exec, os.system, or
 undeclared network access."""
 
@@ -225,8 +229,10 @@ exactly one JSON object with pipeline_py (string), requirements (array of PEP
 Dockerfile. Define every requested node function exactly once with signature
 (inputs, output_dir, context). Functions must be synchronous, must not call
 other node functions, must materialize their declared artifacts in output_dir,
-and must return a list containing exactly one declared output descriptor (terminal
-destinations may return no artifact). A directory bundle is one descriptor.
+and must return a list with one descriptor per declared output, in any order
+(terminal destinations may return no artifact). Most nodes declare one output;
+a node with several declares a distinct port on each. A directory bundle is
+one descriptor.
 Inputs are explicitly bound by the runtime. Select by consumer target_port and,
 when needed, declared artifact name or filename. Never hard-code graph-specific
 connection_id or source_node values; they are diagnostic identities. Select the bound

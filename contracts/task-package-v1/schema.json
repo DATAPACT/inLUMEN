@@ -5,8 +5,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "version",
-    "output"
+    "version"
   ],
   "properties": {
     "$schema": {
@@ -64,6 +63,11 @@
           "items": {
             "$ref": "#/properties/output"
           }
+        },
+        "port": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Output port this artifact is published on. Required in outputs; ignored for a single output."
         }
       }
     },
@@ -163,6 +167,35 @@
           }
         }
       }
+    },
+    "outputs": {
+      "type": "array",
+      "minItems": 2,
+      "description": "Several results, one per output port. Use output for a single result.",
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/properties/output"
+          },
+          {
+            "required": [
+              "port"
+            ]
+          }
+        ]
+      }
     }
-  }
+  },
+  "oneOf": [
+    {
+      "required": [
+        "output"
+      ]
+    },
+    {
+      "required": [
+        "outputs"
+      ]
+    }
+  ]
 }

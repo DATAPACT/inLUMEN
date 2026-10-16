@@ -87,7 +87,7 @@ def task_data_contract(metadata):
     if not isinstance(metadata, dict):
         raise ArtifactContractError(f'{TASK_METADATA_FILENAME} must contain an object')
     if 'data_contract' in metadata:
-        if 'version' in metadata or 'inputs' in metadata or (isinstance(metadata.get('output'), dict) and ('path' in metadata['output'] or 'type' in metadata['output'])):
+        if 'version' in metadata or 'inputs' in metadata or 'outputs' in metadata or (isinstance(metadata.get('output'), dict) and ('path' in metadata['output'] or 'type' in metadata['output'])):
             raise ArtifactContractError('Conflicting public and internal artifact declarations')
         allowed = {'data_contract', 'execution', 'input', 'output', 'capabilities', 'dependencies', 'models', 'resources', 'secrets', 'side_effects', 'schema_version'}
         if set(metadata) - allowed:
@@ -95,8 +95,8 @@ def task_data_contract(metadata):
         contract = metadata['data_contract']
         if not isinstance(contract, dict) or contract.get('contract_id') != CONTRACT_ID or contract.get('version', '2') != '2':
             raise ArtifactContractError('Legacy data_contract must declare inlumen.generic-node@2, version 2')
-        if not isinstance(contract.get('inputs'), list) or not isinstance(contract.get('outputs'), list) or len(contract['outputs']) != 1:
-            raise ArtifactContractError('Legacy data_contract requires inputs and exactly one output artifact')
+        if not isinstance(contract.get('inputs'), list) or not isinstance(contract.get('outputs'), list) or not contract['outputs']:
+            raise ArtifactContractError('Legacy data_contract requires inputs and at least one output artifact')
         def legacy(item):
             result = validate_declaration(item)
             if 'representation' not in item:
@@ -108,26 +108,19 @@ def task_data_contract(metadata):
                     raise ArtifactContractError('Artifact members must be a list')
                 result['members'] = [legacy(member) for member in result['members']]
             return result
-        return {**contract, 'version': '2', 'inputs': [legacy(x) for x in contract['inputs']], 'outputs': [legacy(x) for x in contract['outputs']]}
+        outputs = [legacy(x) for x in contract['outputs']]
+        _check_output_set(outputs)
+        return {**contract, 'version': '2', 'inputs': [legacy(x) for x in contract['inputs']], 'outputs': outputs}
     errors = manifest_errors(metadata)
     if errors:
         raise PackageValidationErrors(errors)
-    out = metadata['output']
-    safe_path(out['path'])
-    _content_schema(out)
-    output = {'name': out.get('name', 'output'), 'filename': out['path'], 'representation': out['type'],
-              'kind': out.get('kind', 'directory' if out['type'] == 'directory' else 'binary')}
-    fmt = out.get('format') or ('json' if out['type'] == 'file' and out['path'].lower().endswith('.json') else None)
-    if 'schema' in out and (out['type'] != 'file' or fmt != 'json'):
-        raise ArtifactContractError('output/schema requires a JSON file output; set output/format to json')
-    if fmt:
-        output.update(format=fmt, kind=out.get('kind', 'json' if fmt == 'json' else output['kind']))
-    if 'schema' in out:
-        output['schema'] = out['schema']
-    if 'members' in out:
-        if out['type'] != 'directory':
-            raise ArtifactContractError('output/members requires a directory bundle')
-        output['members'] = [task_data_contract({'version': 1, 'output': member})['outputs'][0] for member in out['members']]
+    if 'outputs' in metadata:
+        outputs = [_output_declaration(out, out.get('name', out['port'])) for out in metadata['outputs']]
+        for out, declaration in zip(metadata['outputs'], outputs):
+            declaration['port'] = out['port']
+        _check_output_set(outputs)
+    else:
+        outputs = [_output_declaration(metadata['output'], metadata['output'].get('name', 'output'))]
     inputs = []
     seen = set()
     for item in metadata.get('inputs', []):
@@ -140,7 +133,43 @@ def task_data_contract(metadata):
             if source in item:
                 requirement[target] = item[source]
         inputs.append(requirement)
-    return {'contract_id': CONTRACT_ID, 'version': '2', 'inputs': [], 'input_requirements': inputs, 'outputs': [output]}
+    return {'contract_id': CONTRACT_ID, 'version': '2', 'inputs': [], 'input_requirements': inputs, 'outputs': outputs}
+
+
+def _check_output_set(outputs):
+    """Several outputs need a distinct port, name and path each."""
+    if len(outputs) < 2:
+        return
+    ports = [item.get('port') for item in outputs]
+    if not all(ports) or len(set(ports)) != len(ports):
+        raise ArtifactContractError(f'Each output port carries exactly one artifact; give every output a distinct port (got {ports})')
+    names = [item['name'] for item in outputs]
+    if len(set(names)) != len(names):
+        raise ArtifactContractError(f'Output names repeat: {names}')
+    paths = [item['filename'] for item in outputs]
+    for index, left in enumerate(paths):
+        for right in paths[index + 1:]:
+            if left == right or left.startswith(right + '/') or right.startswith(left + '/'):
+                raise ArtifactContractError(f'Outputs overlap at {left!r} and {right!r}; declare distinct paths')
+
+
+def _output_declaration(out, name):
+    safe_path(out['path'])
+    _content_schema(out)
+    output = {'name': name, 'filename': out['path'], 'representation': out['type'],
+              'kind': out.get('kind', 'directory' if out['type'] == 'directory' else 'binary')}
+    fmt = out.get('format') or ('json' if out['type'] == 'file' and out['path'].lower().endswith('.json') else None)
+    if 'schema' in out and (out['type'] != 'file' or fmt != 'json'):
+        raise ArtifactContractError('output/schema requires a JSON file output; set output/format to json')
+    if fmt:
+        output.update(format=fmt, kind=out.get('kind', 'json' if fmt == 'json' else output['kind']))
+    if 'schema' in out:
+        output['schema'] = out['schema']
+    if 'members' in out:
+        if out['type'] != 'directory':
+            raise ArtifactContractError('output/members requires a directory bundle')
+        output['members'] = [_output_declaration(member, member.get('name', 'output')) for member in out['members']]
+    return output
 
 
 def parse_task_metadata(content):
@@ -154,15 +183,26 @@ def parse_task_metadata(content):
 
 def public_manifest(contract, *, models=None):
     """Serialize the internal declaration without exporting runtime identities."""
-    if len(contract.get('outputs', [])) != 1:
-        raise ArtifactContractError('Task must declare exactly one output artifact')
-    out = contract['outputs'][0]
-    result = {'version': 1, 'output': {'type': out.get('representation', 'file'), 'path': out['filename']}}
-    for key in ('name', 'kind', 'format', 'schema'):
-        if out.get(key):
-            result['output'][key] = out[key]
-    if out.get('members'):
-        result['output']['members'] = [public_manifest({'outputs': [member]})['output'] for member in out['members']]
+    outputs = contract.get('outputs', [])
+    if not outputs:
+        raise ArtifactContractError('Task must declare at least one output artifact')
+
+    def public_output(out):
+        value = {'type': out.get('representation', 'file'), 'path': out['filename']}
+        for key in ('name', 'kind', 'format', 'schema'):
+            if out.get(key):
+                value[key] = out[key]
+        if out.get('members'):
+            value['members'] = [public_output(member) for member in out['members']]
+        return value
+
+    if len(outputs) == 1:
+        result = {'version': 1, 'output': public_output(outputs[0])}
+    else:
+        missing = [out.get('name') for out in outputs if not out.get('port')]
+        if missing:
+            raise ArtifactContractError(f'Outputs {missing} must name the output port they publish to')
+        result = {'version': 1, 'outputs': [{**public_output(out), 'port': out['port']} for out in outputs]}
     if models:
         result['models'] = models
     requirements = {}
@@ -264,4 +304,4 @@ def validate_package(files):
     dependencies, constraints = resolve_requirements(files, with_constraints=True)
     return {'metadata': metadata, 'data_contract': task_data_contract(metadata),
             'requirements': dependencies, 'constraints': constraints,
-            'warnings': ([] if metadata.get('output', {}).get('schema') or metadata.get('data_contract', {}).get('outputs', [{}])[0].get('schema') else ['Output content schema not supplied; structural validation unavailable.']) + ['Model availability and execution have not been tested.']}
+            'warnings': ([] if all(out.get('schema') for out in task_data_contract(metadata)['outputs']) else ['Output content schema not supplied; structural validation unavailable.']) + ['Model availability and execution have not been tested.']}

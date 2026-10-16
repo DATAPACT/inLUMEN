@@ -61,8 +61,16 @@ class FilesystemRuntimeTest(unittest.TestCase):
             output = Path(tmp) / "output"
             output.mkdir()
             (output / "result.json").write_text("{}")
-            with self.assertRaisesRegex(RuntimeError, "exactly one logical output set"):
+            with self.assertRaisesRegex(RuntimeError, "write each result into its port folder"):
                 normalize_single_output_port(output, ["left", "right"])
+
+    def test_multiple_output_ports_accept_results_in_port_folders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "output"
+            for port in ("left", "right"):
+                (output / port).mkdir(parents=True)
+                (output / port / "result.json").write_text("{}")
+            self.assertEqual([], normalize_single_output_port(output, ["left", "right"]))
 
     def test_workspace_contract_stages_artifacts_and_discovers_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:

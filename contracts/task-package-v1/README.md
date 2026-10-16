@@ -1,8 +1,8 @@
 # Task package v1
 
 Every Task folder requires main.py and inlumen.task.json. Add requirements.txt only for third-party dependencies; helper modules and supporting assets are allowed. Sources and Destinations are managed connectors and need no Task code.
-A Task publishes exactly one declared file or directory bundle. The output path is relative to PIPELINE_OUTPUT_DIR; it is not a glob. Directory bundles remain one artifact.
-The runtime stages one artifact per incoming graph connection in PIPELINE_INPUT_DIR, preserving declared paths. Port names create no implicit subdirectories. INLUMEN_INPUT_MANIFEST points to JSON with an inputs list; each descriptor includes path, filename, representation, source_node, connection_id, and target_port. Read the supplied path to select a particular input. Write only the declared result beneath PIPELINE_OUTPUT_DIR. Use PIPELINE_WORK_DIR for temporary files and logs.
+A Task usually publishes one declared file or directory bundle (output). The output path is relative to PIPELINE_OUTPUT_DIR; it is not a glob. Directory bundles remain one artifact. A Task with several output ports declares outputs instead: a list with one entry per port, each naming its port and its own distinct path. Write every declared result at its path beneath PIPELINE_OUTPUT_DIR; the platform routes each one to its port, so never create port folders.
+The runtime stages one artifact per incoming graph connection in PIPELINE_INPUT_DIR, preserving declared paths. Port names create no implicit subdirectories. INLUMEN_INPUT_MANIFEST points to JSON with an inputs list; each descriptor includes path, filename, representation, source_node, connection_id, and target_port. Read the supplied path to select a particular input. Write only the declared results beneath PIPELINE_OUTPUT_DIR. Use PIPELINE_WORK_DIR for temporary files and logs.
 Run as a finite, non-interactive Python 3.11 batch program using python main.py. Fail with a nonzero exit code on invalid input or computation failure. Never create fake input data, credentials, model results, or fallback success outputs.
 A minimal inlumen.task.json is:
 {

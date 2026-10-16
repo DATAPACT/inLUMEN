@@ -371,3 +371,48 @@ def test_missing_explicit_task_identity_requires_mapping_instead_of_guessing():
     assert report['packages'][0]['node_id'] is None
     report, _ = inspect_packages(data, g, {'nodes/Analyze audio--removed': 'new'})
     assert report['valid']
+
+
+def test_manifest_declares_one_artifact_per_output_port():
+    manifest = {
+        'version': 1,
+        'outputs': [
+            {'port': 'report', 'type': 'file', 'path': 'report.json'},
+            {'port': 'data', 'name': 'clean', 'type': 'file', 'path': 'clean.csv', 'format': 'csv', 'kind': 'table'},
+        ],
+    }
+    contract = task_data_contract(manifest)
+    assert [(item['name'], item['port'], item['filename']) for item in contract['outputs']] == [
+        ('report', 'report', 'report.json'),
+        ('clean', 'data', 'clean.csv'),
+    ]
+    assert contract['outputs'][0]['format'] == 'json'
+    assert public_manifest(contract) == {
+        'version': 1,
+        'outputs': [
+            {'type': 'file', 'path': 'report.json', 'name': 'report', 'kind': 'json', 'format': 'json', 'port': 'report'},
+            {'type': 'file', 'path': 'clean.csv', 'name': 'clean', 'kind': 'table', 'format': 'csv', 'port': 'data'},
+        ],
+    }
+    single = task_data_contract({'version': 1, 'output': {'type': 'file', 'path': 'r.json'}})
+    assert 'outputs' not in public_manifest({**single, 'outputs': [{**single['outputs'][0], 'port': 'output'}]})
+
+
+@pytest.mark.parametrize('outputs', [
+    [{'port': 'a', 'type': 'file', 'path': 'a.json'}],
+    [{'port': 'a', 'type': 'file', 'path': 'a.json'}, {'type': 'file', 'path': 'b.json'}],
+    [{'port': 'a', 'type': 'file', 'path': 'a.json'}, {'port': 'a', 'type': 'file', 'path': 'b.json'}],
+    [{'port': 'a', 'type': 'file', 'path': 'x.json'}, {'port': 'b', 'type': 'file', 'path': 'x.json'}],
+    [{'port': 'a', 'type': 'directory', 'path': 'out'}, {'port': 'b', 'type': 'file', 'path': 'out/b.json'}],
+])
+def test_manifest_rejects_ambiguous_outputs(outputs):
+    with pytest.raises(ArtifactContractError):
+        task_data_contract({'version': 1, 'outputs': outputs})
+
+
+def test_manifest_requires_exactly_one_of_output_and_outputs():
+    both = {'version': 1, 'output': {'type': 'file', 'path': 'a.json'},
+            'outputs': [{'port': 'a', 'type': 'file', 'path': 'a.json'}, {'port': 'b', 'type': 'file', 'path': 'b.json'}]}
+    for manifest in ({'version': 1}, both):
+        with pytest.raises(ArtifactContractError):
+            task_data_contract(manifest)

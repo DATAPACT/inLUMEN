@@ -105,6 +105,8 @@ def test_v4_declares_single_artifact_and_keeps_previous_schema():
     contract = {"contract_id": "inlumen.generic-node@2", "inputs": [], "outputs": [artifact]}
     assert not list(validator.iter_errors(contract))
     assert list(validator.iter_errors({**contract, "outputs": [artifact, artifact]}))
+    ported = [{**artifact, "port": "model"}, {**artifact, "name": "card", "filename": "card.md", "representation": "file", "port": "card"}]
+    assert not list(validator.iter_errors({**contract, "outputs": ported}))
     legacy = json.loads((CONTRACT_V3_ROOT / "artifact-contract.schema.json").read_text())
     assert legacy["properties"]["schema_version"]["const"] == "inlumen.artifact-contract@3"
 

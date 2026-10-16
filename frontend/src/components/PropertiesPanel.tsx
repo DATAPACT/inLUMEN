@@ -32,6 +32,8 @@ import {
 } from 'lucide-react';
 import { toast } from "sonner";
 import { FilePreviewDialog, PreviewType } from '@/components/properties/FilePreviewDialog';
+import { TaskOutputsEditor } from '@/components/properties/TaskOutputsEditor';
+import type { OutputArtifactDeclaration } from '@/features/nodes/outputArtifacts';
 import { NodeRunOutputs } from '@/components/runs/NodeRunOutputs';
 import { ChatbotConfig } from '@/services/chatbotService';
 import {
@@ -197,6 +199,19 @@ const InspectorSection = ({
     {children}
   </section>
 );
+
+const declaredOutputArtifacts = (implementation: unknown): OutputArtifactDeclaration[] => {
+  const value = implementation && typeof implementation === "object"
+    ? (implementation as Record<string, unknown>).output_artifacts
+    : undefined;
+  return Array.isArray(value)
+    ? value.filter((item): item is OutputArtifactDeclaration => (
+      Boolean(item) && typeof item === "object"
+      && typeof (item as OutputArtifactDeclaration).port === "string"
+      && typeof (item as OutputArtifactDeclaration).filename === "string"
+    ))
+    : [];
+};
 
 interface PropertiesPanelProps {
   selectedNode: Node<PropertyNodeData> | null;
@@ -1671,6 +1686,28 @@ export function PropertiesPanel({
                 )}
                 {renderFileArea("code", indexedCodeFiles, codeFileInputRef)}
                 <TaskPackageHelp />
+              </InspectorSection>
+            )}
+
+            {nodeType === "task" && (
+              <InspectorSection
+                id="inspector-outputs"
+                title="Outputs"
+                description="A Task can publish several results, one per output. Connected steps receive only the file of the output they are connected to."
+              >
+                <TaskOutputsEditor
+                  outputs={ports.outputs}
+                  artifacts={declaredOutputArtifacts(selectedNode.data.implementation)}
+                  connectedPorts={selectedNode.data.connected_ports?.outputs || []}
+                  onChange={(outputs, artifacts) => {
+                    const nextPorts = { ...ports, outputs };
+                    const implementation = { ...(selectedNode.data.implementation || {}) };
+                    if (artifacts.length) implementation.output_artifacts = artifacts;
+                    else delete implementation.output_artifacts;
+                    setPorts(nextPorts);
+                    pushNodeUpdate({ ports: nextPorts, implementation });
+                  }}
+                />
               </InspectorSection>
             )}
 
