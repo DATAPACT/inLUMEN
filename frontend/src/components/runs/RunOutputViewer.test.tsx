@@ -18,6 +18,9 @@ const mount = async (element: React.ReactElement) => {
   await act(async () => root.render(element));
   return {
     container,
+    rerender: async (next: React.ReactElement) => {
+      await act(async () => root.render(next));
+    },
     unmount: async () => {
       await act(async () => root.unmount());
       container.remove();
@@ -115,6 +118,32 @@ describe('RunOutputViewer', () => {
     await act(async () => {});
     expect(document.body.textContent).toContain('ok');
     expect(document.body.textContent).toContain('true');
+    await view.unmount();
+  });
+});
+
+
+describe('RunOutputViewer selection', () => {
+  it('keeps the chosen output when the run list refreshes', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url) => jsonResponse(
+      String(url).includes('b.txt')
+        ? { kind: 'text', path: 'outputs/n/b.txt', filename: 'b.txt', content_type: 'text/plain', size_bytes: 1, text: 'B' }
+        : { kind: 'text', path: 'outputs/n/a.txt', filename: 'a.txt', content_type: 'text/plain', size_bytes: 1, text: 'A' },
+    ));
+    const make = () => presentRunOutputs([
+      { path: 'outputs/n/a.txt', filename: 'a.txt' },
+      { path: 'outputs/n/b.txt', filename: 'b.txt' },
+    ]).all;
+    const view = await mount(<RunOutputViewer open onOpenChange={vi.fn()} runId="r" outputs={make()} />);
+    await act(async () => {});
+    const second = [...document.body.querySelectorAll('aside button')].find((button) => button.textContent?.includes('b.txt'))!;
+    await act(async () => second.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    await act(async () => {});
+
+    // A background refresh passes an equal but new outputs array.
+    await view.rerender(<RunOutputViewer open onOpenChange={vi.fn()} runId="r" outputs={make()} />);
+    await act(async () => {});
+    expect(document.body.querySelector('[role="dialog"] h2')?.textContent).toBe('b.txt');
     await view.unmount();
   });
 });
