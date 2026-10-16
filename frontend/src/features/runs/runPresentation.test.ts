@@ -109,3 +109,15 @@ describe('run outputs per step', () => {
     expect(outputsForNode(outputs, 'missing')).toEqual([]);
   });
 });
+
+describe('reused steps', () => {
+  it('keeps saying a step reused an earlier result after it completes', () => {
+    const events = summarizeNodeEvents([
+      { id: 1, timestamp: '', type: 'node.started', node_id: 'a' },
+      { id: 2, timestamp: '', type: 'node.cached', node_id: 'a', message: 'A reused an earlier result.' },
+      { id: 3, timestamp: '', type: 'node.completed', node_id: 'a' },
+      { id: 4, timestamp: '', type: 'node.completed', node_id: 'b' },
+    ]);
+    expect(events.map((event) => event.type)).toEqual(['node.cached', 'node.completed']);
+  });
+});

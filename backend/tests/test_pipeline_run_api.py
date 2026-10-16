@@ -138,3 +138,38 @@ class PipelineRunApiTest(unittest.TestCase):
         self.assertEqual(
             "pipeline_run_capacity_full", response.json["details"]["code"]
         )
+
+
+class PipelineRunOptionsTest(unittest.TestCase):
+    def setUp(self):
+        self.client = inlumen_api.app.test_client()
+
+    @patch("inlumen_api.runner_request", return_value={"run_id": "run-2", "status": "queued"})
+    @patch(
+        "inlumen_api.prepare_dagster_execution_bundle",
+        return_value={"files": [], "manifest": {}, "runtime_secrets": {}},
+    )
+    @patch("inlumen_api._proxy", return_value=graph_response())
+    def test_cache_options_are_validated_and_forwarded(self, _proxy, _prepare, runner):
+        default = self.client.post("/api/pipeline-runs", json={"idempotency_key": "a"})
+        self.assertEqual(202, default.status_code)
+        self.assertEqual({"cache": "reuse"}, runner.call_args.kwargs["payload"]["execution_options"])
+
+        rerun = self.client.post(
+            "/api/pipeline-runs",
+            json={"idempotency_key": "b", "cache": "reuse", "rerun_from": "node-1"},
+        )
+        self.assertEqual(202, rerun.status_code)
+        self.assertEqual(
+            {"cache": "reuse", "rerun_from": "node-1"},
+            runner.call_args.kwargs["payload"]["execution_options"],
+        )
+
+        refresh = self.client.post("/api/pipeline-runs", json={"cache": "refresh"})
+        self.assertEqual({"cache": "refresh"}, runner.call_args.kwargs["payload"]["execution_options"])
+        self.assertEqual(202, refresh.status_code)
+
+        runner.reset_mock()
+        self.assertEqual(400, self.client.post("/api/pipeline-runs", json={"cache": "always"}).status_code)
+        self.assertEqual(400, self.client.post("/api/pipeline-runs", json={"rerun_from": "missing"}).status_code)
+        runner.assert_not_called()

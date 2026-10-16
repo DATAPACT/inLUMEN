@@ -72,13 +72,16 @@ class RunArtifactStore:
             from minio.commonconfig import ENABLED, Filter
             from minio.lifecycleconfig import Expiration, LifecycleConfig, Rule
 
+            # Run outputs and reusable step results (cache/) expire alike, so
+            # results of old code versions do not accumulate.
             self.client.set_bucket_lifecycle(bucket, LifecycleConfig([
                 Rule(
                     ENABLED,
-                    rule_filter=Filter(prefix="runs/"),
-                    rule_id="expire-run-artifacts",
+                    rule_filter=Filter(prefix=f"{prefix}/"),
+                    rule_id=f"expire-{prefix}",
                     expiration=Expiration(days=self.retention_days),
-                ),
+                )
+                for prefix in ("runs", "cache")
             ]))
         self._ready_buckets.add(bucket)
 

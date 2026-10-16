@@ -2307,7 +2307,22 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
         "AnyObject": {"type": "object", "additionalProperties": True},
         "PipelineRunStartRequest": {
             "type": "object",
-            "properties": {"idempotency_key": {"type": "string", "maxLength": 200}},
+            "properties": {
+                "idempotency_key": {"type": "string", "maxLength": 200},
+                "cache": {
+                    "type": "string",
+                    "enum": ["reuse", "refresh"],
+                    "default": "reuse",
+                    "description": (
+                        "reuse takes earlier results of steps whose code, non-secret parameters "
+                        "and input content are unchanged; refresh runs every step again."
+                    ),
+                },
+                "rerun_from": {
+                    "type": "string",
+                    "description": "Step id to run again together with every step after it.",
+                },
+            },
             "additionalProperties": False,
         },
         "PipelineRunSnapshot": {

@@ -36,6 +36,8 @@ PYTHON_ERROR_PATTERN = re.compile(
     r":\s*(?P<message>.+)$",
     re.MULTILINE,
 )
+# Logged by a step that reused an earlier result instead of running.
+NODE_CACHE_HIT_PATTERN = re.compile(r"INLUMEN_CACHE_HIT\s+(?P<node>node_[A-Za-z0-9_]+)")
 NODE_HEARTBEAT_PATTERN = re.compile(
     r"Node\s+(?P<node>node_[A-Za-z0-9_]+)\s+is still running\s+"
     r"\((?P<elapsed>\d+)s elapsed\)\."
@@ -51,6 +53,7 @@ class DagsterExecutor(Protocol):
         run_id: str,
         files: list[dict[str, Any]],
         runtime_secrets: dict[str, str],
+        options: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 
     async def cancel(self, run_id: str) -> None: ...
@@ -250,6 +253,7 @@ class PipelineRunManager:
                     run_id, files, request.workspace_id
                 ),
                 "_bundle_manifest": deepcopy(request.snapshot.bundle_manifest),
+                "_execution_options": request.execution_options.model_dump(exclude_none=True),
                 "_runtime_secret_names": sorted(request.runtime_secrets),
                 "_output_files": [],
                 "_idempotency_key": key,
@@ -555,6 +559,7 @@ class PipelineRunManager:
                     run_id,
                     self._bundle_files(record),
                     runtime_secrets,
+                    deepcopy(record.get("_execution_options") or {}),
                 )
             finally:
                 progress_task.cancel()
@@ -703,6 +708,8 @@ class PipelineRunManager:
             elif active_node_id == node_id:
                 active_node_id = None
 
+        events_changed = self._append_cache_hits(record, logs, emitted) or events_changed
+
         current_progress = record.get("progress") or {}
         heartbeat_matches = list(NODE_HEARTBEAT_PATTERN.finditer(logs))
         node_elapsed_seconds = current_progress.get("node_elapsed_seconds")
@@ -820,6 +827,7 @@ class PipelineRunManager:
                     f"{self._node_display_name(node_id)} {action}.",
                     node_id=node_id,
                 )
+            self._append_cache_hits(record, decoded_output, emitted_node_events)
             failure = self._root_failure(decoded_output)
             if failure:
                 failed_node_match = next(
@@ -910,6 +918,25 @@ class PipelineRunManager:
             "resource_cpu": progress.get("resource_cpu"),
             "resource_memory_bytes": progress.get("resource_memory_bytes"),
         }
+
+    def _append_cache_hits(
+        self, record: dict[str, Any], logs: str, emitted: set[tuple[str, ...]]
+    ) -> bool:
+        changed = False
+        for match in NODE_CACHE_HIT_PATTERN.finditer(logs):
+            node_id = match.group("node")
+            if (node_id, "cached") in emitted:
+                continue
+            emitted.add((node_id, "cached"))
+            self._append_event(
+                record,
+                "node.cached",
+                "succeeded",
+                f"{self._node_display_name(node_id)} reused an earlier result.",
+                node_id=node_id,
+            )
+            changed = True
+        return changed
 
     @staticmethod
     def _node_display_name(node_id: str) -> str:
@@ -1013,6 +1040,7 @@ class PipelineRunManager:
             "flow_id": str(receipt.get("flow_id") or ""),
             "node_label": str(receipt.get("node_label") or ""),
             "status": str(receipt.get("status") or ""),
+            "cached": bool(receipt.get("cached")),
             "started_at": receipt.get("started_at"),
             "finished_at": receipt.get("finished_at"),
             "connections": [

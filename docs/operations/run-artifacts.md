@@ -49,3 +49,44 @@ removes anything older than the retention period.
 Because of the digests, the file a producer generated and the file a consumer
 used are the same entity. The run panel offers this file as **Download run
 lineage**.
+
+## Reusing step results
+
+Runs reuse the result of a step when that step's code, non-secret parameters,
+runtime and input content are unchanged. The key has two parts:
+
+- **Code key.** Codegen computes it before the run from the step's files, its
+  Dagster definition and the shared runtime files. Secret values never enter a
+  bundle, so they never affect the key.
+- **Input key.** The step computes it from the content of its staged inputs.
+
+Before a run, codegen downloads the matching earlier results from
+`cache/<code key>/<input key>/` and mounts them read-only. A step with a match
+publishes the stored files instead of running, and logs a cache hit. The run
+panel then shows it as "reused an earlier result". After the run, every step
+that actually ran successfully is saved for reuse.
+
+What this gives users:
+
+- **Run** (the default) reuses unchanged steps. After a failure, the same
+  button reads "Resume from failed step": steps that finished last time are
+  reused, so only the failed step and the steps after it run.
+- **Run everything again** (`cache: "refresh"`) ignores earlier results.
+- **Re-run from this step** (node inspector, `rerun_from: <step id>`) runs
+  that step and every step after it, and reuses the rest.
+
+Some steps are never reused:
+
+- Destinations.
+- Flow nodes.
+- Sources other than uploaded files.
+- Steps that declare side effects or secrets.
+- Steps whose `implementation.cacheable` is `false`.
+
+| Variable (codegen) | Default | Meaning |
+| --- | --- | --- |
+| `INLUMEN_STEP_CACHE_KEEP` | `3` | Results kept per code key (the newest input keys). |
+| `INLUMEN_STEP_CACHE_MAX_STAGE_BYTES` | 2 GiB | Most cached data staged for one run. |
+
+Cached results expire with the same retention as run outputs. Clearing runs
+does not clear the cache; use **Run everything again** to ignore it.
