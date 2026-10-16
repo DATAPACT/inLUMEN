@@ -50,7 +50,7 @@ def parameter_environment(parameters: dict[object, object]) -> dict[str, str]:
     normalized = {
         str(key): value
         for key, value in parameters.items()
-        if str(key).strip() and str(key) != "model_plan"
+        if str(key).strip() and str(key) not in {"model_plan", "output_artifacts"}
     }
     environment: dict[str, str] = {}
     if normalized:
@@ -691,7 +691,7 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
             })
             parameters = {
                 str(key): value for key, value in self.parameters.items()
-                if str(key).strip() and str(key) != "model_plan"
+                if str(key).strip() and str(key) not in {"model_plan", "output_artifacts"}
             }
             if parameters:
                 env["PIPELINE_PARAMS_JSON"] = json.dumps(

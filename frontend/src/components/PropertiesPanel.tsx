@@ -33,7 +33,7 @@ import {
 import { toast } from "sonner";
 import { FilePreviewDialog, PreviewType } from '@/components/properties/FilePreviewDialog';
 import { TaskOutputsEditor } from '@/components/properties/TaskOutputsEditor';
-import type { OutputArtifactDeclaration } from '@/features/nodes/outputArtifacts';
+import { OUTPUT_ARTIFACTS_PARAMETER, type OutputArtifactDeclaration } from '@/features/nodes/outputArtifacts';
 import { NodeRunOutputs } from '@/components/runs/NodeRunOutputs';
 import { ChatbotConfig } from '@/services/chatbotService';
 import {
@@ -200,10 +200,8 @@ const InspectorSection = ({
   </section>
 );
 
-const declaredOutputArtifacts = (implementation: unknown): OutputArtifactDeclaration[] => {
-  const value = implementation && typeof implementation === "object"
-    ? (implementation as Record<string, unknown>).output_artifacts
-    : undefined;
+const declaredOutputArtifacts = (param: NodeParamMap): OutputArtifactDeclaration[] => {
+  const value = param[OUTPUT_ARTIFACTS_PARAMETER];
   return Array.isArray(value)
     ? value.filter((item): item is OutputArtifactDeclaration => (
       Boolean(item) && typeof item === "object"
@@ -295,7 +293,8 @@ export function PropertiesPanel({
   // A plugin-backed Task runs the managed plugin adapter, not uploaded code.
   const showTaskImplementation = canManageImplementation && !activePluginId;
   const editableParamEntries: Array<[string, unknown]> = Object.entries(param).filter(([key]) => (
-    key !== "model_plan" && !(nodeType === "flow" && FLOW_PARAMETER_KEYS.has(key))
+    key !== "model_plan" && key !== OUTPUT_ARTIFACTS_PARAMETER
+    && !(nodeType === "flow" && FLOW_PARAMETER_KEYS.has(key))
   ));
   const templateOptions = templateOptionsForType(nodeType, currentTemplate);
   const showTemplateSelector = templateOptions.length > 1;
@@ -325,6 +324,14 @@ export function PropertiesPanel({
     .map((file, index) => ({ file, index }))
     .filter(({ file }) => getNodeFileRole(file) === "data");
   const activeNodeIdRef = useRef<string | null>(selectedNode?.id ?? null);
+  // The canvas attaches connected_ports to the node it displays; node data
+  // written back by the inspector lacks it until connections change again.
+  const lastConnectedPorts = useRef<{ nodeId: string | null; ports: { inputs?: string[]; outputs?: string[] } }>({ nodeId: null, ports: {} });
+  if (selectedNode?.data.connected_ports) {
+    lastConnectedPorts.current = { nodeId: selectedNode.id, ports: selectedNode.data.connected_ports };
+  }
+  const connectedPorts = selectedNode?.data.connected_ports
+    || (lastConnectedPorts.current.nodeId === selectedNode?.id ? lastConnectedPorts.current.ports : {});
   const latestSelectedNodeRef = useRef(selectedNode);
   latestSelectedNodeRef.current = selectedNode;
   const locallyProducedNodeDataRef = useRef(new WeakSet<object>());
@@ -546,7 +553,7 @@ export function PropertiesPanel({
   ) => {
     const template = findTemplateForType(nodeType, templateLabel);
     const nextPorts = normalizeNodePorts(template?.ports, nodeType);
-    const connected = selectedNode?.data.connected_ports || {};
+    const connected = connectedPorts;
     const removesConnectedPort = (direction: keyof NodePorts) =>
       (connected[direction] || []).some((portId) =>
         !nextPorts[direction].some((port) => port.id === portId),
@@ -1689,7 +1696,7 @@ export function PropertiesPanel({
               </InspectorSection>
             )}
 
-            {nodeType === "task" && (
+            {nodeType === "task" && !activePluginId && (
               <InspectorSection
                 id="inspector-outputs"
                 title="Outputs"
@@ -1697,15 +1704,18 @@ export function PropertiesPanel({
               >
                 <TaskOutputsEditor
                   outputs={ports.outputs}
-                  artifacts={declaredOutputArtifacts(selectedNode.data.implementation)}
-                  connectedPorts={selectedNode.data.connected_ports?.outputs || []}
+                  artifacts={declaredOutputArtifacts(param)}
+                  connectedPorts={connectedPorts.outputs || []}
                   onChange={(outputs, artifacts) => {
                     const nextPorts = { ...ports, outputs };
-                    const implementation = { ...(selectedNode.data.implementation || {}) };
-                    if (artifacts.length) implementation.output_artifacts = artifacts;
-                    else delete implementation.output_artifacts;
+                    // Stored with the node's parameters (implementation is
+                    // derived server-side); never passed to the step at run time.
+                    const next = { ...param };
+                    if (artifacts.length) next[OUTPUT_ARTIFACTS_PARAMETER] = artifacts;
+                    else delete next[OUTPUT_ARTIFACTS_PARAMETER];
                     setPorts(nextPorts);
-                    pushNodeUpdate({ ports: nextPorts, implementation });
+                    setParam(next);
+                    pushNodeUpdate({ ports: nextPorts, param: next });
                   }}
                 />
               </InspectorSection>

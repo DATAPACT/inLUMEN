@@ -288,7 +288,7 @@ def _step_runtime_parameters(step: dict[str, Any]) -> dict[str, Any]:
         str(key): value
         for key, value in (step.get("param") or {}).items()
         if str(key).strip()
-        and str(key) != "model_plan"
+        and str(key) not in {"model_plan", "output_artifacts"}
         and str(key) not in secret_names
     }
 
@@ -2666,7 +2666,7 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
             runtime_parameters = {
                 str(key): value
                 for key, value in self.parameters.items()
-                if str(key).strip() and str(key) != "model_plan"
+                if str(key).strip() and str(key) not in {"model_plan", "output_artifacts"}
             }
             if runtime_parameters:
                 env["INLUMEN_PARAMS_JSON"] = json.dumps(

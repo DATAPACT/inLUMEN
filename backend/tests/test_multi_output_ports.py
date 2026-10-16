@@ -88,3 +88,13 @@ def test_argo_runner_publishes_each_output_under_its_port(tmp_path):
         "rows/rows.csv",
         "summary/summary.json",
     ]
+
+
+def test_output_declarations_are_not_runtime_parameters():
+    from deployment_artifacts import _step_runtime_parameters
+    from filesystem_runtime import parameter_environment
+
+    param = {"threshold": 2, "output_artifacts": [{"port": "a", "filename": "a.json"}], "model_plan": {}}
+    assert _step_runtime_parameters({"flow_id": "1", "param": param}) == {"threshold": 2}
+    environment = parameter_environment(param)
+    assert "output_artifacts" not in json.dumps(environment).lower()
