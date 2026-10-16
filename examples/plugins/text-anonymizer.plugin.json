@@ -1,0 +1,54 @@
+{
+  "schema_version": "inlumen.plugin@1",
+  "id": "example.text-anonymizer",
+  "version": "1.0.0",
+  "name": "Text Anonymizer",
+  "description": "Removes e-mail addresses and phone numbers from text or JSON documents before they leave the pipeline.",
+  "publisher": "inLUMEN example",
+  "step_type": "task",
+  "endpoint": {
+    "base_url": "http://mock-tool:8099/tools/text-anonymizer",
+    "health_path": "/health"
+  },
+  "operations": [
+    {
+      "id": "anonymize",
+      "label": "Anonymize text",
+      "description": "Send each input file and receive a JSON document with the redacted text.",
+      "method": "POST",
+      "path": "/v1/anonymize",
+      "request": {"body": "input", "content_type": "text/plain"},
+      "response": {"format": "json", "filename": "anonymized.json"},
+      "timeout_seconds": 30
+    }
+  ],
+  "parameters": [
+    {
+      "name": "replacement",
+      "label": "Replacement text",
+      "description": "Text that replaces each detected personal identifier.",
+      "type": "string",
+      "default": "[REDACTED]",
+      "location": "query"
+    },
+    {
+      "name": "entities",
+      "label": "Entities",
+      "description": "Which identifiers to remove.",
+      "type": "string",
+      "enum": ["email", "phone", "all"],
+      "default": "all",
+      "location": "query"
+    }
+  ],
+  "auth": {"type": "api_key", "header": "X-API-Key", "secret": "api_key"},
+  "secrets": [
+    {"name": "api_key", "label": "API key", "description": "Key issued by the tool provider.", "required": true}
+  ],
+  "ports": {
+    "inputs": [{"name": "text", "type": "Text", "description": "Text or JSON document to anonymize."}],
+    "outputs": [{"name": "anonymized", "type": "Object", "description": "JSON with the redacted text and a count of removed identifiers."}]
+  },
+  "instructions": "Use this tool when a pipeline must remove e-mail addresses or phone numbers from text before storing, sharing or sending it. It processes one input file per call and returns JSON {\"text\": ..., \"removed\": n}. It does not detect names or addresses.",
+  "tags": ["privacy", "anonymization", "text"]
+}

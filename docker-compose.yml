@@ -279,3 +279,22 @@ services:
     command: npm run dev -- --host 0.0.0.0
     networks:
       - datapact_network
+
+  # Optional example tool for trying plugins locally (examples/plugins).
+  # Start with: docker compose --profile plugins-demo up -d mock-tool
+  mock-tool:
+    image: python:3.11-slim
+    container_name: inlumen_mock_tool
+    hostname: mock-tool
+    profiles: ["plugins-demo"]
+    working_dir: /app
+    volumes:
+      - ./examples/plugins:/app:ro
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MOCK_TOOL_API_KEY: ${MOCK_TOOL_API_KEY:-demo-key}
+    command: python mock_tool_server.py
+    expose:
+      - "8099"
+    networks:
+      - datapact_network

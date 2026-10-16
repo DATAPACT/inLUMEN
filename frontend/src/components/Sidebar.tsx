@@ -30,9 +30,11 @@ import {
   Download,
   PackageOpen,
   Wand2,
+  Puzzle,
 } from 'lucide-react';
 import {
   createNodeDataFromDefinition,
+  createNodeDataFromPluginTemplate,
   fetchNodeDefinitions,
   getFallbackNodeDefinitions,
   groupNodeDefinitions,
@@ -44,6 +46,9 @@ import {
 import type { NodeDefinition } from '@/features/nodes/registry/types';
 import { ReusablePipelineViewerDialog } from '@/components/subpipeline/ReusablePipelineViewerDialog';
 import { ReusablePipelineManagerDialog } from '@/components/subpipeline/ReusablePipelineManagerDialog';
+import { PluginManagerDialog } from '@/components/plugins/PluginManagerDialog';
+import { usePluginRegistry } from '@/features/plugins/pluginRegistry';
+import { pluginToTemplate } from '@/features/plugins/pluginTemplates';
 import { PipelineRunPanel } from '@/components/runs/PipelineRunPanel';
 import { publicPortsForSubpipeline } from '@/features/flow/subpipeline';
 import {
@@ -322,6 +327,9 @@ export function Sidebar({
   const [reusablePipelineError, setReusablePipelineError] = useState("");
   const [reusablePipelineToView, setReusablePipelineToView] = useState<ReusablePipelineSummary | null>(null);
   const [isReusablePipelineManagerOpen, setIsReusablePipelineManagerOpen] = useState(false);
+
+  const pluginRegistry = usePluginRegistry();
+  const [isPluginManagerOpen, setIsPluginManagerOpen] = useState(false);
 
   const refreshReusablePipelineCatalog = async () => {
     const pipelines = await fetchReusablePipelines();
@@ -801,6 +809,62 @@ export function Sidebar({
                 <div className="space-y-2">
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      Plugins
+                    </p>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-[11px]"
+                      onClick={() => setIsPluginManagerOpen(true)}
+                    >
+                      {pluginRegistry.canManage ? "Manage" : "View"}
+                    </Button>
+                  </div>
+                  {pluginRegistry.error && (
+                    <p className="rounded-md border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-700 dark:text-amber-300">
+                      {pluginRegistry.error}
+                    </p>
+                  )}
+                  {pluginRegistry.loaded && pluginRegistry.plugins.length === 0 && !pluginRegistry.error && (
+                    <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                      No plugins available. Plugins add third-party tools with a REST API as pipeline steps.
+                    </p>
+                  )}
+                  {pluginRegistry.plugins.map((plugin) => {
+                    const definition = nodeDefinitions.find(
+                      (item) => item.base_type === plugin.step_type,
+                    );
+                    if (!definition) return null;
+                    const template = pluginToTemplate(plugin);
+                    return (
+                      <div
+                        key={plugin.id}
+                        draggable
+                        onDragStart={(event) =>
+                          onDragStart(event, {
+                            type: "custom",
+                            data: createNodeDataFromPluginTemplate(definition, template),
+                          })
+                        }
+                        className="flex items-start gap-3 rounded-md border border-violet-400/25 p-2.5 cursor-move transition-colors hover:bg-muted/50"
+                      >
+                        <div className="rounded-md bg-violet-500/10 p-1.5 text-violet-600 dark:text-violet-300">
+                          <Puzzle className="h-4 w-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <h4 className="truncate text-sm font-medium">{plugin.name}</h4>
+                          <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+                            {plugin.step_type.charAt(0).toUpperCase() + plugin.step_type.slice(1)} · {plugin.description}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                       Reusable pipelines
                     </p>
                     <Button
@@ -1196,6 +1260,9 @@ export function Sidebar({
       currentPipelineName={currentPipelineName}
       currentPipelineDescription={currentPipelineDescription}
     />
+    {isPluginManagerOpen && (
+      <PluginManagerDialog open onOpenChange={setIsPluginManagerOpen} />
+    )}
     </>
   );
 }

@@ -36,13 +36,46 @@ def normalize_connector_template(value: object) -> str:
     return " ".join(str(value or "custom").strip().lower().split()) or "custom"
 
 
+def _plugin_definition(kind: str, template: object, parameters: Any = None) -> dict[str, Any] | None:
+    """Connector definition derived from an installed plugin manifest."""
+    from plugins import plugin_manifest_for_template, required_parameter_names
+
+    manifest = plugin_manifest_for_template(template)
+    if manifest is None:
+        return None
+    if manifest["step_type"] != kind:
+        raise ValueError(
+            f"Plugin {manifest['name']!r} is a {manifest['step_type']} plugin and "
+            f"cannot be used as a {kind}."
+        )
+    values = parameters if isinstance(parameters, dict) else {}
+    return {
+        "required": tuple(required_parameter_names(manifest, values.get("operation"))),
+        "requires_attached_files": False,
+        "plugin": manifest,
+    }
+
+
 def connector_definition(step_type: object, template: object) -> dict[str, Any] | None:
     kind = str(step_type or "").strip().lower()
+    from plugins import is_plugin_template
+
+    if is_plugin_template(template):
+        try:
+            return _plugin_definition(kind, template)
+        except ValueError:
+            return None
     return CONNECTOR_DEFINITIONS.get(kind, {}).get(normalize_connector_template(template))
 
 
 def require_supported_connector(step_type: object, template: object) -> None:
     kind = str(step_type or "").strip().lower()
+    from plugins import is_plugin_template
+
+    if is_plugin_template(template):
+        # Raises PluginNotInstalled / ValueError with an actionable message.
+        _plugin_definition(kind, template)
+        return
     if kind not in CONNECTOR_DEFINITIONS:
         return
     connector = normalize_connector_template(template)
@@ -62,7 +95,17 @@ def missing_connector_parameters(
     template: object,
     parameters: Any,
 ) -> list[str]:
-    definition = connector_definition(step_type, template) or {}
+    from plugins import is_plugin_template
+
+    if is_plugin_template(template):
+        try:
+            definition = _plugin_definition(
+                str(step_type or "").strip().lower(), template, parameters
+            ) or {}
+        except ValueError:
+            definition = {}
+    else:
+        definition = connector_definition(step_type, template) or {}
     values = parameters if isinstance(parameters, dict) else {}
     return [
         name

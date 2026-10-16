@@ -7,6 +7,13 @@ from typing import Any
 
 from node_ports import ports_for_template
 from pipeline_agent.contract import missing_connector_parameters
+from plugins import (
+    PluginManifestError,
+    PluginNotInstalled,
+    is_plugin_template,
+    plugin_manifest_for_template,
+)
+from plugins.manifest import resolve_operation
 from subpipeline_reference import SUBPIPELINE_DEPTH_ERROR, reusable_pipeline_nesting_error, subpipeline_reference
 from step_types import normalize_step_type
 
@@ -16,6 +23,31 @@ def _node_data(node: Any) -> dict[str, Any]:
         return {}
     data = node.get("data")
     return data if isinstance(data, dict) else node
+
+
+def _plugin_configuration_error(
+    kind: str, template_label: str, parameters: dict[str, Any]
+) -> tuple[str, str, str] | None:
+    """Return (code, message, severity) when a plugin step cannot run."""
+    try:
+        manifest = plugin_manifest_for_template(template_label)
+    except PluginNotInstalled as exc:
+        return "plugin-not-installed", str(exc), "error"
+    except Exception as exc:  # registry outage must not hide the rest of the graph
+        return "plugin-registry-unavailable", f"Plugin registry is unavailable: {exc}", "warning"
+    if manifest is None:
+        return None
+    if manifest["step_type"] != kind:
+        return (
+            "plugin-step-type-mismatch",
+            f"Plugin {manifest['name']!r} is a {manifest['step_type']} plugin and cannot be used as a {kind}.",
+            "error",
+        )
+    try:
+        resolve_operation(manifest, parameters.get("operation"))
+    except PluginManifestError as exc:
+        return "plugin-unknown-operation", str(exc), "error"
+    return None
 
 
 def _node_id(node: Any) -> str:
@@ -204,7 +236,20 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
                         ),
                     ))
 
-        if kind in {"source", "destination"}:
+        plugin_step = is_plugin_template(template_label)
+        if plugin_step:
+            plugin_error = _plugin_configuration_error(kind, template_label, _parameters(data))
+            if plugin_error:
+                issues.append(_issue(
+                    "configuration",
+                    plugin_error[0],
+                    plugin_error[1],
+                    node_id=node_id,
+                    severity=plugin_error[2],
+                ))
+                continue
+
+        if kind in {"source", "destination"} or plugin_step:
             missing_parameters = missing_connector_parameters(
                 kind,
                 template_label,
@@ -219,7 +264,7 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
                     severity="warning",
                 ))
 
-        if kind == "task":
+        if kind == "task" and not plugin_step:
             implementation = _implementation(data)
             if not implementation and not _has_python_entrypoint(data):
                 issues.append(_issue(

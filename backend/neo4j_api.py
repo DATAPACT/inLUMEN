@@ -37,6 +37,7 @@ from node_definitions.instance import (
     normalize_definition_properties,
 )
 from pipeline_graph_validation import validate_pipeline_graph
+from plugins import with_plugin_secret_keys
 from subpipeline_reference import (
     derive_subpipeline_interface,
     normalize_reusable_pipeline_graph,
@@ -414,7 +415,9 @@ def _parse_visible_graph(graph: dict) -> tuple[list[dict], list[dict]]:
                 description=str(data.get("description") or ""),
             )
         # Parameters are inspector metadata for every structural node kind.
-        secret_param_keys = data.get("secret_params")
+        secret_param_keys = with_plugin_secret_keys(
+            data.get("secret_params"), data.get("template_label"), param_obj
+        )
         param_obj = without_secret_param_values(param_obj, secret_param_keys)
         props["param_json"] = json.dumps(
             param_obj,
@@ -1333,7 +1336,9 @@ def neo4j_add_node():
     properties.setdefault("y", 0)
     properties["ports_json"] = ports_json(properties.pop("ports", None), step_type)
     param_obj = properties.pop("param", {})
-    secret_param_keys = properties.pop("secret_params", None)
+    secret_param_keys = with_plugin_secret_keys(
+        properties.pop("secret_params", None), properties.get("template_label"), param_obj
+    )
     param_obj = without_secret_param_values(param_obj, secret_param_keys)
     properties["param_json"] = json.dumps(
         param_obj,
@@ -1545,7 +1550,9 @@ def neo4j_update_node():
     properties["description"] = properties.get("description", "")
     properties["ports_json"] = ports_json(properties.pop("ports", None), step_type)
     param_obj = properties.pop("param", {})
-    secret_param_keys = properties.pop("secret_params", None)
+    secret_param_keys = with_plugin_secret_keys(
+        properties.pop("secret_params", None), properties.get("template_label"), param_obj
+    )
     param_obj = without_secret_param_values(param_obj, secret_param_keys)
     properties["param_json"] = json.dumps(
         param_obj,

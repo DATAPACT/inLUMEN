@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://datapact.eu/schemas/inlumen.plugin@1.json",
+  "title": "inLUMEN plugin manifest v1",
+  "description": "Describes a third-party tool that is already deployed behind a reachable REST API and can be used as an inLUMEN pipeline step. Written by the inLUMEN team from what the tool owner tells us about the API. A manifest never contains secret values; it only declares which secrets the tool needs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "version", "name", "description", "step_type", "endpoint", "operations"],
+  "properties": {
+    "schema_version": {"const": "inlumen.plugin@1"},
+    "id": {
+      "type": "string",
+      "description": "Globally unique, dotted, lowercase identifier, e.g. datapact.text-anonymizer.",
+      "pattern": "^[a-z0-9][a-z0-9-]*(\\.[a-z0-9][a-z0-9-]*)+$",
+      "maxLength": 120
+    },
+    "version": {
+      "type": "string",
+      "description": "Semantic version of the plugin manifest.",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.-]+)?$"
+    },
+    "name": {"type": "string", "minLength": 1, "maxLength": 80},
+    "description": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "publisher": {"type": "string", "maxLength": 120},
+    "homepage": {"type": "string", "format": "uri", "pattern": "^https?://"},
+    "step_type": {"enum": ["source", "task", "destination"]},
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base_url"],
+      "properties": {
+        "base_url": {
+          "type": "string",
+          "description": "Base URL of the deployed tool. Must be reachable from inLUMEN runtimes.",
+          "pattern": "^https?://[^\\s]+$",
+          "maxLength": 2048
+        },
+        "health_path": {
+          "type": "string",
+          "description": "Optional GET path used by the endpoint check, relative to base_url.",
+          "pattern": "^/[^\\s]*$"
+        },
+        "openapi_url": {"type": "string", "pattern": "^https?://[^\\s]+$"}
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {"$ref": "#/$defs/operation"}
+    },
+    "parameters": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {"$ref": "#/$defs/parameter"}
+    },
+    "auth": {"$ref": "#/$defs/auth"},
+    "secrets": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": {"$ref": "#/$defs/name"},
+          "label": {"type": "string", "maxLength": 80},
+          "description": {"type": "string", "maxLength": 500},
+          "required": {"type": "boolean", "default": true},
+          "header": {
+            "type": "string",
+            "description": "Send this secret as an HTTP header (for tools that need more than one key).",
+            "pattern": "^[A-Za-z0-9-]+$",
+            "maxLength": 64
+          }
+        }
+      }
+    },
+    "ports": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inputs": {"type": "array", "maxItems": 1, "items": {"$ref": "#/$defs/port"}},
+        "outputs": {"type": "array", "maxItems": 1, "items": {"$ref": "#/$defs/port"}}
+      }
+    },
+    "instructions": {
+      "type": "string",
+      "description": "Guidance for the Pipeline Designer agents: when to choose this tool, which operation to call and its limits.",
+      "maxLength": 8000
+    },
+    "tags": {"type": "array", "maxItems": 20, "items": {"type": "string", "maxLength": 40}}
+  },
+  "$defs": {
+    "name": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$", "maxLength": 64},
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "method", "path"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$", "maxLength": 64},
+        "label": {"type": "string", "maxLength": 80},
+        "description": {"type": "string", "maxLength": 1000},
+        "method": {"enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
+        "path": {"type": "string", "pattern": "^/[^\\s]*$", "maxLength": 1024},
+        "request": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "body": {
+              "enum": ["none", "parameters", "form", "input", "multipart"],
+              "description": "none: no body. parameters: JSON object built from body parameters. form: application/x-www-form-urlencoded body parameters, plus the text of each input file in input_field when set. input: the raw bytes of each input file. multipart: each input file as a multipart upload plus body parameters as form fields."
+            },
+            "content_type": {"type": "string", "maxLength": 120},
+            "file_field": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "maxLength": 64},
+            "input_field": {
+              "type": "string",
+              "description": "For body 'form' or 'parameters': field that receives the UTF-8 text of each input file (dotted path for nested JSON).",
+              "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*$",
+              "maxLength": 128
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "format": {"type": "string", "pattern": "^[a-z0-9]+$", "maxLength": 16},
+            "filename": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "maxLength": 128},
+            "representation": {"enum": ["file", "directory"]},
+            "error_fields": {
+              "type": "array",
+              "description": "Top-level JSON fields that signal an error even with HTTP 200 (e.g. [\"status\"] for Wikifier). If present and non-empty, the step fails with their value.",
+              "maxItems": 10,
+              "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "maxLength": 64}
+            }
+          }
+        },
+        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600},
+        "async": {
+          "type": "object",
+          "description": "The operation queues a job; poll it until done and publish its result.",
+          "additionalProperties": false,
+          "required": ["poll_path"],
+          "properties": {
+            "job_id_field": {"type": "string", "maxLength": 128},
+            "poll_path": {"type": "string", "pattern": "^/[^\\s]*\\{job_id\\}[^\\s]*$", "maxLength": 1024},
+            "status_field": {"type": "string", "maxLength": 128},
+            "done_values": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+            "failed_values": {"type": "array", "items": {"type": "string"}},
+            "result_field": {"type": "string", "maxLength": 128},
+            "error_field": {"type": "string", "maxLength": 128},
+            "interval_seconds": {"type": "number", "minimum": 0.5, "maximum": 60},
+            "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 7200}
+          }
+        }
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "label": {"type": "string", "maxLength": 80},
+        "description": {"type": "string", "maxLength": 500},
+        "type": {"enum": ["string", "integer", "number", "boolean", "object", "array"]},
+        "required": {"type": "boolean"},
+        "default": {},
+        "enum": {"type": "array", "minItems": 1, "maxItems": 100},
+        "location": {"enum": ["query", "header", "path", "body"]},
+        "api_name": {
+          "type": "string",
+          "description": "Name used in the HTTP request when it differs from name (e.g. a header 'X-LLM-Endpoint', or a dotted path such as 'llm.model' for nested JSON bodies).",
+          "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*$",
+          "maxLength": 128
+        },
+        "operations": {
+          "type": "array",
+          "description": "Operation ids this parameter applies to. Omit to apply to all operations.",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {"enum": ["none", "api_key", "bearer"]},
+        "secret": {"$ref": "#/$defs/name"},
+        "header": {"type": "string", "pattern": "^[A-Za-z0-9-]+$", "maxLength": 64},
+        "query_parameter": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "maxLength": 64},
+        "form_field": {
+          "type": "string",
+          "description": "Send the credential as this field of a 'form' request body.",
+          "pattern": "^[A-Za-z0-9_.-]+$",
+          "maxLength": 64
+        },
+        "prefix": {"type": "string", "maxLength": 32}
+      }
+    },
+    "port": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "maxLength": 64},
+        "type": {"type": "string", "maxLength": 64},
+        "description": {"type": "string", "maxLength": 500}
+      }
+    }
+  }
+}

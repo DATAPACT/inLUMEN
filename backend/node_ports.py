@@ -153,7 +153,22 @@ def ports_for_template(
     template_key = str(template_label or "").strip().lower()
     if value is None and kind == "flow" and template_key in FLOW_TEMPLATE_PORTS:
         value = FLOW_TEMPLATE_PORTS[template_key]
+    if value is None and template_key.startswith("plugin:"):
+        value = _plugin_template_ports(template_label, kind)
     return normalize_node_ports(value, kind)
+
+
+def _plugin_template_ports(template_label: object, kind: str) -> dict[str, Any] | None:
+    """Default ports declared by an installed plugin; None falls back to defaults."""
+    try:
+        from plugins import plugin_manifest_for_template, plugin_ports
+
+        manifest = plugin_manifest_for_template(template_label, required=False)
+    except Exception:
+        return None
+    if not manifest or manifest.get("step_type") != kind:
+        return None
+    return plugin_ports(manifest)
 
 
 def ports_json_for_template(value: Any, step_type: object, template_label: object = "") -> str:

@@ -50,6 +50,13 @@ COMPONENT MODEL
   delivery in the label and description without choosing endpoints, buckets,
   queries, tables, credentials, environment names, or parameters. Keep connector
   details out of labels and do not create technology or configuration boxes.
+- Installed plugins are the one exception to connector selection. They are
+  third-party tools already deployed behind a REST API and listed under
+  "plugins" by list_pipeline_components. Use one only when the user's request
+  clearly matches its description: first call get_plugin_instructions with its
+  template, then pass that exact template (plugin:<id>) to create_step for a step
+  whose type equals the plugin's type. Never invent plugin templates, and never
+  set plugin parameters, endpoints, or credentials; the user configures them.
 - A Task is always a generic computation component. Express its semantic role
   in its label and description; do not turn Data Cleaning, OCR, LLM, API Call,
   Notification, or Model Training into a distinct node type or visible template.

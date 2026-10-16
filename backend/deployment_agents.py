@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from connector_catalog import require_supported_connector
+from plugins import is_plugin_template, plugin_manifest_for_template
+from plugins.runtime import plugin_data_contract, plugin_main_source, plugin_runtime_spec
 
 from pydantic import BaseModel, Field
 
@@ -124,6 +126,21 @@ async def generate_dockerfiles_with_agent(
     codegen_dockerfiles: list[dict[str, Any]] = []
     artifact_errors: list[str] = []
     for step in steps:
+        # Plugin steps (any structural type) call a deployed third-party tool
+        # through its REST API; their runtime is always rebuilt from the
+        # pinned plugin manifest.
+        if _is_plugin_step(step):
+            try:
+                runtime_artifact, dockerfile = _plugin_adapter_runtime(step)
+            except ValueError as exc:
+                artifact_errors.append(
+                    f"Node {step.get('flow_id') or '<unknown>'}: {exc}"
+                )
+                continue
+            codegen_runtime_artifacts.append(runtime_artifact)
+            codegen_dockerfiles.append(dockerfile)
+            continue
+
         # Explicit connector boundaries are rebuilt from the current connector
         # specification so stale generated artifacts cannot override them.
         # Custom boundaries with an attached main.py are user-owned runtimes
@@ -1311,6 +1328,98 @@ def _managed_adapter_runtime(
         "configuration_hash": configuration_hash,
         "build_manifest": "node-manifest.json",
         "data_contract": node_manifest["data_contract"],
+    }
+
+
+def _step_template(step: dict[str, Any]) -> str:
+    return str(step.get("template") or step.get("template_label") or "").strip()
+
+
+def _is_plugin_step(step: dict[str, Any]) -> bool:
+    return is_plugin_template(_step_template(step))
+
+
+def _plugin_adapter_runtime(
+    step: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build the runtime that calls an installed plugin's REST endpoint."""
+    flow_id = str(step.get("flow_id") or "").strip()
+    manifest = plugin_manifest_for_template(_step_template(step))
+    spec = plugin_runtime_spec(step, manifest)
+    main_content = plugin_main_source(spec)
+    data_contract = plugin_data_contract(spec, step)
+    node_manifest = {
+        "schema_version": "inlumen.node-manifest@1",
+        "flow_id": flow_id,
+        "entrypoint": ["python", "/app/main.py"],
+        "data_contract": data_contract,
+        "adapter": {
+            "kind": spec["kind"],
+            "template": _step_template(step),
+            "label": str(step.get("label") or "").strip(),
+            "ports": step.get("ports") if isinstance(step.get("ports"), dict) else {},
+            "plugin": spec["plugin"],
+            "operation": spec["operation"]["id"],
+            "endpoint": spec["base_url"],
+        },
+        "runtime_environment": [],
+        "source": f"inLumen plugin adapter for {spec['plugin']['id']}@{spec['plugin']['version']}",
+    }
+    runtime_files = [
+        {
+            "filename": "main.py",
+            "content": main_content,
+            "content_type": "text/x-python;charset=utf-8",
+        },
+        {
+            "filename": "requirements.txt",
+            "content": "",
+            "content_type": "text/plain;charset=utf-8",
+        },
+        {
+            "filename": "node-manifest.json",
+            "content": json.dumps(node_manifest, indent=2) + "\n",
+            "content_type": "application/json",
+        },
+    ]
+    dockerfile_filename, dockerfile_content = _deterministic_python_dockerfile(
+        flow_id,
+        [item["filename"] for item in runtime_files],
+        entrypoint=["python", "/app/main.py"],
+    )
+    configuration_hash = hashlib.sha256(
+        json.dumps(
+            {"flow_id": flow_id, "plugin_spec": spec, "runtime": main_content},
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    image = (
+        f"inlumen/plugin-{_sanitize_fragment(spec['plugin']['id'], 'plugin')}:"
+        f"{configuration_hash[:12]}"
+    )
+    runtime_artifact = {
+        "flow_id": flow_id,
+        "definition_id": str(step.get("definition_id") or ""),
+        "definition_version": step.get("definition_version") or 1,
+        "generator": MANAGED_ADAPTER_GENERATOR,
+        "configuration_hash": configuration_hash,
+        "entrypoint": ["python", "/app/main.py"],
+        "data_contract": data_contract,
+        "files": runtime_files,
+        "manifest": node_manifest,
+        "validation_report": {"status": "valid", "errors": [], "warnings": []},
+    }
+    return runtime_artifact, {
+        "dockerfile_filename": dockerfile_filename,
+        "content": dockerfile_content,
+        "flow_id": flow_id,
+        "image": image,
+        "command": ["python", "/app/main.py"],
+        "files": [item["filename"] for item in runtime_files],
+        "generator": MANAGED_ADAPTER_GENERATOR,
+        "configuration_hash": configuration_hash,
+        "build_manifest": "node-manifest.json",
+        "data_contract": data_contract,
     }
 
 

@@ -25,7 +25,8 @@ export const taskImplementationMigrationError = (value: unknown): string => {
 export const nodeSupportsInputFiles = (nodeType: StepType, template: unknown) => {
   // A Source may combine a configured connector with local seed files. The
   // bundle resolves which inputs apply; the inspector stays deliberately light.
-  void template;
+  // Plugin sources fetch their data from the plugin's REST API instead.
+  if (String(template ?? "").trim().toLowerCase().startsWith("plugin:")) return false;
   return nodeType === "source";
 };
 

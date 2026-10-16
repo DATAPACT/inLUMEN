@@ -110,6 +110,19 @@ The current flat runtime schemas are published in
 compatibility rules, and current-surface inventory are recorded in [ADR
 0001](./adr/0001-export-output-contracts.md).
 
+### Plugins (third-party tools)
+
+A Source, Task or Destination can be backed by a **plugin**: a JSON definition
+of a third-party tool that is already deployed behind a REST API (for example the
+JSI Wikifier). The inLUMEN team writes the definition from what the tool owner
+tells us about the API and adds it to `backend/plugins/manifests`; administrators
+can also add one in the UI. Users drag plugins from the
+**Plugins** palette group and configure parameters and encrypted secrets in the
+inspector. At run time a platform-owned adapter calls the tool's endpoint. The
+Pipeline Designer can use installed plugins when they match a request. See
+[plugins.md](./plugins.md) for the manifest format, catalog API contract and a
+local demo.
+
 ## **Architecture**
 The picture below shows the component in the DATAPACT architecture.
 

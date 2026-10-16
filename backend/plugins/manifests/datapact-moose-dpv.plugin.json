@@ -1,0 +1,97 @@
+{
+  "schema_version": "inlumen.plugin@1",
+  "id": "datapact.moose-dpv",
+  "version": "1.0.0",
+  "name": "Moose DPV Annotation",
+  "description": "Annotates text with concepts from the W3C Data Privacy Vocabulary (DPV): personal data categories, purposes, processing operations, legal bases and more. LLM-based NER by SINTEF's Moose service.",
+  "publisher": "SINTEF (DataPACT)",
+  "homepage": "https://github.com/DATAPACT/moose",
+  "step_type": "task",
+  "endpoint": {
+    "base_url": "https://moose.zooverse.dev",
+    "openapi_url": "https://moose.zooverse.dev/openapi.json"
+  },
+  "operations": [
+    {
+      "id": "annotate",
+      "label": "Annotate text with DPV",
+      "description": "Sends the text of each input file to Moose, waits for the job (queued, processing, completed or failed) and publishes its result: {entities: [{start, end, text, type_id, confidence}], warnings?}.",
+      "method": "POST",
+      "path": "/schemas/{vocabulary}/ner",
+      "request": {"body": "parameters", "input_field": "text"},
+      "response": {"format": "json", "filename": "dpv-annotations.json"},
+      "timeout_seconds": 60,
+      "async": {
+        "job_id_field": "job_id",
+        "poll_path": "/jobs/{job_id}",
+        "status_field": "status",
+        "done_values": ["completed"],
+        "failed_values": ["failed"],
+        "result_field": "result",
+        "error_field": "error",
+        "interval_seconds": 2,
+        "timeout_seconds": 900
+      }
+    }
+  ],
+  "parameters": [
+    {
+      "name": "vocabulary",
+      "label": "DPV vocabulary",
+      "description": "dpv: the full Data Privacy Vocabulary. dpv_pd: the DPV personal data categories extension.",
+      "type": "string",
+      "enum": ["dpv", "dpv_pd"],
+      "default": "dpv",
+      "location": "path"
+    },
+    {
+      "name": "llm_provider",
+      "label": "LLM provider",
+      "description": "Provider Moose uses for the annotation. Ollama does not need an LLM API key.",
+      "type": "string",
+      "enum": ["openrouter", "ollama", "deepinfra", "deepseek"],
+      "default": "openrouter",
+      "location": "body",
+      "api_name": "llm.provider"
+    },
+    {
+      "name": "llm_model",
+      "label": "LLM model",
+      "description": "Provider-specific model name, e.g. anthropic/claude-3.5-sonnet (OpenRouter), deepseek-chat, or llama3.1:8b (Ollama).",
+      "type": "string",
+      "required": true,
+      "location": "body",
+      "api_name": "llm.model"
+    },
+    {
+      "name": "llm_endpoint",
+      "label": "LLM endpoint override",
+      "description": "Optional custom endpoint for the LLM provider (e.g. a self-hosted Ollama URL).",
+      "type": "string",
+      "location": "header",
+      "api_name": "X-LLM-Endpoint"
+    }
+  ],
+  "auth": {"type": "api_key", "header": "X-API-Key", "secret": "moose_api_key"},
+  "secrets": [
+    {
+      "name": "moose_api_key",
+      "label": "Moose API key",
+      "description": "Key for the Moose service, from the Moose maintainers (SINTEF).",
+      "required": true
+    },
+    {
+      "name": "llm_api_key",
+      "label": "LLM provider API key",
+      "description": "Your key for the selected LLM provider (OpenRouter, DeepInfra, DeepSeek). Not needed for Ollama.",
+      "required": false,
+      "header": "X-LLM-API-Key"
+    }
+  ],
+  "ports": {
+    "inputs": [{"name": "text", "type": "Text", "description": "UTF-8 text (e.g. a privacy notice, contract or data description) to annotate."}],
+    "outputs": [{"name": "dpv_annotations", "type": "Object", "description": "JSON {\"entities\": [{\"start\", \"end\", \"text\", \"type_id\", \"confidence\"}], \"warnings\"?: [...]}: character offsets into the input text, the matched span, the DPV concept id and the model's confidence."}]
+  },
+  "instructions": "Use when a pipeline must identify privacy and data-protection concepts in text according to the W3C Data Privacy Vocabulary (DPV): personal data categories, processing purposes, operations, legal bases, recipients, technical and organisational measures. Choose vocabulary dpv_pd to focus on personal data categories. Input must be plain UTF-8 text, one document per input file; convert PDFs to text first. Runs asynchronously and may take a few minutes per document. Not for tables or general named-entity recognition.",
+  "tags": ["privacy", "dpv", "gdpr", "annotation", "ner", "datapact"]
+}
