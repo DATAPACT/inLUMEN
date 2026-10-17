@@ -30,9 +30,9 @@ NODE_EVENT_PATTERN = re.compile(
     r"-\s+(?P<node>node_[A-Za-z0-9_]+)\s+-\s+"
     r"STEP_(?P<outcome>START|SUCCESS|FAILURE)\b"
 )
+# Any exception class a step raises, including its own (e.g. PluginCallError).
 PYTHON_ERROR_PATTERN = re.compile(
-    r"^(?P<kind>FileNotFoundError|ModuleNotFoundError|ImportError|PermissionError|"
-    r"ConnectionError|TimeoutError|OSError|ValueError|KeyError|TypeError|RuntimeError)"
+    r"^(?P<kind>[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception))"
     r":\s*(?P<message>.+)$",
     re.MULTILINE,
 )
@@ -955,11 +955,12 @@ class PipelineRunManager:
             message = match.group("message").strip().strip('"')
             if (
                 not message
+                or kind.startswith("dagster.")
                 or "Error occurred while executing op" in message
                 or message.startswith("Node script ")
             ):
                 continue
-            candidates.append(f"{kind}: {message}")
+            candidates.append(f"{kind.rsplit('.', 1)[-1]}: {message}")
         return candidates[-1][:600] if candidates else ""
 
     def _bundle_files(self, record: dict[str, Any]) -> list[dict[str, Any]]:

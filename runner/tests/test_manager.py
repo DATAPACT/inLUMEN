@@ -687,3 +687,18 @@ async def test_run_options_reach_the_executor_and_cache_hits_are_reported():
 def test_run_options_are_validated():
     with pytest.raises(ValueError):
         CreatePipelineRunRequest.model_validate({**request().model_dump(), "execution_options": {"cache": "sometimes"}})
+
+
+def test_root_failure_reports_errors_raised_by_plugins_and_steps():
+    trace = (
+        "dagster._core.errors.DagsterExecutionStepExecutionError: Error occurred while executing op \"node_5\":\n"
+        "RuntimeError: Node script node_5_jsi_wikifier failed with exit code 1:\n"
+        "Traceback (most recent call last):\n"
+        "PluginCallError: Plugin 'JSI Wikifier' reported an error: {\"error\": \"Input text is too long\"}\n"
+    )
+    assert PipelineRunManager._root_failure(trace) == (
+        "PluginCallError: Plugin 'JSI Wikifier' reported an error: {\"error\": \"Input text is too long\"}"
+    )
+    assert PipelineRunManager._root_failure("app.errors.QuotaExceededException: daily limit reached") == (
+        "QuotaExceededException: daily limit reached"
+    )

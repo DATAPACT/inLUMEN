@@ -63,8 +63,14 @@ Examples: [`backend/plugins/manifests/jsi-wikifier.plugin.json`](../backend/plug
 `request.body` decides what is sent:
 
 - `none` – no body (default for `GET`/`DELETE`).
-- `parameters` – a JSON object of the `body` parameters (default for sources); with `input_field`, the UTF-8 text of each input file is put in that (dotted) field, one request per file (used by Moose: `input_field: "text"`).
-- `form` – `application/x-www-form-urlencoded` `body` parameters; with `input_field`, the UTF-8 text of each input file is sent in that field, one request per file (used by Wikifier: `input_field: "text"`).
+- `parameters` – a JSON object of the `body` parameters (default for sources); with `input_field`, the text of each input file is put in that (dotted) field, one request per file (used by Moose: `input_field: "text"`).
+- `form` – `application/x-www-form-urlencoded` `body` parameters; with `input_field`, the text of each input file is sent in that field, one request per file (used by Wikifier: `input_field: "text"`).
+
+  The text of an input file is its UTF-8 content, except for a JSON document:
+  then its `transcript`, `text`, `content` or `body` field is sent (the first
+  that is a non-empty string), so a Speech-to-Text result sends the transcript
+  rather than its segments and metadata. JSON without such a field fails before
+  the tool is called.
 - `input` – the raw bytes of each input file, one request per file (default for tasks/destinations).
 - `multipart` – each input file as a `multipart/form-data` upload (`file_field`, default `file`) plus `body` parameters as form fields.
 
