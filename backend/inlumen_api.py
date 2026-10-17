@@ -2387,6 +2387,13 @@ def pipeline_runs():
             return _json_error(422, "pipeline graph has no nodes")
         pipeline = graph.get("pipeline") if isinstance(graph.get("pipeline"), dict) else {}
         client_payload = _request_json()
+        cache_mode = str(client_payload.get("cache") or "reuse").strip()
+        if cache_mode not in {"reuse", "refresh"}:
+            return _json_error(400, "cache must be 'reuse' or 'refresh'.")
+        rerun_from = str(client_payload.get("rerun_from") or "").strip() or None
+        node_ids = {str(node.get("id")) for node in graph.get("nodes") or [] if isinstance(node, dict)}
+        if rerun_from and rerun_from not in node_ids:
+            return _json_error(400, f"rerun_from names no step of this pipeline: {rerun_from}")
         executable = prepare_dagster_execution_bundle(graph)
         runner_payload = {
             "workspace_id": current_principal().workspace_id,
@@ -2405,6 +2412,10 @@ def pipeline_runs():
             "idempotency_key": str(client_payload.get("idempotency_key") or "").strip()
             or None,
             "runtime_secrets": executable["runtime_secrets"],
+            "execution_options": {
+                "cache": cache_mode,
+                **({"rerun_from": rerun_from} if rerun_from else {}),
+            },
         }
         return jsonify(runner_request("POST", "/v1/pipeline-runs", payload=runner_payload)), 202
     except PipelineRunnerError as exc:

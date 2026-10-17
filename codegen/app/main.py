@@ -924,6 +924,8 @@ async def _execute_registered_deployment(request: DeploymentBundleValidationRequ
             execution_id=request.execution_id,
             artifact_workspace_id=request.artifact_workspace_id,
             artifact_run_id=request.artifact_run_id,
+            cache_mode=request.cache_mode,
+            rerun_from=request.rerun_from,
         )
         future = asyncio.get_running_loop().run_in_executor(
             DEPLOYMENT_POOL, contextvars.copy_context().run, worker

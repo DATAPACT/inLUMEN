@@ -26,7 +26,7 @@ class FakeDagsterExecutor:
         self.secrets_seen: dict[str, str] = {}
         self.files_seen: list[dict] = []
 
-    async def execute(self, run_id, files, runtime_secrets):
+    async def execute(self, run_id, files, runtime_secrets, options=None):
         self.secrets_seen = dict(runtime_secrets)
         self.files_seen = [dict(item) for item in files]
         await asyncio.sleep(self.delay)
@@ -99,7 +99,7 @@ class ProgressDagsterExecutor(FakeDagsterExecutor):
 
 
 class SecretFailureExecutor(FakeDagsterExecutor):
-    async def execute(self, run_id, files, runtime_secrets):
+    async def execute(self, run_id, files, runtime_secrets, options=None):
         secret = runtime_secrets["INLUMEN_SECRET_NODE_1_API_KEY"]
         return {
             "ok": False,
@@ -540,7 +540,7 @@ async def test_clear_blocks_late_callbacks_from_another_worker(tmp_path):
 
 
 class PartialFailureExecutor(FakeDagsterExecutor):
-    async def execute(self, run_id, files, runtime_secrets):
+    async def execute(self, run_id, files, runtime_secrets, options=None):
         failed = await FakeDagsterExecutor(succeeds=False).execute(
             run_id, files, runtime_secrets
         )
@@ -600,7 +600,7 @@ async def test_failed_run_keeps_outputs_of_completed_steps_and_maps_node_events(
 
 
 class ReferenceExecutor(FakeDagsterExecutor):
-    async def execute(self, run_id, files, runtime_secrets):
+    async def execute(self, run_id, files, runtime_secrets, options=None):
         return {
             "ok": True,
             "validation_report": {"ok": True},
@@ -644,3 +644,46 @@ async def test_object_stored_outputs_are_kept_as_references_with_step_lineage(tm
     assert step["connections"] == [{"source_node": "0", "source_port": "data", "target_port": "input", "filename": "in.csv"}]
     assert step["inputs"] == [{"path": "in.csv", "size_bytes": 5, "sha256": "aaa"}]
     assert "asset_key" not in step
+
+
+class CachingExecutor(FakeDagsterExecutor):
+    def __init__(self):
+        super().__init__()
+        self.options_seen = None
+
+    async def execute(self, run_id, files, runtime_secrets, options=None):
+        self.options_seen = options
+        return {
+            "ok": True,
+            "validation_report": {"ok": True, "dagster": {"steps": [{"name": "materialize", "output": (
+                "dagster - node_1_task - STEP_START - running\n"
+                "INLUMEN_CACHE_HIT node_1_task\n"
+                "dagster - node_1_task - STEP_SUCCESS - done\n"
+            )}]}},
+            "run_outputs": [],
+            "step_receipts": [{"flow_id": "1", "status": "succeeded", "cached": True}],
+        }
+
+
+@pytest.mark.asyncio
+async def test_run_options_reach_the_executor_and_cache_hits_are_reported():
+    executor = CachingExecutor()
+    manager = PipelineRunManager(PipelineRunStore(":memory:"), adapter="dagster", executor=executor)
+    run_request = request(key="cached-run").model_copy(update={
+        "execution_options": {"cache": "reuse", "rerun_from": "2"},
+    })
+    run_request = type(run_request).model_validate(run_request.model_dump())
+
+    queued, _created = await manager.start(run_request)
+    await manager.tasks[queued["run_id"]]
+
+    assert executor.options_seen == {"cache": "reuse", "rerun_from": "2"}
+    events = manager.events(queued["run_id"])["events"]
+    cached = [event for event in events if event["type"] == "node.cached"]
+    assert len(cached) == 1 and "reused an earlier result" in cached[0]["message"]
+    assert manager.get(queued["run_id"])["result"]["steps"][0]["cached"] is True
+
+
+def test_run_options_are_validated():
+    with pytest.raises(ValueError):
+        CreatePipelineRunRequest.model_validate({**request().model_dump(), "execution_options": {"cache": "sometimes"}})

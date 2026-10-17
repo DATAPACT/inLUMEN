@@ -565,7 +565,39 @@ def _artifacts(output_dir):
 STEP_RECEIPT = ".inlumen-step.json"
 
 
-def _write_step_receipt(root, asset_key, started_at, input_dir, bindings, artifacts):
+def _input_digest(input_dir):
+    """Content digest of everything staged for a step, independent of timing."""
+    digest = hashlib.sha256(b"inlumen.step-input@1\0")
+    for item in _artifacts(Path(input_dir)) if Path(input_dir).is_dir() else []:
+        digest.update(item["path"].encode("utf-8") + b"\0" + item["sha256"].encode() + b"\0")
+    return digest.hexdigest()
+
+
+def _step_cache_context(output_dir_attribute, input_dir):
+    """Return this step's cache keys and, when staged, a reusable earlier result.
+
+    The platform stages candidate results under INLUMEN_STEP_CACHE_DIR with a
+    keys.json naming each step's code key; the input key is computed here,
+    after inputs are staged.
+    """
+    root = os.environ.get("INLUMEN_STEP_CACHE_DIR", "").strip()
+    if not root:
+        return {}
+    node_dir = Path(str(output_dir_attribute)).name
+    try:
+        keys = json.loads((Path(root) / "keys.json").read_text(encoding="utf-8")).get(node_dir) or {}
+    except (OSError, ValueError):
+        return {}
+    if not keys.get("cacheable") or not keys.get("static_key"):
+        return {}
+    context = {"static_key": str(keys["static_key"]), "input_digest": _input_digest(input_dir), "cached": False}
+    hit = Path(root) / node_dir / context["input_digest"] / "files"
+    if keys.get("lookup") and hit.is_dir():
+        context["hit"] = hit
+    return context
+
+
+def _write_step_receipt(root, asset_key, started_at, input_dir, bindings, artifacts, cache=None):
     """Record what a step read and published, for lineage and caching.
 
     The receipt sits next to the published ports; the platform reads it after
@@ -587,6 +619,7 @@ def _write_step_receipt(root, asset_key, started_at, input_dir, bindings, artifa
         "connections": connections,
         "inputs": _artifacts(Path(input_dir)) if Path(input_dir).is_dir() else [],
         "outputs": [item for item in artifacts if item["path"] != STEP_RECEIPT],
+        **{key: value for key, value in (cache or {}).items() if key != "hit"},
     })
 
 
@@ -672,6 +705,22 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
             output_dir.mkdir(parents=True, exist_ok=True)
 
             published_dir = output_dir
+            cache = _step_cache_context(self.output_dir, input_dir)
+            if cache.get("hit") is not None:
+                # Same step code, parameters and input content as an earlier
+                # successful run: reuse its published outputs instead of running.
+                staged = Path(tempfile.mkdtemp(dir=published_dir.parent, prefix=".cache-"))
+                staged.rmdir()
+                shutil.copytree(cache.pop("hit"), staged)
+                publish_artifact_directory(staged, published_dir)
+                context.log.info(f"INLUMEN_CACHE_HIT {self.asset_key}")
+                artifacts = _artifacts(published_dir)
+                _write_step_receipt(published_dir, self.asset_key, started_at, input_dir,
+                                    bound_inputs or bindings, artifacts, {**cache, "cached": True})
+                return dg.MaterializeResult(metadata={
+                    "input_dir": str(input_dir), "output_dir": str(published_dir), "cached": True,
+                    "artifact_count": len(artifacts), "artifacts": dg.MetadataValue.json(artifacts),
+                })
             work_dir = input_dir.parent.parent / "runtime" / run_scope
             if strict:
                 if work_dir.exists():
@@ -805,7 +854,7 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
                 )
                 artifacts = _artifacts(published_dir)
                 _write_step_receipt(published_dir, self.asset_key, started_at, input_dir,
-                                    bound_inputs, artifacts)
+                                    bound_inputs, artifacts, cache)
                 return dg.MaterializeResult(metadata={
                     "input_dir": str(input_dir), "output_dir": str(published_dir),
                     "artifact_count": len(declarations), "artifacts": dg.MetadataValue.json(artifacts),
@@ -826,7 +875,7 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
             )
             artifacts = _artifacts(output_dir)
             _write_step_receipt(output_dir, self.asset_key, started_at, input_dir,
-                                bindings, artifacts)
+                                bindings, artifacts, cache)
             return dg.MaterializeResult(metadata={
                 "input_dir": str(input_dir),
                 "output_dir": str(output_dir),

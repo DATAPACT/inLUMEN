@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 class BlockingExecutor:
     configured = True
 
-    async def execute(self, run_id, files, runtime_secrets):
+    async def execute(self, run_id, files, runtime_secrets, options=None):
         await asyncio.sleep(10)
         return {"ok": True, "validation_report": {"ok": True}, "run_outputs": []}
 
@@ -19,7 +19,7 @@ class BlockingExecutor:
 
 
 class OutputExecutor(BlockingExecutor):
-    async def execute(self, run_id, files, runtime_secrets):
+    async def execute(self, run_id, files, runtime_secrets, options=None):
         return {
             "ok": True,
             "validation_report": {"ok": True},

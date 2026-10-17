@@ -405,3 +405,7 @@ class DeploymentBundleValidationRequest(BaseModel):
     # Set by the API from the caller's workspace and run id; client values are replaced.
     artifact_workspace_id: str | None = None
     artifact_run_id: str | None = None
+    # Step reuse: "reuse" takes earlier results of unchanged steps, "refresh"
+    # runs every step again. rerun_from forces a step and its descendants to run.
+    cache_mode: Literal["reuse", "refresh"] = "reuse"
+    rerun_from: str | None = Field(default=None, max_length=200)

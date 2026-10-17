@@ -117,15 +117,28 @@ export const listPipelineRuns = async (limit = 20): Promise<PipelineRunRecord[]>
   return Array.isArray(payload.runs) ? payload.runs : [];
 };
 
+export type PipelineRunOptions = {
+  /** reuse: take earlier results of unchanged steps; refresh: run every step again. */
+  cache?: 'reuse' | 'refresh';
+  /** Run this step and every step after it again. */
+  rerun_from?: string;
+};
+
+export const PIPELINE_RUN_STARTED_EVENT = 'inlumen:pipeline-run-started';
+
 export const startPipelineRun = async (
   idempotencyKey: string,
+  options: PipelineRunOptions = {},
 ): Promise<PipelineRunRecord> => {
   const response = await apiFetch(`${INLUMEN_API_URL}/api/pipeline-runs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    body: JSON.stringify({ idempotency_key: idempotencyKey, ...options }),
   });
-  return responseJson<PipelineRunRecord>(response, 'Failed to start the pipeline run.');
+  const run = await responseJson<PipelineRunRecord>(response, 'Failed to start the pipeline run.');
+  // Runs can start outside the run panel (for example from a node); let it follow them.
+  window.dispatchEvent(new CustomEvent(PIPELINE_RUN_STARTED_EVENT, { detail: run }));
+  return run;
 };
 
 export const getPipelineRun = async (runId: string): Promise<PipelineRunRecord> => {

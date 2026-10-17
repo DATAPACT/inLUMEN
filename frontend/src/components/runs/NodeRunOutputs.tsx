@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Eye, Loader2 } from 'lucide-react';
+import { Eye, Loader2, RotateCcw } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { RunOutputViewer } from '@/components/runs/RunOutputViewer';
-import { listPipelineRuns, type PipelineRunRecord } from '@/features/runs/pipelineRuns';
+import { listPipelineRuns, startPipelineRun, type PipelineRunRecord } from '@/features/runs/pipelineRuns';
 import {
   formatOutputSize,
   outputsForNode,
@@ -31,11 +31,26 @@ export const NodeRunOutputs = ({ nodeId }: { nodeId: string }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [viewerPath, setViewerPath] = useState<string | null>(null);
+  const [rerunState, setRerunState] = useState<'idle' | 'starting' | 'started'>('idle');
+
+  const rerunFromHere = async () => {
+    setRerunState('starting');
+    setError('');
+    try {
+      const key = globalThis.crypto?.randomUUID?.() || `rerun-${Date.now()}`;
+      await startPipelineRun(key, { cache: 'reuse', rerun_from: nodeId });
+      setRerunState('started');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      setRerunState('idle');
+    }
+  };
 
   useEffect(() => {
     setRun(null);
     setError('');
     setViewerPath(null);
+    setRerunState('idle');
   }, [nodeId]);
 
   useEffect(() => {
@@ -73,6 +88,23 @@ export const NodeRunOutputs = ({ nodeId }: { nodeId: string }) => {
     >
       <summary className="cursor-pointer text-sm font-semibold">Latest run outputs</summary>
       <div className="mt-2 space-y-1 text-xs">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="mb-1 w-full"
+          disabled={rerunState === 'starting'}
+          title="Run this step and every step after it again; earlier steps reuse their results."
+          onClick={() => { void rerunFromHere(); }}
+        >
+          {rerunState === 'starting'
+            ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+            : <RotateCcw className="mr-2 h-3.5 w-3.5" />}
+          Re-run from this step
+        </Button>
+        {rerunState === 'started' && (
+          <p role="status" className="text-muted-foreground">Run started. Follow it in the Run panel.</p>
+        )}
         {loading && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-label="Loading runs" />}
         {error && <p className="text-red-500">{error}</p>}
         {!loading && !error && expanded && !run && (

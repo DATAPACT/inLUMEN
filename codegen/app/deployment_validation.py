@@ -5,10 +5,12 @@ import base64
 import hashlib
 
 from .run_artifact_store import RunArtifactStore
+from .step_cache import CacheMode, StepCache, StepCachePlan, plan_step_cache
 from .security import EXECUTION_WORKSPACE
 import json
 import mimetypes
 import os
+import logging
 import shutil
 import subprocess
 import sys
@@ -698,7 +700,15 @@ def _isolated_dagster_execution(
             name: str(allocation["cpu"])
             for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS")
         })
+        step_cache_dir = STEP_CACHE_DIRS.get(execution_id)
+        if step_cache_dir is not None:
+            environment["INLUMEN_STEP_CACHE_DIR"] = STEP_CACHE_MOUNT
         execution_volumes = {
+            **(
+                {str(step_cache_dir.resolve()): {"bind": STEP_CACHE_MOUNT, "mode": "ro"}}
+                if step_cache_dir is not None
+                else {}
+            ),
             str(runtime_dir.resolve()): {
                 "bind": "/runtime",
                 "mode": "rw",
@@ -2198,7 +2208,13 @@ def _collect_run_outputs(
             except (OSError, ValueError):
                 continue
             if node is not None and isinstance(receipt, dict):
-                receipts.append({**receipt, "flow_id": node["flow_id"], "node_label": node["label"]})
+                receipts.append({
+                    **receipt,
+                    "flow_id": node["flow_id"],
+                    "node_label": node["label"],
+                    # Local only: where the step published, for the step cache.
+                    "_published_root": str(path.parent),
+                })
             continue
         entry = _run_output_metadata(path, bundle_root)
         port, below_port = _split_run_output_path(tuple(rest), node)
@@ -2232,18 +2248,60 @@ def _read_run_output_files(bundle_root: Path) -> list[dict[str, Any]]:
     ]
 
 
+STEP_CACHE_DIRS: dict[str, Path] = {}
+STEP_CACHE_MOUNT = "/workspace/step-cache"
+
+
+def _prepare_step_cache(
+    bundle_root: Path,
+    *,
+    execution_id: str | None,
+    workspace_id: str | None,
+    run_id: str | None,
+    mode: CacheMode,
+    rerun_from: str | None,
+) -> StepCachePlan | None:
+    """Stage reusable step results next to the bundle; return the run's cache keys."""
+    store = RunArtifactStore.from_environment() if workspace_id and run_id and execution_id else None
+    if store is None:
+        return None
+    plan = plan_step_cache(bundle_root, mode=mode, rerun_from=rerun_from)
+    # Next to the bundle, so it is visible to the Docker host but never part
+    # of the image build context or snapshot hash.
+    cache_dir = Path(tempfile.mkdtemp(prefix="inlumen-step-cache-", dir=bundle_root.parent))
+    try:
+        StepCache(store.client, workspace_id).stage(plan, cache_dir)
+    except Exception as exc:  # noqa: BLE001 - run without reuse rather than fail.
+        logging.getLogger(__name__).warning("Step cache staging failed: %s", exc)
+    for path in [cache_dir, *cache_dir.rglob("*")]:
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    STEP_CACHE_DIRS[execution_id] = cache_dir
+    return plan
+
+
+def _release_step_cache(execution_id: str | None) -> None:
+    cache_dir = STEP_CACHE_DIRS.pop(execution_id or "", None)
+    if cache_dir is not None:
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+
 def _run_outputs_response(
     bundle_root: Path,
     *,
     workspace_id: str | None,
     run_id: str | None,
+    cache_plan: StepCachePlan | None = None,
 ) -> dict[str, Any]:
     """Store a run's outputs by reference when possible, inline otherwise."""
-    outputs, receipts = _collect_run_outputs(bundle_root)
+    outputs, local_receipts = _collect_run_outputs(bundle_root)
+    receipts = [
+        {key: value for key, value in receipt.items() if not key.startswith("_")}
+        for receipt in local_receipts
+    ]
     store = RunArtifactStore.from_environment() if workspace_id and run_id else None
     if store is not None:
         try:
-            return {
+            response = {
                 "run_outputs": store.publish(
                     workspace_id=workspace_id, run_id=run_id, outputs=outputs, receipts=receipts,
                 ),
@@ -2256,6 +2314,12 @@ def _run_outputs_response(
                 "step_receipts": receipts,
                 "artifact_storage_warning": warning,
             }
+        if cache_plan is not None:
+            try:
+                StepCache(store.client, workspace_id).record(cache_plan, local_receipts, run_id=run_id)
+            except Exception as exc:  # noqa: BLE001 - the run itself succeeded or failed already.
+                response["step_cache_warning"] = f"Step results were not saved for reuse: {exc}"
+        return response
     return {"run_outputs": _read_run_output_files(bundle_root), "step_receipts": receipts}
 
 
@@ -2276,6 +2340,8 @@ def validate_deployment_bundle_files(
     execution_id: str | None = None,
     artifact_workspace_id: str | None = None,
     artifact_run_id: str | None = None,
+    cache_mode: CacheMode = "reuse",
+    rerun_from: str | None = None,
 ) -> dict[str, Any]:
     """Materialize, validate, and optionally repair an uploaded bundle.
 
@@ -2299,68 +2365,126 @@ def validate_deployment_bundle_files(
     ) as temp_dir:
         bundle_root = Path(temp_dir)
         _materialize_bundle_files(files, bundle_root)
-
-        repair_report = None
-        if normalized_mode in {"repair", "validate-and-repair"}:
-            service_report = validate_and_repair_deployment_bundle(
-                bundle_root,
-                targets=targets,
-                validate_argo=validate_argo,
-                validate_dagster=validate_dagster,
-                materialize=materialize,
-                reinstall=reinstall,
-                skip_install=skip_install,
-                argo_lint=argo_lint,
-                argo_dry_run=argo_dry_run,
-                timeout_seconds=timeout_seconds,
-                runtime_secrets=runtime_secrets,
-                execution_id=execution_id,
-            )
-            repair_report = service_report.get("repair_report")
-            validation_report = service_report.get("validation_report")
-            if not isinstance(validation_report, dict):
-                validation_report = service_report
-        else:
-            validation_report = validate_deployment_bundle(
-                bundle_root,
-                targets=targets,
-                validate_argo=validate_argo,
-                validate_dagster=validate_dagster,
-                materialize=materialize,
-                reinstall=reinstall,
-                skip_install=skip_install,
-                argo_lint=argo_lint,
-                argo_dry_run=argo_dry_run,
-                timeout_seconds=timeout_seconds,
-                runtime_secrets=runtime_secrets,
-                execution_id=execution_id,
-            )
-
-        ok = bool(validation_report.get("ok"))
         execution_requested = (
             normalized_mode != "fast"
             and bool((targets or {}).get("dagster"))
             and materialize
         )
-        return {
-            "ok": ok,
-            "validation_report": validation_report,
-            "repair_report": repair_report,
-            "repaired_files": (
-                _read_repaired_bundle_files(bundle_root)
-                if ok and repair_report is not None
-                else []
-            ),
-            # Failed runs still return what earlier steps published, so users
-            # can inspect partial results and see where the pipeline stopped.
-            **(
-                _run_outputs_response(
-                    bundle_root, workspace_id=artifact_workspace_id, run_id=artifact_run_id
-                )
-                if execution_requested
-                else {"run_outputs": [], "step_receipts": []}
-            ),
-        }
+        cache_plan = (
+            _prepare_step_cache(
+                bundle_root,
+                execution_id=execution_id,
+                workspace_id=artifact_workspace_id,
+                run_id=artifact_run_id,
+                mode=cache_mode,
+                rerun_from=rerun_from,
+            )
+            if execution_requested
+            else None
+        )
+        try:
+            return _validate_and_collect(
+                bundle_root,
+                normalized_mode=normalized_mode,
+                execution_requested=execution_requested,
+                cache_plan=cache_plan,
+                artifact_workspace_id=artifact_workspace_id,
+                artifact_run_id=artifact_run_id,
+                targets=targets,
+                validate_argo=validate_argo,
+                validate_dagster=validate_dagster,
+                materialize=materialize,
+                reinstall=reinstall,
+                skip_install=skip_install,
+                argo_lint=argo_lint,
+                argo_dry_run=argo_dry_run,
+                timeout_seconds=timeout_seconds,
+                runtime_secrets=runtime_secrets,
+                execution_id=execution_id,
+            )
+        finally:
+            _release_step_cache(execution_id)
+
+
+def _validate_and_collect(
+    bundle_root: Path,
+    *,
+    normalized_mode: str,
+    execution_requested: bool,
+    cache_plan: StepCachePlan | None,
+    artifact_workspace_id: str | None,
+    artifact_run_id: str | None,
+    targets: dict[str, Any] | None,
+    validate_argo: bool | None,
+    validate_dagster: bool | None,
+    materialize: bool,
+    reinstall: bool,
+    skip_install: bool,
+    argo_lint: bool,
+    argo_dry_run: bool,
+    timeout_seconds: int,
+    runtime_secrets: dict[str, str] | None,
+    execution_id: str | None,
+) -> dict[str, Any]:
+    repair_report = None
+    if normalized_mode in {"repair", "validate-and-repair"}:
+        service_report = validate_and_repair_deployment_bundle(
+            bundle_root,
+            targets=targets,
+            validate_argo=validate_argo,
+            validate_dagster=validate_dagster,
+            materialize=materialize,
+            reinstall=reinstall,
+            skip_install=skip_install,
+            argo_lint=argo_lint,
+            argo_dry_run=argo_dry_run,
+            timeout_seconds=timeout_seconds,
+            runtime_secrets=runtime_secrets,
+            execution_id=execution_id,
+        )
+        repair_report = service_report.get("repair_report")
+        validation_report = service_report.get("validation_report")
+        if not isinstance(validation_report, dict):
+            validation_report = service_report
+    else:
+        validation_report = validate_deployment_bundle(
+            bundle_root,
+            targets=targets,
+            validate_argo=validate_argo,
+            validate_dagster=validate_dagster,
+            materialize=materialize,
+            reinstall=reinstall,
+            skip_install=skip_install,
+            argo_lint=argo_lint,
+            argo_dry_run=argo_dry_run,
+            timeout_seconds=timeout_seconds,
+            runtime_secrets=runtime_secrets,
+            execution_id=execution_id,
+        )
+
+    ok = bool(validation_report.get("ok"))
+    return {
+        "ok": ok,
+        "validation_report": validation_report,
+        "repair_report": repair_report,
+        "repaired_files": (
+            _read_repaired_bundle_files(bundle_root)
+            if ok and repair_report is not None
+            else []
+        ),
+        # Failed runs still return what earlier steps published, so users
+        # can inspect partial results and see where the pipeline stopped.
+        **(
+            _run_outputs_response(
+                bundle_root,
+                workspace_id=artifact_workspace_id,
+                run_id=artifact_run_id,
+                cache_plan=cache_plan,
+            )
+            if execution_requested
+            else {"run_outputs": [], "step_receipts": []}
+        ),
+    }
 
 
 def main() -> int:

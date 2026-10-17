@@ -136,11 +136,20 @@ export const outputsForNode = (outputs: RunOutput[], nodeId: string) =>
 
 export const summarizeNodeEvents = (events: PipelineRunEvent[]) => {
   const latestByNode = new Map<string, PipelineRunEvent>();
+  const cachedNodes = new Set<string>();
   const unscoped: PipelineRunEvent[] = [];
   events.forEach((event) => {
     const nodeId = String(event.node_id || '').trim();
-    if (nodeId) latestByNode.set(nodeId, event);
-    else unscoped.push(event);
+    if (!nodeId) {
+      unscoped.push(event);
+      return;
+    }
+    if (event.type === 'node.cached') cachedNodes.add(nodeId);
+    // A reused step also reports completion; keep saying it was reused.
+    const keep = cachedNodes.has(nodeId) && event.type === 'node.completed'
+      ? latestByNode.get(nodeId) || event
+      : event;
+    latestByNode.set(nodeId, keep);
   });
   return [...unscoped, ...latestByNode.values()]
     .sort((left, right) => left.id - right.id)

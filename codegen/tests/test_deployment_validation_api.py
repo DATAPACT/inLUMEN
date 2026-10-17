@@ -101,6 +101,8 @@ def test_deployment_validation_endpoint_forwards_every_option() -> None:
         execution_id="run-1",
         artifact_workspace_id="local-workspace",
         artifact_run_id="run-1",
+        cache_mode="reuse",
+        rerun_from=None,
     )
 
 

@@ -4,6 +4,7 @@ import {
   AlertCircle,
   Ban,
   Check,
+  ChevronDown,
   Circle,
   Download,
   Eye,
@@ -15,6 +16,12 @@ import {
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import {
   cancelPipelineRun,
   downloadPipelineRunBundle,
@@ -28,7 +35,9 @@ import {
   isActivePipelineRun,
   listPipelineRuns,
   startPipelineRun,
+  PIPELINE_RUN_STARTED_EVENT,
   type PipelineRunEvent,
+  type PipelineRunOptions,
   type PipelineRunRecord,
   type RunnerCapabilities,
 } from '@/features/runs/pipelineRuns';
@@ -210,9 +219,15 @@ export const PipelineRunPanel = () => {
     () => runs.filter((run) => isActivePipelineRun(run.status)).length,
     [runs],
   );
+  const lastRunFailed = runs[0]?.status === 'failed';
   const capacityLimit = capabilities?.max_outstanding_runs || 0;
   const runCapacityFull = capacityLimit > 0 && outstandingRunCount >= capacityLimit;
   const globalCapacityFull = workloadFresh && workload !== null && workload.outstanding_runs >= workload.max_outstanding_runs;
+  const startDisabled = submitting
+    || loading
+    || !capabilities?.execution_available
+    || runCapacityFull
+    || globalCapacityFull;
 
   const loadInitial = useCallback(async () => {
     if (listInFlight.current) return;
@@ -296,13 +311,22 @@ export const PipelineRunPanel = () => {
     return () => { stopped = true; window.clearTimeout(timer); };
   }, [selectedRunIdForRefresh, selectedRunStatus]);
 
-  const handleStart = async () => {
+  useEffect(() => {
+    const follow = (event: Event) => {
+      const run = (event as CustomEvent<PipelineRunRecord>).detail;
+      if (!run?.run_id) return;
+      setRuns((current) => mergeRun(current, run));
+      setSelectedRunId(run.run_id);
+    };
+    window.addEventListener(PIPELINE_RUN_STARTED_EVENT, follow);
+    return () => window.removeEventListener(PIPELINE_RUN_STARTED_EVENT, follow);
+  }, []);
+
+  const handleStart = async (options: PipelineRunOptions = {}) => {
     setSubmitting(true);
     setError('');
     try {
-      const run = await startPipelineRun(newIdempotencyKey());
-      setRuns((current) => mergeRun(current, run));
-      setSelectedRunId(run.run_id);
+      await startPipelineRun(newIdempotencyKey(), options);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Failed to start the run.');
     } finally {
@@ -362,26 +386,46 @@ export const PipelineRunPanel = () => {
         </Button>
       </div>
 
-      <Button
-        className="mt-3 h-10 w-full"
-        onClick={() => { void handleStart(); }}
-        disabled={
-          submitting
-          || loading
-          || !capabilities?.execution_available
-          || runCapacityFull
-          || globalCapacityFull
-        }
-      >
-        {submitting ? (
-          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-        ) : (
-          <PlayCircle className="mr-2 h-4 w-4" />
-        )}
-        Run current pipeline
-      </Button>
+      <div className="mt-3 flex gap-1">
+        <Button
+          className="h-10 min-w-0 flex-1"
+          onClick={() => { void handleStart({ cache: 'reuse' }); }}
+          disabled={startDisabled}
+          title="Steps whose code, parameters and inputs did not change reuse their earlier results."
+        >
+          {submitting ? (
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          ) : (
+            <PlayCircle className="mr-2 h-4 w-4" />
+          )}
+          {lastRunFailed ? 'Resume from failed step' : 'Run current pipeline'}
+        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button className="h-10 w-9 shrink-0 px-0" disabled={startDisabled} aria-label="More run options">
+              <ChevronDown className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-64">
+            <DropdownMenuItem onSelect={() => { void handleStart({ cache: 'reuse' }); }}>
+              <div>
+                <div>Run, reusing unchanged steps</div>
+                <div className="text-[11px] text-muted-foreground">
+                  {lastRunFailed ? 'Steps that finished last time are not run again.' : 'The default for every run.'}
+                </div>
+              </div>
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => { void handleStart({ cache: 'refresh' }); }}>
+              <div>
+                <div>Run everything again</div>
+                <div className="text-[11px] text-muted-foreground">Ignore earlier results and run every step.</div>
+              </div>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
       <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
-        A fixed snapshot is created at launch. You can close the browser while it runs.
+        A fixed snapshot is created at launch. Unchanged steps reuse earlier results. You can close the browser while it runs.
       </p>
 
       <div className="mt-3 text-xs text-muted-foreground">
@@ -556,7 +600,9 @@ export const PipelineRunPanel = () => {
                   <div key={event.id} className="flex items-start gap-1.5">
                     <span className={cn(
                       'mt-1 h-1.5 w-1.5 shrink-0 rounded-full',
-                      event.status === 'failed' ? 'bg-red-400' : event.status === 'succeeded' ? 'bg-emerald-400' : 'bg-amber-400',
+                      event.type === 'node.cached'
+                        ? 'bg-sky-400'
+                        : event.status === 'failed' ? 'bg-red-400' : event.status === 'succeeded' ? 'bg-emerald-400' : 'bg-amber-400',
                     )} />
                     <span>{event.message || event.type}</span>
                   </div>
