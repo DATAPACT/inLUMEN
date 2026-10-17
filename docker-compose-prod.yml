@@ -152,6 +152,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      minio:
+        condition: service_healthy
     expose:
       - "8010"
     volumes:
@@ -181,6 +183,14 @@ services:
       CODEGEN_INPUT_FILE_BASE_URL: http://backend:5000/api/files/content
       CODEGEN_INPUT_FILE_ALLOW_INSECURE_HTTP: "true"
       CODEGEN_INPUT_FILE_MAX_BYTES: ${CODEGEN_INPUT_FILE_MAX_BYTES:-52428800}
+      # Step outputs are uploaded to MinIO after each run and passed to the
+      # runner and backend by reference. Set to "inline" to keep them on the runner.
+      INLUMEN_RUN_ARTIFACT_STORAGE: ${INLUMEN_RUN_ARTIFACT_STORAGE:-minio}
+      INLUMEN_RUN_ARTIFACT_RETENTION_DAYS: ${INLUMEN_RUN_ARTIFACT_RETENTION_DAYS:-30}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-datapact-minio-db:9000}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/ready', timeout=5)"]
       interval: 10s

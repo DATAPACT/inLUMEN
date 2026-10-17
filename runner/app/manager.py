@@ -321,6 +321,8 @@ class PipelineRunManager:
         for entry in record.get("_output_files", []):
             if str(entry.get("path") or "") != path:
                 continue
+            if entry.get("storage") == "minio":
+                return None  # The backend reads object-stored outputs directly.
             storage_path = str(entry.get("_storage_path") or "")
             if storage_path:
                 body, size = self.artifact_store.read_output(storage_path, offset, length)
@@ -988,7 +990,39 @@ class PipelineRunManager:
             output_files,
             str(record.get("workspace_id") or "local-workspace"),
         )
+        receipts = response.get("step_receipts")
+        record["_step_receipts"] = [
+            self._step_summary(item) for item in receipts or [] if isinstance(item, dict)
+        ]
+        warning = str(response.get("artifact_storage_warning") or "").strip()
+        if warning:
+            self._append_event(record, "run.artifact_storage", None, warning)
         return output_files
+
+    @staticmethod
+    def _step_summary(receipt: dict[str, Any]) -> dict[str, Any]:
+        """Keep the lineage facts of a step receipt: what it read and published."""
+        def files(items: Any) -> list[dict[str, Any]]:
+            return [
+                {key: item.get(key) for key in ("path", "size_bytes", "sha256") if item.get(key) is not None}
+                for item in items or []
+                if isinstance(item, dict)
+            ]
+
+        return {
+            "flow_id": str(receipt.get("flow_id") or ""),
+            "node_label": str(receipt.get("node_label") or ""),
+            "status": str(receipt.get("status") or ""),
+            "started_at": receipt.get("started_at"),
+            "finished_at": receipt.get("finished_at"),
+            "connections": [
+                {key: str(item.get(key) or "") for key in ("source_node", "source_port", "target_port", "filename")}
+                for item in receipt.get("connections") or []
+                if isinstance(item, dict)
+            ],
+            "inputs": files(receipt.get("inputs")),
+            "outputs": files(receipt.get("outputs")),
+        }
 
     def _finish_failed(
         self,
@@ -1035,6 +1069,9 @@ class PipelineRunManager:
                 "node_label",
                 "port",
                 "output_role",
+                "storage",
+                "bucket",
+                "key",
             )
             if entry.get(key) is not None
         }
@@ -1059,6 +1096,8 @@ class PipelineRunManager:
         }
         if record.get("started_at"):
             result["started_at"] = record["started_at"]
+        if record.get("_step_receipts"):
+            result["steps"] = deepcopy(record["_step_receipts"])
         if error is not None:
             result["error"] = deepcopy(error)
         return result

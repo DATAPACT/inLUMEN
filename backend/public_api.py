@@ -1964,7 +1964,7 @@ def _ui_api_openapi_paths(
         "/api/provenance/prov-o": {
             "get": {
                 "tags": ["Pipeline State"],
-                "summary": "Download PROV-O provenance as JSON-LD for a pipeline version",
+                "summary": "Download PROV-O provenance as JSON-LD for a pipeline version or run",
                 "operationId": "downloadProvOProvenance",
                 "parameters": [
                     {
@@ -1973,7 +1973,17 @@ def _ui_api_openapi_paths(
                         "required": False,
                         "schema": {"type": "string"},
                         "description": "Pipeline version uid. Defaults to the active version.",
-                    }
+                    },
+                    {
+                        "name": "run_id",
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "string"},
+                        "description": (
+                            "Pipeline run id. Returns the run's lineage instead: each step, the "
+                            "artifacts it used and generated, linked by content digest."
+                        ),
+                    },
                 ],
                 "responses": {
                     "200": {

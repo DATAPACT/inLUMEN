@@ -300,3 +300,122 @@ def build_prov_o_jsonld(payload: dict[str, Any]) -> dict[str, Any]:
         "generatedAtTime": generated_at,
         "@graph": graph,
     }
+
+
+RUN_PROV_O_CONTEXT = {
+    **PROV_O_CONTEXT,
+    "wasInformedBy": {"@id": "prov:wasInformedBy", "@type": "@id"},
+    "partOf": {"@id": "inlumen:partOf", "@type": "@id"},
+    "sha256": "inlumen:sha256",
+    "sizeBytes": {"@id": "inlumen:sizeBytes", "@type": "xsd:integer"},
+    "path": "inlumen:path",
+    "port": "inlumen:port",
+    "status": "inlumen:status",
+}
+
+
+def _epoch_iso(value: Any) -> str:
+    if isinstance(value, (int, float)):
+        return (
+            datetime.fromtimestamp(value, timezone.utc)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z")
+        )
+    return _text(value)
+
+
+def _digest(value: Any) -> str:
+    return _text(value).removeprefix("sha256:")
+
+
+def build_run_prov_o_jsonld(run: dict[str, Any]) -> dict[str, Any]:
+    """Describe one pipeline run as PROV-O: steps, what they used and generated.
+
+    Artifacts are identified by content digest, so the output a producer
+    generated and the input a consumer used resolve to the same entity.
+    """
+    run_id = _text(run.get("run_id"), "run")
+    result = run.get("result") if isinstance(run.get("result"), dict) else {}
+    run_iri = f"{BASE_IRI}run:{_iri_part(run_id, 'run')}"
+    graph: list[dict[str, Any]] = []
+    entities: dict[str, dict[str, Any]] = {}
+
+    def entity(digest: str, path: str, size: Any = None) -> str:
+        entity_id = f"{BASE_IRI}artifact:sha256:{digest}"
+        node = entities.setdefault(
+            entity_id, _typed_node(entity_id, "prov:Entity", "inlumen:RunArtifact")
+        )
+        node["sha256"] = digest
+        if path and not node.get("label"):
+            node["label"] = path
+        if isinstance(size, int):
+            node["sizeBytes"] = size
+        return entity_id
+
+    run_node = _typed_node(run_iri, "prov:Activity", "inlumen:PipelineRun", label=f"Pipeline run {run_id}")
+    run_node["status"] = _text(result.get("status") or run.get("status"))
+    _set_time(run_node, "startedAtTime", run.get("started_at") or run.get("created_at"))
+    _set_time(run_node, "endedAtTime", run.get("finished_at"))
+    graph.append(run_node)
+
+    step_iris: dict[str, str] = {}
+    steps = [item for item in result.get("steps") or [] if isinstance(item, dict)]
+    for step in steps:
+        flow_id = _text(step.get("flow_id"), "step")
+        step_iri = f"{run_iri}:step:{_iri_part(flow_id, 'step')}"
+        step_iris[flow_id] = step_iri
+        node = _typed_node(
+            step_iri, "prov:Activity", "inlumen:StepExecution",
+            label=_text(step.get("node_label"), f"Step {flow_id}"),
+        )
+        node["partOf"] = run_iri
+        node["status"] = _text(step.get("status"))
+        _set_time(node, "startedAtTime", _epoch_iso(step.get("started_at")))
+        _set_time(node, "endedAtTime", _epoch_iso(step.get("finished_at")))
+        used = [
+            entity(_digest(item.get("sha256")), _text(item.get("path")), item.get("size_bytes"))
+            for item in step.get("inputs") or []
+            if isinstance(item, dict) and _digest(item.get("sha256"))
+        ]
+        if used:
+            node["used"] = sorted(set(used))
+        informed_by = sorted({
+            _text(item.get("source_node"))
+            for item in step.get("connections") or []
+            if isinstance(item, dict) and _text(item.get("source_node"))
+        })
+        if informed_by:
+            node["wasInformedBy"] = [
+                step_iris.get(source) or f"{run_iri}:step:{_iri_part(source, 'step')}"
+                for source in informed_by
+            ]
+        graph.append(node)
+        for item in step.get("outputs") or []:
+            if isinstance(item, dict) and _digest(item.get("sha256")):
+                generated = entities[entity(_digest(item.get("sha256")), "", item.get("size_bytes"))]
+                generated.setdefault("wasGeneratedBy", step_iri)
+
+    # Public output paths, ports and producers from the run result (these
+    # cover runs recorded before step receipts existed as well).
+    for output in result.get("outputs") or []:
+        if not isinstance(output, dict) or not _digest(output.get("sha256")):
+            continue
+        node = entities[entity(_digest(output.get("sha256")), "", output.get("size_bytes"))]
+        node["path"] = _text(output.get("path"))
+        node["label"] = _text(output.get("filename"), node["path"])
+        if output.get("port"):
+            node["port"] = _text(output.get("port"))
+        producer = _text(output.get("source_node"))
+        if producer and "wasGeneratedBy" not in node:
+            node["wasGeneratedBy"] = step_iris.get(producer) or f"{run_iri}:step:{_iri_part(producer, 'step')}"
+
+    graph.extend(entities.values())
+    generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return {
+        "@context": RUN_PROV_O_CONTEXT,
+        "@id": f"{run_iri}:bundle",
+        "@type": "prov:Bundle",
+        "label": f"inLUMEN lineage for pipeline run {run_id}",
+        "generatedAtTime": generated_at,
+        "@graph": graph,
+    }

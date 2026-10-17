@@ -146,7 +146,8 @@ class RunOutputPreviewRouteTest(unittest.TestCase):
         self.assertEqual(400, response.status_code)
 
     def test_inline_output_is_sandboxed(self):
-        with patch.object(
+        run = {"result": {"outputs": [{"path": "outputs/n/a.svg", "filename": "a.svg"}]}}
+        with patch.object(self.api, "runner_request", return_value=run), patch.object(
             self.api, "runner_raw_request", return_value=(b"<svg/>", "image/svg+xml", 'inline; filename="a.svg"')
         ) as raw:
             response = self.client.get(
@@ -158,6 +159,56 @@ class RunOutputPreviewRouteTest(unittest.TestCase):
         self.assertEqual("nosniff", response.headers["X-Content-Type-Options"])
         bad = self.client.get("/api/pipeline-runs/run-1/outputs/a.svg?disposition=other")
         self.assertEqual(400, bad.status_code)
+
+    def object_run(self, **overrides):
+        entry = {
+            "path": "outputs/n/a.csv", "filename": "a.csv", "content_type": "text/csv",
+            "storage": "minio", "bucket": "run-artifacts-local", "key": "runs/run-1/outputs/n/a.csv",
+            **overrides,
+        }
+        return {"result": {"outputs": [entry]}}
+
+    def test_object_stored_outputs_are_read_from_minio(self):
+        body = b"x,y\n1,2\n"
+
+        def window(bucket, key, offset, length):
+            self.assertEqual(("run-artifacts-local", "runs/run-1/outputs/n/a.csv"), (bucket, key))
+            return body[offset:None if length is None else offset + length], len(body)
+
+        with patch.object(self.api, "runner_request", return_value=self.object_run()), patch.object(
+            self.api, "read_window", side_effect=window
+        ), patch.object(
+            self.api, "stream_object", return_value=(iter([body[:4], body[4:]]), len(body))
+        ), patch.object(self.api, "runner_raw_response") as runner_bytes:
+            preview = self.client.get("/api/pipeline-runs/run-1/preview/outputs/n/a.csv")
+            download = self.client.get("/api/pipeline-runs/run-1/outputs/outputs/n/a.csv")
+
+        runner_bytes.assert_not_called()
+        self.assertEqual(200, preview.status_code, preview.json)
+        self.assertEqual([["1", "2"]], preview.json["rows"])
+        self.assertEqual(body, download.data)
+        self.assertEqual(str(len(body)), download.headers["Content-Length"])
+        self.assertIn('attachment; filename="a.csv"', download.headers["Content-Disposition"])
+
+    def test_references_outside_the_run_are_refused(self):
+        for overrides in ({"bucket": "run-artifacts-ws-otherworkspace0000"}, {"key": "runs/other-run/outputs/n/a.csv"}):
+            with patch.object(self.api, "runner_request", return_value=self.object_run(**overrides)), patch.object(
+                self.api, "read_window"
+            ) as window, patch.object(self.api, "stream_object") as stream:
+                preview = self.client.get("/api/pipeline-runs/run-1/preview/outputs/n/a.csv")
+                download = self.client.get("/api/pipeline-runs/run-1/outputs/outputs/n/a.csv")
+            self.assertEqual((403, 403), (preview.status_code, download.status_code))
+            window.assert_not_called()
+            stream.assert_not_called()
+
+    def test_clearing_runs_removes_stored_artifacts(self):
+        with patch.object(self.api, "runner_request", return_value={"removed_runs": 2}), patch.object(
+            self.api, "remove_run_artifacts", return_value=5
+        ) as remove:
+            response = self.client.delete("/api/pipeline-runs")
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"removed_runs": 2, "removed_artifact_objects": 5}, response.json)
+        remove.assert_called_once_with("local-workspace")
 
 
 if __name__ == "__main__":
