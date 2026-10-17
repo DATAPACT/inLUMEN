@@ -25,8 +25,15 @@ RESERVED_PARAMETER_NAMES = frozenset({
     "model_plan",
     "output_artifact",
     "output_filename",
+    "output_mode",
     "timeout",
 })
+
+# Values of the output_mode step parameter, for operations with response.merge.
+OUTPUT_MODE_ANNOTATIONS = "annotations"
+OUTPUT_MODE_ENRICH = "input_with_annotations"
+OUTPUT_MODES = (OUTPUT_MODE_ANNOTATIONS, OUTPUT_MODE_ENRICH)
+DEFAULT_MERGE_FILENAME = "annotated.json"
 
 _PATH_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _DEFAULT_PORT_NAMES = {
@@ -151,6 +158,16 @@ def validate_plugin_manifest(data: Any) -> dict[str, Any]:
             else f"response.{response['format']}"
         )
         response.setdefault("filename", default_filename)
+        merge = response.get("merge")
+        if merge:
+            merge.setdefault("filename", DEFAULT_MERGE_FILENAME)
+            if response["format"] != "json":
+                errors.append(f"operations/{operation['id']}: response.merge requires a JSON response")
+            if not request.get("input_field"):
+                errors.append(
+                    f"operations/{operation['id']}: response.merge requires request.input_field "
+                    "(the input text the response annotates)"
+                )
 
     # Parameters -----------------------------------------------------------
     parameter_names: set[str] = set()
@@ -248,6 +265,11 @@ def validate_plugin_manifest(data: Any) -> dict[str, Any]:
     return manifest
 
 
+def supports_enrich(operation: dict[str, Any]) -> bool:
+    """Whether the operation can publish its input with the response added."""
+    return bool((operation.get("response") or {}).get("merge"))
+
+
 def parameters_for_operation(manifest: dict[str, Any], operation_id: str) -> list[dict[str, Any]]:
     return [
         parameter
@@ -309,6 +331,8 @@ def secret_parameter_names(manifest: dict[str, Any]) -> list[str]:
 def default_parameters(manifest: dict[str, Any]) -> dict[str, Any]:
     """Initial STEP.param for a newly configured plugin step."""
     values: dict[str, Any] = {"operation": default_operation(manifest)["id"]}
+    if any(supports_enrich(operation) for operation in manifest["operations"]):
+        values["output_mode"] = OUTPUT_MODE_ANNOTATIONS
     for parameter in manifest.get("parameters") or []:
         values[parameter["name"]] = parameter.get("default", "")
     # Only required secrets start on the step: an unconfigured optional secret

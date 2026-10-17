@@ -18,7 +18,12 @@
       "method": "POST",
       "path": "/annotate-article",
       "request": {"body": "form", "input_field": "text"},
-      "response": {"format": "json", "filename": "annotations.json", "error_fields": ["status", "error"]},
+      "response": {
+        "format": "json",
+        "filename": "annotations.json",
+        "error_fields": ["status", "error"],
+        "merge": {"key": "wikifier", "filename": "annotated.json"}
+      },
       "timeout_seconds": 120
     }
   ],
@@ -116,6 +121,6 @@
     "inputs": [{"name": "text", "type": "Text", "description": "UTF-8 text document to annotate."}],
     "outputs": [{"name": "annotations", "type": "Object", "description": "Wikifier JSON: annotations with Wikipedia/Wikidata links, plus the word split of the text."}]
   },
-  "instructions": "Use for entity linking or concept extraction: finding which people, places, organisations and topics a text mentions and linking them to Wikipedia/Wikidata. Input must be plain UTF-8 text (convert PDFs or audio to text first). One call per input file; keep documents to a few tens of thousands of characters. Not for translation, summarisation or sentiment. The public service is occasionally down.",
+  "instructions": "Use for entity linking or concept extraction: finding which people, places, organisations and topics a text mentions and linking them to Wikipedia/Wikidata. Input must be plain UTF-8 text (convert PDFs or audio to text first). One call per input file; keep documents to a few tens of thousands of characters. Not for translation, summarisation or sentiment. With Output 'Input with annotations' the step publishes its input (e.g. a transcript) with the Wikifier result under 'wikifier', so a later step in a chain still gets the text. The public service is occasionally down.",
   "tags": ["nlp", "entity-linking", "wikipedia", "wikidata", "annotation"]
 }

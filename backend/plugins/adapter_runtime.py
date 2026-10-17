@@ -250,13 +250,23 @@ def _set_dotted(document, dotted, value):
 # transcript JSON carries "transcript" next to segments, timings and metadata.
 TEXT_FIELDS = ("transcript", "text", "content", "body")
 
+# Values of the output_mode step parameter (see response.merge).
+OUTPUT_MODE_ANNOTATIONS = "annotations"
+OUTPUT_MODE_ENRICH = "input_with_annotations"
+
 
 def _input_text(input_file):
-    """Return the text a plugin should process from one input file.
+    """Return the text a plugin should process from one input file."""
+    return _read_input(input_file)[0]
+
+
+def _read_input(input_file):
+    """Return ``(text, document)`` for one input file.
 
     Plain text is sent as is. A JSON document is not text to annotate: its
     text field is sent instead of the whole document with its keys, numbers
-    and metadata (which can also exceed a tool's size limit).
+    and metadata (which can also exceed a tool's size limit). ``document`` is
+    the parsed JSON object, or ``None`` when the input is not one.
     """
     try:
         raw = Path(input_file["path"]).read_text(encoding="utf-8")
@@ -268,18 +278,18 @@ def _input_text(input_file):
         raw.lstrip()[:1] in {"{", "["}
     )
     if not looks_json:
-        return raw
+        return raw, None
     try:
         document = json.loads(raw)
     except ValueError:
-        return raw
+        return raw, None
     if isinstance(document, str):
-        return document
+        return document, None
     if isinstance(document, dict):
         for field in TEXT_FIELDS:
             value = document.get(field)
             if isinstance(value, str) and value.strip():
-                return value
+                return value, document
     raise PluginCallError(
         f"Input {input_file['filename']!r} is a JSON document without a text field "
         f"({', '.join(TEXT_FIELDS)}); {_plugin_name()!r} needs text. Connect a step "
@@ -467,6 +477,32 @@ def _check_payload(payload, operation):
     return payload
 
 
+def _enrich_mode(operation):
+    merge = (operation.get("response") or {}).get("merge")
+    if not merge:
+        return False
+    mode = str(_value("output_mode", OUTPUT_MODE_ANNOTATIONS))
+    if mode not in {OUTPUT_MODE_ANNOTATIONS, OUTPUT_MODE_ENRICH}:
+        raise PluginCallError(
+            f"Plugin output_mode must be {OUTPUT_MODE_ANNOTATIONS!r} or "
+            f"{OUTPUT_MODE_ENRICH!r}; got {mode!r}."
+        )
+    return mode == OUTPUT_MODE_ENRICH
+
+
+def _enriched(input_file, payload, key):
+    """The input document with the tool's JSON response added under ``key``.
+
+    A JSON object keeps all its fields (a transcript's ``transcript``,
+    segments and metadata), so later steps still find the text; plain text
+    becomes ``{"text": ...}``.
+    """
+    text, document = _read_input(input_file)
+    enriched = dict(document) if document is not None else {"text": text}
+    enriched[key] = json.loads(payload.decode("utf-8"))
+    return (json.dumps(enriched, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
 def _write_metadata(calls):
     work_dir = os.environ.get("PIPELINE_WORK_DIR")
     if not work_dir:
@@ -492,7 +528,13 @@ def run(input_dir, output_dir):
     kind = PLUGIN_SPEC["kind"]
     body_mode = (operation.get("request") or {}).get("body", "none")
     response_spec = operation.get("response") or {}
-    output_name = str(_value("output_filename", response_spec.get("filename") or "response.json"))
+    enrich = kind == "task" and _enrich_mode(operation)
+    default_name = (
+        response_spec["merge"].get("filename") or "annotated.json"
+        if enrich
+        else response_spec.get("filename") or "response.json"
+    )
+    output_name = str(_value("output_filename", default_name))
     if "/" in output_name or "\\" in output_name or output_name in {"", ".", ".."}:
         raise PluginCallError("Plugin output filename must be a plain file name.")
     values = _parameter_values()
@@ -520,6 +562,9 @@ def run(input_dir, output_dir):
         })
         results.append((item, payload))
     _write_metadata(calls)
+    if enrich:
+        key = response_spec["merge"]["key"]
+        results = [(item, _enriched(item, payload, key)) for item, payload in results]
 
     output_dir.mkdir(parents=True, exist_ok=True)
     if kind == "destination":

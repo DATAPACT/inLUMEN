@@ -50,6 +50,17 @@ describe("plugin templates", () => {
     expect(isPluginTemplate("REST API")).toBe(false);
   });
 
+  it("starts annotation plugins with annotations-only output", () => {
+    const annotator: PluginManifest = {
+      ...manifest,
+      operations: [{ id: "annotate", method: "POST", path: "/annotate", response: { merge: { key: "wikifier" } } }],
+    };
+    expect(pluginToTemplate({ ...installed, manifest: annotator }).defaultParameters).toMatchObject({
+      operation: "annotate", output_mode: "annotations",
+    });
+    expect(pluginToTemplate(installed).defaultParameters).not.toHaveProperty("output_mode");
+  });
+
   it("maps a manifest onto the component template model", () => {
     const template = pluginToTemplate(installed);
     expect(template.value).toBe("plugin:datapact.text-anonymizer");

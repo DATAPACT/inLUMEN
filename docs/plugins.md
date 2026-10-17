@@ -88,8 +88,35 @@ fails with `error_field`), giving up after `timeout_seconds`.
 `response.error_fields` lists top-level JSON fields that mean failure even with
 HTTP 200 (Wikifier answers a bad key with `{"status": "user-key-not-found"}`).
 
+### Passing the input on (`response.merge`)
+
+An annotation tool answers with annotations only, so in a linear chain such as
+*Speech-to-Text → Wikifier → Sentiment Analysis* the last step would get
+annotations and no transcript. An operation with `response.merge`
+(`{"key": "wikifier", "filename": "annotated.json"}`; requires a JSON response
+and `request.input_field`) gives the step an **Output** setting, the step
+parameter `output_mode`:
+
+- `annotations` – **Annotations only** (default): publish the tool's response,
+  as without `merge`.
+- `input_with_annotations` – **Input with annotations**: publish the input with
+  the response added under `key`, in `merge.filename` (default
+  `annotated.json`). A JSON object input keeps all its fields (a transcript's
+  `transcript`, `text`, segments and metadata), so later steps still find the
+  text; plain text becomes `{"text": <input>, "<key>": <response>}`.
+
+```json
+{"transcript": "Rome is the capital of Italy.", "segments": [...],
+ "wikifier": {"annotations": [...], "words": [...], "spaces": [...]}}
+```
+
+The step's declared output (name, filename, `json` kind and format) follows the
+chosen mode. Both built-in plugins support it: Wikifier under `wikifier`, Moose
+under `dpv`. Steps keep explicit connections; a step that needs only the
+annotations reads `wikifier` (or `dpv`) from the enriched document.
+
 Step parameters reserved by the adapter: `operation`, `timeout`,
-`output_filename` (and `base_url`, which is reserved but ignored: the endpoint is
+`output_filename`, `output_mode` (and `base_url`, which is reserved but ignored: the endpoint is
 always the one in the plugin definition). The adapter
 never follows HTTP redirects, so credentials cannot be forwarded to another host.
 Optional secrets are added to a step only when the user enters them.
