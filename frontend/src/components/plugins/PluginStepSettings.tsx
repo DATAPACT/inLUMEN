@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { checkPluginEndpoint, type EndpointCheck, type PluginManifest, type PluginParameter } from '@/features/plugins/pluginApi';
-import { isRequiredParameter, parametersForOperation } from '@/features/plugins/pluginTemplates';
+import { DEFAULT_PLUGIN_OUTPUT_MODE, isRequiredParameter, parametersForOperation, PLUGIN_OUTPUT_MODES } from '@/features/plugins/pluginTemplates';
 
 export type PluginOption = { value: string; label: string; description?: string };
 
@@ -138,6 +138,27 @@ export function PluginStepSettings({
                 ))}
               </select>
               {operation?.description && <p className="text-[11px] text-muted-foreground">{operation.description}</p>}
+            </div>
+          )}
+
+          {operation?.response?.merge && (
+            <div className="space-y-1.5">
+              <Label htmlFor={fieldId('output_mode')} className="text-xs">Output</Label>
+              <select
+                id={fieldId('output_mode')}
+                className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                value={String(param.output_mode || DEFAULT_PLUGIN_OUTPUT_MODE)}
+                onChange={(event) => onParameterChange('output_mode', event.target.value)}
+              >
+                {PLUGIN_OUTPUT_MODES.map((mode) => (
+                  <option key={mode.value} value={mode.value}>{mode.label}</option>
+                ))}
+              </select>
+              <p className="text-[11px] text-muted-foreground">
+                {param.output_mode === 'annotations'
+                  ? `Publishes only the ${manifest.name} result; later steps do not get the input text.`
+                  : `Publishes the input (e.g. a transcript) with the result added under "${operation.response.merge.key}", so later steps still get the text.`}
+              </p>
             </div>
           )}
 

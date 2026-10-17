@@ -30,6 +30,13 @@ export type PluginOperation = {
   description?: string;
   method: string;
   path: string;
+  response?: {
+    format?: string;
+    filename?: string;
+    representation?: 'file' | 'directory';
+    /** Present when the step can publish its input with the response added. */
+    merge?: { key: string; filename?: string };
+  };
 };
 
 export type PluginPort = { name: string; type?: string; description?: string };

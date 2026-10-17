@@ -35,7 +35,7 @@ from plugins import (  # noqa: E402
     with_plugin_secret_keys,
 )
 from plugins.manifest import default_parameters, required_parameter_names  # noqa: E402
-from plugins.runtime import plugin_main_source, plugin_runtime_spec  # noqa: E402
+from plugins.runtime import plugin_data_contract, plugin_main_source, plugin_runtime_spec  # noqa: E402
 
 EXAMPLE_PATH = ROOT / "examples" / "plugins" / "text-anonymizer.plugin.json"
 TEMPLATE = "plugin:example.text-anonymizer"
@@ -194,8 +194,11 @@ class BuiltinPluginsTest(unittest.TestCase):
             store._ENGINE.dispose()
             store._ENGINE = None
 
-    def _run_wikifier(self, filename, content):
-        """Run the Wikifier step against a local mock; return the form it received."""
+    def _run_wikifier(self, filename, content, **param):
+        """Run the Wikifier step against a local mock.
+
+        Return the form it received, and under ``outputs`` the files it wrote.
+        """
         import urllib.parse
         from http.server import BaseHTTPRequestHandler
 
@@ -205,7 +208,7 @@ class BuiltinPluginsTest(unittest.TestCase):
             def do_POST(self):  # noqa: N802
                 body = self.rfile.read(int(self.headers["Content-Length"])).decode()
                 received["form"] = dict(urllib.parse.parse_qsl(body))
-                payload = json.dumps({"annotations": [], "words": [], "spaces": [""]}).encode()
+                payload = json.dumps({"annotations": [{"title": "Rome"}], "words": [], "spaces": [""]}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
@@ -223,10 +226,12 @@ class BuiltinPluginsTest(unittest.TestCase):
             "https://www.wikifier.org", f"http://127.0.0.1:{server.server_address[1]}")))
         step = {
             "flow_id": "w", "type": "task", "template": "plugin:jsi.wikifier",
-            "param": {"operation": "annotate", "lang": "en", "user_key": ""},
+            "param": {"operation": "annotate", "lang": "en", "user_key": "", **param},
             "secret_params": ["user_key"],
         }
-        source = plugin_main_source(plugin_runtime_spec(step, manifest))
+        spec = plugin_runtime_spec(step, manifest)
+        source = plugin_main_source(spec)
+        received["declared"] = plugin_data_contract(spec, step)["outputs"]
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "in").mkdir()
@@ -238,7 +243,73 @@ class BuiltinPluginsTest(unittest.TestCase):
             }):
                 os.environ.pop("INLUMEN_INPUT_MANIFEST", None)
                 exec(compile(source, "wikifier-main.py", "exec"), {"__name__": "__main__"})
+            received["outputs"] = {
+                path.name: path.read_text(encoding="utf-8") for path in (root / "out").iterdir()
+            }
         return received
+
+    def _speech_to_text_result(self, transcript):
+        return {
+            "text": transcript, "transcript": transcript, "language": "en",
+            "segments": [{"start": 0.0, "end": 2.5, "text": transcript}],
+            "processing_metadata": {"model_id": "Systran/faster-whisper-medium"},
+        }
+
+    def test_annotations_only_output_publishes_the_response(self):
+        result = self._run_wikifier(
+            "speech_to_text.json", json.dumps(self._speech_to_text_result("Rome.")), output_mode="annotations")
+        self.assertEqual(["annotations.json"], list(result["outputs"]))
+        self.assertEqual(
+            {"annotations": [{"title": "Rome"}], "words": [], "spaces": [""]},
+            json.loads(result["outputs"]["annotations.json"]),
+        )
+        [declared] = result["declared"]
+        self.assertEqual(("annotations", "annotations.json", "json"), (declared["name"], declared["filename"], declared["kind"]))
+
+    def test_by_default_the_transcript_is_kept_and_the_annotations_added(self):
+        stt = self._speech_to_text_result("Rome is the capital of Italy.")
+        # A step created before output_mode existed has no value: it enriches too.
+        result = self._run_wikifier("speech_to_text.json", json.dumps(stt))
+        self.assertEqual(["annotated.json"], list(result["outputs"]))
+        enriched = json.loads(result["outputs"]["annotated.json"])
+        self.assertEqual({**stt, "wikifier": {"annotations": [{"title": "Rome"}], "words": [], "spaces": [""]}}, enriched)
+        [declared] = result["declared"]
+        self.assertEqual(
+            ("annotated", "annotated.json", "json", "json"),
+            (declared["name"], declared["filename"], declared["kind"], declared["format"]),
+        )
+        self.assertIn("'wikifier'", declared["description"])
+
+    def test_enrich_wraps_plain_text_input(self):
+        result = self._run_wikifier("notes.txt", "Rome is in Italy.", output_mode="input_with_annotations")
+        self.assertEqual(
+            {"text": "Rome is in Italy.", "wikifier": {"annotations": [{"title": "Rome"}], "words": [], "spaces": [""]}},
+            json.loads(result["outputs"]["annotated.json"]),
+        )
+
+    def test_a_chain_passes_the_transcript_through_an_enriching_plugin(self):
+        # Speech-to-Text -> Wikifier (enrich) -> a text step such as Sentiment Analysis.
+        transcript = "Thank you for calling NordKart support."
+        wikified = self._run_wikifier(
+            "speech_to_text.json", json.dumps(self._speech_to_text_result(transcript)),
+        )["outputs"]["annotated.json"]
+        self.assertEqual(transcript, json.loads(wikified)["transcript"])
+        downstream = self._run_wikifier("annotated.json", wikified)
+        self.assertEqual(transcript, downstream["form"]["text"])
+
+    def test_unknown_output_mode_is_rejected(self):
+        manifest = validate_plugin_manifest(WIKIFIER_PATH.read_text())
+        with self.assertRaisesRegex(ValueError, "output_mode"):
+            plugin_runtime_spec({"type": "task", "param": {"output_mode": "both"}}, manifest)
+
+    def test_merge_requires_a_json_response_and_input_text(self):
+        data = example_manifest()
+        data["operations"][0]["response"] = {"format": "txt", "merge": {"key": "anon"}}
+        with self.assertRaises(PluginManifestError) as raised:
+            validate_plugin_manifest(data)
+        message = str(raised.exception)
+        self.assertIn("response.merge requires a JSON response", message)
+        self.assertIn("response.merge requires request.input_field", message)
 
     def test_plugins_receive_the_transcript_of_a_speech_to_text_result(self):
         transcript = "Thank you for calling NordKart support. This is Sarah."
@@ -305,8 +376,9 @@ class BuiltinPluginsTest(unittest.TestCase):
             }):
                 os.environ.pop("INLUMEN_INPUT_MANIFEST", None)
                 exec(compile(source, "wikifier-main.py", "exec"), {"__name__": "__main__"})
-            result = json.loads((root / "out" / "annotations.json").read_text())
-        self.assertEqual("Rome", result["annotations"][0]["title"])
+            result = json.loads((root / "out" / "annotated.json").read_text())
+        self.assertEqual("Rome is the capital of Italy.", result["text"])
+        self.assertEqual("Rome", result["wikifier"]["annotations"][0]["title"])
         self.assertEqual("/annotate-article", received["path"])
         self.assertEqual("application/x-www-form-urlencoded", received["type"])
         form = received["form"]
@@ -398,8 +470,9 @@ class BuiltinPluginsTest(unittest.TestCase):
     def test_moose_submits_a_job_and_publishes_its_result(self):
         url, calls = self._fake_moose()
         out, source = self._run_moose(url, vocabulary="dpv_pd", llm_provider="deepseek")
-        result = json.loads((out / "dpv-annotations.json").read_text())
-        entity = result["entities"][0]
+        result = json.loads((out / "annotated.json").read_text())
+        self.assertEqual("We store your email address for marketing.", result["text"])
+        entity = result["dpv"]["entities"][0]
         self.assertEqual("dpv-pd:EmailAddress", entity["type_id"])
         self.assertEqual("email address", "We store your email address for marketing."[entity["start"]:entity["end"]])
         method, path, headers, body = calls[0]

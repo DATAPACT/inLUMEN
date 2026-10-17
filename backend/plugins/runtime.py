@@ -8,15 +8,19 @@ from typing import Any
 from node_parameters import is_sensitive_parameter_name, normalize_secret_param_keys
 
 from .manifest import (
+    DEFAULT_OUTPUT_MODE,
+    OUTPUT_MODE_ENRICH,
+    OUTPUT_MODES,
     parameters_for_operation,
     plugin_ports,
     resolve_operation,
     secret_parameter_names,
+    supports_enrich,
 )
 
 ADAPTER_TEMPLATE_PATH = Path(__file__).with_name("adapter_runtime.py")
 _SPEC_LINE_MARKER = "# __PLUGIN_SPEC__"
-ADAPTER_VALUE_NAMES = ("operation", "timeout", "output_filename")
+ADAPTER_VALUE_NAMES = ("operation", "timeout", "output_filename", "output_mode")
 
 
 def plugin_runtime_spec(step: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
@@ -42,6 +46,15 @@ def plugin_runtime_spec(step: dict[str, Any], manifest: dict[str, Any]) -> dict[
         and value not in (None, "")
     }
     values["operation"] = operation["id"]
+    if supports_enrich(operation):
+        mode = str(values.get("output_mode") or DEFAULT_OUTPUT_MODE)
+        if mode not in OUTPUT_MODES:
+            raise ValueError(
+                f"Plugin {manifest['id']!r} output_mode must be one of {', '.join(OUTPUT_MODES)}; got {mode!r}."
+            )
+        values["output_mode"] = mode
+    else:
+        values.pop("output_mode", None)
     return {
         "plugin": {
             "id": manifest["id"],
@@ -57,6 +70,14 @@ def plugin_runtime_spec(step: dict[str, Any], manifest: dict[str, Any]) -> dict[
         "secrets": manifest.get("secrets") or [],
         "values": values,
     }
+
+
+def enrich_mode(spec: dict[str, Any]) -> bool:
+    """Whether the step publishes its input with the response added."""
+    return (
+        supports_enrich(spec["operation"])
+        and spec["values"].get("output_mode") == OUTPUT_MODE_ENRICH
+    )
 
 
 def plugin_main_source(spec: dict[str, Any]) -> str:
@@ -79,7 +100,9 @@ def plugin_data_contract(spec: dict[str, Any], step: dict[str, Any]) -> dict[str
     if spec["kind"] == "destination":
         return {"contract_id": "inlumen.generic-node@2", "version": "2", "inputs": [], "outputs": []}
     response = spec["operation"].get("response") or {}
-    output_name = str(spec["values"].get("output_filename") or response.get("filename"))
+    enrich = enrich_mode(spec)
+    default_name = response["merge"]["filename"] if enrich else response.get("filename")
+    output_name = str(spec["values"].get("output_filename") or default_name)
     directory = response.get("representation") == "directory"
     ports = step.get("ports") if isinstance(step.get("ports"), dict) else {}
     outputs = ports.get("outputs") or []
@@ -90,7 +113,12 @@ def plugin_data_contract(spec: dict[str, Any], step: dict[str, Any]) -> dict[str
         "kind": "directory" if directory else ("json" if response.get("format") == "json" else "binary"),
         "format": response.get("format") or "bin",
         "representation": "directory" if directory else "file",
-        "description": f"Response of {spec['plugin']['name']} operation {spec['operation']['id']}.",
+        "description": (
+            f"Input of {spec['plugin']['name']} with its operation {spec['operation']['id']} "
+            f"response under {response['merge']['key']!r}."
+            if enrich
+            else f"Response of {spec['plugin']['name']} operation {spec['operation']['id']}."
+        ),
     }
     if port_id:
         declaration["port"] = port_id

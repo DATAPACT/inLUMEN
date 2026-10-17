@@ -19,7 +19,11 @@
       "method": "POST",
       "path": "/schemas/{vocabulary}/ner",
       "request": {"body": "parameters", "input_field": "text"},
-      "response": {"format": "json", "filename": "dpv-annotations.json"},
+      "response": {
+        "format": "json",
+        "filename": "dpv-annotations.json",
+        "merge": {"key": "dpv", "filename": "annotated.json"}
+      },
       "timeout_seconds": 60,
       "async": {
         "job_id_field": "job_id",
@@ -92,6 +96,6 @@
     "inputs": [{"name": "text", "type": "Text", "description": "UTF-8 text (e.g. a privacy notice, contract or data description) to annotate."}],
     "outputs": [{"name": "dpv_annotations", "type": "Object", "description": "JSON {\"entities\": [{\"start\", \"end\", \"text\", \"type_id\", \"confidence\"}], \"warnings\"?: [...]}: character offsets into the input text, the matched span, the DPV concept id and the model's confidence."}]
   },
-  "instructions": "Use when a pipeline must identify privacy and data-protection concepts in text according to the W3C Data Privacy Vocabulary (DPV): personal data categories, processing purposes, operations, legal bases, recipients, technical and organisational measures. Choose vocabulary dpv_pd to focus on personal data categories. Input must be plain UTF-8 text, one document per input file; convert PDFs to text first. Runs asynchronously and may take a few minutes per document. Not for tables or general named-entity recognition.",
+  "instructions": "Use when a pipeline must identify privacy and data-protection concepts in text according to the W3C Data Privacy Vocabulary (DPV): personal data categories, processing purposes, operations, legal bases, recipients, technical and organisational measures. Choose vocabulary dpv_pd to focus on personal data categories. Input must be plain UTF-8 text, one document per input file; convert PDFs to text first. Runs asynchronously and may take a few minutes per document. By default (Output 'Input with annotations') the step publishes its input (e.g. a transcript) with the DPV result under 'dpv', so a later step in a chain still gets the text. Not for tables or general named-entity recognition.",
   "tags": ["privacy", "dpv", "gdpr", "annotation", "ner", "datapact"]
 }
