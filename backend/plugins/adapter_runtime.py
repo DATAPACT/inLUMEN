@@ -246,13 +246,45 @@ def _set_dotted(document, dotted, value):
     target[parts[-1]] = value
 
 
+# Text fields of structured upstream results, most specific first: a
+# transcript JSON carries "transcript" next to segments, timings and metadata.
+TEXT_FIELDS = ("transcript", "text", "content", "body")
+
+
 def _input_text(input_file):
+    """Return the text a plugin should process from one input file.
+
+    Plain text is sent as is. A JSON document is not text to annotate: its
+    text field is sent instead of the whole document with its keys, numbers
+    and metadata (which can also exceed a tool's size limit).
+    """
     try:
-        return Path(input_file["path"]).read_text(encoding="utf-8")
+        raw = Path(input_file["path"]).read_text(encoding="utf-8")
     except UnicodeDecodeError:
         raise PluginCallError(
             f"Input {input_file['filename']!r} must be UTF-8 text for this plugin."
         ) from None
+    looks_json = str(input_file.get("filename") or "").lower().endswith(".json") or (
+        raw.lstrip()[:1] in {"{", "["}
+    )
+    if not looks_json:
+        return raw
+    try:
+        document = json.loads(raw)
+    except ValueError:
+        return raw
+    if isinstance(document, str):
+        return document
+    if isinstance(document, dict):
+        for field in TEXT_FIELDS:
+            value = document.get(field)
+            if isinstance(value, str) and value.strip():
+                return value
+    raise PluginCallError(
+        f"Input {input_file['filename']!r} is a JSON document without a text field "
+        f"({', '.join(TEXT_FIELDS)}); {_plugin_name()!r} needs text. Connect a step "
+        "that produces text, or add a Task that extracts it."
+    )
 
 
 def _timeout(default):

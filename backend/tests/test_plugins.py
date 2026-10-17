@@ -194,6 +194,72 @@ class BuiltinPluginsTest(unittest.TestCase):
             store._ENGINE.dispose()
             store._ENGINE = None
 
+    def _run_wikifier(self, filename, content):
+        """Run the Wikifier step against a local mock; return the form it received."""
+        import urllib.parse
+        from http.server import BaseHTTPRequestHandler
+
+        received = {}
+
+        class Wikifier(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                body = self.rfile.read(int(self.headers["Content-Length"])).decode()
+                received["form"] = dict(urllib.parse.parse_qsl(body))
+                payload = json.dumps({"annotations": [], "words": [], "spaces": [""]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Wikifier)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        manifest = validate_plugin_manifest(json.loads(WIKIFIER_PATH.read_text().replace(
+            "https://www.wikifier.org", f"http://127.0.0.1:{server.server_address[1]}")))
+        step = {
+            "flow_id": "w", "type": "task", "template": "plugin:jsi.wikifier",
+            "param": {"operation": "annotate", "lang": "en", "user_key": ""},
+            "secret_params": ["user_key"],
+        }
+        source = plugin_main_source(plugin_runtime_spec(step, manifest))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "in").mkdir()
+            (root / "in" / filename).write_text(content, encoding="utf-8")
+            with patch.dict(os.environ, {
+                "PIPELINE_INPUT_DIR": str(root / "in"),
+                "PIPELINE_OUTPUT_DIR": str(root / "out"),
+                "INLUMEN_PARAM_USER_KEY": "k" * 30,
+            }):
+                os.environ.pop("INLUMEN_INPUT_MANIFEST", None)
+                exec(compile(source, "wikifier-main.py", "exec"), {"__name__": "__main__"})
+        return received
+
+    def test_plugins_receive_the_transcript_of_a_speech_to_text_result(self):
+        transcript = "Thank you for calling NordKart support. This is Sarah."
+        result = {
+            "text": transcript, "transcript": transcript, "language": "en",
+            "segments": [{"start": 0.0, "end": 2.5, "text": transcript,
+                          "words": [{"word": word, "start": 0.1, "probability": 0.99} for word in transcript.split()]}] * 40,
+            "processing_metadata": {"model_id": "Systran/faster-whisper-medium"},
+        }
+        received = self._run_wikifier("speech_to_text.json", json.dumps(result))
+        self.assertEqual(transcript, received["form"]["text"])
+
+    def test_plugins_receive_plain_text_unchanged(self):
+        received = self._run_wikifier("notes.txt", '{not json} Rome is in Italy.')
+        self.assertEqual('{not json} Rome is in Italy.', received["form"]["text"])
+
+    def test_json_without_text_fails_before_calling_the_tool(self):
+        with self.assertRaises(BaseException) as raised:
+            self._run_wikifier("table.json", json.dumps([{"a": 1}]))
+        self.assertIn("without a text field", str(raised.exception))
+
     def test_wikifier_sends_a_form_with_text_and_user_key(self):
         import urllib.parse
         from http.server import BaseHTTPRequestHandler
