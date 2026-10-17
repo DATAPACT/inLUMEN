@@ -79,13 +79,22 @@ def runner_request(
     return parsed
 
 
-def runner_raw_request(method: str, path: str) -> tuple[bytes, str, str | None]:
+def runner_raw_response(
+    method: str,
+    path: str,
+    *,
+    params: dict[str, Any] | None = None,
+) -> tuple[bytes, Any]:
+    """Return the raw body and response headers of a runner request."""
     if not RUNNER_SERVICE_API_KEY:
         raise PipelineRunnerError(
             503, "Pipeline runner authentication is not configured."
         )
+    url = f"{RUNNER_SERVICE_URL}{path}"
+    if params:
+        url = f"{url}?{urlencode(params)}"
     request = Request(
-        f"{RUNNER_SERVICE_URL}{path}",
+        url,
         headers={
             "Accept": "*/*",
             "Authorization": f"Bearer {RUNNER_SERVICE_API_KEY}",
@@ -95,11 +104,7 @@ def runner_raw_request(method: str, path: str) -> tuple[bytes, str, str | None]:
     )
     try:
         with urlopen(request, timeout=RUNNER_REQUEST_TIMEOUT_SECONDS) as response:
-            return (
-                response.read(),
-                response.headers.get_content_type(),
-                response.headers.get("Content-Disposition"),
-            )
+            return response.read(), response.headers
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise _runner_error(exc.code, body) from exc
@@ -109,6 +114,16 @@ def runner_raw_request(method: str, path: str) -> tuple[bytes, str, str | None]:
             f"Pipeline runner is unavailable at {RUNNER_SERVICE_URL}.",
             str(exc.reason),
         ) from exc
+
+
+def runner_raw_request(
+    method: str,
+    path: str,
+    *,
+    params: dict[str, Any] | None = None,
+) -> tuple[bytes, str, str | None]:
+    body, headers = runner_raw_response(method, path, params=params)
+    return body, headers.get_content_type(), headers.get("Content-Disposition")
 
 
 def _runner_error(status_code: int, body: str) -> PipelineRunnerError:

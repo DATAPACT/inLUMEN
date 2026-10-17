@@ -22,9 +22,19 @@
     },
     "outputs": {
       "type": "array",
-      "maxItems": 1,
       "items": {
         "$ref": "#/$defs/artifact"
+      },
+      "description": "One artifact per output port. Several outputs each name their distinct port.",
+      "if": {
+        "minItems": 2
+      },
+      "then": {
+        "items": {
+          "required": [
+            "port"
+          ]
+        }
       }
     }
   },
@@ -68,6 +78,13 @@
           "items": {
             "$ref": "#/$defs/artifact"
           }
+        },
+        "port": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_port": {
+          "type": "string"
         }
       }
     }

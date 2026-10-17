@@ -26,7 +26,7 @@ class FakeDagsterExecutor:
         self.secrets_seen: dict[str, str] = {}
         self.files_seen: list[dict] = []
 
-    async def execute(self, run_id, files, runtime_secrets):
+    async def execute(self, run_id, files, runtime_secrets, options=None):
         self.secrets_seen = dict(runtime_secrets)
         self.files_seen = [dict(item) for item in files]
         await asyncio.sleep(self.delay)
@@ -99,7 +99,7 @@ class ProgressDagsterExecutor(FakeDagsterExecutor):
 
 
 class SecretFailureExecutor(FakeDagsterExecutor):
-    async def execute(self, run_id, files, runtime_secrets):
+    async def execute(self, run_id, files, runtime_secrets, options=None):
         secret = runtime_secrets["INLUMEN_SECRET_NODE_1_API_KEY"]
         return {
             "ok": False,
@@ -538,6 +538,155 @@ async def test_clear_blocks_late_callbacks_from_another_worker(tmp_path):
     PipelineRunStore(path).save(stale)
     assert store.get(run['run_id']) is None
 
+
+class PartialFailureExecutor(FakeDagsterExecutor):
+    async def execute(self, run_id, files, runtime_secrets, options=None):
+        failed = await FakeDagsterExecutor(succeeds=False).execute(
+            run_id, files, runtime_secrets
+        )
+        failed["run_outputs"] = [
+            {
+                "path": "outputs/node-0-load/data.csv",
+                "filename": "data.csv",
+                "content": "a,b\n1,2\n",
+                "content_encoding": "utf-8",
+                "content_type": "text/csv",
+                "size_bytes": 8,
+                "source_node": "0",
+                "node_label": "Load",
+                "port": "output",
+                "output_role": "intermediate",
+            }
+        ]
+        return failed
+
+
+@pytest.mark.asyncio
+async def test_failed_run_keeps_outputs_of_completed_steps_and_maps_node_events():
+    manager = PipelineRunManager(
+        PipelineRunStore(":memory:"), adapter="dagster", executor=PartialFailureExecutor()
+    )
+    run_request = request(key="partial-failure")
+    run_request.snapshot.bundle_manifest = {
+        "targets": {"dagster": True},
+        "nodes": [{"flow_id": "1", "asset_key": "node_1_task"}],
+    }
+
+    queued, _created = await manager.start(run_request)
+    await manager.tasks[queued["run_id"]]
+
+    failed = manager.get(queued["run_id"])
+    assert failed["status"] == "failed"
+    assert failed["result"]["outputs"] == [
+        {
+            "path": "outputs/node-0-load/data.csv",
+            "filename": "data.csv",
+            "content_type": "text/csv",
+            "size_bytes": 8,
+            "source_node": "0",
+            "node_label": "Load",
+            "port": "output",
+            "output_role": "intermediate",
+        }
+    ]
+    assert manager.output(queued["run_id"], "outputs/node-0-load/data.csv")[0] == b"a,b\n1,2\n"
+    node_events = [
+        event
+        for event in manager.events(queued["run_id"])["events"]
+        if event["type"].startswith("node.")
+    ]
+    assert node_events
+    assert {event.get("flow_id") for event in node_events} == {"1"}
+
+
+class ReferenceExecutor(FakeDagsterExecutor):
+    async def execute(self, run_id, files, runtime_secrets, options=None):
+        return {
+            "ok": True,
+            "validation_report": {"ok": True},
+            "run_outputs": [{
+                "path": "outputs/node-1/big.csv", "filename": "big.csv", "content_type": "text/csv",
+                "size_bytes": 10_000_000, "sha256": "sha256:abc", "source_node": "1",
+                "storage": "minio", "bucket": "run-artifacts-local", "key": f"runs/{run_id}/outputs/node-1/big.csv",
+            }],
+            "step_receipts": [{
+                "flow_id": "1", "node_label": "Clean", "status": "succeeded", "asset_key": "node_1_clean",
+                "started_at": 1.0, "finished_at": 2.0,
+                "connections": [{"source_node": "0", "source_port": "data", "target_port": "input",
+                                 "filename": "in.csv", "connection_id": "x"}],
+                "inputs": [{"path": "in.csv", "size_bytes": 5, "sha256": "aaa", "content_type": "text/csv"}],
+                "outputs": [{"path": "output/big.csv", "size_bytes": 10_000_000, "sha256": "abc"}],
+            }],
+            "artifact_storage_warning": "",
+        }
+
+
+@pytest.mark.asyncio
+async def test_object_stored_outputs_are_kept_as_references_with_step_lineage(tmp_path):
+    manager = PipelineRunManager(
+        PipelineRunStore(":memory:"),
+        adapter="dagster",
+        executor=ReferenceExecutor(),
+        artifact_store=PipelineArtifactStore(tmp_path / "artifacts"),
+    )
+    queued, _created = await manager.start(request(key="reference-run"))
+    await manager.tasks[queued["run_id"]]
+
+    run = manager.get(queued["run_id"])
+    [output] = run["result"]["outputs"]
+    assert (output["storage"], output["bucket"], output["key"]) == (
+        "minio", "run-artifacts-local", f"runs/{queued['run_id']}/outputs/node-1/big.csv",
+    )
+    assert manager.output(queued["run_id"], "outputs/node-1/big.csv") is None
+    assert not list((tmp_path / "artifacts").rglob("big.csv"))
+    [step] = run["result"]["steps"]
+    assert step["flow_id"] == "1"
+    assert step["connections"] == [{"source_node": "0", "source_port": "data", "target_port": "input", "filename": "in.csv"}]
+    assert step["inputs"] == [{"path": "in.csv", "size_bytes": 5, "sha256": "aaa"}]
+    assert "asset_key" not in step
+
+
+class CachingExecutor(FakeDagsterExecutor):
+    def __init__(self):
+        super().__init__()
+        self.options_seen = None
+
+    async def execute(self, run_id, files, runtime_secrets, options=None):
+        self.options_seen = options
+        return {
+            "ok": True,
+            "validation_report": {"ok": True, "dagster": {"steps": [{"name": "materialize", "output": (
+                "dagster - node_1_task - STEP_START - running\n"
+                "INLUMEN_CACHE_HIT node_1_task\n"
+                "dagster - node_1_task - STEP_SUCCESS - done\n"
+            )}]}},
+            "run_outputs": [],
+            "step_receipts": [{"flow_id": "1", "status": "succeeded", "cached": True}],
+        }
+
+
+@pytest.mark.asyncio
+async def test_run_options_reach_the_executor_and_cache_hits_are_reported():
+    executor = CachingExecutor()
+    manager = PipelineRunManager(PipelineRunStore(":memory:"), adapter="dagster", executor=executor)
+    run_request = request(key="cached-run").model_copy(update={
+        "execution_options": {"cache": "reuse", "rerun_from": "2"},
+    })
+    run_request = type(run_request).model_validate(run_request.model_dump())
+
+    queued, _created = await manager.start(run_request)
+    await manager.tasks[queued["run_id"]]
+
+    assert executor.options_seen == {"cache": "reuse", "rerun_from": "2"}
+    events = manager.events(queued["run_id"])["events"]
+    cached = [event for event in events if event["type"] == "node.cached"]
+    assert len(cached) == 1 and "reused an earlier result" in cached[0]["message"]
+    assert manager.get(queued["run_id"])["result"]["steps"][0]["cached"] is True
+
+
+def test_run_options_are_validated():
+    with pytest.raises(ValueError):
+        CreatePipelineRunRequest.model_validate({**request().model_dump(), "execution_options": {"cache": "sometimes"}})
 
 
 def test_root_failure_reports_errors_raised_by_plugins_and_steps():

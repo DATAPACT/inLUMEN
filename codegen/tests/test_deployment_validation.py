@@ -233,6 +233,62 @@ class DeploymentInputContractValidationTest(unittest.TestCase):
 
         self.assertEqual("outputs/node-1/result.txt", outputs[0]["path"])
 
+    def test_run_outputs_are_tagged_with_their_producing_step(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "run-spec.json").write_text(
+                json.dumps(
+                    {
+                        "nodes": [
+                            {
+                                "id": "1",
+                                "label": "Clean",
+                                "output_path": "outputs/node-1-clean",
+                                "outputs": [{"id": "output"}],
+                                "parents": [],
+                            },
+                            {
+                                "id": "2",
+                                "label": "Split",
+                                "output_path": "outputs/node-2-split",
+                                "outputs": [{"id": "train"}, {"id": "test"}],
+                                "parents": ["1"],
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            for relative in (
+                "outputs/node-1-clean/run-uuid/output/clean.csv",
+                "outputs/node-2-split/run-uuid/train/data.csv",
+                "outputs/node-2-split/run-uuid/test/data.csv",
+            ):
+                staged = root / relative
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                staged.write_text("a,b\n1,2\n", encoding="utf-8")
+
+            outputs = {item["path"]: item for item in _read_run_output_files(root)}
+
+        self.assertEqual(
+            {
+                "outputs/node-1-clean/clean.csv",
+                "outputs/node-2-split/train/data.csv",
+                "outputs/node-2-split/test/data.csv",
+            },
+            set(outputs),
+        )
+        clean = outputs["outputs/node-1-clean/clean.csv"]
+        self.assertEqual("1", clean["source_node"])
+        self.assertEqual("1", clean["flow_id"])
+        self.assertEqual("Clean", clean["node_label"])
+        self.assertEqual("output", clean["port"])
+        self.assertEqual("intermediate", clean["output_role"])
+        train = outputs["outputs/node-2-split/train/data.csv"]
+        self.assertEqual("2", train["source_node"])
+        self.assertEqual("train", train["port"])
+        self.assertEqual("final", train["output_role"])
+
     def test_validation_rejects_run_spec_node_drift(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

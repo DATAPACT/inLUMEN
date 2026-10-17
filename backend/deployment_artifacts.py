@@ -9,7 +9,7 @@ from urllib.parse import unquote, urlsplit
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import InvalidWheelFilename, parse_wheel_filename
 
-from artifact_runtime import ArtifactContractError, CONTRACT_ID, validate_connection_contract, validate_declaration
+from artifact_runtime import ArtifactContractError, CONTRACT_ID, assign_output_ports, validate_connection_contract, validate_declaration
 from artifact_content import decode_artifact_content, verify_artifact_integrity
 from artifact_contract import ArtifactBinding, artifact_bindings, classify_artifact
 from connector_catalog import connector_definition
@@ -127,11 +127,6 @@ def publish_staged_directory(staging, destination):
 
 command = json.loads(sys.argv[1])
 ports = [str(value).strip() for value in json.loads(sys.argv[2]) if str(value).strip()]
-if len(ports) > 1:
-    raise RuntimeError(
-        "The flat Task workspace supports exactly one logical output set; "
-        "fan out one output to multiple consumers or add an explicit split Task."
-    )
 requirements = json.loads(sys.argv[3])
 staging_roots = [Path(value) for value in json.loads(sys.argv[4])]
 missing = [
@@ -162,11 +157,13 @@ if contract.get("contract_id") == CONTRACT_ID:
         raise SystemExit(result.returncode)
     receipt = work / "outputs.json"
     actual = json.loads(receipt.read_text()).get("outputs") if receipt.is_file() else None
-    if contract.get("outputs") or ports:
+    validated = (
         validate_result(output, contract.get("outputs", []), actual, producer=os.environ.get("INLUMEN_FLOW_ID", "producer"))
+        if contract.get("outputs") or ports
+        else []
+    )
     published.mkdir(parents=True, exist_ok=True)
-    target = published / (ports[0] if ports else "result")
-    publish_artifact_directory(output, target)
+    publish_port_artifacts(output, validated, published, ports[0] if ports else "result")
     raise SystemExit(0)
 if staging_roots:
     input_dir = Path(os.environ["PIPELINE_INPUT_DIR"])
@@ -291,7 +288,7 @@ def _step_runtime_parameters(step: dict[str, Any]) -> dict[str, Any]:
         str(key): value
         for key, value in (step.get("param") or {}).items()
         if str(key).strip()
-        and str(key) != "model_plan"
+        and str(key) not in {"model_plan", "output_artifacts"}
         and str(key) not in secret_names
     }
 
@@ -757,15 +754,14 @@ def _validate_flat_task_output_contract(steps: Sequence[dict]) -> None:
             for port in ((step.get("ports") or {}).get("outputs") or [])
             if isinstance(port, dict) and _clean_string(port.get("id"))
         ]
-        if len(output_ports) == 1:
+        if output_ports:
             continue
         step_id = _clean_string(step.get("flow_id")) or "<unknown>"
         label = _clean_string(step.get("label"))
         description = f" ({label})" if label else ""
         errors.append(
-            f"Task {step_id}{description} declares {len(output_ports)} output ports; "
-            "the flat Task workspace supports exactly one logical output set. "
-            "Fan out that output to multiple consumers or add an explicit split Task."
+            f"Task {step_id}{description} declares no output port; "
+            "add an output port for the result it publishes."
         )
     if errors:
         raise DeploymentArtifactValidationError(
@@ -1284,8 +1280,20 @@ def _runtime_artifact_contract(step: dict, payload, *, require_current=False) ->
             contract["outputs"] = [declaration]
             contract["inputs"] = [declaration]
     outputs = contract.get("outputs", [])
-    if step.get("type") not in {"destination", "output"} and len(outputs) != 1:
-        raise DeploymentArtifactValidationError("Invalid artifact contract", [f"Node {step['flow_id']} must declare exactly one output artifact."])
+    if step.get("type") not in {"destination", "output"} and not outputs:
+        raise DeploymentArtifactValidationError("Invalid artifact contract", [f"Node {step['flow_id']} must declare at least one output artifact."])
+    if outputs:
+        port_ids = [
+            _clean_string(port.get("id"))
+            for port in ((step.get("ports") or {}).get("outputs") or [])
+            if isinstance(port, dict) and _clean_string(port.get("id"))
+        ]
+        try:
+            outputs = assign_output_ports(outputs, port_ids)
+        except ArtifactContractError as exc:
+            raise DeploymentArtifactValidationError(
+                "Invalid artifact contract", [f"Node {step['flow_id']}: {exc}"]
+            ) from exc
     contract["outputs"] = [validate_declaration(item) for item in outputs]
     contract["inputs"] = [validate_declaration(item) for item in contract.get("inputs", [])]
     return contract
@@ -1299,7 +1307,22 @@ def _declared_bindings(step, incoming, steps_by_id, payload, source_root):
     for binding in incoming:
         producer = steps_by_id[binding.source_node]
         contract = _runtime_artifact_contract(producer, payload, require_current=True)
-        output = contract["outputs"][0]
+        # A single declared artifact is routed to whichever port is active
+        # (control-flow branches publish it on one of several ports). With
+        # several declared artifacts, each producer port carries its own.
+        output = (
+            contract["outputs"][0]
+            if len(contract["outputs"]) == 1
+            else next(
+                (item for item in contract["outputs"] if item.get("port") == binding.source_port),
+                None,
+            )
+        )
+        if output is None:
+            raise DeploymentArtifactValidationError("Incompatible artifact connection", [
+                f"Node {binding.source_node} has no declared output on port {binding.source_port!r}; "
+                f"its outputs publish to {[item.get('port') for item in contract['outputs']]}."
+            ])
         connection_id = f"{binding.source_node}:{binding.source_port}->{binding.target_node}:{binding.target_port}"
         expected = next((item for item in [*target_contract.get("inputs", []), *target_contract.get("input_requirements", [])]
             if (not item.get("source_node") and not item.get("connection_id") and item.get("target_port") == binding.target_port) or item.get("connection_id") == connection_id or
@@ -2643,7 +2666,7 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
             runtime_parameters = {
                 str(key): value
                 for key, value in self.parameters.items()
-                if str(key).strip() and str(key) != "model_plan"
+                if str(key).strip() and str(key) not in {"model_plan", "output_artifacts"}
             }
             if runtime_parameters:
                 env["INLUMEN_PARAMS_JSON"] = json.dumps(
@@ -4880,12 +4903,14 @@ def build_deployment_bundle_files(
 
     bundle_files: List[dict] = []
     node_entries = []
+    asset_names = _dagster_asset_names([steps_by_id[step_id] for step_id in ordered_ids])
     for step_id in ordered_ids:
         step = steps_by_id[step_id]
         node_dir = _bundle_node_dir(step)
         node_entries.append(
             {
                 "flow_id": step_id,
+                "asset_key": asset_names[step_id],
                 "label": step.get("label") or "",
                 "type": step.get("type") or "task",
                 "template": step.get("template") or "",

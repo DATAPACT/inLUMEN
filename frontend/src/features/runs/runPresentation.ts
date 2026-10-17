@@ -27,7 +27,18 @@ export type PresentedRunOutput = {
   contentType: string;
   sizeBytes: number | null;
   copies: number;
+  sourceNode: string;
+  nodeLabel: string;
+  port: string;
+  role: 'final' | 'intermediate' | '';
   source: RunOutput;
+};
+
+export type RunOutputStepGroup = {
+  key: string;
+  label: string;
+  role: PresentedRunOutput['role'];
+  outputs: PresentedRunOutput[];
 };
 
 const INTERNAL_OUTPUT_NAMES = new Set([
@@ -43,6 +54,7 @@ const normalizeOutput = (output: RunOutput, index: number): PresentedRunOutput |
     output.filename || path.split('/').pop() || `output-${index + 1}`,
   ).trim();
   const rawSize = Number(output.size_bytes);
+  const role = String(output.output_role || '').trim();
   return {
     path,
     filename,
@@ -50,6 +62,10 @@ const normalizeOutput = (output: RunOutput, index: number): PresentedRunOutput |
     contentType: String(output.content_type || '').trim(),
     sizeBytes: Number.isFinite(rawSize) && rawSize >= 0 ? rawSize : null,
     copies: 1,
+    sourceNode: String(output.source_node || '').trim(),
+    nodeLabel: String(output.node_label || '').trim(),
+    port: String(output.port || '').trim(),
+    role: role === 'final' || role === 'intermediate' ? role : '',
     source: output,
   };
 };
@@ -74,7 +90,8 @@ export const presentRunOutputs = (outputs: RunOutput[]) => {
   const all = [...uniqueByPath.values()];
   const primaryByName = new Map<string, PresentedRunOutput>();
   all.filter((output) => !isInternalRunOutput(output)).forEach((output) => {
-    const key = output.filename.toLocaleLowerCase();
+    // Same-named files from different steps are different results.
+    const key = `${output.sourceNode}\u0000${output.filename.toLocaleLowerCase()}`;
     const existing = primaryByName.get(key);
     if (existing) {
       existing.copies += 1;
@@ -89,13 +106,50 @@ export const presentRunOutputs = (outputs: RunOutput[]) => {
   };
 };
 
+const stepLabel = (output: PresentedRunOutput) =>
+  output.nodeLabel || (output.sourceNode ? `Step ${output.sourceNode}` : 'Other outputs');
+
+/** Group outputs by the step that produced them, final results first. */
+export const groupRunOutputsByStep = (outputs: PresentedRunOutput[]): RunOutputStepGroup[] => {
+  const groups = new Map<string, RunOutputStepGroup>();
+  outputs.forEach((output) => {
+    const key = output.sourceNode || '';
+    const group = groups.get(key) || {
+      key,
+      label: stepLabel(output),
+      role: output.role,
+      outputs: [],
+    };
+    group.outputs.push(output);
+    groups.set(key, group);
+  });
+  const rank = (group: RunOutputStepGroup) => (
+    group.role === 'final' ? 0 : group.role === 'intermediate' ? 1 : 2
+  );
+  return [...groups.values()].sort((left, right) => rank(left) - rank(right));
+};
+
+export const outputsForNode = (outputs: RunOutput[], nodeId: string) =>
+  presentRunOutputs(outputs).all.filter(
+    (output) => output.sourceNode === nodeId && !isInternalRunOutput(output),
+  );
+
 export const summarizeNodeEvents = (events: PipelineRunEvent[]) => {
   const latestByNode = new Map<string, PipelineRunEvent>();
+  const cachedNodes = new Set<string>();
   const unscoped: PipelineRunEvent[] = [];
   events.forEach((event) => {
     const nodeId = String(event.node_id || '').trim();
-    if (nodeId) latestByNode.set(nodeId, event);
-    else unscoped.push(event);
+    if (!nodeId) {
+      unscoped.push(event);
+      return;
+    }
+    if (event.type === 'node.cached') cachedNodes.add(nodeId);
+    // A reused step also reports completion; keep saying it was reused.
+    const keep = cachedNodes.has(nodeId) && event.type === 'node.completed'
+      ? latestByNode.get(nodeId) || event
+      : event;
+    latestByNode.set(nodeId, keep);
   });
   return [...unscoped, ...latestByNode.values()]
     .sort((left, right) => left.id - right.id)

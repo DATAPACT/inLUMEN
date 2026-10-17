@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .artifact_runtime import ArtifactContractError, validate_declaration
+from .artifact_runtime import ArtifactContractError, assign_output_ports, validate_declaration
 from .task_package_contract import public_manifest, validate_package
 from .generation_budget import budgeted
 from .llm import (
@@ -250,8 +250,8 @@ async def build_and_validate_node(
         files=files,
         runtime_constraints=request.context.runtime_constraints,
     )
-    if not is_output_node_kind(request.context.target_node.type) and len(data_contract.outputs) != 1:
-        validation.errors.append("Producing nodes must declare exactly one output artifact; declare a directory bundle for multiple files.")
+    if not is_output_node_kind(request.context.target_node.type) and not data_contract.outputs:
+        validation.errors.append("Producing nodes must declare at least one output artifact.")
         validation.status = "invalid"
     merge_validation_report(
         validation,
@@ -619,6 +619,7 @@ def build_pipeline_generation_plan(
             FileDescriptor(
                 filename=artifact_filename(edge.source, output),
                 source_node=edge.source,
+                source_port=edge.source_port,
                 connection_id=edge.id or f"{edge.source}:{edge.source_port}->{edge.target}:{edge.target_port}",
                 target_port=edge.target_port,
                 representation=output.representation,
@@ -631,7 +632,7 @@ def build_pipeline_generation_plan(
                 semantic_role=output.semantic_role,
             )
             for edge in incoming_edges
-            for output in outputs_by_node[edge.source]
+            for output in outputs_for_port(outputs_by_node[edge.source], edge.source_port)
         ]
         available_inputs = [*node.files, *inherited_inputs]
         expected_outputs = expected_outputs_for_node(
@@ -639,8 +640,17 @@ def build_pipeline_generation_plan(
             child_ids,
             available_inputs,
         )
-        if not is_output_node_kind(node.type) and len(expected_outputs) != 1:
-            raise ValueError(f"Node {flow_id} must declare exactly one output artifact")
+        if not is_output_node_kind(node.type) and not expected_outputs:
+            raise ValueError(f"Node {flow_id} must declare at least one output artifact")
+        if expected_outputs:
+            try:
+                assigned = assign_output_ports(
+                    [item.model_dump(mode="json") for item in expected_outputs],
+                    [str(port.get("id")) for port in (node.ports or {}).get("outputs") or [] if port.get("id")],
+                )
+            except ArtifactContractError as exc:
+                raise ValueError(f"Node {flow_id}: {exc}") from exc
+            expected_outputs = [ExpectedArtifact.model_validate(item) for item in assigned]
         for declaration in expected_outputs:
             validate_declaration(declaration.model_dump(mode="json"))
         outputs_by_node[flow_id] = expected_outputs
@@ -1172,7 +1182,12 @@ async def generate_pipeline_script_bundles_node_first(
                            if item.connection_id == (edge.id or f"{edge.source}:{edge.source_port}->{edge.target}:{edge.target_port}")]
                 materialized = handoff_outputs_by_node.get(edge.source, [])
                 for descriptor in planned:
-                    sample = materialized[0].sample if len(materialized) == 1 else descriptor.sample
+                    produced = [
+                        item for item in materialized
+                        if len(materialized) == 1
+                        or Path(str(item.filename or "")).name == Path(descriptor.filename).name
+                    ]
+                    sample = produced[0].sample if len(produced) == 1 else descriptor.sample
                     inherited_inputs.append(descriptor.model_copy(update={"sample": sample}))
             available_inputs = [*node.files, *inherited_inputs]
             node_required_packages = required_packages_for_node(
@@ -1523,7 +1538,7 @@ def build_edge_contracts(
             connection_id=edge.id or f"{edge.source}:{edge.source_port}->{edge.target}:{edge.target_port}",
             source_port=edge.source_port,
             target_port=edge.target_port,
-            outputs=outputs_by_node.get(edge.source, []),
+            outputs=outputs_for_port(outputs_by_node.get(edge.source, []), edge.source_port),
         )
         for edge in graph.edges
         if edge.source in outputs_by_node
@@ -1772,6 +1787,28 @@ def sanitize_fragment(value: str) -> str:
     return text or "node"
 
 
+def outputs_for_port(outputs: list[ExpectedArtifact], port: str) -> list[ExpectedArtifact]:
+    """Return the artifact a connection from ``port`` carries.
+
+    A single declared artifact is routed to whichever port is active
+    (control-flow branches); several artifacts are bound by their port.
+    """
+    if len(outputs) <= 1:
+        return outputs
+    return [output for output in outputs if output.port == port]
+
+
+def _declared_output_artifacts(node) -> list[ExpectedArtifact] | None:
+    for source in (node.implementation or {}, node.parameters or {}):
+        plural = source.get("output_artifacts")
+        if isinstance(plural, list) and plural:
+            return [ExpectedArtifact.model_validate(item) for item in plural if isinstance(item, dict)]
+        single = source.get("output_artifact")
+        if isinstance(single, dict):
+            return [ExpectedArtifact.model_validate(single)]
+    return None
+
+
 def expected_outputs_for_node(
     node,
     child_ids: list[str],
@@ -1791,9 +1828,9 @@ def expected_outputs_for_node(
     task = classify_node_task(node, inputs)
     task_name = f"final_{name}" if is_output_node_kind(node.type) else name
     if is_input_node_kind(node.type):
-        declared = (node.implementation or {}).get("output_artifact") or (node.parameters or {}).get("output_artifact")
-        if isinstance(declared, dict):
-            return [ExpectedArtifact.model_validate(declared)]
+        declared = _declared_output_artifacts(node)
+        if declared:
+            return declared
         if len(inputs) > 1:
             raise ValueError(f"Source {node.flow_id} has multiple files; declare output_artifact as a directory bundle")
         if len(inputs) == 1:
@@ -1802,9 +1839,9 @@ def expected_outputs_for_node(
                 kind=item.kind or "binary", representation=item.representation,
                 format=item.format, schema=item.schema, columns=item.columns,
                 required_columns=item.required_columns, semantic_role=item.semantic_role)]
-    declared = (node.implementation or {}).get("output_artifact") or (node.parameters or {}).get("output_artifact")
-    if isinstance(declared, dict):
-        return [ExpectedArtifact.model_validate(declared)]
+    declared = _declared_output_artifacts(node)
+    if declared:
+        return declared
     if task == "speech_to_text":
         return [
             ExpectedArtifact(

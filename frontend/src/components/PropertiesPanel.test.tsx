@@ -260,7 +260,41 @@ describe("PropertiesPanel", () => {
     expect(container.textContent).not.toContain("Generate with AI");
     expect((container.querySelector("#plugin-parameter-entities") as HTMLSelectElement).value).toBe("email");
     expect((container.querySelector("#plugin-parameter-api_key") as HTMLInputElement).type).toBe("password");
+    expect(container.textContent).not.toContain("Add output");
     await act(async () => root.unmount());
     setPluginRegistryState({ plugins: [] });
+  });
+
+  it("stores Task outputs as a hidden parameter and keeps connected outputs locked", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const onNodeUpdate = vi.fn();
+    const task = (data: Record<string, unknown>): Node<PropertyNodeData> => ({
+      id: "split", type: "custom", position: { x: 0, y: 0 },
+      data: { type: "task", label: "Split", param: { threshold: "2" }, ...data },
+    });
+    await act(async () => root.render(<PropertiesPanel selectedNode={task({
+      connected_ports: { inputs: [], outputs: ["output"] },
+    })} onNodeUpdate={onNodeUpdate} />));
+    const button = (label: string) => [...container.querySelectorAll("button")].find((item) => item.textContent?.includes(label))!;
+    await act(async () => button("Add output").dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    const file = container.querySelector('input[aria-label="File published on output_2"]') as HTMLInputElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(file, "report.json");
+      file.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const update = onNodeUpdate.mock.lastCall![1];
+    expect(update.ports.outputs.map((port: { id: string }) => port.id)).toEqual(["output", "output_2"]);
+    expect(update.param).toEqual({
+      threshold: "2",
+      output_artifacts: [{ name: "output_2", port: "output_2", filename: "report.json", kind: "json", format: "json" }],
+    });
+    expect(update.implementation?.output_artifacts).toBeUndefined();
+
+    // The canvas hands back the updated node without connected_ports.
+    await act(async () => root.render(<PropertiesPanel selectedNode={task({ ports: update.ports, param: update.param })} onNodeUpdate={onNodeUpdate} />));
+    expect((container.querySelector('input[aria-label="Output 1 name"]') as HTMLInputElement).disabled).toBe(true);
+    expect([...container.querySelectorAll("input")].some((input) => input.value === "output_artifacts")).toBe(false);
+    await act(async () => root.unmount());
   });
 });

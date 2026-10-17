@@ -51,12 +51,16 @@ class CodegenDagsterExecutor:
         run_id: str,
         files: list[dict[str, Any]],
         runtime_secrets: dict[str, str],
+        options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        options = options or {}
         accepted = await self._request("POST", "/v1/validate/deployment-bundle?background=true", {
             "execution_id": run_id, "files": files,
             "targets": {"argo": False, "dagster": True}, "mode": "validate",
             "validate_argo": False, "validate_dagster": True, "materialize": True,
             "timeout_seconds": self.timeout_seconds, "runtime_secrets": runtime_secrets,
+            "cache_mode": options.get("cache", "reuse"),
+            "rerun_from": options.get("rerun_from"),
         }, 30)
         # The worker now owns the durable snapshot. Release uploaded audio/code
         # while this coroutine only polls, rather than retaining every queued bundle.

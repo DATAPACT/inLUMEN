@@ -36,6 +36,8 @@ PYTHON_ERROR_PATTERN = re.compile(
     r":\s*(?P<message>.+)$",
     re.MULTILINE,
 )
+# Logged by a step that reused an earlier result instead of running.
+NODE_CACHE_HIT_PATTERN = re.compile(r"INLUMEN_CACHE_HIT\s+(?P<node>node_[A-Za-z0-9_]+)")
 NODE_HEARTBEAT_PATTERN = re.compile(
     r"Node\s+(?P<node>node_[A-Za-z0-9_]+)\s+is still running\s+"
     r"\((?P<elapsed>\d+)s elapsed\)\."
@@ -51,6 +53,7 @@ class DagsterExecutor(Protocol):
         run_id: str,
         files: list[dict[str, Any]],
         runtime_secrets: dict[str, str],
+        options: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 
     async def cancel(self, run_id: str) -> None: ...
@@ -250,6 +253,7 @@ class PipelineRunManager:
                     run_id, files, request.workspace_id
                 ),
                 "_bundle_manifest": deepcopy(request.snapshot.bundle_manifest),
+                "_execution_options": request.execution_options.model_dump(exclude_none=True),
                 "_runtime_secret_names": sorted(request.runtime_secrets),
                 "_output_files": [],
                 "_idempotency_key": key,
@@ -302,28 +306,45 @@ class PipelineRunManager:
         }
 
     def output(
-        self, run_id: str, path: str, workspace_id: str | None = None
-    ) -> tuple[bytes, str, str] | None:
+        self,
+        run_id: str,
+        path: str,
+        workspace_id: str | None = None,
+        *,
+        offset: int = 0,
+        length: int | None = None,
+    ) -> tuple[bytes, str, str, int] | None:
+        """Return (bytes, content type, filename, total size) for an output.
+
+        ``offset``/``length`` select a byte window so previews never need to
+        load a large output whole.
+        """
         record = self.store.get(run_id, workspace_id)
         if record is None:
             return None
         for entry in record.get("_output_files", []):
             if str(entry.get("path") or "") != path:
                 continue
+            if entry.get("storage") == "minio":
+                return None  # The backend reads object-stored outputs directly.
             storage_path = str(entry.get("_storage_path") or "")
             if storage_path:
-                body = self.artifact_store.read_output(storage_path)
+                body, size = self.artifact_store.read_output(storage_path, offset, length)
             else:
                 content = str(entry.get("content") or "")
-                body = (
+                full = (
                     base64.b64decode(content, validate=True)
                     if str(entry.get("content_encoding") or "") == "base64"
                     else content.encode("utf-8")
                 )
+                size = len(full)
+                start = min(max(offset, 0), size)
+                body = full[start:] if length is None else full[start : start + max(length, 0)]
             return (
                 body,
                 str(entry.get("content_type") or "application/octet-stream"),
                 str(entry.get("filename") or PurePosixPath(path).name or "output"),
+                size,
             )
         return None
 
@@ -538,6 +559,7 @@ class PipelineRunManager:
                     run_id,
                     self._bundle_files(record),
                     runtime_secrets,
+                    deepcopy(record.get("_execution_options") or {}),
                 )
             finally:
                 progress_task.cancel()
@@ -559,6 +581,7 @@ class PipelineRunManager:
             validation_report = (
                 validation_report if isinstance(validation_report, dict) else {}
             )
+            output_files = self._store_run_outputs(record, response)
             if not response.get("ok"):
                 errors = validation_report.get("errors") or [
                     "Dagster pipeline execution failed."
@@ -573,16 +596,9 @@ class PipelineRunManager:
                         )
                     },
                 }
-                self._finish_failed(record, error)
+                self._finish_failed(record, error, outputs=output_files)
                 return
 
-            outputs = response.get("run_outputs")
-            output_files = [item for item in outputs or [] if isinstance(item, dict)]
-            record["_output_files"] = self.artifact_store.store_outputs(
-                run_id,
-                output_files,
-                str(record.get("workspace_id") or "local-workspace"),
-            )
             now = utc_now_iso()
             record["status"] = "succeeded"
             record["updated_at"] = now
@@ -691,6 +707,8 @@ class PipelineRunManager:
                 active_node_id = node_id
             elif active_node_id == node_id:
                 active_node_id = None
+
+        events_changed = self._append_cache_hits(record, logs, emitted) or events_changed
 
         current_progress = record.get("progress") or {}
         heartbeat_matches = list(NODE_HEARTBEAT_PATTERN.finditer(logs))
@@ -809,6 +827,7 @@ class PipelineRunManager:
                     f"{self._node_display_name(node_id)} {action}.",
                     node_id=node_id,
                 )
+            self._append_cache_hits(record, decoded_output, emitted_node_events)
             failure = self._root_failure(decoded_output)
             if failure:
                 failed_node_match = next(
@@ -900,6 +919,25 @@ class PipelineRunManager:
             "resource_memory_bytes": progress.get("resource_memory_bytes"),
         }
 
+    def _append_cache_hits(
+        self, record: dict[str, Any], logs: str, emitted: set[tuple[str, ...]]
+    ) -> bool:
+        changed = False
+        for match in NODE_CACHE_HIT_PATTERN.finditer(logs):
+            node_id = match.group("node")
+            if (node_id, "cached") in emitted:
+                continue
+            emitted.add((node_id, "cached"))
+            self._append_event(
+                record,
+                "node.cached",
+                "succeeded",
+                f"{self._node_display_name(node_id)} reused an earlier result.",
+                node_id=node_id,
+            )
+            changed = True
+        return changed
+
     @staticmethod
     def _node_display_name(node_id: str) -> str:
         name = re.sub(r"^node_\d+_?", "", node_id).replace("_", " ").strip()
@@ -970,7 +1008,58 @@ class PipelineRunManager:
         )
         self._save_terminal_record(record)
 
-    def _finish_failed(self, record: dict[str, Any], error: dict[str, Any]) -> None:
+    def _store_run_outputs(
+        self, record: dict[str, Any], response: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        outputs = response.get("run_outputs")
+        output_files = [item for item in outputs or [] if isinstance(item, dict)]
+        record["_output_files"] = self.artifact_store.store_outputs(
+            record["run_id"],
+            output_files,
+            str(record.get("workspace_id") or "local-workspace"),
+        )
+        receipts = response.get("step_receipts")
+        record["_step_receipts"] = [
+            self._step_summary(item) for item in receipts or [] if isinstance(item, dict)
+        ]
+        warning = str(response.get("artifact_storage_warning") or "").strip()
+        if warning:
+            self._append_event(record, "run.artifact_storage", None, warning)
+        return output_files
+
+    @staticmethod
+    def _step_summary(receipt: dict[str, Any]) -> dict[str, Any]:
+        """Keep the lineage facts of a step receipt: what it read and published."""
+        def files(items: Any) -> list[dict[str, Any]]:
+            return [
+                {key: item.get(key) for key in ("path", "size_bytes", "sha256") if item.get(key) is not None}
+                for item in items or []
+                if isinstance(item, dict)
+            ]
+
+        return {
+            "flow_id": str(receipt.get("flow_id") or ""),
+            "node_label": str(receipt.get("node_label") or ""),
+            "status": str(receipt.get("status") or ""),
+            "cached": bool(receipt.get("cached")),
+            "started_at": receipt.get("started_at"),
+            "finished_at": receipt.get("finished_at"),
+            "connections": [
+                {key: str(item.get(key) or "") for key in ("source_node", "source_port", "target_port", "filename")}
+                for item in receipt.get("connections") or []
+                if isinstance(item, dict)
+            ],
+            "inputs": files(receipt.get("inputs")),
+            "outputs": files(receipt.get("outputs")),
+        }
+
+    def _finish_failed(
+        self,
+        record: dict[str, Any],
+        error: dict[str, Any],
+        *,
+        outputs: list[dict[str, Any]] | None = None,
+    ) -> None:
         now = utc_now_iso()
         record["status"] = "failed"
         record["updated_at"] = now
@@ -984,7 +1073,12 @@ class PipelineRunManager:
             "active_node_name": None,
             "node_elapsed_seconds": None,
         }
-        record["result"] = self._terminal_result(record, "failed", error=error)
+        record["result"] = self._terminal_result(
+            record,
+            "failed",
+            error=error,
+            outputs=[self._output_metadata(item) for item in outputs or []],
+        )
         self._append_event(record, "run.failed", "failed", str(error["message"]))
         self._save_terminal_record(record)
 
@@ -1000,6 +1094,13 @@ class PipelineRunManager:
                 "content_type",
                 "size_bytes",
                 "sha256",
+                "source_node",
+                "node_label",
+                "port",
+                "output_role",
+                "storage",
+                "bucket",
+                "key",
             )
             if entry.get(key) is not None
         }
@@ -1024,6 +1125,8 @@ class PipelineRunManager:
         }
         if record.get("started_at"):
             result["started_at"] = record["started_at"]
+        if record.get("_step_receipts"):
+            result["steps"] = deepcopy(record["_step_receipts"])
         if error is not None:
             result["error"] = deepcopy(error)
         return result
@@ -1039,13 +1142,27 @@ class PipelineRunManager:
     ) -> None:
         cursor = int(record.get("event_cursor") or 0) + 1
         record["event_cursor"] = cursor
-        record.setdefault("_events", []).append(
-            {
-                "id": cursor,
-                "timestamp": utc_now_iso(),
-                "type": event_type,
-                "status": status,
-                "message": message,
-                "node_id": node_id,
-            }
-        )
+        event = {
+            "id": cursor,
+            "timestamp": utc_now_iso(),
+            "type": event_type,
+            "status": status,
+            "message": message,
+            "node_id": node_id,
+        }
+        flow_id = PipelineRunManager._flow_id_for_asset(record, node_id)
+        if flow_id:
+            event["flow_id"] = flow_id
+        record.setdefault("_events", []).append(event)
+
+    @staticmethod
+    def _flow_id_for_asset(record: dict[str, Any], node_id: str | None) -> str | None:
+        """Map a Dagster asset name to the canvas node that produced it."""
+        if not node_id:
+            return None
+        manifest = record.get("_bundle_manifest")
+        nodes = manifest.get("nodes") if isinstance(manifest, dict) else None
+        for node in nodes or []:
+            if isinstance(node, dict) and node.get("asset_key") == node_id:
+                return str(node.get("flow_id") or "") or None
+        return None

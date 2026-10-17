@@ -16,9 +16,15 @@ def test_generated_task_contains_public_portable_manifest():
     assert task_data_contract(json.loads(portable['inlumen.task.json']))==package['data_contract']
 
 
-def test_multiple_outputs_require_an_explicit_bundle():
+def test_multiple_outputs_require_a_distinct_port_each():
+    def request(outputs):
+        return {'context':{'target_node':{'flow_id':'task','type':'task','label':'Task'},'expected_outputs':outputs}}
     with pytest.raises(ValidationError):
-        GenerateNodeScriptRequest.model_validate({'context':{'target_node':{'flow_id':'task','type':'task','label':'Task'},'expected_outputs':[{'name':name,'filename':name+'.json','kind':'json'} for name in ['one','two']]}})
+        GenerateNodeScriptRequest.model_validate(request([{'name':name,'filename':name+'.json','kind':'json'} for name in ['one','two']]))
+    with pytest.raises(ValidationError):
+        GenerateNodeScriptRequest.model_validate(request([{'name':name,'filename':name+'.json','kind':'json','port':'same'} for name in ['one','two']]))
+    parsed = GenerateNodeScriptRequest.model_validate(request([{'name':name,'filename':name+'.json','kind':'json','port':name} for name in ['one','two']]))
+    assert [item.port for item in parsed.context.expected_outputs] == ['one','two']
 
 
 def test_sentiment_prefers_canonical_anonymized_transcript_over_original_alias():

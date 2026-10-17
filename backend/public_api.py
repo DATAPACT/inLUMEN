@@ -1761,11 +1761,48 @@ def _ui_api_openapi_paths(
                         "required": True,
                         "schema": {"type": "string", "minLength": 1},
                     },
+                    {
+                        "name": "disposition",
+                        "in": "query",
+                        "required": False,
+                        "description": "Use inline to display the artifact in the browser instead of saving it.",
+                        "schema": {"type": "string", "enum": ["attachment", "inline"], "default": "attachment"},
+                    },
                 ],
                 "responses": {
                     "200": {
                         "description": "Pipeline output artifact.",
                         "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}},
+                    },
+                    **not_found_responses,
+                },
+            },
+        },
+        "/api/pipeline-runs/{run_id}/preview/{output_path}": {
+            "get": {
+                "tags": ["Pipeline Runs"],
+                "summary": "Preview a produced pipeline artifact without downloading it",
+                "description": (
+                    "Returns a bounded preview: table rows (CSV, TSV, JSON Lines), a parsed JSON value, "
+                    "a text window, or metadata for media and binary files. Tables and text are paged by "
+                    "byte offset; pass next_offset from the previous response as offset to continue."
+                ),
+                "operationId": "previewPipelineRunOutput",
+                "parameters": [
+                    {"$ref": "#/components/parameters/RunId"},
+                    {
+                        "name": "output_path",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string", "minLength": 1},
+                    },
+                    {"name": "offset", "in": "query", "required": False, "schema": {"type": "integer", "minimum": 0}},
+                    {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer", "minimum": 1}},
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Bounded preview of the artifact.",
+                        "content": {"application/json": {"schema": {"type": "object", "additionalProperties": True}}},
                     },
                     **not_found_responses,
                 },
@@ -1927,7 +1964,7 @@ def _ui_api_openapi_paths(
         "/api/provenance/prov-o": {
             "get": {
                 "tags": ["Pipeline State"],
-                "summary": "Download PROV-O provenance as JSON-LD for a pipeline version",
+                "summary": "Download PROV-O provenance as JSON-LD for a pipeline version or run",
                 "operationId": "downloadProvOProvenance",
                 "parameters": [
                     {
@@ -1936,7 +1973,17 @@ def _ui_api_openapi_paths(
                         "required": False,
                         "schema": {"type": "string"},
                         "description": "Pipeline version uid. Defaults to the active version.",
-                    }
+                    },
+                    {
+                        "name": "run_id",
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "string"},
+                        "description": (
+                            "Pipeline run id. Returns the run's lineage instead: each step, the "
+                            "artifacts it used and generated, linked by content digest."
+                        ),
+                    },
                 ],
                 "responses": {
                     "200": {
@@ -2260,7 +2307,22 @@ def _ui_api_openapi_schemas() -> dict[str, Any]:
         "AnyObject": {"type": "object", "additionalProperties": True},
         "PipelineRunStartRequest": {
             "type": "object",
-            "properties": {"idempotency_key": {"type": "string", "maxLength": 200}},
+            "properties": {
+                "idempotency_key": {"type": "string", "maxLength": 200},
+                "cache": {
+                    "type": "string",
+                    "enum": ["reuse", "refresh"],
+                    "default": "reuse",
+                    "description": (
+                        "reuse takes earlier results of steps whose code, non-secret parameters "
+                        "and input content are unchanged; refresh runs every step again."
+                    ),
+                },
+                "rerun_from": {
+                    "type": "string",
+                    "description": "Step id to run again together with every step after it.",
+                },
+            },
             "additionalProperties": False,
         },
         "PipelineRunSnapshot": {

@@ -4,10 +4,13 @@ import argparse
 import base64
 import hashlib
 
+from .run_artifact_store import RunArtifactStore
+from .step_cache import CacheMode, StepCache, StepCachePlan, plan_step_cache
 from .security import EXECUTION_WORKSPACE
 import json
 import mimetypes
 import os
+import logging
 import shutil
 import subprocess
 import sys
@@ -16,7 +19,7 @@ import uuid
 import threading
 import time
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import docker
@@ -697,7 +700,15 @@ def _isolated_dagster_execution(
             name: str(allocation["cpu"])
             for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS")
         })
+        step_cache_dir = STEP_CACHE_DIRS.get(execution_id)
+        if step_cache_dir is not None:
+            environment["INLUMEN_STEP_CACHE_DIR"] = STEP_CACHE_MOUNT
         execution_volumes = {
+            **(
+                {str(step_cache_dir.resolve()): {"bind": STEP_CACHE_MOUNT, "mode": "ro"}}
+                if step_cache_dir is not None
+                else {}
+            ),
             str(runtime_dir.resolve()): {
                 "bind": "/runtime",
                 "mode": "rw",
@@ -2096,25 +2107,220 @@ def _read_repaired_bundle_files(bundle_root: Path) -> list[dict[str, Any]]:
     ]
 
 
-def _read_run_output_files(bundle_root: Path) -> list[dict[str, Any]]:
+_DEFAULT_OUTPUT_PORTS = frozenset({"output", "result"})
+
+
+def _run_output_nodes(bundle_root: Path) -> dict[str, dict[str, Any]]:
+    """Index run-spec nodes by their output directory name."""
+    try:
+        run_spec = json.loads((bundle_root / "run-spec.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    nodes = [node for node in run_spec.get("nodes") or [] if isinstance(node, dict)]
+    parents = {
+        str(parent)
+        for node in nodes
+        for parent in node.get("parents") or []
+    }
+    indexed: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        output_path = PurePosixPath(str(node.get("output_path") or ""))
+        flow_id = str(node.get("id") or node.get("flow_id") or "").strip()
+        if len(output_path.parts) != 2 or output_path.parts[0] != "outputs" or not flow_id:
+            continue
+        ports = [
+            str(port.get("id"))
+            for port in node.get("outputs") or []
+            if isinstance(port, dict) and port.get("id")
+        ]
+        indexed[output_path.parts[1]] = {
+            "flow_id": flow_id,
+            "label": str(node.get("label") or ""),
+            "ports": ports,
+            "final": flow_id not in parents,
+        }
+    return indexed
+
+
+def _split_run_output_path(
+    rest: tuple[str, ...],
+    node: dict[str, Any] | None,
+) -> tuple[str, tuple[str, ...]]:
+    """Return (port, path below the port) without Dagster's run-scope folder."""
+    ports = _DEFAULT_OUTPUT_PORTS | set((node or {}).get("ports") or [])
+    # Dagster publishes outputs/<node>/<run-id>/<port>/<path>. A run already
+    # scopes its own artifact collection, so engine-private staging
+    # directories must not leak into the public artifact contract.
+    if len(rest) >= 3 and rest[1] in ports:
+        return rest[1], rest[2:]
+    if len(rest) >= 2 and rest[0] in ports:
+        return rest[0], rest[1:]
+    if node is not None and len(rest) >= 2:
+        return "", rest[1:]
+    return "", rest
+
+
+STEP_RECEIPT_FILENAME = ".inlumen-step.json"
+
+
+def _run_output_metadata(path: Path, bundle_root: Path) -> dict[str, Any]:
+    """Describe a run output without loading it into memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    content_type = _content_type_for_filename(
+        path.name,
+        "application/json" if path.suffix == ".json"
+        else "application/x-yaml;charset=utf-8" if path.suffix in {".yaml", ".yml"}
+        else "",
+    )
+    return {
+        "path": path.relative_to(bundle_root).as_posix(),
+        "filename": path.name,
+        "flow_id": "",
+        **_canonical_artifact(path.name),
+        "content_type": content_type,
+        "size_bytes": path.stat().st_size,
+        "sha256": f"sha256:{digest.hexdigest()}",
+        "role": "run-output",
+    }
+
+
+def _collect_run_outputs(
+    bundle_root: Path,
+) -> tuple[list[tuple[dict[str, Any], Path]], list[dict[str, Any]]]:
+    """Return (output metadata with local paths, step receipts) for a run."""
     output_root = bundle_root / "outputs"
     if not output_root.is_dir():
-        return []
-    entries = []
+        return [], []
+    nodes = _run_output_nodes(bundle_root)
+    outputs: list[tuple[dict[str, Any], Path]] = []
+    receipts: list[dict[str, Any]] = []
     for path in sorted(item for item in output_root.rglob("*") if item.is_file()):
         if path.name == ".gitkeep":
             continue
-        entry = _artifact_file_entry(path, bundle_root, role="run-output")
-        relative = path.relative_to(output_root)
-        # Dagster uses outputs/<node>/<run-id>/output/<filename> internally.
-        # A run already scopes its own artifact collection, so engine-private
-        # staging directories must not leak into the public artifact contract.
-        if len(relative.parts) >= 4 and relative.parts[2] == "output":
-            entry["path"] = Path(
-                "outputs", relative.parts[0], *relative.parts[3:]
-            ).as_posix()
-        entries.append(entry)
-    return entries
+        node_dir, *rest = path.relative_to(output_root).parts
+        node = nodes.get(node_dir)
+        if path.name == STEP_RECEIPT_FILENAME:
+            try:
+                receipt = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if node is not None and isinstance(receipt, dict):
+                receipts.append({
+                    **receipt,
+                    "flow_id": node["flow_id"],
+                    "node_label": node["label"],
+                    # Local only: where the step published, for the step cache.
+                    "_published_root": str(path.parent),
+                })
+            continue
+        entry = _run_output_metadata(path, bundle_root)
+        port, below_port = _split_run_output_path(tuple(rest), node)
+        # Keep the port in the public path only when it disambiguates files.
+        keep_port = bool(port) and node is not None and len(node["ports"]) > 1
+        entry["path"] = PurePosixPath(
+            "outputs", node_dir, *([port] if keep_port else []), *below_port
+        ).as_posix()
+        if port:
+            entry["port"] = port
+        if node is not None:
+            entry["flow_id"] = node["flow_id"]
+            entry["source_node"] = node["flow_id"]
+            entry["node_label"] = node["label"]
+            entry["output_role"] = "final" if node["final"] else "intermediate"
+        outputs.append((entry, path))
+    return outputs, receipts
+
+
+def _read_run_output_files(bundle_root: Path) -> list[dict[str, Any]]:
+    """Run outputs with their content inline (used when no object store is configured)."""
+    outputs, _receipts = _collect_run_outputs(bundle_root)
+    return [
+        {
+            **entry,
+            **_encode_artifact_bytes(
+                path.read_bytes(), filename=path.name, content_type=entry["content_type"]
+            ),
+        }
+        for entry, path in outputs
+    ]
+
+
+STEP_CACHE_DIRS: dict[str, Path] = {}
+STEP_CACHE_MOUNT = "/workspace/step-cache"
+
+
+def _prepare_step_cache(
+    bundle_root: Path,
+    *,
+    execution_id: str | None,
+    workspace_id: str | None,
+    run_id: str | None,
+    mode: CacheMode,
+    rerun_from: str | None,
+) -> StepCachePlan | None:
+    """Stage reusable step results next to the bundle; return the run's cache keys."""
+    store = RunArtifactStore.from_environment() if workspace_id and run_id and execution_id else None
+    if store is None:
+        return None
+    plan = plan_step_cache(bundle_root, mode=mode, rerun_from=rerun_from)
+    # Next to the bundle, so it is visible to the Docker host but never part
+    # of the image build context or snapshot hash.
+    cache_dir = Path(tempfile.mkdtemp(prefix="inlumen-step-cache-", dir=bundle_root.parent))
+    try:
+        StepCache(store.client, workspace_id).stage(plan, cache_dir)
+    except Exception as exc:  # noqa: BLE001 - run without reuse rather than fail.
+        logging.getLogger(__name__).warning("Step cache staging failed: %s", exc)
+    for path in [cache_dir, *cache_dir.rglob("*")]:
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    STEP_CACHE_DIRS[execution_id] = cache_dir
+    return plan
+
+
+def _release_step_cache(execution_id: str | None) -> None:
+    cache_dir = STEP_CACHE_DIRS.pop(execution_id or "", None)
+    if cache_dir is not None:
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def _run_outputs_response(
+    bundle_root: Path,
+    *,
+    workspace_id: str | None,
+    run_id: str | None,
+    cache_plan: StepCachePlan | None = None,
+) -> dict[str, Any]:
+    """Store a run's outputs by reference when possible, inline otherwise."""
+    outputs, local_receipts = _collect_run_outputs(bundle_root)
+    receipts = [
+        {key: value for key, value in receipt.items() if not key.startswith("_")}
+        for receipt in local_receipts
+    ]
+    store = RunArtifactStore.from_environment() if workspace_id and run_id else None
+    if store is not None:
+        try:
+            response = {
+                "run_outputs": store.publish(
+                    workspace_id=workspace_id, run_id=run_id, outputs=outputs, receipts=receipts,
+                ),
+                "step_receipts": receipts,
+            }
+        except Exception as exc:  # noqa: BLE001 - keep the run's results inline instead.
+            warning = f"Run outputs were kept inline because object storage failed: {exc}"
+            return {
+                "run_outputs": _read_run_output_files(bundle_root),
+                "step_receipts": receipts,
+                "artifact_storage_warning": warning,
+            }
+        if cache_plan is not None:
+            try:
+                StepCache(store.client, workspace_id).record(cache_plan, local_receipts, run_id=run_id)
+            except Exception as exc:  # noqa: BLE001 - the run itself succeeded or failed already.
+                response["step_cache_warning"] = f"Step results were not saved for reuse: {exc}"
+        return response
+    return {"run_outputs": _read_run_output_files(bundle_root), "step_receipts": receipts}
 
 
 def validate_deployment_bundle_files(
@@ -2132,6 +2338,10 @@ def validate_deployment_bundle_files(
     timeout_seconds: int = 900,
     runtime_secrets: dict[str, str] | None = None,
     execution_id: str | None = None,
+    artifact_workspace_id: str | None = None,
+    artifact_run_id: str | None = None,
+    cache_mode: CacheMode = "reuse",
+    rerun_from: str | None = None,
 ) -> dict[str, Any]:
     """Materialize, validate, and optionally repair an uploaded bundle.
 
@@ -2155,64 +2365,126 @@ def validate_deployment_bundle_files(
     ) as temp_dir:
         bundle_root = Path(temp_dir)
         _materialize_bundle_files(files, bundle_root)
-
-        repair_report = None
-        if normalized_mode in {"repair", "validate-and-repair"}:
-            service_report = validate_and_repair_deployment_bundle(
-                bundle_root,
-                targets=targets,
-                validate_argo=validate_argo,
-                validate_dagster=validate_dagster,
-                materialize=materialize,
-                reinstall=reinstall,
-                skip_install=skip_install,
-                argo_lint=argo_lint,
-                argo_dry_run=argo_dry_run,
-                timeout_seconds=timeout_seconds,
-                runtime_secrets=runtime_secrets,
-                execution_id=execution_id,
-            )
-            repair_report = service_report.get("repair_report")
-            validation_report = service_report.get("validation_report")
-            if not isinstance(validation_report, dict):
-                validation_report = service_report
-        else:
-            validation_report = validate_deployment_bundle(
-                bundle_root,
-                targets=targets,
-                validate_argo=validate_argo,
-                validate_dagster=validate_dagster,
-                materialize=materialize,
-                reinstall=reinstall,
-                skip_install=skip_install,
-                argo_lint=argo_lint,
-                argo_dry_run=argo_dry_run,
-                timeout_seconds=timeout_seconds,
-                runtime_secrets=runtime_secrets,
-                execution_id=execution_id,
-            )
-
-        ok = bool(validation_report.get("ok"))
         execution_requested = (
             normalized_mode != "fast"
             and bool((targets or {}).get("dagster"))
             and materialize
         )
-        return {
-            "ok": ok,
-            "validation_report": validation_report,
-            "repair_report": repair_report,
-            "repaired_files": (
-                _read_repaired_bundle_files(bundle_root)
-                if ok and repair_report is not None
-                else []
-            ),
-            "run_outputs": (
-                _read_run_output_files(bundle_root)
-                if ok and execution_requested
-                else []
-            ),
-        }
+        cache_plan = (
+            _prepare_step_cache(
+                bundle_root,
+                execution_id=execution_id,
+                workspace_id=artifact_workspace_id,
+                run_id=artifact_run_id,
+                mode=cache_mode,
+                rerun_from=rerun_from,
+            )
+            if execution_requested
+            else None
+        )
+        try:
+            return _validate_and_collect(
+                bundle_root,
+                normalized_mode=normalized_mode,
+                execution_requested=execution_requested,
+                cache_plan=cache_plan,
+                artifact_workspace_id=artifact_workspace_id,
+                artifact_run_id=artifact_run_id,
+                targets=targets,
+                validate_argo=validate_argo,
+                validate_dagster=validate_dagster,
+                materialize=materialize,
+                reinstall=reinstall,
+                skip_install=skip_install,
+                argo_lint=argo_lint,
+                argo_dry_run=argo_dry_run,
+                timeout_seconds=timeout_seconds,
+                runtime_secrets=runtime_secrets,
+                execution_id=execution_id,
+            )
+        finally:
+            _release_step_cache(execution_id)
+
+
+def _validate_and_collect(
+    bundle_root: Path,
+    *,
+    normalized_mode: str,
+    execution_requested: bool,
+    cache_plan: StepCachePlan | None,
+    artifact_workspace_id: str | None,
+    artifact_run_id: str | None,
+    targets: dict[str, Any] | None,
+    validate_argo: bool | None,
+    validate_dagster: bool | None,
+    materialize: bool,
+    reinstall: bool,
+    skip_install: bool,
+    argo_lint: bool,
+    argo_dry_run: bool,
+    timeout_seconds: int,
+    runtime_secrets: dict[str, str] | None,
+    execution_id: str | None,
+) -> dict[str, Any]:
+    repair_report = None
+    if normalized_mode in {"repair", "validate-and-repair"}:
+        service_report = validate_and_repair_deployment_bundle(
+            bundle_root,
+            targets=targets,
+            validate_argo=validate_argo,
+            validate_dagster=validate_dagster,
+            materialize=materialize,
+            reinstall=reinstall,
+            skip_install=skip_install,
+            argo_lint=argo_lint,
+            argo_dry_run=argo_dry_run,
+            timeout_seconds=timeout_seconds,
+            runtime_secrets=runtime_secrets,
+            execution_id=execution_id,
+        )
+        repair_report = service_report.get("repair_report")
+        validation_report = service_report.get("validation_report")
+        if not isinstance(validation_report, dict):
+            validation_report = service_report
+    else:
+        validation_report = validate_deployment_bundle(
+            bundle_root,
+            targets=targets,
+            validate_argo=validate_argo,
+            validate_dagster=validate_dagster,
+            materialize=materialize,
+            reinstall=reinstall,
+            skip_install=skip_install,
+            argo_lint=argo_lint,
+            argo_dry_run=argo_dry_run,
+            timeout_seconds=timeout_seconds,
+            runtime_secrets=runtime_secrets,
+            execution_id=execution_id,
+        )
+
+    ok = bool(validation_report.get("ok"))
+    return {
+        "ok": ok,
+        "validation_report": validation_report,
+        "repair_report": repair_report,
+        "repaired_files": (
+            _read_repaired_bundle_files(bundle_root)
+            if ok and repair_report is not None
+            else []
+        ),
+        # Failed runs still return what earlier steps published, so users
+        # can inspect partial results and see where the pipeline stopped.
+        **(
+            _run_outputs_response(
+                bundle_root,
+                workspace_id=artifact_workspace_id,
+                run_id=artifact_run_id,
+                cache_plan=cache_plan,
+            )
+            if execution_requested
+            else {"run_outputs": [], "step_receipts": []}
+        ),
+    }
 
 
 def main() -> int:
