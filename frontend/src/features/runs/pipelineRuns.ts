@@ -52,6 +52,7 @@ export type PipelineRunRecord = {
   result?: {
     status?: string;
     outputs?: Array<Record<string, unknown>>;
+    steps?: Array<Record<string, unknown>>;
   } | null;
 };
 
@@ -62,6 +63,7 @@ export type PipelineRunEvent = {
   status?: PipelineRunStatus | null;
   message?: string | null;
   node_id?: string | null;
+  flow_id?: string | null;
 };
 
 export type RunnerCapabilities = {
@@ -115,15 +117,28 @@ export const listPipelineRuns = async (limit = 20): Promise<PipelineRunRecord[]>
   return Array.isArray(payload.runs) ? payload.runs : [];
 };
 
+export type PipelineRunOptions = {
+  /** reuse: take earlier results of unchanged steps; refresh: run every step again. */
+  cache?: 'reuse' | 'refresh';
+  /** Run this step and every step after it again. */
+  rerun_from?: string;
+};
+
+export const PIPELINE_RUN_STARTED_EVENT = 'inlumen:pipeline-run-started';
+
 export const startPipelineRun = async (
   idempotencyKey: string,
+  options: PipelineRunOptions = {},
 ): Promise<PipelineRunRecord> => {
   const response = await apiFetch(`${INLUMEN_API_URL}/api/pipeline-runs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    body: JSON.stringify({ idempotency_key: idempotencyKey, ...options }),
   });
-  return responseJson<PipelineRunRecord>(response, 'Failed to start the pipeline run.');
+  const run = await responseJson<PipelineRunRecord>(response, 'Failed to start the pipeline run.');
+  // Runs can start outside the run panel (for example from a node); let it follow them.
+  window.dispatchEvent(new CustomEvent(PIPELINE_RUN_STARTED_EVENT, { detail: run }));
+  return run;
 };
 
 export const getPipelineRun = async (runId: string): Promise<PipelineRunRecord> => {
@@ -170,20 +185,74 @@ const downloadRunFile = async (url: string, fallbackName: string): Promise<void>
   URL.revokeObjectURL(objectUrl);
 };
 
+export const downloadPipelineRunLineage = (runId: string): Promise<void> =>
+  downloadRunFile(
+    `${INLUMEN_API_URL}/api/provenance/prov-o?run_id=${encodeURIComponent(runId)}`,
+    `inlumen-run-lineage-${runId}.jsonld`,
+  );
+
 export const downloadPipelineRunBundle = (runId: string): Promise<void> =>
   downloadRunFile(
     `${INLUMEN_API_URL}/api/pipeline-runs/${encodeURIComponent(runId)}/bundle`,
     `inlumen-dagster-run-${runId}.zip`,
   );
 
+const encodeOutputPath = (path: string) => path.split('/').map(encodeURIComponent).join('/');
+
+const runOutputUrl = (runId: string, path: string) =>
+  `${INLUMEN_API_URL}/api/pipeline-runs/${encodeURIComponent(runId)}/outputs/${encodeOutputPath(path)}`;
+
 export const downloadPipelineRunOutput = (
   runId: string,
   path: string,
   filename: string,
-): Promise<void> => downloadRunFile(
-  `${INLUMEN_API_URL}/api/pipeline-runs/${encodeURIComponent(runId)}/outputs/${path.split('/').map(encodeURIComponent).join('/')}`,
-  filename,
+): Promise<void> => downloadRunFile(runOutputUrl(runId, path), filename);
+
+export type RunOutputPreviewColumn = { name: string; type: string };
+
+type RunOutputPreviewBase = {
+  path: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  source_node?: string | null;
+  port?: string | null;
+  offset?: number;
+  next_offset?: number | null;
+  has_more?: boolean;
+};
+
+export type RunOutputPreview = RunOutputPreviewBase & (
+  | { kind: 'table'; columns: RunOutputPreviewColumn[]; rows: string[][] }
+  | { kind: 'json'; value: unknown }
+  | { kind: 'text' | 'markdown'; text: string }
+  | { kind: 'image' | 'audio' | 'video' | 'pdf'; inline: boolean }
+  | { kind: 'binary' }
 );
+
+export const fetchPipelineRunOutputPreview = async (
+  runId: string,
+  path: string,
+  options: { offset?: number; limit?: number } = {},
+): Promise<RunOutputPreview> => {
+  const params = new URLSearchParams();
+  if (options.offset) params.set('offset', String(options.offset));
+  if (options.limit) params.set('limit', String(options.limit));
+  const query = params.toString();
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/pipeline-runs/${encodeURIComponent(runId)}/preview/${encodeOutputPath(path)}${query ? `?${query}` : ''}`,
+  );
+  return responseJson<RunOutputPreview>(response, 'Failed to preview the run output.');
+};
+
+/** Fetch an output's bytes for in-page display (images, PDFs, media). */
+export const fetchPipelineRunOutputBlob = async (runId: string, path: string): Promise<Blob> => {
+  const response = await apiFetch(`${runOutputUrl(runId, path)}?disposition=inline`);
+  if (!response.ok) {
+    await responseJson(response, 'Failed to load the run output.');
+  }
+  return response.blob();
+};
 
 export const isActivePipelineRun = (status: PipelineRunStatus): boolean =>
   ['queued', 'preparing', 'running', 'cancelling'].includes(status);

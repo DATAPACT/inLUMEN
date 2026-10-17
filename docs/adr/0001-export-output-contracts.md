@@ -108,6 +108,14 @@ may fan out to any number of downstream consumers. Pipelines needing two
 independently routed result sets use an explicit split Task, keeping user code
 independent from orchestration port directories.
 
+Amended 2026-10-16 ([#151](https://github.com/DATAPACT/inLUMEN/issues/151)): a
+Task may declare one artifact per output port (`outputs` in `inlumen.task.json`,
+each entry naming its `port` and a distinct path). Task code still writes every
+declared artifact directly beneath the output root and never sees port
+directories; the orchestrator validates the set and publishes each artifact
+under its port, and each connection binds only the artifact of the port it
+starts from. A single output keeps the original behaviour.
+
 ## Status and errors
 
 Run results use `succeeded`, `partial`, `failed`, or `cancelled`. A failed or

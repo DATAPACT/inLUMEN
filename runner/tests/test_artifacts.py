@@ -24,7 +24,8 @@ def test_artifact_store_keeps_bundle_and_output_bytes_outside_lifecycle_rows(tmp
         ],
     )
     assert "content" not in outputs[0]
-    assert store.read_output(outputs[0]["_storage_path"]) == b"result"
+    assert store.read_output(outputs[0]["_storage_path"]) == (b"result", 6)
+    assert store.read_output(outputs[0]["_storage_path"], 2, 3) == (b"sul", 6)
 
 
 def test_artifact_store_rejects_path_traversal(tmp_path):

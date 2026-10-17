@@ -1,3 +1,4 @@
+import pytest
 import ast
 import asyncio
 import base64
@@ -21,7 +22,7 @@ from app.generator import (
     normalize_requirements,
 )
 from app.main import app
-from app.llm import NODE_SYSTEM_PROMPT
+from app.llm import NODE_SYSTEM_PROMPT, PIPELINE_SYSTEM_PROMPT
 from app.multimodal import build_multimodal_user_content
 from app.pipeline_compiler import (
     compile_pipeline_nodes,
@@ -96,7 +97,9 @@ def test_node_prompt_requires_filesystem_workspace_contract() -> None:
     assert "PIPELINE_OUTPUT_DIR" in NODE_SYSTEM_PROMPT
     assert "directly\nfrom PIPELINE_INPUT_DIR" in NODE_SYSTEM_PROMPT
     assert "Port names never create implicit workspace directories" in NODE_SYSTEM_PROMPT
-    assert "Only the declared output artifact is handed" in NODE_SYSTEM_PROMPT
+    assert "Only the declared output artifacts are handed" in NODE_SYSTEM_PROMPT
+    assert "never create port folders yourself" in NODE_SYSTEM_PROMPT
+    assert "one descriptor per declared output" in PIPELINE_SYSTEM_PROMPT
 
 
 def test_targeted_generation_reuses_validated_packages() -> None:
@@ -1922,3 +1925,63 @@ def test_multimodal_prompt_contains_bounded_image_and_audio_parts() -> None:
         "image_url",
         "input_audio",
     ]
+
+
+def test_plan_binds_each_connection_to_its_producer_port() -> None:
+    request = GeneratePipelineScriptsRequest.model_validate({
+        "context": {
+            "pipeline": {"name": "Split"},
+            "graph": {
+                "nodes": [
+                    {"flow_id": "src", "label": "Rows", "type": "input",
+                     "files": [{"filename": "rows.csv", "kind": "table", "format": "csv"}]},
+                    {"flow_id": "split", "label": "Split", "type": "action",
+                     "ports": {"inputs": [{"id": "input"}], "outputs": [{"id": "report"}, {"id": "data"}]},
+                     "implementation": {"output_artifacts": [
+                         {"name": "report", "filename": "report.json", "kind": "json", "format": "json"},
+                         {"name": "data", "filename": "clean.csv", "kind": "table", "format": "csv"},
+                     ]}},
+                    {"flow_id": "notify", "label": "Notify", "type": "action"},
+                    {"flow_id": "store", "label": "Store", "type": "action"},
+                ],
+                "edges": [
+                    {"source": "src", "target": "split"},
+                    {"source": "split", "source_port": "report", "target": "notify", "target_port": "input"},
+                    {"source": "split", "source_port": "data", "target": "store", "target_port": "input"},
+                ],
+            },
+        }
+    })
+
+    plan, contexts = build_pipeline_generation_plan(request)
+
+    nodes = {node["flow_id"]: node for node in plan["nodes"]}
+    assert [(item["name"], item["port"]) for item in nodes["split"]["outputs"]] == [
+        ("report", "report"),
+        ("data", "data"),
+    ]
+    notify_inputs = [item for item in nodes["notify"]["inputs"] if item["source_node"] == "split"]
+    store_inputs = [item for item in nodes["store"]["inputs"] if item["source_node"] == "split"]
+    assert [(item["format"], item["source_port"]) for item in notify_inputs] == [("json", "report")]
+    assert [(item["format"], item["source_port"]) for item in store_inputs] == [("csv", "data")]
+    assert [output.port for output in contexts["split"].expected_outputs] == ["report", "data"]
+
+
+def test_plan_rejects_several_outputs_without_ports() -> None:
+    request = GeneratePipelineScriptsRequest.model_validate({
+        "context": {
+            "graph": {
+                "nodes": [
+                    {"flow_id": "split", "label": "Split", "type": "action",
+                     "ports": {"inputs": [], "outputs": [{"id": "output"}]},
+                     "implementation": {"output_artifacts": [
+                         {"name": "one", "filename": "one.json", "kind": "json"},
+                         {"name": "two", "filename": "two.json", "kind": "json"},
+                     ]}},
+                ],
+                "edges": [],
+            },
+        }
+    })
+    with pytest.raises(ValueError, match="must name the output port"):
+        build_pipeline_generation_plan(request)

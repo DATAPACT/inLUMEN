@@ -50,7 +50,7 @@ def parameter_environment(parameters: dict[object, object]) -> dict[str, str]:
     normalized = {
         str(key): value
         for key, value in parameters.items()
-        if str(key).strip() and str(key) != "model_plan"
+        if str(key).strip() and str(key) not in {"model_plan", "output_artifacts"}
     }
     environment: dict[str, str] = {}
     if normalized:
@@ -243,19 +243,13 @@ def normalize_single_output_port(
 ) -> list[str]:
     """Move public root outputs into the orchestration-owned output port.
 
-    Task code always writes directly to ``PIPELINE_OUTPUT_DIR``.  For a Task
-    with one output port, the runner namespaces those artifacts only after the
-    process exits so downstream routing remains internal to the orchestrator.
-    Tasks with multiple logical output sets are rejected; model those results
-    with an explicit split Task instead.
+    Task code writes directly to ``PIPELINE_OUTPUT_DIR``.  For a Task with one
+    output port, the runner namespaces those artifacts only after the process
+    exits so downstream routing remains internal to the orchestrator.  A legacy
+    Task with several output ports must write each result into its port folder.
     """
     root = Path(output_dir)
     ports = [str(port).strip() for port in output_ports if str(port).strip()]
-    if len(ports) > 1:
-        raise RuntimeError(
-            "The flat Task workspace supports exactly one logical output set; "
-            "fan out one output to multiple consumers or add an explicit split Task."
-        )
     root.mkdir(parents=True, exist_ok=True)
     declared = set(ports)
     root_entries = [
@@ -269,7 +263,8 @@ def normalize_single_output_port(
         names = ", ".join(path.name for path in root_entries)
         raise RuntimeError(
             "Task wrote artifacts outside declared output-port directories: "
-            f"{names}."
+            f"{names}. With several output ports, write each result into "
+            "its port folder or declare the outputs in inlumen.task.json."
         )
     port_root = root / ports[0]
     port_root.mkdir(parents=True, exist_ok=True)
@@ -516,11 +511,6 @@ def _stage_input_bindings(bindings, input_dir):
 
 def _normalize_single_output_port(output_dir, output_ports):
     ports = [str(port).strip() for port in output_ports if str(port).strip()]
-    if len(ports) > 1:
-        raise RuntimeError(
-            "The flat Task workspace supports exactly one logical output set; "
-            "fan out one output to multiple consumers or add an explicit split Task."
-        )
     output_dir.mkdir(parents=True, exist_ok=True)
     declared = set(ports)
     root_entries = [
@@ -533,6 +523,8 @@ def _normalize_single_output_port(output_dir, output_ports):
         names = ", ".join(path.name for path in root_entries)
         raise RuntimeError(
             "Task wrote artifacts outside declared output-port directories: " + names
+            + ". With several output ports, write each result into its port "
+            "folder or declare the outputs in inlumen.task.json."
         )
     port_root = output_dir / ports[0]
     port_root.mkdir(parents=True, exist_ok=True)
@@ -568,6 +560,67 @@ def _artifacts(output_dir):
                     or "application/octet-stream",
             })
     return results
+
+
+STEP_RECEIPT = ".inlumen-step.json"
+
+
+def _input_digest(input_dir):
+    """Content digest of everything staged for a step, independent of timing."""
+    digest = hashlib.sha256(b"inlumen.step-input@1\0")
+    for item in _artifacts(Path(input_dir)) if Path(input_dir).is_dir() else []:
+        digest.update(item["path"].encode("utf-8") + b"\0" + item["sha256"].encode() + b"\0")
+    return digest.hexdigest()
+
+
+def _step_cache_context(output_dir_attribute, input_dir):
+    """Return this step's cache keys and, when staged, a reusable earlier result.
+
+    The platform stages candidate results under INLUMEN_STEP_CACHE_DIR with a
+    keys.json naming each step's code key; the input key is computed here,
+    after inputs are staged.
+    """
+    root = os.environ.get("INLUMEN_STEP_CACHE_DIR", "").strip()
+    if not root:
+        return {}
+    node_dir = Path(str(output_dir_attribute)).name
+    try:
+        keys = json.loads((Path(root) / "keys.json").read_text(encoding="utf-8")).get(node_dir) or {}
+    except (OSError, ValueError):
+        return {}
+    if not keys.get("cacheable") or not keys.get("static_key"):
+        return {}
+    context = {"static_key": str(keys["static_key"]), "input_digest": _input_digest(input_dir), "cached": False}
+    hit = Path(root) / node_dir / context["input_digest"] / "files"
+    if keys.get("lookup") and hit.is_dir():
+        context["hit"] = hit
+    return context
+
+
+def _write_step_receipt(root, asset_key, started_at, input_dir, bindings, artifacts, cache=None):
+    """Record what a step read and published, for lineage and caching.
+
+    The receipt sits next to the published ports; the platform reads it after
+    the run and never hands it to downstream steps.
+    """
+    connections = [
+        {key: str(item.get(key) or "") for key in (
+            "source_node", "source_port", "connection_id", "target_port", "filename",
+        )}
+        for item in bindings or []
+        if isinstance(item, dict)
+    ]
+    atomic_json(Path(root) / STEP_RECEIPT, {
+        "schema_version": "inlumen.step-receipt@1",
+        "asset_key": asset_key,
+        "status": "succeeded",
+        "started_at": started_at,
+        "finished_at": time.time(),
+        "connections": connections,
+        "inputs": _artifacts(Path(input_dir)) if Path(input_dir).is_dir() else [],
+        "outputs": [item for item in artifacts if item["path"] != STEP_RECEIPT],
+        **{key: value for key, value in (cache or {}).items() if key != "hit"},
+    })
 
 
 def _validate_output_ports(output_dir, required_ports):
@@ -608,6 +661,7 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
         @dg.asset(name=self.asset_key, deps=deps)
         def run_script(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             project_root = Path.cwd()
+            started_at = time.time()
 
             def resolve(value):
                 path = Path(value)
@@ -651,6 +705,22 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
             output_dir.mkdir(parents=True, exist_ok=True)
 
             published_dir = output_dir
+            cache = _step_cache_context(self.output_dir, input_dir)
+            if cache.get("hit") is not None:
+                # Same step code, parameters and input content as an earlier
+                # successful run: reuse its published outputs instead of running.
+                staged = Path(tempfile.mkdtemp(dir=published_dir.parent, prefix=".cache-"))
+                staged.rmdir()
+                shutil.copytree(cache.pop("hit"), staged)
+                publish_artifact_directory(staged, published_dir)
+                context.log.info(f"INLUMEN_CACHE_HIT {self.asset_key}")
+                artifacts = _artifacts(published_dir)
+                _write_step_receipt(published_dir, self.asset_key, started_at, input_dir,
+                                    bound_inputs or bindings, artifacts, {**cache, "cached": True})
+                return dg.MaterializeResult(metadata={
+                    "input_dir": str(input_dir), "output_dir": str(published_dir), "cached": True,
+                    "artifact_count": len(artifacts), "artifacts": dg.MetadataValue.json(artifacts),
+                })
             work_dir = input_dir.parent.parent / "runtime" / run_scope
             if strict:
                 if work_dir.exists():
@@ -670,7 +740,7 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
             })
             parameters = {
                 str(key): value for key, value in self.parameters.items()
-                if str(key).strip() and str(key) != "model_plan"
+                if str(key).strip() and str(key) not in {"model_plan", "output_artifacts"}
             }
             if parameters:
                 env["PIPELINE_PARAMS_JSON"] = json.dumps(
@@ -770,11 +840,21 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
                 declarations = self.data_contract.get("outputs", [])
                 receipt = work_dir / "outputs.json"
                 actual = json.loads(receipt.read_text()).get("outputs") if receipt.is_file() else None
-                if declarations or self.output_ports:
+                validated = (
                     validate_result(output_dir, declarations, actual, producer=self.asset_key)
-                port_root = published_dir / self.output_ports[0] if self.output_ports else published_dir / "result"
-                publish_artifact_directory(output_dir, port_root)
+                    if declarations or self.output_ports
+                    else []
+                )
+                # Each declared output is published under its own port.
+                publish_port_artifacts(
+                    output_dir,
+                    validated,
+                    published_dir,
+                    self.output_ports[0] if self.output_ports else "result",
+                )
                 artifacts = _artifacts(published_dir)
+                _write_step_receipt(published_dir, self.asset_key, started_at, input_dir,
+                                    bound_inputs, artifacts, cache)
                 return dg.MaterializeResult(metadata={
                     "input_dir": str(input_dir), "output_dir": str(published_dir),
                     "artifact_count": len(declarations), "artifacts": dg.MetadataValue.json(artifacts),
@@ -794,6 +874,8 @@ class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
                 self.output_ports if self.required_output_ports is None else self.required_output_ports,
             )
             artifacts = _artifacts(output_dir)
+            _write_step_receipt(output_dir, self.asset_key, started_at, input_dir,
+                                bindings, artifacts, cache)
             return dg.MaterializeResult(metadata={
                 "input_dir": str(input_dir),
                 "output_dir": str(output_dir),

@@ -13,6 +13,8 @@ sys.path[:0] = [str(ROOT / "backend"), str(ROOT / "codegen")]
 from artifact_runtime import (
     ArtifactContractError,
     CONTRACT_ID,
+    assign_output_ports,
+    publish_port_artifacts,
     stage_bound_artifacts,
     validate_result,
 )
@@ -489,3 +491,81 @@ assert sum(e.event_type_value == 'STEP_SKIPPED' for e in result.all_events) == 2
     ]
     result = subprocess.run(command, capture_output=True, text=True, timeout=90)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def two_outputs():
+    report = dict(name="report", filename="report.json", kind="json", format="json",
+                  representation="file", port="report")
+    data = dict(name="data", filename="clean/data.csv", kind="table", format="csv",
+                representation="file", port="data")
+    return report, data
+
+
+def test_assign_output_ports_defaults_and_matches_by_name():
+    single = assign_output_ports([artifact()], ["output"])
+    assert single[0]["port"] == "output"
+    report, data = two_outputs()
+    named = assign_output_ports(
+        [{**report, "port": None}, {**data, "port": None}], ["report", "data"]
+    )
+    assert [item["port"] for item in named] == ["report", "data"]
+    with pytest.raises(ArtifactContractError, match="must name the output port"):
+        assign_output_ports([{**report, "name": "x", "port": None}, data], ["report", "data"])
+    with pytest.raises(ArtifactContractError, match="unknown port"):
+        assign_output_ports([{**report, "port": "nope"}, data], ["report", "data"])
+    with pytest.raises(ArtifactContractError, match="exactly one artifact"):
+        assign_output_ports([report, {**data, "port": "report"}], ["report", "data"])
+
+
+def test_several_outputs_are_validated_and_published_per_port(tmp_path):
+    report, data = two_outputs()
+    staging = tmp_path / "publish"
+    staging.mkdir()
+    (staging / "report.json").write_text('{"rows": 2}')
+    (staging / "clean").mkdir()
+    (staging / "clean" / "data.csv").write_text("a,b\n1,2\n")
+
+    validated = validate_result(
+        staging, [report, data],
+        [{"name": "data", "path": "clean/data.csv"}, {"name": "report", "filename": "report.json"}],
+        producer="split",
+    )
+    assert [item["port"] for item in validated] == ["report", "data"]
+
+    published = tmp_path / "published"
+    publish_port_artifacts(staging, validated, published)
+    assert sorted(path.relative_to(published).as_posix() for path in published.rglob("*") if path.is_file()) == [
+        "data/clean/data.csv",
+        "report/report.json",
+    ]
+
+    staged = stage_bound_artifacts(
+        [dict(source_dir=str(published / "data"), artifact=data, source_node="split",
+              source_port="data", connection_id="split:data->next:input", target_port="input")],
+        tmp_path / "next-input",
+    )
+    assert staged[0]["source_port"] == "data"
+    assert sorted(path.name for path in (tmp_path / "next-input").rglob("*") if path.is_file()) == ["data.csv"]
+
+
+@pytest.mark.parametrize("case", ["missing_one", "extra_file", "returned_twice", "unknown_return", "same_path", "no_ports"])
+def test_several_outputs_reject_contract_violations(tmp_path, case):
+    report, data = two_outputs()
+    (tmp_path / "report.json").write_text("{}")
+    (tmp_path / "clean").mkdir()
+    (tmp_path / "clean" / "data.csv").write_text("a\n1\n")
+    declarations, actual = [report, data], None
+    if case == "missing_one":
+        (tmp_path / "clean" / "data.csv").unlink()
+    elif case == "extra_file":
+        (tmp_path / "debug.log").write_text("x")
+    elif case == "returned_twice":
+        actual = [{"name": "report"}, {"name": "report"}]
+    elif case == "unknown_return":
+        actual = [{"name": "report"}, {"name": "other"}]
+    elif case == "same_path":
+        declarations = [report, {**data, "filename": "report.json"}]
+    elif case == "no_ports":
+        declarations = [{**report, "port": None}, {**data, "port": None}]
+    with pytest.raises(ArtifactContractError):
+        validate_result(tmp_path, declarations, actual, producer="split")

@@ -27,10 +27,20 @@ class PipelineSnapshotRequest(BaseModel):
     bundle_manifest: dict[str, Any]
 
 
+class PipelineExecutionOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # "reuse" takes earlier results of unchanged steps; "refresh" runs every step.
+    cache: Literal["reuse", "refresh"] = "reuse"
+    # Run this step and every step after it again, reusing the rest.
+    rerun_from: str | None = Field(default=None, min_length=1, max_length=200)
+
+
 class CreatePipelineRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     snapshot: PipelineSnapshotRequest
+    execution_options: PipelineExecutionOptions = Field(default_factory=PipelineExecutionOptions)
     workspace_id: str = Field(default="local-workspace", min_length=1, max_length=160)
     requested_by: str = Field(default="local-user", min_length=1, max_length=160)
     idempotency_key: str | None = Field(default=None, max_length=200)
@@ -55,6 +65,7 @@ class PipelineRunEvent(BaseModel):
     status: RunStatus | None = None
     message: str | None = None
     node_id: str | None = None
+    flow_id: str | None = None
 
 
 class PipelineRunError(BaseModel):
