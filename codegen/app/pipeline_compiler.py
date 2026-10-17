@@ -422,7 +422,13 @@ def _run_compiled_pipeline():
         for declared in node.get("inputs", []):
             parent = declared.get("source_node")
             if parent:
-                artifact = produced[parent][0]
+                # Several outputs: bind the artifact published on the connected port.
+                candidates = produced[parent]
+                if len(candidates) > 1:
+                    candidates = [item for item in candidates if item.get("port") == declared.get("source_port")]
+                if len(candidates) != 1:
+                    raise RuntimeError(f"Node {flow_id}: no single output of {parent} on port {declared.get('source_port')!r}")
+                artifact = candidates[0]
                 bindings.append({"source_dir": str(root / "nodes" / parent),
                     "artifact": artifact, "filename": declared["filename"],
                     "source_node": parent, "connection_id": declared.get("connection_id", ""),

@@ -1,7 +1,7 @@
 import os
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 NodeKind = Literal[
     "input",
@@ -90,6 +90,9 @@ class FileDescriptor(BaseModel):
     members: list[dict[str, Any]] = Field(default_factory=list)
     filename: str
     source_node: str = ""
+    source_port: str = ""
+    # Output port of the producer that published this artifact.
+    port: str = ""
     connection_id: str = ""
     target_port: str = ""
     representation: Literal["file", "directory"] = "file"
@@ -155,8 +158,11 @@ class RuntimeConstraints(BaseModel):
 class ExpectedArtifact(BaseModel):
     members: list[dict[str, Any]] = Field(default_factory=list)
     source_node: str = ""
+    source_port: str = ""
     connection_id: str = ""
     target_port: str = ""
+    # Output port this artifact publishes to; each port carries one artifact.
+    port: str = ""
     representation: Literal["file", "directory"] = "file"
     name: str
     kind: ArtifactKind
@@ -175,8 +181,20 @@ class GenerationContext(BaseModel):
     pipeline: dict[str, Any] = Field(default_factory=dict)
     graph: GraphContext = Field(default_factory=GraphContext)
     available_inputs: list[FileDescriptor] = Field(default_factory=list)
-    expected_outputs: list[ExpectedArtifact] = Field(default_factory=list, max_length=1)
+    expected_outputs: list[ExpectedArtifact] = Field(default_factory=list)
     runtime_constraints: RuntimeConstraints = Field(default_factory=RuntimeConstraints)
+
+    @field_validator("expected_outputs")
+    @classmethod
+    def _one_artifact_per_port(cls, outputs: list[ExpectedArtifact]) -> list[ExpectedArtifact]:
+        if len(outputs) > 1:
+            ports = [output.port for output in outputs]
+            if not all(ports) or len(set(ports)) != len(ports):
+                raise ValueError(
+                    "Several expected outputs require a distinct output port on each; "
+                    "otherwise declare one directory bundle."
+                )
+        return outputs
 
 
 class GenerationOptions(BaseModel):

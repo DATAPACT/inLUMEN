@@ -47,7 +47,9 @@ def validate_declaration(declaration):
         )
     identity = {
         key: str(declaration[key])
-        for key in ("name", "source_node", "connection_id", "target_port")
+        for key in (
+            "name", "source_node", "source_port", "connection_id", "target_port", "port",
+        )
         if declaration.get(key) is not None
     }
     return {**declaration, **identity, "representation": representation}
@@ -183,45 +185,161 @@ def validate_artifact(root, declaration, *, exclusive=False):
     return {**declaration, "path": str(path.resolve())}
 
 
+def assign_output_ports(declarations, port_ids):
+    """Give every output declaration the output port it publishes to.
+
+    A single output defaults to the node's first output port. With several
+    outputs, each declaration names its port, or its name matches a port id.
+    Each port carries exactly one artifact.
+    """
+    port_ids = [str(port) for port in port_ids or [] if port]
+    assigned = [dict(item) for item in declarations]
+    if len(assigned) == 1 and not assigned[0].get("port"):
+        assigned[0]["port"] = port_ids[0] if port_ids else "output"
+    for item in assigned:
+        name = str(item.get("name") or "")
+        if not item.get("port"):
+            if name not in port_ids:
+                raise ArtifactContractError(
+                    f"Output {name!r} must name the output port it publishes to (one of {port_ids})"
+                )
+            item["port"] = name
+        item["port"] = str(item["port"])
+        if port_ids and item["port"] not in port_ids:
+            raise ArtifactContractError(
+                f"Output {name!r} publishes to unknown port {item['port']!r}; ports are {port_ids}"
+            )
+    ports = [item["port"] for item in assigned]
+    if len(set(ports)) != len(ports):
+        raise ArtifactContractError(
+            f"Each output port carries exactly one artifact; ports {ports} repeat"
+        )
+    return assigned
+
+
+def _check_distinct_outputs(declarations):
+    names = [item["name"] for item in declarations]
+    if len(set(names)) != len(names):
+        raise ArtifactContractError(f"Output artifact names repeat: {names}")
+    paths = [relative_path(item["filename"]) for item in declarations]
+    for index, left in enumerate(paths):
+        for right in paths[index + 1:]:
+            if left == right or left.startswith(right + "/") or right.startswith(left + "/"):
+                raise ArtifactContractError(
+                    f"Output artifacts overlap at {left!r} and {right!r}; declare distinct paths"
+                )
+    if len(declarations) > 1:
+        ports = [item.get("port") for item in declarations]
+        if not all(ports) or len(set(ports)) != len(ports):
+            raise ArtifactContractError(
+                "Several outputs require a distinct output port on each declaration"
+            )
+
+
+def _match_returned(item, expected, root):
+    if len(expected) == 1:
+        return expected[0]
+    for key in ("name", "port", "filename"):
+        if item.get(key):
+            matches = [decl for decl in expected if str(decl.get(key)) == str(item[key])]
+            if len(matches) == 1:
+                return matches[0]
+    if item.get("path"):
+        returned = Path(item["path"])
+        if not returned.is_absolute():
+            returned = Path(root) / returned
+        for decl in expected:
+            if returned.resolve() == (Path(root) / decl["filename"]).resolve():
+                return decl
+    raise ArtifactContractError(
+        f"Returned artifact {item.get('name') or item.get('filename')!r} matches no declared output"
+    )
+
+
 def validate_result(root, declarations, actual=None, *, producer=""):
     try:
-        if len(declarations) != 1:
-            raise ArtifactContractError(
-                f"Expected exactly one declared output artifact, got {len(declarations)}"
-            )
-        expected = validate_declaration(declarations[0])
+        if not declarations:
+            raise ArtifactContractError("Expected at least one declared output artifact")
+        expected = [validate_declaration(item) for item in declarations]
+        _check_distinct_outputs(expected)
         if actual is not None:
             if (
                 not isinstance(actual, list)
-                or len(actual) != 1
-                or not isinstance(actual[0], dict)
+                or len(actual) != len(expected)
+                or not all(isinstance(item, dict) for item in actual)
             ):
                 raise ArtifactContractError(
                     "Expected exactly one returned artifact descriptor"
+                    if len(expected) == 1
+                    else f"Expected one returned artifact descriptor per declared output ({len(expected)})"
                 )
-            item = actual[0]
-            for field in ("name", "filename", "kind", "format", "representation"):
-                if (
-                    item.get(field)
-                    and expected.get(field)
-                    and item[field] != expected[field]
-                ):
+            seen = set()
+            for item in actual:
+                declaration = _match_returned(item, expected, root)
+                if declaration["name"] in seen:
                     raise ArtifactContractError(
-                        f"Returned artifact {field} {item[field]!r} does not match {expected[field]!r}"
+                        f"Output {declaration['name']!r} was returned more than once"
                     )
-            if item.get("path"):
-                returned = Path(item["path"])
-                if not returned.is_absolute():
-                    returned = Path(root) / returned
-                if returned.resolve() != (Path(root) / expected["filename"]).resolve():
-                    raise ArtifactContractError(
-                        "Returned artifact path does not match the declared output"
-                    )
-        return [validate_artifact(root, expected, exclusive=True)]
+                seen.add(declaration["name"])
+                for field in ("name", "filename", "kind", "format", "representation", "port"):
+                    if (
+                        item.get(field)
+                        and declaration.get(field)
+                        and str(item[field]) != str(declaration[field])
+                    ):
+                        raise ArtifactContractError(
+                            f"Returned artifact {field} {item[field]!r} does not match {declaration[field]!r}"
+                        )
+                if item.get("path"):
+                    returned = Path(item["path"])
+                    if not returned.is_absolute():
+                        returned = Path(root) / returned
+                    if returned.resolve() != (Path(root) / declaration["filename"]).resolve():
+                        raise ArtifactContractError(
+                            "Returned artifact path does not match the declared output"
+                        )
+        if len(expected) == 1:
+            return [validate_artifact(root, expected[0], exclusive=True)]
+        validated = [validate_artifact(root, item) for item in expected]
+        declared = [Path(item["path"]) for item in validated]
+        for entry in Path(root).rglob("*"):
+            resolved = entry.resolve()
+            if any(
+                resolved == path or path in resolved.parents or resolved in path.parents
+                for path in declared
+            ):
+                continue
+            raise ArtifactContractError(
+                f"Undeclared output {entry.relative_to(root)}; expected only "
+                f"{[item['filename'] for item in expected]}"
+            )
+        return validated
     except ArtifactContractError as exc:
         raise ArtifactContractError(
             f"Artifact contract violation at {producer or 'producer'}: {exc}"
         ) from exc
+
+
+def publish_port_artifacts(staging, artifacts, published_dir, default_port="result"):
+    """Publish each validated artifact under published_dir/<port>/<filename>.
+
+    A single output publishes the whole staging directory to the node's
+    default port, as before. Several outputs are split so each port holds
+    only its own artifact.
+    """
+    staging, published_dir = Path(staging), Path(published_dir)
+    if len(artifacts) <= 1:
+        publish_artifact_directory(staging, published_dir / str(default_port))
+        return
+    published_dir.mkdir(parents=True, exist_ok=True)
+    for artifact in artifacts:
+        port_staging = Path(tempfile.mkdtemp(dir=published_dir, prefix=".port-"))
+        relative = relative_path(artifact["filename"])
+        target = port_staging / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(staging / relative), str(target))
+        publish_artifact_directory(port_staging, published_dir / str(artifact["port"]))
+    shutil.rmtree(staging, ignore_errors=True)
 
 
 def atomic_json(path, value):
@@ -275,7 +393,11 @@ def publish_artifact_directory(staging, destination):
 
 
 def stage_bound_artifacts(bindings, destination):
-    """Bindings contain a publication root and exactly one declared artifact."""
+    """Bindings contain a port publication root and exactly one declared artifact.
+
+    A producer with several output ports publishes each artifact under its
+    own port, so a binding names the producer port it reads (source_port).
+    """
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(dir=destination.parent, prefix=".artifacts-"))
@@ -311,6 +433,7 @@ def stage_bound_artifacts(bindings, destination):
                         "filename": relative,
                         "path": str((destination / relative).resolve()),
                         "source_node": str(binding.get("source_node", "")),
+                        "source_port": str(binding.get("source_port", "")),
                         "connection_id": str(binding.get("connection_id", "")),
                         "target_port": str(binding.get("target_port", "")),
                     }
