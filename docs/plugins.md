@@ -97,13 +97,14 @@ annotations and no transcript. An operation with `response.merge`
 and `request.input_field`) gives the step an **Output** setting, the step
 parameter `output_mode`:
 
-- `annotations` – **Annotations only** (default): publish the tool's response,
-  as without `merge`.
-- `input_with_annotations` – **Input with annotations**: publish the input with
+- `input_with_annotations` – **Input with annotations** (default, also for
+  steps created before the setting existed): publish the input with
   the response added under `key`, in `merge.filename` (default
   `annotated.json`). A JSON object input keeps all its fields (a transcript's
   `transcript`, `text`, segments and metadata), so later steps still find the
   text; plain text becomes `{"text": <input>, "<key>": <response>}`.
+- `annotations` – **Annotations only**: publish the tool's response, as without
+  `merge`. Later steps then get no input text.
 
 ```json
 {"transcript": "Rome is the capital of Italy.", "segments": [...],

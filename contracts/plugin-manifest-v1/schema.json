@@ -136,7 +136,7 @@
             },
             "merge": {
               "type": "object",
-              "description": "Offer the step output 'Input with annotations' (step parameter output_mode = input_with_annotations): publish the input document with the JSON response added under key, so later steps still see the input's text fields. Plain-text input becomes {\"text\": <input>, <key>: <response>}. Requires a JSON response.",
+              "description": "Publish the input with the response added (step parameter output_mode = input_with_annotations, the default; 'annotations' publishes only the response): publish the input document with the JSON response added under key, so later steps still see the input's text fields. Plain-text input becomes {\"text\": <input>, <key>: <response>}. Requires a JSON response.",
               "additionalProperties": false,
               "required": ["key"],
               "properties": {

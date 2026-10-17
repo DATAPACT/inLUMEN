@@ -47,13 +47,14 @@ export const isRequiredParameter = (parameter: PluginParameter) =>
 
 /** Values of the ``output_mode`` step parameter, for operations with ``response.merge``. */
 export const PLUGIN_OUTPUT_MODES = [
-  { value: 'annotations', label: 'Annotations only' },
   { value: 'input_with_annotations', label: 'Input with annotations' },
+  { value: 'annotations', label: 'Annotations only' },
 ] as const;
+export const DEFAULT_PLUGIN_OUTPUT_MODE = 'input_with_annotations';
 
 export const pluginDefaultParameters = (manifest: PluginManifest): Record<string, unknown> => ({
   operation: manifest.operations[0]?.id || '',
-  ...(manifest.operations.some((operation) => operation.response?.merge) ? { output_mode: 'annotations' } : {}),
+  ...(manifest.operations.some((operation) => operation.response?.merge) ? { output_mode: DEFAULT_PLUGIN_OUTPUT_MODE } : {}),
   ...Object.fromEntries((manifest.parameters || []).map((p) => [p.name, p.default ?? ''])),
   // Optional secrets are added only when the user enters a value; an
   // unconfigured sensitive parameter would fail the run.

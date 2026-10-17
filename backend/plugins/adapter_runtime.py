@@ -481,7 +481,7 @@ def _enrich_mode(operation):
     merge = (operation.get("response") or {}).get("merge")
     if not merge:
         return False
-    mode = str(_value("output_mode", OUTPUT_MODE_ANNOTATIONS))
+    mode = str(_value("output_mode", OUTPUT_MODE_ENRICH))
     if mode not in {OUTPUT_MODE_ANNOTATIONS, OUTPUT_MODE_ENRICH}:
         raise PluginCallError(
             f"Plugin output_mode must be {OUTPUT_MODE_ANNOTATIONS!r} or "

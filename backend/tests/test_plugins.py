@@ -255,8 +255,9 @@ class BuiltinPluginsTest(unittest.TestCase):
             "processing_metadata": {"model_id": "Systran/faster-whisper-medium"},
         }
 
-    def test_annotations_only_is_the_default_output(self):
-        result = self._run_wikifier("speech_to_text.json", json.dumps(self._speech_to_text_result("Rome.")))
+    def test_annotations_only_output_publishes_the_response(self):
+        result = self._run_wikifier(
+            "speech_to_text.json", json.dumps(self._speech_to_text_result("Rome.")), output_mode="annotations")
         self.assertEqual(["annotations.json"], list(result["outputs"]))
         self.assertEqual(
             {"annotations": [{"title": "Rome"}], "words": [], "spaces": [""]},
@@ -265,10 +266,10 @@ class BuiltinPluginsTest(unittest.TestCase):
         [declared] = result["declared"]
         self.assertEqual(("annotations", "annotations.json", "json"), (declared["name"], declared["filename"], declared["kind"]))
 
-    def test_enrich_keeps_the_transcript_and_adds_the_annotations(self):
+    def test_by_default_the_transcript_is_kept_and_the_annotations_added(self):
         stt = self._speech_to_text_result("Rome is the capital of Italy.")
-        result = self._run_wikifier(
-            "speech_to_text.json", json.dumps(stt), output_mode="input_with_annotations")
+        # A step created before output_mode existed has no value: it enriches too.
+        result = self._run_wikifier("speech_to_text.json", json.dumps(stt))
         self.assertEqual(["annotated.json"], list(result["outputs"]))
         enriched = json.loads(result["outputs"]["annotated.json"])
         self.assertEqual({**stt, "wikifier": {"annotations": [{"title": "Rome"}], "words": [], "spaces": [""]}}, enriched)
@@ -291,7 +292,6 @@ class BuiltinPluginsTest(unittest.TestCase):
         transcript = "Thank you for calling NordKart support."
         wikified = self._run_wikifier(
             "speech_to_text.json", json.dumps(self._speech_to_text_result(transcript)),
-            output_mode="input_with_annotations",
         )["outputs"]["annotated.json"]
         self.assertEqual(transcript, json.loads(wikified)["transcript"])
         downstream = self._run_wikifier("annotated.json", wikified)
@@ -376,8 +376,9 @@ class BuiltinPluginsTest(unittest.TestCase):
             }):
                 os.environ.pop("INLUMEN_INPUT_MANIFEST", None)
                 exec(compile(source, "wikifier-main.py", "exec"), {"__name__": "__main__"})
-            result = json.loads((root / "out" / "annotations.json").read_text())
-        self.assertEqual("Rome", result["annotations"][0]["title"])
+            result = json.loads((root / "out" / "annotated.json").read_text())
+        self.assertEqual("Rome is the capital of Italy.", result["text"])
+        self.assertEqual("Rome", result["wikifier"]["annotations"][0]["title"])
         self.assertEqual("/annotate-article", received["path"])
         self.assertEqual("application/x-www-form-urlencoded", received["type"])
         form = received["form"]
@@ -469,8 +470,9 @@ class BuiltinPluginsTest(unittest.TestCase):
     def test_moose_submits_a_job_and_publishes_its_result(self):
         url, calls = self._fake_moose()
         out, source = self._run_moose(url, vocabulary="dpv_pd", llm_provider="deepseek")
-        result = json.loads((out / "dpv-annotations.json").read_text())
-        entity = result["entities"][0]
+        result = json.loads((out / "annotated.json").read_text())
+        self.assertEqual("We store your email address for marketing.", result["text"])
+        entity = result["dpv"]["entities"][0]
         self.assertEqual("dpv-pd:EmailAddress", entity["type_id"])
         self.assertEqual("email address", "We store your email address for marketing."[entity["start"]:entity["end"]])
         method, path, headers, body = calls[0]

@@ -50,13 +50,13 @@ describe("plugin templates", () => {
     expect(isPluginTemplate("REST API")).toBe(false);
   });
 
-  it("starts annotation plugins with annotations-only output", () => {
+  it("starts annotation plugins passing their input on", () => {
     const annotator: PluginManifest = {
       ...manifest,
       operations: [{ id: "annotate", method: "POST", path: "/annotate", response: { merge: { key: "wikifier" } } }],
     };
     expect(pluginToTemplate({ ...installed, manifest: annotator }).defaultParameters).toMatchObject({
-      operation: "annotate", output_mode: "annotations",
+      operation: "annotate", output_mode: "input_with_annotations",
     });
     expect(pluginToTemplate(installed).defaultParameters).not.toHaveProperty("output_mode");
   });

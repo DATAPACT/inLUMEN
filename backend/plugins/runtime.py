@@ -8,7 +8,7 @@ from typing import Any
 from node_parameters import is_sensitive_parameter_name, normalize_secret_param_keys
 
 from .manifest import (
-    OUTPUT_MODE_ANNOTATIONS,
+    DEFAULT_OUTPUT_MODE,
     OUTPUT_MODE_ENRICH,
     OUTPUT_MODES,
     parameters_for_operation,
@@ -47,7 +47,7 @@ def plugin_runtime_spec(step: dict[str, Any], manifest: dict[str, Any]) -> dict[
     }
     values["operation"] = operation["id"]
     if supports_enrich(operation):
-        mode = str(values.get("output_mode") or OUTPUT_MODE_ANNOTATIONS)
+        mode = str(values.get("output_mode") or DEFAULT_OUTPUT_MODE)
         if mode not in OUTPUT_MODES:
             raise ValueError(
                 f"Plugin {manifest['id']!r} output_mode must be one of {', '.join(OUTPUT_MODES)}; got {mode!r}."

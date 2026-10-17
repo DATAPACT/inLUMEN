@@ -33,6 +33,9 @@ RESERVED_PARAMETER_NAMES = frozenset({
 OUTPUT_MODE_ANNOTATIONS = "annotations"
 OUTPUT_MODE_ENRICH = "input_with_annotations"
 OUTPUT_MODES = (OUTPUT_MODE_ANNOTATIONS, OUTPUT_MODE_ENRICH)
+# Carry the input on by default, so a chain such as Speech-to-Text ->
+# Wikifier -> Sentiment Analysis keeps the transcript.
+DEFAULT_OUTPUT_MODE = OUTPUT_MODE_ENRICH
 DEFAULT_MERGE_FILENAME = "annotated.json"
 
 _PATH_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -332,7 +335,7 @@ def default_parameters(manifest: dict[str, Any]) -> dict[str, Any]:
     """Initial STEP.param for a newly configured plugin step."""
     values: dict[str, Any] = {"operation": default_operation(manifest)["id"]}
     if any(supports_enrich(operation) for operation in manifest["operations"]):
-        values["output_mode"] = OUTPUT_MODE_ANNOTATIONS
+        values["output_mode"] = DEFAULT_OUTPUT_MODE
     for parameter in manifest.get("parameters") or []:
         values[parameter["name"]] = parameter.get("default", "")
     # Only required secrets start on the step: an unconfigured optional secret
