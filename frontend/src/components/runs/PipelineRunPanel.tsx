@@ -6,6 +6,7 @@ import {
   Check,
   Circle,
   Download,
+  Eye,
   FileOutput,
   Loader2,
   PlayCircle,
@@ -37,7 +38,9 @@ import {
   presentRunOutputs,
   presentRunFailure,
   summarizeNodeEvents,
+  type PresentedRunOutput,
 } from '@/features/runs/runPresentation';
+import { RunOutputViewer } from '@/components/runs/RunOutputViewer';
 import { cn } from '@/lib/utils';
 
 type StageState = 'pending' | 'active' | 'complete' | 'error';
@@ -102,6 +105,60 @@ const StageIcon = ({ state }: { state: StageState }) => {
   return <Circle className="h-3.5 w-3.5" />;
 };
 
+const RunOutputRow = ({
+  output,
+  onOpen,
+  onDownload,
+  compact = false,
+  showPath = false,
+}: {
+  output: PresentedRunOutput;
+  onOpen: () => void;
+  onDownload: () => void;
+  compact?: boolean;
+  showPath?: boolean;
+}) => {
+  const metadata = showPath
+    ? output.path
+    : [
+      compact ? output.nodeLabel : output.kind || output.contentType,
+      formatOutputSize(output.sizeBytes),
+      output.copies > 1 ? `${output.copies} artifacts` : '',
+    ].filter(Boolean).join(' · ');
+  return (
+    <div className="flex items-center gap-1">
+      <Button
+        variant="ghost"
+        size="sm"
+        className={cn(
+          'h-auto min-w-0 flex-1 justify-start px-2 text-left',
+          compact ? 'min-h-9 py-1' : 'min-h-10 py-1.5',
+        )}
+        onClick={onOpen}
+        title={`Open ${output.filename}`}
+      >
+        <Eye className={cn('mr-2 shrink-0', compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+        <span className="min-w-0">
+          <span className={cn('block truncate', !compact && 'font-medium')}>{output.filename}</span>
+          {metadata && (
+            <span className="block truncate text-[10px] font-normal text-muted-foreground">{metadata}</span>
+          )}
+        </span>
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-7 w-7 shrink-0"
+        onClick={onDownload}
+        aria-label={`Download ${output.filename}`}
+        title={`Download ${output.filename}`}
+      >
+        <Download className="h-3.5 w-3.5" />
+      </Button>
+    </div>
+  );
+};
+
 export const PipelineRunPanel = () => {
   const [capabilities, setCapabilities] = useState<RunnerCapabilities | null>(null);
   const [runs, setRuns] = useState<PipelineRunRecord[]>([]);
@@ -138,6 +195,16 @@ export const PipelineRunPanel = () => {
     () => presentRunOutputs(selectedRun?.result?.outputs || []),
     [selectedRun?.result?.outputs],
   );
+  const finalOutputs = useMemo(
+    () => presentedOutputs.primary.filter((output) => output.role !== 'intermediate'),
+    [presentedOutputs],
+  );
+  const stepOutputs = useMemo(
+    () => presentedOutputs.primary.filter((output) => output.role === 'intermediate'),
+    [presentedOutputs],
+  );
+  const [viewerPath, setViewerPath] = useState<string | null>(null);
+  const openViewer = (path: string) => setViewerPath(path);
   const outstandingRunCount = useMemo(
     () => runs.filter((run) => isActivePipelineRun(run.status)).length,
     [runs],
@@ -506,48 +573,53 @@ export const PipelineRunPanel = () => {
                     Results
                   </div>
                   <p className="mt-0.5 text-[10px] text-muted-foreground">
-                    Final files are grouped by name. Manifests and runtime files are kept below.
+                    Open a file to inspect it here. Outputs of every step are kept with the run.
                   </p>
                 </div>
                 <span className="shrink-0 rounded-full bg-background/70 px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                  {presentedOutputs.primary.length}
+                  {finalOutputs.length}
                 </span>
               </div>
-              {presentedOutputs.primary.length > 0 ? (
+              {finalOutputs.length > 0 ? (
                 <div className="mt-1.5 space-y-1">
-                  {presentedOutputs.primary.map((output) => {
-                    const metadata = [
-                      output.kind || output.contentType,
-                      formatOutputSize(output.sizeBytes),
-                      output.copies > 1 ? `${output.copies} artifacts` : '',
-                    ].filter(Boolean).join(' · ');
-                    return (
-                      <Button
-                        key={output.path}
-                        variant="ghost"
-                        size="sm"
-                        className="h-auto min-h-10 w-full justify-start px-2 py-1.5 text-left"
-                        onClick={() => {
-                          void downloadPipelineRunOutput(selectedRun.run_id, output.path, output.filename);
-                        }}
-                      >
-                        <Download className="mr-2 h-3.5 w-3.5 shrink-0" />
-                        <span className="min-w-0">
-                          <span className="block truncate font-medium">{output.filename}</span>
-                          {metadata && (
-                            <span className="block truncate text-[10px] font-normal text-muted-foreground">
-                              {metadata}
-                            </span>
-                          )}
-                        </span>
-                      </Button>
-                    );
-                  })}
+                  {finalOutputs.map((output) => (
+                    <RunOutputRow
+                      key={output.path}
+                      output={output}
+                      onOpen={() => openViewer(output.path)}
+                      onDownload={() => {
+                        void downloadPipelineRunOutput(selectedRun.run_id, output.path, output.filename);
+                      }}
+                    />
+                  ))}
                 </div>
               ) : (
                 <p className="mt-2 rounded-md border border-dashed border-border p-2 text-[11px] text-muted-foreground">
-                  This run produced technical artifacts only; there is no user-facing result file.
+                  {selectedRun.status === 'succeeded'
+                    ? 'This run produced technical artifacts only; there is no user-facing result file.'
+                    : 'The run stopped before its final steps produced results.'}
                 </p>
+              )}
+
+              {stepOutputs.length > 0 && (
+                <div className="mt-2">
+                  <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                    Intermediate step outputs ({stepOutputs.length})
+                  </div>
+                  <div className="mt-1 space-y-1">
+                    {stepOutputs.map((output) => (
+                      <RunOutputRow
+                        key={output.path}
+                        output={output}
+                        compact
+                        onOpen={() => openViewer(output.path)}
+                        onDownload={() => {
+                          void downloadPipelineRunOutput(selectedRun.run_id, output.path, output.filename);
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
               )}
 
               {presentedOutputs.hiddenCount > 0 && (
@@ -557,27 +629,27 @@ export const PipelineRunPanel = () => {
                   </summary>
                   <div className="space-y-1 border-t border-border p-1.5">
                     {presentedOutputs.all.map((output) => (
-                      <Button
+                      <RunOutputRow
                         key={output.path}
-                        variant="ghost"
-                        size="sm"
-                        className="h-auto min-h-9 w-full justify-start px-1.5 py-1 text-left"
-                        onClick={() => {
+                        output={output}
+                        compact
+                        showPath
+                        onOpen={() => openViewer(output.path)}
+                        onDownload={() => {
                           void downloadPipelineRunOutput(selectedRun.run_id, output.path, output.filename);
                         }}
-                      >
-                        <Download className="mr-1.5 h-3 w-3 shrink-0" />
-                        <span className="min-w-0">
-                          <span className="block truncate">{output.filename}</span>
-                          <span className="block truncate text-[9px] font-normal text-muted-foreground">
-                            {output.path}
-                          </span>
-                        </span>
-                      </Button>
+                      />
                     ))}
                   </div>
                 </details>
               )}
+              <RunOutputViewer
+                open={viewerPath !== null}
+                onOpenChange={(open) => { if (!open) setViewerPath(null); }}
+                runId={selectedRun.run_id}
+                outputs={presentedOutputs.all}
+                initialPath={viewerPath || undefined}
+              />
             </div>
           )}
 

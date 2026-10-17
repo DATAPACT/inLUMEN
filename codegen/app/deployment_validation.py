@@ -16,7 +16,7 @@ import uuid
 import threading
 import time
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import docker
@@ -2096,23 +2096,84 @@ def _read_repaired_bundle_files(bundle_root: Path) -> list[dict[str, Any]]:
     ]
 
 
+_DEFAULT_OUTPUT_PORTS = frozenset({"output", "result"})
+
+
+def _run_output_nodes(bundle_root: Path) -> dict[str, dict[str, Any]]:
+    """Index run-spec nodes by their output directory name."""
+    try:
+        run_spec = json.loads((bundle_root / "run-spec.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    nodes = [node for node in run_spec.get("nodes") or [] if isinstance(node, dict)]
+    parents = {
+        str(parent)
+        for node in nodes
+        for parent in node.get("parents") or []
+    }
+    indexed: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        output_path = PurePosixPath(str(node.get("output_path") or ""))
+        flow_id = str(node.get("id") or node.get("flow_id") or "").strip()
+        if len(output_path.parts) != 2 or output_path.parts[0] != "outputs" or not flow_id:
+            continue
+        ports = [
+            str(port.get("id"))
+            for port in node.get("outputs") or []
+            if isinstance(port, dict) and port.get("id")
+        ]
+        indexed[output_path.parts[1]] = {
+            "flow_id": flow_id,
+            "label": str(node.get("label") or ""),
+            "ports": ports,
+            "final": flow_id not in parents,
+        }
+    return indexed
+
+
+def _split_run_output_path(
+    rest: tuple[str, ...],
+    node: dict[str, Any] | None,
+) -> tuple[str, tuple[str, ...]]:
+    """Return (port, path below the port) without Dagster's run-scope folder."""
+    ports = _DEFAULT_OUTPUT_PORTS | set((node or {}).get("ports") or [])
+    # Dagster publishes outputs/<node>/<run-id>/<port>/<path>. A run already
+    # scopes its own artifact collection, so engine-private staging
+    # directories must not leak into the public artifact contract.
+    if len(rest) >= 3 and rest[1] in ports:
+        return rest[1], rest[2:]
+    if len(rest) >= 2 and rest[0] in ports:
+        return rest[0], rest[1:]
+    if node is not None and len(rest) >= 2:
+        return "", rest[1:]
+    return "", rest
+
+
 def _read_run_output_files(bundle_root: Path) -> list[dict[str, Any]]:
     output_root = bundle_root / "outputs"
     if not output_root.is_dir():
         return []
+    nodes = _run_output_nodes(bundle_root)
     entries = []
     for path in sorted(item for item in output_root.rglob("*") if item.is_file()):
         if path.name == ".gitkeep":
             continue
         entry = _artifact_file_entry(path, bundle_root, role="run-output")
-        relative = path.relative_to(output_root)
-        # Dagster uses outputs/<node>/<run-id>/output/<filename> internally.
-        # A run already scopes its own artifact collection, so engine-private
-        # staging directories must not leak into the public artifact contract.
-        if len(relative.parts) >= 4 and relative.parts[2] == "output":
-            entry["path"] = Path(
-                "outputs", relative.parts[0], *relative.parts[3:]
-            ).as_posix()
+        node_dir, *rest = path.relative_to(output_root).parts
+        node = nodes.get(node_dir)
+        port, below_port = _split_run_output_path(tuple(rest), node)
+        # Keep the port in the public path only when it disambiguates files.
+        keep_port = bool(port) and node is not None and len(node["ports"]) > 1
+        entry["path"] = PurePosixPath(
+            "outputs", node_dir, *([port] if keep_port else []), *below_port
+        ).as_posix()
+        if port:
+            entry["port"] = port
+        if node is not None:
+            entry["flow_id"] = node["flow_id"]
+            entry["source_node"] = node["flow_id"]
+            entry["node_label"] = node["label"]
+            entry["output_role"] = "final" if node["final"] else "intermediate"
         entries.append(entry)
     return entries
 
@@ -2207,10 +2268,10 @@ def validate_deployment_bundle_files(
                 if ok and repair_report is not None
                 else []
             ),
+            # Failed runs still return what earlier steps published, so users
+            # can inspect partial results and see where the pipeline stopped.
             "run_outputs": (
-                _read_run_output_files(bundle_root)
-                if ok and execution_requested
-                else []
+                _read_run_output_files(bundle_root) if execution_requested else []
             ),
         }
 

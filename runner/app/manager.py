@@ -302,8 +302,19 @@ class PipelineRunManager:
         }
 
     def output(
-        self, run_id: str, path: str, workspace_id: str | None = None
-    ) -> tuple[bytes, str, str] | None:
+        self,
+        run_id: str,
+        path: str,
+        workspace_id: str | None = None,
+        *,
+        offset: int = 0,
+        length: int | None = None,
+    ) -> tuple[bytes, str, str, int] | None:
+        """Return (bytes, content type, filename, total size) for an output.
+
+        ``offset``/``length`` select a byte window so previews never need to
+        load a large output whole.
+        """
         record = self.store.get(run_id, workspace_id)
         if record is None:
             return None
@@ -312,18 +323,22 @@ class PipelineRunManager:
                 continue
             storage_path = str(entry.get("_storage_path") or "")
             if storage_path:
-                body = self.artifact_store.read_output(storage_path)
+                body, size = self.artifact_store.read_output(storage_path, offset, length)
             else:
                 content = str(entry.get("content") or "")
-                body = (
+                full = (
                     base64.b64decode(content, validate=True)
                     if str(entry.get("content_encoding") or "") == "base64"
                     else content.encode("utf-8")
                 )
+                size = len(full)
+                start = min(max(offset, 0), size)
+                body = full[start:] if length is None else full[start : start + max(length, 0)]
             return (
                 body,
                 str(entry.get("content_type") or "application/octet-stream"),
                 str(entry.get("filename") or PurePosixPath(path).name or "output"),
+                size,
             )
         return None
 
@@ -559,6 +574,7 @@ class PipelineRunManager:
             validation_report = (
                 validation_report if isinstance(validation_report, dict) else {}
             )
+            output_files = self._store_run_outputs(record, response)
             if not response.get("ok"):
                 errors = validation_report.get("errors") or [
                     "Dagster pipeline execution failed."
@@ -573,16 +589,9 @@ class PipelineRunManager:
                         )
                     },
                 }
-                self._finish_failed(record, error)
+                self._finish_failed(record, error, outputs=output_files)
                 return
 
-            outputs = response.get("run_outputs")
-            output_files = [item for item in outputs or [] if isinstance(item, dict)]
-            record["_output_files"] = self.artifact_store.store_outputs(
-                run_id,
-                output_files,
-                str(record.get("workspace_id") or "local-workspace"),
-            )
             now = utc_now_iso()
             record["status"] = "succeeded"
             record["updated_at"] = now
@@ -969,7 +978,25 @@ class PipelineRunManager:
         )
         self._save_terminal_record(record)
 
-    def _finish_failed(self, record: dict[str, Any], error: dict[str, Any]) -> None:
+    def _store_run_outputs(
+        self, record: dict[str, Any], response: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        outputs = response.get("run_outputs")
+        output_files = [item for item in outputs or [] if isinstance(item, dict)]
+        record["_output_files"] = self.artifact_store.store_outputs(
+            record["run_id"],
+            output_files,
+            str(record.get("workspace_id") or "local-workspace"),
+        )
+        return output_files
+
+    def _finish_failed(
+        self,
+        record: dict[str, Any],
+        error: dict[str, Any],
+        *,
+        outputs: list[dict[str, Any]] | None = None,
+    ) -> None:
         now = utc_now_iso()
         record["status"] = "failed"
         record["updated_at"] = now
@@ -983,7 +1010,12 @@ class PipelineRunManager:
             "active_node_name": None,
             "node_elapsed_seconds": None,
         }
-        record["result"] = self._terminal_result(record, "failed", error=error)
+        record["result"] = self._terminal_result(
+            record,
+            "failed",
+            error=error,
+            outputs=[self._output_metadata(item) for item in outputs or []],
+        )
         self._append_event(record, "run.failed", "failed", str(error["message"]))
         self._save_terminal_record(record)
 
@@ -999,6 +1031,10 @@ class PipelineRunManager:
                 "content_type",
                 "size_bytes",
                 "sha256",
+                "source_node",
+                "node_label",
+                "port",
+                "output_role",
             )
             if entry.get(key) is not None
         }
@@ -1038,13 +1074,27 @@ class PipelineRunManager:
     ) -> None:
         cursor = int(record.get("event_cursor") or 0) + 1
         record["event_cursor"] = cursor
-        record.setdefault("_events", []).append(
-            {
-                "id": cursor,
-                "timestamp": utc_now_iso(),
-                "type": event_type,
-                "status": status,
-                "message": message,
-                "node_id": node_id,
-            }
-        )
+        event = {
+            "id": cursor,
+            "timestamp": utc_now_iso(),
+            "type": event_type,
+            "status": status,
+            "message": message,
+            "node_id": node_id,
+        }
+        flow_id = PipelineRunManager._flow_id_for_asset(record, node_id)
+        if flow_id:
+            event["flow_id"] = flow_id
+        record.setdefault("_events", []).append(event)
+
+    @staticmethod
+    def _flow_id_for_asset(record: dict[str, Any], node_id: str | None) -> str | None:
+        """Map a Dagster asset name to the canvas node that produced it."""
+        if not node_id:
+            return None
+        manifest = record.get("_bundle_manifest")
+        nodes = manifest.get("nodes") if isinstance(manifest, dict) else None
+        for node in nodes or []:
+            if isinstance(node, dict) and node.get("asset_key") == node_id:
+                return str(node.get("flow_id") or "") or None
+        return None

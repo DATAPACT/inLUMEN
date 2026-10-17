@@ -62,6 +62,7 @@ export type PipelineRunEvent = {
   status?: PipelineRunStatus | null;
   message?: string | null;
   node_id?: string | null;
+  flow_id?: string | null;
 };
 
 export type RunnerCapabilities = {
@@ -176,14 +177,62 @@ export const downloadPipelineRunBundle = (runId: string): Promise<void> =>
     `inlumen-dagster-run-${runId}.zip`,
   );
 
+const encodeOutputPath = (path: string) => path.split('/').map(encodeURIComponent).join('/');
+
+const runOutputUrl = (runId: string, path: string) =>
+  `${INLUMEN_API_URL}/api/pipeline-runs/${encodeURIComponent(runId)}/outputs/${encodeOutputPath(path)}`;
+
 export const downloadPipelineRunOutput = (
   runId: string,
   path: string,
   filename: string,
-): Promise<void> => downloadRunFile(
-  `${INLUMEN_API_URL}/api/pipeline-runs/${encodeURIComponent(runId)}/outputs/${path.split('/').map(encodeURIComponent).join('/')}`,
-  filename,
+): Promise<void> => downloadRunFile(runOutputUrl(runId, path), filename);
+
+export type RunOutputPreviewColumn = { name: string; type: string };
+
+type RunOutputPreviewBase = {
+  path: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  source_node?: string | null;
+  port?: string | null;
+  offset?: number;
+  next_offset?: number | null;
+  has_more?: boolean;
+};
+
+export type RunOutputPreview = RunOutputPreviewBase & (
+  | { kind: 'table'; columns: RunOutputPreviewColumn[]; rows: string[][] }
+  | { kind: 'json'; value: unknown }
+  | { kind: 'text' | 'markdown'; text: string }
+  | { kind: 'image' | 'audio' | 'video' | 'pdf'; inline: boolean }
+  | { kind: 'binary' }
 );
+
+export const fetchPipelineRunOutputPreview = async (
+  runId: string,
+  path: string,
+  options: { offset?: number; limit?: number } = {},
+): Promise<RunOutputPreview> => {
+  const params = new URLSearchParams();
+  if (options.offset) params.set('offset', String(options.offset));
+  if (options.limit) params.set('limit', String(options.limit));
+  const query = params.toString();
+  const response = await apiFetch(
+    `${INLUMEN_API_URL}/api/pipeline-runs/${encodeURIComponent(runId)}/preview/${encodeOutputPath(path)}${query ? `?${query}` : ''}`,
+  );
+  return responseJson<RunOutputPreview>(response, 'Failed to preview the run output.');
+};
+
+/** Fetch an output's bytes for in-page display (images, PDFs, media). */
+export const fetchPipelineRunOutputBlob = async (runId: string, path: string): Promise<Blob> => {
+  const response = await apiFetch(`${runOutputUrl(runId, path)}?disposition=inline`);
+  if (!response.ok) {
+    await responseJson(response, 'Failed to load the run output.');
+  }
+  return response.blob();
+};
 
 export const isActivePipelineRun = (status: PipelineRunStatus): boolean =>
   ['queued', 'preparing', 'running', 'cancelling'].includes(status);

@@ -81,8 +81,16 @@ class PipelineArtifactStore:
             stored.append(metadata)
         return stored
 
-    def read_output(self, reference: str) -> bytes:
-        return self._safe_reference(reference).read_bytes()
+    def read_output(
+        self, reference: str, offset: int = 0, length: int | None = None
+    ) -> tuple[bytes, int]:
+        """Return a byte window of a stored output and the output's full size."""
+        path = self._safe_reference(reference)
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            handle.seek(min(max(offset, 0), size))
+            body = handle.read() if length is None else handle.read(max(length, 0))
+        return body, size
 
     def clear(self, workspace_id: str | None = None) -> int:
         """Remove run payloads, optionally constrained to one workspace."""

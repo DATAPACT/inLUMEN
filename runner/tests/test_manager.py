@@ -537,3 +537,63 @@ async def test_clear_blocks_late_callbacks_from_another_worker(tmp_path):
     store.clear('local-workspace')
     PipelineRunStore(path).save(stale)
     assert store.get(run['run_id']) is None
+
+
+class PartialFailureExecutor(FakeDagsterExecutor):
+    async def execute(self, run_id, files, runtime_secrets):
+        failed = await FakeDagsterExecutor(succeeds=False).execute(
+            run_id, files, runtime_secrets
+        )
+        failed["run_outputs"] = [
+            {
+                "path": "outputs/node-0-load/data.csv",
+                "filename": "data.csv",
+                "content": "a,b\n1,2\n",
+                "content_encoding": "utf-8",
+                "content_type": "text/csv",
+                "size_bytes": 8,
+                "source_node": "0",
+                "node_label": "Load",
+                "port": "output",
+                "output_role": "intermediate",
+            }
+        ]
+        return failed
+
+
+@pytest.mark.asyncio
+async def test_failed_run_keeps_outputs_of_completed_steps_and_maps_node_events():
+    manager = PipelineRunManager(
+        PipelineRunStore(":memory:"), adapter="dagster", executor=PartialFailureExecutor()
+    )
+    run_request = request(key="partial-failure")
+    run_request.snapshot.bundle_manifest = {
+        "targets": {"dagster": True},
+        "nodes": [{"flow_id": "1", "asset_key": "node_1_task"}],
+    }
+
+    queued, _created = await manager.start(run_request)
+    await manager.tasks[queued["run_id"]]
+
+    failed = manager.get(queued["run_id"])
+    assert failed["status"] == "failed"
+    assert failed["result"]["outputs"] == [
+        {
+            "path": "outputs/node-0-load/data.csv",
+            "filename": "data.csv",
+            "content_type": "text/csv",
+            "size_bytes": 8,
+            "source_node": "0",
+            "node_label": "Load",
+            "port": "output",
+            "output_role": "intermediate",
+        }
+    ]
+    assert manager.output(queued["run_id"], "outputs/node-0-load/data.csv")[0] == b"a,b\n1,2\n"
+    node_events = [
+        event
+        for event in manager.events(queued["run_id"])["events"]
+        if event["type"].startswith("node.")
+    ]
+    assert node_events
+    assert {event.get("flow_id") for event in node_events} == {"1"}
