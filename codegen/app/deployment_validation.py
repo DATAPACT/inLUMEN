@@ -1089,13 +1089,16 @@ def _validate_bundle_structure(
         "outputs",
     ]
     if targets.get("argo"):
-        required_paths.extend(
-            [
-                "argo/workflow.yaml",
-                "argo/Dockerfile",
-                "argo/requirements.txt",
-            ]
-        )
+        required_paths.append("argo/workflow.yaml")
+        # One shared image, or one per group of compatible steps.
+        image_dirs = sorted(
+            path.parent.relative_to(bundle_root).as_posix()
+            for path in (bundle_root / "argo" / "images").glob("*/Dockerfile")
+        ) or ["argo"]
+        for image_dir in image_dirs:
+            required_paths.extend(
+                [f"{image_dir}/Dockerfile", f"{image_dir}/requirements.txt"]
+            )
     if targets.get("dagster"):
         required_paths.extend(
             [

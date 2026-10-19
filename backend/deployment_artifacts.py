@@ -1433,6 +1433,12 @@ def _build_codegen_argo_workflow_object(
 
     templates = [entry_template]
     shared_image_parameter = "pipeline-image"
+    # Grouped bundles build one image per compatible package set; each step
+    # runs on its group's image.
+    step_image_parameters = (shared_runtime or {}).get("image_parameter_by_step") or {}
+    prefetch_image_parameter = (
+        (shared_runtime or {}).get("prefetch_image_parameter") or shared_image_parameter
+    )
     # Reviewed models are fetched once into a persistent volume by the first
     # task, then mounted read-only at /models by the steps that use them.
     # Baked models are already at /models in the image.
@@ -1458,7 +1464,7 @@ def _build_codegen_argo_workflow_object(
             "name": argo_bundle.MODEL_PREFETCH_TASK,
             "metadata": {"annotations": {"inlumen.ai/role": "model-prefetch"}},
             "container": {
-                "image": f"{{{{workflow.parameters.{shared_image_parameter}}}}}",
+                "image": f"{{{{workflow.parameters.{prefetch_image_parameter}}}}}",
                 "imagePullPolicy": "IfNotPresent",
                 "command": ["python", model_store["script_path"]],
                 "env": [
@@ -1503,6 +1509,11 @@ def _build_codegen_argo_workflow_object(
         model_resource_classes[model["flow_id"]].append(_clean_string(model.get("resource_class")))
     image_parameters = (
         [
+            {"name": group["image_parameter"], "value": group["image"]}
+            for group in shared_runtime["images"]
+        ]
+        if (shared_runtime or {}).get("strategy") == "grouped"
+        else [
             {
                 "name": shared_image_parameter,
                 "value": _clean_string((shared_runtime or {}).get("image"))
@@ -1571,7 +1582,7 @@ def _build_codegen_argo_workflow_object(
         incoming_bindings = bindings_by_target.get(step_id) or []
         dockerfile = dockerfiles_by_step[step_id]
         image_parameter = (
-            shared_image_parameter
+            step_image_parameters.get(step_id, shared_image_parameter)
             if shared_runtime
             else _argo_name(f"image-{step_id}", "image")
         )
@@ -1769,7 +1780,10 @@ def _build_codegen_argo_workflow_object(
             "inlumen.ai/generator": _clean_string(dockerfile.get("generator"))
             or CODEGEN_GENERATOR,
             "inlumen.ai/dockerfile": (
-                _clean_string((shared_runtime or {}).get("dockerfile"))
+                _clean_string(
+                    ((shared_runtime or {}).get("dockerfile_by_step") or {}).get(step_id)
+                )
+                or _clean_string((shared_runtime or {}).get("dockerfile"))
                 or dockerfile["dockerfile_filename"]
             ),
         }
@@ -2219,6 +2233,14 @@ def validate_argo_workflow_object(workflow: Any, expected_step_ids: Optional[Ite
         task_templates.add(template_name)
         if template_name not in template_by_name:
             errors.append(f"task '{task_name}' references missing template '{template_name}'")
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        for dependency in task.get("dependencies") or []:
+            if dependency not in task_names:
+                errors.append(
+                    f"task '{task.get('name')}' depends on missing task '{dependency}'"
+                )
 
     expected_template_names = {
         _argo_name(step_id)
@@ -4706,15 +4728,101 @@ def _bundle_input_manifest(input_files: Sequence[dict]) -> str:
     return json.dumps(manifest, indent=2) + "\n"
 
 
+def _requirement_specifiers(requirements: Sequence[str]) -> Dict[str, Any]:
+    """Combine each package's version specifiers; skip options and URLs."""
+    from packaging.specifiers import SpecifierSet
+    from packaging.utils import canonicalize_name
+
+    combined: Dict[str, Any] = {}
+    for line in requirements:
+        text = line.split("#", 1)[0].strip()
+        if not text or text.startswith("-"):
+            continue
+        try:
+            requirement = Requirement(text)
+        except InvalidRequirement:
+            continue
+        if requirement.url:
+            continue
+        name = canonicalize_name(requirement.name)
+        combined[name] = combined.get(name, SpecifierSet()) & requirement.specifier
+    return combined
+
+
+def _specifiers_overlap(first: Any, second: Any) -> bool:
+    """Whether some version satisfies both sets, judged from their bounds.
+
+    Offline and approximate: candidates are the versions named in the
+    specifiers, versions just above them (``.1``, ``.post1``) and ``0``. A
+    missed overlap only splits the image unnecessarily; it never merges
+    incompatible steps.
+    """
+    from packaging.version import InvalidVersion, Version
+
+    combined = first & second
+    if not str(combined):
+        return True
+    candidates = {"0"}
+    for specifier in combined:
+        version = specifier.version.rstrip(".*")
+        candidates.update({version, f"{version}.0", f"{version}.1", f"{version}.post1"})
+    for candidate in candidates:
+        try:
+            if combined.contains(Version(candidate), prereleases=True):
+                return True
+        except InvalidVersion:
+            continue
+    return False
+
+
+def _requirement_conflict(first: Sequence[str], second: Sequence[str]) -> str:
+    """Name a package the two requirement lists cannot both satisfy, or ''."""
+    first_specifiers = _requirement_specifiers(first)
+    second_specifiers = _requirement_specifiers(second)
+    for name in sorted(set(first_specifiers) & set(second_specifiers)):
+        if not _specifiers_overlap(first_specifiers[name], second_specifiers[name]):
+            return name
+    return ""
+
+
+def _compatible_requirement_groups(
+    ordered_ids: Sequence[str],
+    step_requirements: Dict[str, List[str]],
+) -> List[dict]:
+    """Place steps, in order, into the first group they are compatible with."""
+    groups: List[dict] = []
+    for step_id in ordered_ids:
+        requirements = step_requirements.get(step_id) or []
+        conflicts = []
+        for group in groups:
+            package = _requirement_conflict(group["requirements"], requirements)
+            if not package:
+                group["flow_ids"].append(step_id)
+                group["requirements"].extend(requirements)
+                break
+            conflicts.append({"flow_ids": list(group["flow_ids"]), "package": package})
+        else:
+            groups.append({
+                "flow_ids": [step_id],
+                "requirements": list(requirements),
+                "conflicts": conflicts,
+            })
+    return groups
+
+
 def _shared_argo_runtime(
     steps: Sequence[dict],
     ordered_ids: Sequence[str],
     dockerfiles_payload: Any,
     input_files: Sequence[dict] = (),
 ) -> dict:
-    """Describe one Python image that holds every node and the root inputs."""
+    """Describe the Python image(s) that hold every node and the root inputs.
+
+    Usually one shared image. When steps pin packages that cannot be installed
+    together, they are split into the fewest compatible groups, one image each.
+    """
     steps_by_id = {step["flow_id"]: step for step in steps}
-    requirements: List[str] = []
+    step_requirements: Dict[str, List[str]] = {}
     digest_entries: List[dict] = []
     nodes: dict[str, dict] = {}
 
@@ -4740,9 +4848,7 @@ def _shared_argo_runtime(
                     "manifest per node."
                 ],
             )
-        requirements.extend(
-            _package_dependencies(dockerfiles_payload, step_id)
-        )
+        step_requirements[step_id] = _package_dependencies(dockerfiles_payload, step_id)
         for file_entry in step_files:
             content = str(file_entry.get("content") or "")
             digest_entries.append(
@@ -4797,40 +4903,66 @@ def _shared_argo_runtime(
                 "filename": filename,
                 "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
             })
-        if not any(
+
+    groups = _compatible_requirement_groups(ordered_ids, step_requirements)
+    grouped = len(groups) > 1
+    prefetch_group = (
+        next(
+            index for index, group in enumerate(groups)
+            if set(group["flow_ids"]) & set(models["flow_ids"])
+        )
+        if models
+        else None
+    )
+    sorted_digests = sorted(digest_entries, key=lambda item: (item["flow_id"], item["filename"]))
+    images = []
+    for index, group in enumerate(groups):
+        requirements = list(group["requirements"])
+        if index == prefetch_group and not any(
             re.match(r"huggingface[-_]hub\b", requirement.strip(), re.IGNORECASE)
             for requirement in requirements
         ):
             # The prefetch step downloads reviewed snapshots with huggingface_hub.
             requirements.append("huggingface-hub")
+        requirements.append("jsonschema>=4.23,<5")
+        unique_requirements: List[str] = []
+        seen_requirements: set[str] = set()
+        for requirement in requirements:
+            cleaned = requirement.strip()
+            key = cleaned.lower()
+            if not cleaned or key in seen_requirements:
+                continue
+            seen_requirements.add(key)
+            unique_requirements.append(cleaned)
+        name = f"env-{index + 1}" if grouped else ""
+        hashed = {
+            "python": "3.11",
+            "requirements": unique_requirements,
+            "files": sorted_digests,
+        }
+        if grouped:
+            hashed["group"] = name
+        environment_hash = hashlib.sha256(
+            json.dumps(hashed, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        requirements_content = "\n".join(unique_requirements)
+        if requirements_content:
+            requirements_content += "\n"
+        images.append({
+            "name": name,
+            "flow_ids": list(group["flow_ids"]),
+            "conflicts": group["conflicts"],
+            "directory": f"argo/images/{name}" if grouped else "argo",
+            "environment_hash": environment_hash,
+            "requirements_content": requirements_content,
+            "image": (
+                f"{argo_bundle.IMAGE_NAME}-{name}:{environment_hash[:12]}"
+                if grouped
+                else f"inlumen/pipeline:{environment_hash[:12]}"
+            ),
+            "image_parameter": f"pipeline-image-{name}" if grouped else "pipeline-image",
+        })
 
-    requirements.append("jsonschema>=4.23,<5")
-    unique_requirements: List[str] = []
-    seen_requirements: set[str] = set()
-    for requirement in requirements:
-        cleaned = requirement.strip()
-        key = cleaned.lower()
-        if not cleaned or key in seen_requirements:
-            continue
-        seen_requirements.add(key)
-        unique_requirements.append(cleaned)
-    environment_hash = hashlib.sha256(
-        json.dumps(
-            {
-                "python": "3.11",
-                "requirements": unique_requirements,
-                "files": sorted(
-                    digest_entries,
-                    key=lambda item: (item["flow_id"], item["filename"]),
-                ),
-            },
-            sort_keys=True,
-        ).encode("utf-8")
-    ).hexdigest()
-    image = f"inlumen/pipeline:{environment_hash[:12]}"
-    requirements_content = "\n".join(unique_requirements)
-    if requirements_content:
-        requirements_content += "\n"
     model_prefetch_copy = (
         f"""# The model-prefetch task fills the model store before the model steps run.
 COPY argo/model-prefetch /workspace/model-prefetch
@@ -4856,7 +4988,10 @@ RUN --mount=type=secret,id=hf_token \\
         if models
         else ""
     )
-    dockerfile = f"""# syntax=docker/dockerfile:1.7
+    def dockerfile_for(image: dict) -> str:
+        directory = image["directory"]
+        environment_hash = image["environment_hash"]
+        return f"""# syntax=docker/dockerfile:1.7
 FROM python:3.11-slim
 COPY --from=ghcr.io/astral-sh/uv:{UV_PINNED_VERSION} /uv /uvx /bin/
 ENV PYTHONUNBUFFERED=1
@@ -4865,7 +5000,7 @@ ARG INLUMEN_ACCELERATOR=cpu
 ARG INLUMEN_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
 WORKDIR /workspace
 # requirements.lock is optional: `make -C argo lock` creates it.
-COPY argo/requirements.txt argo/constraints.txt argo/requirements.lock* /tmp/inlumen/
+COPY {directory}/requirements.txt argo/constraints.txt {directory}/requirements.lock* /tmp/inlumen/
 RUN --mount=type=cache,target=/root/.cache/uv \\
     if [ "$INLUMEN_ACCELERATOR" = "cpu" ] && grep -Eiq '^torch([<>=!~].*)?$' /tmp/inlumen/requirements.txt; then \\
       TORCH_REQUIREMENT="$(grep -Ei '^torch([<>=!~].*)?$' /tmp/inlumen/requirements.txt | head -n 1)" \\
@@ -4881,17 +5016,49 @@ RUN --mount=type=cache,target=/root/.cache/uv \\
 COPY inputs /workspace/inputs
 LABEL inlumen.runtime.environment-hash="{environment_hash}"
 """
-    return {
-        "strategy": "shared",
+
+    for image in images:
+        image["dockerfile"] = f"{image['directory']}/Dockerfile"
+        image["requirements"] = f"{image['directory']}/requirements.txt"
+        image["dockerfile_content"] = dockerfile_for(image)
+    runtime = {
         "inputs_embedded": True,
         "models": models,
-        "image": image,
-        "environment_hash": environment_hash,
-        "dockerfile": "argo/Dockerfile",
-        "requirements": "argo/requirements.txt",
-        "dockerfile_content": dockerfile,
-        "requirements_content": requirements_content,
         "nodes": nodes,
+        "images": images,
+    }
+    if not grouped:
+        image = images[0]
+        return {
+            **runtime,
+            "strategy": "shared",
+            "image": image["image"],
+            "environment_hash": image["environment_hash"],
+            "dockerfile": image["dockerfile"],
+            "requirements": image["requirements"],
+            "dockerfile_content": image["dockerfile_content"],
+            "requirements_content": image["requirements_content"],
+        }
+    return {
+        **runtime,
+        "strategy": "grouped",
+        # Identifies the whole set of images (bundle manifest, README).
+        "environment_hash": hashlib.sha256(
+            "".join(image["environment_hash"] for image in images).encode("utf-8")
+        ).hexdigest(),
+        "image_parameter_by_step": {
+            step_id: image["image_parameter"]
+            for image in images
+            for step_id in image["flow_ids"]
+        },
+        "dockerfile_by_step": {
+            step_id: image["dockerfile"]
+            for image in images
+            for step_id in image["flow_ids"]
+        },
+        "prefetch_image_parameter": (
+            images[prefetch_group]["image_parameter"] if prefetch_group is not None else ""
+        ),
     }
 
 
@@ -4974,6 +5141,21 @@ def _argo_bundle_plan(
 
     return argo_bundle.ArgoBundlePlan(
         image_tag=shared_runtime["environment_hash"][:12],
+        image_groups=tuple(
+            argo_bundle.ArgoImageGroup(
+                name=image["name"],
+                image_tag=image["environment_hash"][:12],
+                flow_ids=tuple(image["flow_ids"]),
+                labels=tuple(
+                    _clean_string(steps_by_id[step_id].get("label")) or step_id
+                    for step_id in image["flow_ids"]
+                ),
+                conflicts=tuple(conflict["package"] for conflict in image["conflicts"]),
+            )
+            for image in shared_runtime["images"]
+        )
+        if shared_runtime.get("strategy") == "grouped"
+        else (),
         model_store=bool(shared_runtime.get("models")),
         environment_parameters=tuple(environment_parameters),
         secrets=tuple(secrets[key] for key in sorted(secrets)),
@@ -4994,7 +5176,7 @@ def _argo_helper_bundle_files(
                      role="argo-cluster-setup", content_type="application/x-yaml;charset=utf-8"),
         _bundle_file("argo/k8s/artifact-repositories.yaml", argo_bundle.artifact_repositories_manifest(),
                      role="argo-cluster-setup", content_type="application/x-yaml;charset=utf-8"),
-        _bundle_file("ci/github-actions/build-image.yml", argo_bundle.github_actions_template(),
+        _bundle_file("ci/github-actions/build-image.yml", argo_bundle.github_actions_template(plan),
                      role="ci-template", content_type="application/x-yaml;charset=utf-8"),
     ]
     models = shared_runtime.get("models")
@@ -5157,7 +5339,7 @@ def build_run_spec(
             {
                 "mode": "kubernetes-export",
                 "workflow": "argo/workflow.yaml",
-                "image_strategy": "shared",
+                "image_strategy": (shared_argo_runtime or {}).get("strategy", "shared"),
                 "image": (shared_argo_runtime or {}).get("image"),
                 "dockerfile": (shared_argo_runtime or {}).get("dockerfile"),
                 "environment_hash": (shared_argo_runtime or {}).get(
@@ -5497,20 +5679,26 @@ def build_deployment_bundle_files(
                     content_type="application/x-yaml;charset=utf-8",
                 ),
                 *argo_variant_files,
-                _bundle_file(
-                    "argo/Dockerfile",
-                    shared_argo_runtime["dockerfile_content"],
-                    role="argo-runtime",
-                    content_type="text/x-dockerfile",
-                ),
+                *[
+                    file_entry
+                    for image in shared_argo_runtime["images"]
+                    for file_entry in (
+                        _bundle_file(
+                            image["dockerfile"],
+                            image["dockerfile_content"],
+                            role="argo-runtime",
+                            content_type="text/x-dockerfile",
+                        ),
+                        _bundle_file(
+                            image["requirements"],
+                            image["requirements_content"],
+                            role="argo-runtime",
+                        ),
+                    )
+                ],
                 _bundle_file(
                     "argo/constraints.txt",
                     _pipeline_constraints(dockerfiles_payload, steps),
-                    role="argo-runtime",
-                ),
-                _bundle_file(
-                    "argo/requirements.txt",
-                    shared_argo_runtime["requirements_content"],
                     role="argo-runtime",
                 ),
                 *_argo_helper_bundle_files(argo_plan, shared_argo_runtime),
@@ -5569,6 +5757,12 @@ def build_deployment_bundle_files(
         | {item["name"] for item in runtime_environment}
         # Optional: authenticated Hugging Face access for the model prefetch.
         | ({"HF_TOKEN"} if has_model_requirements else set())
+        # Optional: point plugin steps at another address (Argo only).
+        | (
+            {item.environment for item in argo_plan.plugin_endpoints}
+            if argo_plan
+            else set()
+        )
     )
     if env_example_names:
         bundle_files.append(
@@ -5626,10 +5820,23 @@ def build_deployment_bundle_files(
         "argo": (
             {
                 "workflow": argo_workflow_path,
-                "dockerfile": shared_argo_runtime["dockerfile"],
-                "requirements": shared_argo_runtime["requirements"],
-                "image": shared_argo_runtime["image"],
-                "image_strategy": "shared",
+                "dockerfile": shared_argo_runtime.get("dockerfile"),
+                "requirements": shared_argo_runtime.get("requirements"),
+                "image": shared_argo_runtime.get("image"),
+                "image_strategy": shared_argo_runtime["strategy"],
+                # One entry per image; several when step packages conflict.
+                "images": [
+                    {
+                        "group": image["name"] or None,
+                        "dockerfile": image["dockerfile"],
+                        "requirements": image["requirements"],
+                        "image": image["image"],
+                        "image_parameter": image["image_parameter"],
+                        "flow_ids": image["flow_ids"],
+                        "conflicts": image["conflicts"],
+                    }
+                    for image in shared_argo_runtime["images"]
+                ],
                 "environment_hash": shared_argo_runtime["environment_hash"],
                 "image_tag": argo_plan.image_tag,
                 # One workflow per MODELS / ACCELERATOR choice of the Makefile.
