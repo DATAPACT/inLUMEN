@@ -87,20 +87,15 @@ jobs:
       - name: Audit frontend dependencies
         run: npm audit --prefix frontend --audit-level=moderate
 
-  # Browser suites run in parallel jobs; the e2e specs are split across two shards.
+  # The e2e specs are split across two parallel shards. The stress harness
+  # tests live in stress-harness.yml and only run when the harness changes.
   frontend-browser:
-    name: Frontend browser (${{ matrix.name }})
+    name: Frontend browser (e2e ${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: e2e 1/2
-            command: npm run test:e2e --prefix frontend -- --shard=1/2
-          - name: e2e 2/2
-            command: npm run test:e2e --prefix frontend -- --shard=2/2
-          - name: stress harness
-            command: npm run test:stress --prefix frontend
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -122,8 +117,8 @@ jobs:
       - name: Install test browser system dependencies
         if: steps.playwright-cache.outputs.cache-hit == 'true'
         run: cd frontend && npx playwright install-deps chromium
-      - name: Run ${{ matrix.name }} tests
-        run: ${{ matrix.command }}
+      - name: Browser recovery and accessibility tests
+        run: npm run test:e2e --prefix frontend -- --shard=${{ matrix.shard }}/2
 
   integration:
     name: Graph transactions and workspace isolation
