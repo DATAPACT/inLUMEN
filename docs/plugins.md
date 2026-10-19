@@ -111,6 +111,10 @@ parameter `output_mode`:
  "wikifier": {"annotations": [...], "words": [...], "spaces": [...]}}
 ```
 
+Results the adapter builds itself (the merged document, an `async` job's
+result) are written as compact JSON, like the tools' own responses, which are
+published unchanged; the run output viewer formats them for reading.
+
 The step's declared output (name, filename, `json` kind and format) follows the
 chosen mode. Both built-in plugins support it: Wikifier under `wikifier`, Moose
 under `dpv`. Steps keep explicit connections; a step that needs only the
@@ -137,7 +141,10 @@ Optional secrets are added to a step only when the user enters them.
 **Wikifier (real service).** Register for a free user key at
 <https://wikifier.org/register.html>. Build *Source (upload a .txt file) → JSI
 Wikifier → Destination*, enter the key in the Wikifier step, and run. Note the
-public service is occasionally down.
+public service is occasionally down. The step does not ask Wikifier for candidate
+`ranges` (every possible mention with all its candidate pages and scores) unless
+**Include candidate ranges** is on: for a three-minute call transcript they are
+about 6 MB of a 70 KB result.
 
 **Offline example.** `docker compose --profile plugins-demo up -d mock-tool`
 starts a local "Text Anonymizer" (API key `demo-key`). Add

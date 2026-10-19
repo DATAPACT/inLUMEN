@@ -325,6 +325,16 @@ def _send(request, timeout, label):
         ) from None
 
 
+def _compact_json(document):
+    """Serialize a JSON result the adapter builds, without indentation.
+
+    Tools answer with compact JSON and the adapter publishes it unchanged, so
+    the results it builds itself (merged inputs, async job results) are
+    compact too: indentation can add a third to a large annotation file.
+    """
+    return json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
 def _json_field(document, dotted):
     value = document
     for part in str(dotted).split("."):
@@ -364,7 +374,7 @@ def _await_job(submitted_payload, credentials, timeout):
         status = _json_field(job, status_field)
         if status in done:
             result = _json_field(job, spec["result_field"]) if spec.get("result_field") else job
-            return json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8")
+            return _compact_json(result)
         if status in failed:
             error = _json_field(job, spec.get("error_field", "error"))
             raise PluginCallError(f"Plugin {_plugin_name()!r} job {job_id} failed: {error}")
@@ -500,7 +510,7 @@ def _enriched(input_file, payload, key):
     text, document = _read_input(input_file)
     enriched = dict(document) if document is not None else {"text": text}
     enriched[key] = json.loads(payload.decode("utf-8"))
-    return (json.dumps(enriched, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    return _compact_json(enriched)
 
 
 def _write_metadata(calls):

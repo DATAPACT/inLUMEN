@@ -297,6 +297,15 @@ class BuiltinPluginsTest(unittest.TestCase):
         downstream = self._run_wikifier("annotated.json", wikified)
         self.assertEqual(transcript, downstream["form"]["text"])
 
+    def test_candidate_ranges_can_be_requested(self):
+        result = self._run_wikifier("notes.txt", "Rome is in Italy.", ranges="true")
+        self.assertEqual("true", result["form"]["ranges"])
+
+    def test_merged_output_is_compact_json(self):
+        stt = self._speech_to_text_result("Rome is the capital of Italy.")
+        published = self._run_wikifier("speech_to_text.json", json.dumps(stt))["outputs"]["annotated.json"]
+        self.assertEqual(json.dumps(json.loads(published), ensure_ascii=False, separators=(",", ":")), published)
+
     def test_unknown_output_mode_is_rejected(self):
         manifest = validate_plugin_manifest(WIKIFIER_PATH.read_text())
         with self.assertRaisesRegex(ValueError, "output_mode"):
@@ -387,6 +396,8 @@ class BuiltinPluginsTest(unittest.TestCase):
         self.assertEqual("en", form["lang"])
         self.assertEqual("true", form["wikiDataClasses"])
         self.assertEqual("0.8", form["pageRankSqThreshold"])
+        # Candidate ranges are megabytes for a short transcript: not asked for by default.
+        self.assertEqual("false", form["ranges"])
         self.assertNotIn("k" * 30, source)
 
     def test_error_fields_fail_a_200_response(self):
