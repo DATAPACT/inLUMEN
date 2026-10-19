@@ -9,9 +9,10 @@ contacts a registry, a cluster or the network at export time.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Any, Iterable, Sequence
 
 ARTIFACT_REPOSITORY_CONFIGMAP = "inlumen-artifact-repositories"
 ARTIFACT_REPOSITORY_KEY = "minio"
@@ -22,6 +23,109 @@ MODEL_PREFETCH_TASK = "inlumen-model-prefetch"
 MODEL_STORE_VOLUME = "model-store"
 MODEL_STORE_CLAIM = "inlumen-model-store"
 MODEL_ROOT = "/models"
+GPU_RESOURCE = "nvidia.com/gpu"
+PLUGIN_BASE_URL_ENV = "INLUMEN_PLUGIN_BASE_URL"
+
+# One workflow file per way of running the bundle. `make -C argo submit`
+# picks the one matching MODELS and ACCELERATOR.
+WORKFLOW_PATH = "argo/workflow.yaml"
+
+
+def workflow_path(*, models_baked: bool = False, gpu: bool = False) -> str:
+    suffix = ("-gpu" if gpu else "") + ("-models-baked" if models_baked else "")
+    return f"argo/workflow{suffix}.yaml" if suffix else WORKFLOW_PATH
+
+
+# The same profiles as codegen/app/resource_policy.py, which sizes local runs;
+# test_argo_bundle checks that the two stay in sync. The backend image does not
+# ship the codegen package, hence the copy.
+GIB = 1024**3
+RESOURCE_PROFILES = {
+    "lightweight": {"cpu": 1, "memory_bytes": 1 * GIB},
+    "standard": {"cpu": 2, "memory_bytes": 2 * GIB},
+    "ml_cpu": {"cpu": 4, "memory_bytes": 4 * GIB},
+}
+_ML_RESOURCE_CLASSES = {"gpu_preferred", "heavy_cpu_or_gpu"}
+_STANDARD_RESOURCE_CLASSES = {"lightweight_cpu"}
+_ML_REQUIREMENT_MARKERS = (
+    "torch",
+    "tensorflow",
+    "transformers",
+    "faster-whisper",
+    "ctranslate2",
+    "onnxruntime",
+)
+_STANDARD_REQUIREMENT_MARKERS = (
+    "numpy",
+    "pandas",
+    "polars",
+    "pyarrow",
+    "scikit-learn",
+    "scipy",
+)
+_QUANTITY_RE = re.compile(r"^[0-9]+(\.[0-9]+)?(m|k|Ki|M|Mi|G|Gi|T|Ti)?$")
+
+
+def select_resource_profile(
+    model_resource_classes: Iterable[str],
+    requirements: Iterable[str],
+) -> str:
+    """Name the profile codegen/app/resource_policy.py would pick for a step."""
+    classes = [str(item or "").strip().lower() for item in model_resource_classes]
+    if classes and (set(classes) & _ML_RESOURCE_CLASSES or "" in classes):
+        return "ml_cpu"
+    if set(classes) & _STANDARD_RESOURCE_CLASSES:
+        return "standard"
+    text = "\n".join(requirements).lower()
+    if any(marker in text for marker in _ML_REQUIREMENT_MARKERS):
+        return "ml_cpu"
+    if any(marker in text for marker in _STANDARD_REQUIREMENT_MARKERS):
+        return "standard"
+    return "lightweight"
+
+
+def _quantity(field_name: str, value: Any) -> str:
+    text = str(value).strip()
+    if isinstance(value, bool) or not _QUANTITY_RE.fullmatch(text):
+        raise ValueError(
+            f"capabilities.resources.{field_name} must be a Kubernetes quantity "
+            f"such as 2, 500m or 4Gi; got {value!r}."
+        )
+    return text
+
+
+def step_resources(profile: str, declared: Any = None, *, gpu: bool = False) -> dict:
+    """Requests and limits for one step: its profile, then what it declares.
+
+    Requests equal limits, like the CPU and memory caps of local runs. With
+    `gpu`, the step also gets `declared["gpu"]` (default 1) NVIDIA GPUs.
+    """
+    declared = declared if isinstance(declared, dict) else {}
+    defaults = RESOURCE_PROFILES[profile]
+    cpu = _quantity("cpu", declared.get("cpu", defaults["cpu"]))
+    memory = (
+        _quantity("memory", declared["memory"])
+        if "memory" in declared
+        else f"{defaults['memory_bytes'] // GIB}Gi"
+    )
+    amounts = {"cpu": cpu, "memory": memory}
+    resources = {"requests": dict(amounts), "limits": dict(amounts)}
+    if gpu:
+        count = str(declared.get("gpu", 1)).strip()
+        if not count.isdigit() or int(count) < 1:
+            raise ValueError(
+                f"capabilities.resources.gpu must be a whole number of GPUs; got {declared.get('gpu')!r}."
+            )
+        resources["limits"][GPU_RESOURCE] = count
+    return resources
+
+
+def wants_gpu(profile: str, declared: Any = None) -> bool:
+    """Steps on the model profile, or that ask for a GPU, get one on GPU runs."""
+    declared = declared if isinstance(declared, dict) else {}
+    if "gpu" in declared:
+        return str(declared["gpu"]).strip() not in {"", "0", "false", "False"}
+    return profile == "ml_cpu"
 
 # Defaults match the Argo Workflows quick-start (S3 service `minio:9000`,
 # bucket `my-bucket`, credentials Secret `my-minio-cred`), so a local test
@@ -47,11 +151,23 @@ class ArgoSecretKey:
 
 
 @dataclass(frozen=True)
+class ArgoPluginEndpoint:
+    flow_id: str
+    plugin: str
+    parameter: str
+    environment: str
+    url: str
+
+
+@dataclass(frozen=True)
 class ArgoBundlePlan:
     image_tag: str
     model_store: bool = False
+    # Whether some step can use a GPU, so ACCELERATOR=gpu means something.
+    gpu: bool = False
     environment_parameters: Sequence[ArgoEnvironmentParameter] = field(default_factory=tuple)
     secrets: Sequence[ArgoSecretKey] = field(default_factory=tuple)
+    plugin_endpoints: Sequence[ArgoPluginEndpoint] = field(default_factory=tuple)
 
 
 def _bash_array(name: str, rows: Sequence[Sequence[str]]) -> str:
@@ -144,14 +260,17 @@ kubectl create secret generic {RUNTIME_SECRET_NAME} -n "$NAMESPACE" ${{args[@]+"
 
 def submit_script(plan: ArgoBundlePlan) -> str:
     rows = [(item.parameter, item.environment) for item in plan.environment_parameters]
+    rows.extend((item.parameter, item.environment) for item in plan.plugin_endpoints)
     return f'''#!/usr/bin/env bash
-# Generated by inLUMEN. Submits argo/workflow.yaml with the pipeline image,
-# a per-run output prefix and the non-secret runtime settings from .env.
-# Extra arguments are passed to `argo submit` (for example --watch).
+# Generated by inLUMEN. Submits argo/workflow.yaml (or the WORKFLOW file) with
+# the pipeline image, a per-run output prefix and the non-secret runtime
+# settings from .env. Extra arguments are passed to `argo submit` (for example
+# --watch).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${{BASH_SOURCE[0]}}")/.." && pwd)"
 ENV_FILE="${{ENV_FILE:-$ROOT/.env}}"
+WORKFLOW="${{WORKFLOW:-$ROOT/{WORKFLOW_PATH}}}"
 IMAGE="${{IMAGE:?Set IMAGE to the pipeline image, for example with make -C argo submit}}"
 NAMESPACE="${{NAMESPACE:-argo}}"
 SERVICE_ACCOUNT="${{SERVICE_ACCOUNT:-{SERVICE_ACCOUNT_NAME}}}"
@@ -178,13 +297,50 @@ for entry in ${{ENV_PARAMETERS[@]+"${{ENV_PARAMETERS[@]}}"}}; do
 done
 
 echo "Results will be written under $OUTPUT_PREFIX/ in the artifact repository bucket."
-argo submit "$ROOT/argo/workflow.yaml" "${{args[@]}}" "$@"
+argo submit "$WORKFLOW" "${{args[@]}}" "$@"
 '''
 
 
 def makefile(plan: ArgoBundlePlan, *, uv_version: str) -> str:
+    options = []
+    build_args = []
+    variant_tag = ""
+    workflow_suffix = ""
+    if plan.gpu:
+        options.append(
+            "# CPU or GPU. gpu builds CUDA PyTorch and gives the model steps an\n"
+            f"# {GPU_RESOURCE} limit; the cluster needs the NVIDIA device plugin.\n"
+            "ACCELERATOR ?= cpu\n"
+            "$(if $(filter-out cpu gpu,$(ACCELERATOR)),$(error ACCELERATOR must be cpu or gpu))"
+        )
+        build_args.append("--build-arg INLUMEN_ACCELERATOR=$(ACCELERATOR)")
+        variant_tag += "$(if $(filter gpu,$(ACCELERATOR)),-gpu)"
+        workflow_suffix += "$(if $(filter gpu,$(ACCELERATOR)),-gpu)"
+    if plan.model_store:
+        options.append(
+            "# Where the reviewed models come from. volume: the inlumen-model-prefetch\n"
+            f"# task fills the {MODEL_STORE_CLAIM} volume. bake: the image build downloads\n"
+            "# them into the image, so runs need neither the volume nor internet access.\n"
+            "MODELS ?= volume\n"
+            "$(if $(filter-out volume bake,$(MODELS)),$(error MODELS must be volume or bake))\n"
+            "# Speech-to-text model size: auto, fast, balanced or accuracy. With\n"
+            "# MODELS=bake, build and submit with the same value.\n"
+            "ASR_PROFILE ?="
+        )
+        build_args.extend([
+            "--build-arg INLUMEN_MODELS=$(MODELS)",
+            "--build-arg INLUMEN_ASR_PROFILE=$(or $(ASR_PROFILE),auto)",
+            # BuildKit secret: the token never lands in an image layer.
+            "$(if $(HF_TOKEN),--secret id=hf_token$(comma)env=HF_TOKEN)",
+        ])
+        variant_tag += "$(if $(filter bake,$(MODELS)),-models$(if $(ASR_PROFILE),-$(ASR_PROFILE)))"
+        workflow_suffix += "$(if $(filter bake,$(MODELS)),-models-baked)"
+    options_block = ("\n" + "\n\n".join(options) + "\n") if options else ""
+    tag_note = "\n# The options above add a suffix, so each variant gets its own tag." if options else ""
+    build_args_line = " ".join(build_args)
     model_store_setup = (
-        "\tkubectl apply -n $(NAMESPACE) -f $(ARGO_DIR)/k8s/model-store-pvc.yaml\n"
+        "\t$(if $(filter volume,$(MODELS)),kubectl apply -n $(NAMESPACE) -f $(ARGO_DIR)/k8s/model-store-pvc.yaml,"
+        "@echo \"MODELS=bake: the models are in the image, no model store volume needed.\")\n"
         if plan.model_store
         else ""
     )
@@ -193,22 +349,35 @@ def makefile(plan: ArgoBundlePlan, *, uv_version: str) -> str:
         if plan.secrets
         else "\t@echo \"This pipeline has no sensitive parameters.\""
     )
+    asr_submit = "$(if $(ASR_PROFILE),INLUMEN_ASR_PROFILE=$(ASR_PROFILE) )" if plan.model_store else ""
+    option_help = ""
+    if plan.gpu:
+        option_help += "\t@echo \"  ACCELERATOR=cpu|gpu   CPU (default) or NVIDIA GPU\"\n"
+    if plan.model_store:
+        option_help += (
+            "\t@echo \"  MODELS=volume|bake    models in a shared volume (default) or in the image\"\n"
+            "\t@echo \"  ASR_PROFILE=<profile> speech-to-text model size (auto, fast, balanced, accuracy)\"\n"
+        )
+    if option_help:
+        option_help = "\t@echo \"Options (use the same ones for image and submit):\"\n" + option_help
     return f'''# Generated by inLUMEN. Builds and submits this pipeline on Argo
 # Workflows. Run from the bundle root:   make -C argo help
 # Every setting below can be overridden: make -C argo image REGISTRY=ghcr.io/acme
 
 ARGO_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 ROOT := $(abspath $(ARGO_DIR)/..)
-
+comma := ,
+{options_block}
 # Image tag computed by inLUMEN from the requirements, step code and the
 # input files copied into the image. When
-# argo/requirements.lock exists (make lock), its checksum is appended.
+# argo/requirements.lock exists (make lock), its checksum is appended.{tag_note}
 EXPORT_TAG := {plan.image_tag}
 LOCK_SUM := $(shell [ -f $(ARGO_DIR)/requirements.lock ] && cksum < $(ARGO_DIR)/requirements.lock | cut -d' ' -f1)
 REGISTRY ?=
 IMAGE_NAME ?= {IMAGE_NAME}
-TAG ?= $(EXPORT_TAG)$(if $(LOCK_SUM),-$(LOCK_SUM))
+TAG ?= $(EXPORT_TAG)$(if $(LOCK_SUM),-$(LOCK_SUM)){variant_tag}
 IMAGE ?= $(if $(REGISTRY),$(REGISTRY)/)$(IMAGE_NAME):$(TAG)
+WORKFLOW_FILE ?= $(ARGO_DIR)/workflow{workflow_suffix}.yaml
 
 NAMESPACE ?= argo
 SERVICE_ACCOUNT ?= {SERVICE_ACCOUNT_NAME}
@@ -218,7 +387,7 @@ K3D_CLUSTER ?= k3s-default
 KIND_CLUSTER ?= kind
 UV ?= uv
 
-.PHONY: help print-image image push k3d-import kind-load lock setup secrets submit
+.PHONY: help print-image print-workflow image push k3d-import kind-load lock setup secrets submit
 
 help:
 \t@echo "Targets (run from the bundle root with make -C argo <target>):"
@@ -229,13 +398,16 @@ help:
 \t@echo "  lock         resolve exact package versions into argo/requirements.lock"
 \t@echo "  setup        apply the service account, RBAC, artifact repository{' and model store' if plan.model_store else ''}"
 \t@echo "  secrets      create the {RUNTIME_SECRET_NAME} Secret from .env"
-\t@echo "  submit       submit the workflow"
-
+\t@echo "  submit       submit $(notdir $(WORKFLOW_FILE))"
+{option_help}
 print-image:
 \t@echo $(IMAGE)
 
+print-workflow:
+\t@echo $(WORKFLOW_FILE)
+
 image:
-\tdocker build -f $(ARGO_DIR)/Dockerfile -t $(IMAGE) $(ROOT)
+\tdocker build -f $(ARGO_DIR)/Dockerfile {build_args_line + " " if build_args_line else ""}-t $(IMAGE) $(ROOT)
 
 push:
 \t@test -n "$(REGISTRY)" || (echo "Set REGISTRY, for example make -C argo push REGISTRY=ghcr.io/acme" >&2; exit 1)
@@ -263,7 +435,7 @@ secrets:
 {secrets_recipe}
 
 submit:
-\tIMAGE=$(IMAGE) NAMESPACE=$(NAMESPACE) SERVICE_ACCOUNT=$(SERVICE_ACCOUNT) ENV_FILE=$(ENV_FILE) \\
+\t{asr_submit}WORKFLOW=$(WORKFLOW_FILE) IMAGE=$(IMAGE) NAMESPACE=$(NAMESPACE) SERVICE_ACCOUNT=$(SERVICE_ACCOUNT) ENV_FILE=$(ENV_FILE) \\
 \t  bash $(ARGO_DIR)/submit.sh $(ARGO_FLAGS)
 '''
 
@@ -396,6 +568,9 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       # Add image scanning (for example aquasecurity/trivy-action) and signing
       # (for example sigstore/cosign-installer) here, as your policy requires.
+      # For another variant (for example MODELS=bake or ACCELERATOR=gpu), pass
+      # the same options to print-image above and as build-args below
+      # (INLUMEN_MODELS, INLUMEN_ASR_PROFILE, INLUMEN_ACCELERATOR).
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -451,7 +626,8 @@ def readme_section(plan: ArgoBundlePlan) -> str:
             3,
             "**Model store.** `make -C argo setup` also creates the "
             f"`{MODEL_STORE_CLAIM}` volume (`argo/k8s/model-store-pvc.yaml`). Use a "
-            "ReadWriteMany storage class on multi-node clusters, and size it for your models.",
+            "ReadWriteMany storage class on multi-node clusters, and size it for your models. "
+            "Without such storage or without internet access, use `MODELS=bake` (see \"Options\").",
         )
     own_cluster_steps = "\n".join(
         f"{index}. {step}" for index, step in enumerate(steps, start=1)
@@ -463,12 +639,60 @@ def readme_section(plan: ArgoBundlePlan) -> str:
         else ""
     )
     models_section = (
-        f"""**Reviewed models** stay out of the image. The first task of the workflow, `{MODEL_PREFETCH_TASK}`, downloads the pinned model revisions (listed in `argo/model-prefetch/model-requirements.json`) into the `{MODEL_STORE_CLAIM}` volume and verifies their SHA-256 manifests. The model steps mount that volume read-only at `{MODEL_ROOT}`. Only the first run downloads; later runs reuse the verified models. The prefetch task needs internet access to Hugging Face; set `HF_TOKEN` in `.env` (then `make -C argo secrets`) for gated models. To choose the speech-to-text model size, submit with `ARGO_FLAGS="-p asr-profile=fast"` (or `balanced`, `accuracy`; the default `auto` picks `balanced` on CPU).
+        f"""**Reviewed models** stay out of the image by default. The first task of the workflow, `{MODEL_PREFETCH_TASK}`, downloads the pinned model revisions (listed in `argo/model-prefetch/model-requirements.json`) into the `{MODEL_STORE_CLAIM}` volume and verifies their SHA-256 manifests. The model steps mount that volume read-only at `{MODEL_ROOT}`. Only the first run downloads; later runs reuse the verified models. The prefetch task needs internet access to Hugging Face; set `HF_TOKEN` in `.env` (then `make -C argo secrets`) for gated models. To choose the speech-to-text model size, add `ASR_PROFILE=fast` (or `balanced`, `accuracy`; the default `auto` picks `balanced` on CPU and `accuracy` on GPU) to `make -C argo submit`, or set `INLUMEN_ASR_PROFILE` in `.env`. If your cluster has no shared storage or no internet access, bake the models into the image instead (`MODELS=bake`, see "Options" below).
 
 """
         if plan.model_store
         else ""
     )
+    option_sections = [
+        f"""**CPU and memory.** Each step requests, and is limited to, the CPU and memory of its resource profile, the same profiles inLUMEN uses for local runs: `lightweight` (1 CPU, 1 GiB), `standard` (2 CPU, 2 GiB, for data-processing packages such as pandas) and `ml_cpu` (4 CPU, 4 GiB, for model steps and packages such as torch). A node can declare its own `cpu`, `memory` and `gpu` under `capabilities.resources` in its `node-manifest.json`; those values win. To change them for a cluster, edit `resources:` in the workflow files (they are plain YAML). A step stays `Pending` with `Insufficient cpu` or `Insufficient memory` when no node has that much free."""
+    ]
+    if plan.gpu:
+        option_sections.append(
+            f"""**GPU (`ACCELERATOR=gpu`).** `make -C argo image submit ACCELERATOR=gpu` builds the image with CUDA PyTorch (`--build-arg INLUMEN_ACCELERATOR=gpu`) and submits `argo/workflow-gpu.yaml`, where the model steps also get a `{GPU_RESOURCE}: 1` limit (or the `gpu` count their node declares) and `INLUMEN_ACCELERATOR=gpu`, as in the Dagster bundle. The cluster needs NVIDIA GPU nodes with the NVIDIA device plugin (or GPU operator); add node selectors or tolerations to the workflow file if your GPU nodes are tainted. If you use `make -C argo lock`, lock with `TORCH_BACKEND=auto` for GPU images. The image tag gets a `-gpu` suffix. The default, `ACCELERATOR=cpu`, installs CPU-only PyTorch and asks for no GPU."""
+        )
+    if plan.model_store:
+        option_sections.append(
+            f"""**Models in the image (`MODELS=bake`).** For clusters without ReadWriteMany storage or without internet access. `make -C argo image MODELS=bake` runs the same prefetch script, with the same SHA-256 verification, during `docker build`, into `{MODEL_ROOT}` in the image. `make -C argo setup submit MODELS=bake` then skips the volume and submits `argo/workflow-models-baked.yaml`, which has no `{MODEL_PREFETCH_TASK}` task and mounts no volume, so runs need no access to Hugging Face. The image is larger (about 0.5 to 2 GB per model) and its tag gets a `-models` suffix. Only the models for the chosen speech-to-text size are baked: pass the same `ASR_PROFILE` (and `ACCELERATOR`) to `image` and `submit`. For gated models, run `HF_TOKEN=... make -C argo image MODELS=bake`: the token reaches the build as a BuildKit secret and is not stored in the image. Check the model licences before pushing such an image to a shared registry. The default, `MODELS=volume`, keeps the models out of the image."""
+        )
+    options_section = "\n\n".join(option_sections)
+    troubleshooting_extra = ""
+    if plan.model_store:
+        troubleshooting_extra += (
+            "\n- `Reviewed model is not available in the verified local model store`: with the "
+            f"default volume, check the logs of `{MODEL_PREFETCH_TASK}`; with `MODELS=bake`, "
+            "build and submit with the same `ASR_PROFILE` and `ACCELERATOR`."
+        )
+    if plan.plugin_endpoints:
+        troubleshooting_extra += (
+            "\n- A plugin step fails with `Name or service not known`, a timeout or "
+            "`Connection refused`: the pod cannot resolve or reach the plugin server. Check "
+            "cluster DNS, egress rules and the plugin URL parameter (see \"Plugin steps\")."
+        )
+    plugins_section = ""
+    if plan.plugin_endpoints:
+        rows = "\n".join(
+            f"| `{item.flow_id}` | {item.plugin or 'plugin'} | `{item.parameter}` | `{item.environment}` | `{item.url}` |"
+            for item in plan.plugin_endpoints
+        )
+        plugins_section = f"""
+### Plugin steps
+
+Plugin steps call their tool server over HTTP(S) from inside the cluster. The pods of those steps need:
+
+- **DNS** that resolves the server's host name (cluster DNS for an in-cluster service, upstream DNS for an external one);
+- **egress** to that host and port: allow it in your `NetworkPolicy`, egress gateway or proxy (set `HTTPS_PROXY`/`NO_PROXY` on the templates if you use one);
+- the plugin's credentials, if it needs any, in the `{RUNTIME_SECRET_NAME}` Secret (`make -C argo secrets`).
+
+Each plugin step reads its server address from a workflow parameter. The default is the address in the plugin manifest; to use your own copy of the service, for example an in-cluster one, set the `.env` variable (or pass `ARGO_FLAGS="--watch -p <parameter>=<url>"`):
+
+| Step | Plugin | Workflow parameter | `.env` variable | Default |
+|---|---|---|---|---|
+{rows}
+
+For example `{plan.plugin_endpoints[0].environment}=http://<service>.<namespace>.svc.cluster.local:<port>`. Redirects are never followed, so use the final address.
+"""
     return f"""
 ## Argo
 
@@ -506,6 +730,10 @@ The quick-start runs an S3-compatible store as the `minio` service, with the buc
 
 {own_cluster_steps}
 
+### Options
+
+{options_section}
+{plugins_section}
 Run `make -C argo help` for all targets and settings. The scripts in `argo/` are plain Bash, so you can also use them from your own automation.
 
 ### Troubleshooting
@@ -514,4 +742,5 @@ Run `make -C argo help` for all targets and settings. The scripts in `argo/` are
 - `artifact repository ... not found`: run `make -C argo setup` in the same namespace you submit to.
 - `secret "inlumen-runtime-secrets" not found` or a missing key: run `make -C argo secrets`.
 - `workflowtaskresults ... forbidden`: run `make -C argo setup`, and submit with the `{SERVICE_ACCOUNT_NAME}` service account (the default).
+- A step stays `Pending` with `Insufficient cpu`, `memory` or `{GPU_RESOURCE}`: no node has that much free. Lower `resources:` in the workflow file, or add capacity.{troubleshooting_extra}
 """

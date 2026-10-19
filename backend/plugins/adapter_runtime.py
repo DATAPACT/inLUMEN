@@ -129,8 +129,12 @@ def _secret(name):
 
 
 def _base_url():
-    # The endpoint is pinned by the administrator-installed manifest.
-    base_url = str(PLUGIN_SPEC.get("base_url") or "").strip().rstrip("/")
+    # The endpoint is pinned by the administrator-installed manifest. A
+    # deployment (for example an Argo workflow parameter) may point it at its
+    # own copy of the service; step parameters cannot set this variable.
+    base_url = str(
+        os.getenv("INLUMEN_PLUGIN_BASE_URL") or PLUGIN_SPEC.get("base_url") or ""
+    ).strip().rstrip("/")
     if urlparse(base_url).scheme not in {"http", "https"} or not urlparse(base_url).netloc:
         raise PluginCallError("Plugin endpoint must be an http(s) URL.")
     return base_url
