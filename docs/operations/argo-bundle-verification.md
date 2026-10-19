@@ -147,3 +147,25 @@ Workflows v4.1.5 quick-start.
   4 CPU / 4 GiB for the two model steps; none mounted a model volume.
 - Not run on a cluster: `ACCELERATOR=gpu` (no GPU available) and plugin URL
   parameters; both are covered by unit tests only.
+
+### 2026-10-19 (issue #161, close-out: plugin secrets and split images)
+
+Environment: Docker 29.8.0 on macOS ARM64, k3d v5.9.0 (k3s v1.35.5), Argo
+Workflows v4.1.5 quick-start.
+
+- Plugin step with a secret: Source → Text Anonymizer (example plugin) → File
+  Destination, with the mock tool server running in the cluster as the
+  `anonymizer` service. The API key came from `.env` through
+  `make -C argo secrets`, and `INLUMEN_PLUGIN_URL_STEP_2` pointed the step at
+  `http://anonymizer:8099/…` instead of the manifest default. 3/3 steps
+  succeeded and the result had the e-mail address and phone number redacted.
+  With a wrong key in the Secret, the step failed with
+  `HTTP 401: invalid API key`.
+- Split images: order-summary with conflicting pins (Source `pandas==1.5.3`,
+  Task `pandas>=2.2`) exported as `grouped` with two images. `make -C argo image
+  k3d-import` built and imported both; the pods ran on `env-1` (pandas 1.5.3)
+  and `env-2` (pandas 3.0.6); 3/3 steps succeeded and the result matched
+  `expected-summary.json`. The codegen validator and `argo lint --offline`
+  accepted the bundle.
+- Not run: the CI template (`ci/github-actions/build-image.yml`) in a real
+  GitHub repository. Its make commands are covered by unit tests only.
