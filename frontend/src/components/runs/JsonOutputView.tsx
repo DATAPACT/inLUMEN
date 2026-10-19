@@ -1,4 +1,13 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -26,10 +35,13 @@ import {
   valueAt,
   type JsonSegment,
 } from '@/features/runs/jsonView';
+import { formatOutputSize } from '@/features/runs/runPresentation';
 import { cn } from '@/lib/utils';
 
 const JSON_CHILD_LIMIT = 200;
 const TABLE_ROW_LIMIT = 1000;
+/** Raw text is shown in pages so a large file doesn't render all its lines at once. */
+const RAW_PAGE_CHARS = 256 * 1024;
 const DEFAULT_DEPTH = 2;
 const VIEW_MODE_KEY = 'inlumen-run-output-json-view';
 
@@ -62,12 +74,25 @@ const saveViewMode = (mode: JsonViewMode) => {
 const matches = (value: string, query: string) =>
   Boolean(query) && value.toLocaleLowerCase().includes(query);
 
+// Every expanded node asks whether its subtree matches; caching the answers
+// for the current query keeps that one pass over the document.
+let matchCacheQuery = '';
+let matchCache = new WeakMap<object, boolean>();
+
 const subtreeMatches = (value: unknown, query: string): boolean => {
   if (!query) return false;
   if (!isContainer(value)) return matches(String(value), query);
-  return Object.entries(value).some(
+  if (query !== matchCacheQuery) {
+    matchCacheQuery = query;
+    matchCache = new WeakMap();
+  }
+  const cached = matchCache.get(value);
+  if (cached !== undefined) return cached;
+  const found = Object.entries(value).some(
     ([key, child]) => matches(key, query) || subtreeMatches(child, query),
   );
+  matchCache.set(value, found);
+  return found;
 };
 
 const Highlight = ({ text, query }: { text: string; query: string }) => {
@@ -330,11 +355,40 @@ const JsonSearch = ({
   );
 };
 
+const RawJson = ({
+  text,
+  shownChars,
+  onShowMore,
+}: {
+  text: string;
+  shownChars: number;
+  onShowMore: () => void;
+}) => {
+  const complete = text.length <= shownChars;
+  // End the page at a line break when there is one, so lines aren't split.
+  const lineEnd = complete ? -1 : text.lastIndexOf('\n', shownChars);
+  const shown = complete ? text : text.slice(0, lineEnd > 0 ? lineEnd + 1 : shownChars);
+  return (
+    <>
+      <TextPreview text={shown} />
+      {!complete && (
+        <div className="flex items-center gap-3 text-xs text-muted-foreground">
+          <span>Showing the first {formatOutputSize(shown.length)} of {formatOutputSize(text.length)}</span>
+          <Button variant="outline" size="sm" onClick={onShowMore}>Show more</Button>
+        </div>
+      )}
+    </>
+  );
+};
+
 export const JsonOutputView = ({ value }: { value: unknown }) => {
   const tableSources = useMemo(() => findRecordArrays(value), [value]);
   const [savedMode, setSavedMode] = useState(readViewMode);
   const [tablePath, setTablePath] = useState<JsonSegment[] | null>(null);
   const [query, setQuery] = useState('');
+  // Typing stays responsive while a large tree re-renders with the new query.
+  const searchQuery = useDeferredValue(query.trim().toLocaleLowerCase());
+  const [rawChars, setRawChars] = useState(RAW_PAGE_CHARS);
   const [minified, setMinified] = useState(false);
   // Expand/collapse remounts the tree so every node takes the new default depth.
   const [expansion, setExpansion] = useState({ depth: DEFAULT_DEPTH, generation: 0 });
@@ -368,11 +422,11 @@ export const JsonOutputView = ({ value }: { value: unknown }) => {
     [minified, mode, value],
   );
   const context = useMemo<JsonViewContextValue>(() => ({
-    query: query.trim().toLocaleLowerCase(),
+    query: searchQuery,
     compact: mode === 'compact',
     defaultDepth: expansion.depth,
     onShowTable: showTable,
-  }), [expansion.depth, mode, query, showTable]);
+  }), [expansion.depth, mode, searchQuery, showTable]);
 
   const showsTree = mode === 'compact' || mode === 'tree';
   return (
@@ -400,7 +454,7 @@ export const JsonOutputView = ({ value }: { value: unknown }) => {
               rootRef={rootRef}
               query={query}
               onQueryChange={setQuery}
-              refreshKey={`${mode}:${expansion.generation}`}
+              refreshKey={`${mode}:${expansion.generation}:${searchQuery}`}
             />
             <div className="ml-auto flex items-center gap-1">
               <Button variant="ghost" size="sm" className="h-8 px-2 text-xs" onClick={() => expandTo(Infinity)}>
@@ -466,7 +520,7 @@ export const JsonOutputView = ({ value }: { value: unknown }) => {
           )}
         </>
       )}
-      {mode === 'raw' && <TextPreview text={raw} />}
+      {mode === 'raw' && <RawJson text={raw} shownChars={rawChars} onShowMore={() => setRawChars(rawChars + RAW_PAGE_CHARS)} />}
     </div>
   );
 };

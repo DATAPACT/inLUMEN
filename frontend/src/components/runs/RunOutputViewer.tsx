@@ -30,7 +30,7 @@ type RunOutputViewerProps = {
 };
 
 /** Text-like outputs up to this size can be copied whole (the JSON preview limit). */
-const COPY_MAX_BYTES = 2 * 1024 * 1024;
+const COPY_MAX_BYTES = 16 * 1024 * 1024;
 const COPYABLE_KINDS = new Set(['table', 'json', 'text', 'markdown']);
 
 const MediaPreview = ({

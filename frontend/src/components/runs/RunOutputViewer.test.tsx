@@ -243,6 +243,18 @@ describe('JsonOutputView', () => {
     await view.unmount();
   });
 
+  it('shows large raw JSON a page at a time', async () => {
+    const value = { rows: Array.from({ length: 30000 }, (_, index) => ({ index })) };
+    const view = await mount(<JsonOutputView value={value} />);
+    await click(buttonNamed(view.container, 'Raw'));
+    const lines = () => view.container.querySelectorAll('pre > div').length;
+    const firstPage = lines();
+    expect(view.container.textContent).toMatch(/Showing the first 256\.0 KB of 985\.3 KB/);
+    await click(buttonNamed(view.container, 'Show more'));
+    expect(lines()).toBeGreaterThan(firstPage);
+    await view.unmount();
+  });
+
   it('copies values and paths, and opens a nested array as a table', async () => {
     const value = { result: { pages: [{ n: 1, words: [{ w: 'hi' }, { w: 'there' }] }] } };
     const view = await mount(<JsonOutputView value={value} />);
