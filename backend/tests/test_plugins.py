@@ -411,6 +411,22 @@ class BuiltinPluginsTest(unittest.TestCase):
             check(b'{"userKey": "", "status": "user-key-not-found"}', operation)
         check(b'{"annotations": [], "words": [], "spaces": [""]}', operation)
 
+    def test_deployment_can_point_the_step_at_its_own_copy_of_the_service(self):
+        manifest = validate_plugin_manifest(WIKIFIER_PATH.read_text())
+        spec = plugin_runtime_spec({"type": "task", "param": {}}, manifest)
+        namespace = {"__name__": "wikifier_checks"}
+        exec(compile(plugin_main_source(spec), "wikifier-main.py", "exec"), namespace)
+        base_url = namespace["_base_url"]
+        pinned = manifest["endpoint"]["base_url"].rstrip("/")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("INLUMEN_PLUGIN_BASE_URL", None)
+            self.assertEqual(pinned, base_url())
+        with patch.dict(os.environ, {"INLUMEN_PLUGIN_BASE_URL": "http://wikifier.tools.svc:8080/"}):
+            self.assertEqual("http://wikifier.tools.svc:8080", base_url())
+        with patch.dict(os.environ, {"INLUMEN_PLUGIN_BASE_URL": "file:///etc/passwd"}):
+            with self.assertRaisesRegex(RuntimeError, "http"):
+                base_url()
+
     def _fake_moose(self, final_status="completed"):
         from http.server import BaseHTTPRequestHandler
 
