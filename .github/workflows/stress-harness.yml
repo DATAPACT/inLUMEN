@@ -1,0 +1,54 @@
+name: Stress harness
+
+# These tests cover the load-testing tool in frontend/loadtest against fake
+# fixture servers, not the application, so they only run when the tool or
+# its dependencies change.
+on:
+  pull_request:
+    paths:
+      - frontend/loadtest/**
+      - frontend/package-lock.json
+      - .github/workflows/stress-harness.yml
+  push:
+    branches:
+      - main
+    paths:
+      - frontend/loadtest/**
+      - frontend/package-lock.json
+      - .github/workflows/stress-harness.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stress-harness-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  stress:
+    name: Stress harness regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+      - name: Restore test browser
+        id: playwright-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+      - name: Install test browser
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: cd frontend && npx playwright install --with-deps chromium
+      - name: Install test browser system dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: cd frontend && npx playwright install-deps chromium
+      - name: Run stress harness tests
+        run: npm run test:stress --prefix frontend
