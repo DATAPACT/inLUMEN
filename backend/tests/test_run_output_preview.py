@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from run_output_preview import build_preview, preview_kind  # noqa: E402
+from run_output_preview import build_preview, preview_kind, preview_limits  # noqa: E402
 
 
 def reader(content: bytes):
@@ -79,10 +79,16 @@ class RunOutputPreviewTest(unittest.TestCase):
         self.assertEqual({"a": [1, 2]}, small["value"])
 
         big = json.dumps({"rows": list(range(5000))}).encode()
+        big_reader = reader(big)
         with patch.dict("os.environ", {"INLUMEN_PREVIEW_JSON_MAX_BYTES": "100"}):
-            windowed = build_preview(reader(big), {"filename": "x.json"})
+            windowed = build_preview(big_reader, {"filename": "x.json"})
         self.assertEqual("text", windowed["kind"])
         self.assertNotIn("value", windowed)
+        # Only the size check and the first text window are read.
+        self.assertEqual([0, 256 * 1024], [length for _offset, length in big_reader.calls])
+
+    def test_json_limit_defaults_to_16_mb(self):
+        self.assertEqual(16 * 1024 * 1024, preview_limits()["json_max_bytes"])
 
     def test_json_lines_become_table_rows(self):
         body = b'{"a": 1, "b": {"c": 2}}\n{"a": 3}\n'

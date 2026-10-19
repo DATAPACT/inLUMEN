@@ -40,7 +40,7 @@ def preview_limits() -> dict[str, int]:
     return {
         "max_bytes": _env_int("INLUMEN_PREVIEW_MAX_BYTES", 256 * 1024),
         "max_rows": _env_int("INLUMEN_PREVIEW_MAX_ROWS", 200),
-        "json_max_bytes": _env_int("INLUMEN_PREVIEW_JSON_MAX_BYTES", 2 * 1024 * 1024),
+        "json_max_bytes": _env_int("INLUMEN_PREVIEW_JSON_MAX_BYTES", 16 * 1024 * 1024),
         "inline_max_bytes": _env_int("INLUMEN_PREVIEW_INLINE_MAX_BYTES", 25 * 1024 * 1024),
     }
 
@@ -265,8 +265,10 @@ def build_preview(
         rows = min(max(int(limit or limits["max_rows"]), 1), limits["max_rows"])
         return {**base, **_json_lines_preview(read_window, offset, rows, limits)}
     if kind == "json" and offset == 0:
-        window, size = read_window(0, limits["json_max_bytes"] + 1)
+        # Check the size first so a file over the limit is never read whole.
+        _window, size = read_window(0, 0)
         if size <= limits["json_max_bytes"]:
+            window, size = read_window(0, size)
             try:
                 value = json.loads(window.decode("utf-8-sig"))
             except ValueError:
