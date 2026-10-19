@@ -1,8 +1,8 @@
-import { test } from 'node:test';
+import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { availableParallelism, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import JSZip from 'jszip';
 import { runLoadTest } from '../runner.mjs';
@@ -154,64 +154,67 @@ async function fixture(mode, bytes) {
     close: () => new Promise(resolve => server.close(resolve)) };
 }
 
-for (const mode of ['synchronized_success', 'synchronized_invalid_zip', 'success', 'second_chat_failure', 'invalid_zip', 'run_failure', 'missing_artifact', 'excessive_allocation', 'custom_allocation_limits', 'excessive_memory', 'preview_success', 'preview_apply_failure', 'review_disabled', 'destination_copy', 'conflicting_copy', 'one_design_failure']) {
-  test(`audio session browser workload: ${mode}`, { timeout: 90000 }, async () => {
-    const bytes = await syntheticBundle();
-    const server = await fixture(mode === 'synchronized_success' ? 'success' : mode === 'synchronized_invalid_zip' ? 'invalid_zip' : mode, bytes);
-    const dir = await mkdtemp(join(tmpdir(), 'inlumen-session-'));
-    const codeZip = join(dir, 'synthetic-code.zip');
-    await writeFile(codeZip, bytes);
-    const audioFile = join(dir, 'session.wav');
-    const audioBytes = Buffer.from('RIFF session fixture WAV bytes');
-    await writeFile(audioFile, audioBytes);
-    try {
-      const users = ['success', 'preview_success'].includes(mode) ? 20 : 2;
-      const report = await runLoadTest({ baseURL: server.baseURL, issuer: server.baseURL + '/realms/inlumen',
-        accounts: Array.from({ length: users }, (_, i) => ({ username: `user${i + 1}`, password: 'fixture-password' })),
-        scenario: 'audio-session', synchronizedRun: mode.startsWith('synchronized_'), reviewAIChanges: mode === 'review_disabled' ? false : undefined, codeZip, audioFile, timeoutMs: 5000, runTimeoutMs: 5000, pollMs: 20,
-        maxRunCpus: mode === 'custom_allocation_limits' ? 4 : 2,
-        maxRunMemoryGiB: mode === 'excessive_memory' ? 2 : 4, onProgress: () => {} });
-      assert.equal(report.failure, null, JSON.stringify(report));
-      assert.equal(report.passed, ['success', 'synchronized_success', 'custom_allocation_limits', 'preview_success', 'review_disabled', 'destination_copy'].includes(mode), JSON.stringify(report));
-      assert.deepEqual(report.allocation_limits, { cpu: mode === 'custom_allocation_limits' ? 4 : 2,
-        memory_bytes: (mode === 'excessive_memory' ? 2 : 4) * 1024 ** 3 });
-      const expectedMessages = mode === 'preview_apply_failure' ? AUDIO_PROMPTS.slice(0, 1) : AUDIO_PROMPTS;
-      assert.equal(server.messages.length, users * expectedMessages.length);
-      for (let i = 1; i <= users; i++) assert.deepEqual(server.messages.filter(message => message.user === `user${i}`).map(item => item.message), expectedMessages);
-      const shouldRun = !['second_chat_failure', 'invalid_zip', 'synchronized_invalid_zip', 'preview_apply_failure'].includes(mode);
-      const expectedRuns = mode === 'one_design_failure' ? users - 1 : shouldRun ? users : 0;
-      assert.equal(server.submissions.length, expectedRuns);
-      assert.equal(server.uploadedCodes.length, expectedRuns);
-      assert.ok(server.uploadedAudio.every(body => body.includes(audioBytes)));
-      assert.equal(report.results.length, users);
-      if (['success', 'synchronized_success'].includes(mode)) {
-        assert.ok(report.summary.peak_observed_chat_requests > 1);
-        assert.ok(report.results.every(result => result.stages.length === 5 && result.stages.at(-1).artifacts_verified.length === 4));
-        assert.equal(report.shared_assets.audio_bytes, audioBytes.length);
-      }
-      if (mode === 'second_chat_failure') assert.ok(report.results.every(result => result.failure === 'chat_http_524' && result.outcome_may_be_running));
-      if (mode === 'run_failure' || mode === 'missing_artifact') assert.ok(report.results.every(result => !result.outcome_may_be_running));
-      if (['excessive_allocation', 'excessive_memory'].includes(mode)) assert.ok(report.results.every(result => result.failure === 'execution_allocation_exceeds_configured_limits'));
-      if (mode === 'preview_success') {
-        assert.equal(server.appliedPreviews.length, users * 2);
-        assert.ok(report.results.every(result => result.stages.slice(0, 2).every(stage => stage.preview_applied)));
-      }
-      if (mode === 'review_disabled') {
-        assert.equal(report.review_ai_changes, false);
-        assert.equal(server.appliedPreviews.length, 0);
-        assert.ok(server.messages.every(message => message.preview_changes === false));
-      }
-      if (mode === 'preview_apply_failure') assert.ok(report.results.every(result => result.failure === 'graph_preview_apply_http_409'));
-      if (mode === 'conflicting_copy') assert.ok(report.results.every(result => result.failure === 'conflicting_sentiment_json'));
-      if (mode === 'one_design_failure') {
-        assert.equal(report.results[0].failure, 'chat_http_524');
-        assert.equal(report.results[1].ok, true);
-      }
-      const text = JSON.stringify(report);
-      assert.ok(!text.includes('fixture-password') && !text.includes('Hello Alice'));
-    } finally { await server.close(); await rm(dir, { recursive: true }); }
-  });
-}
+// Each scenario owns its fixture server, temp folder and browser, so they can run side by side.
+describe('audio session browser workloads', { concurrency: Math.min(4, availableParallelism()) }, () => {
+  for (const mode of ['synchronized_success', 'synchronized_invalid_zip', 'success', 'second_chat_failure', 'invalid_zip', 'run_failure', 'missing_artifact', 'excessive_allocation', 'custom_allocation_limits', 'excessive_memory', 'preview_success', 'preview_apply_failure', 'review_disabled', 'destination_copy', 'conflicting_copy', 'one_design_failure']) {
+    test(`audio session browser workload: ${mode}`, { timeout: 90000 }, async () => {
+      const bytes = await syntheticBundle();
+      const server = await fixture(mode === 'synchronized_success' ? 'success' : mode === 'synchronized_invalid_zip' ? 'invalid_zip' : mode, bytes);
+      const dir = await mkdtemp(join(tmpdir(), 'inlumen-session-'));
+      const codeZip = join(dir, 'synthetic-code.zip');
+      await writeFile(codeZip, bytes);
+      const audioFile = join(dir, 'session.wav');
+      const audioBytes = Buffer.from('RIFF session fixture WAV bytes');
+      await writeFile(audioFile, audioBytes);
+      try {
+        const users = ['success', 'preview_success'].includes(mode) ? 20 : 2;
+        const report = await runLoadTest({ baseURL: server.baseURL, issuer: server.baseURL + '/realms/inlumen',
+          accounts: Array.from({ length: users }, (_, i) => ({ username: `user${i + 1}`, password: 'fixture-password' })),
+          scenario: 'audio-session', synchronizedRun: mode.startsWith('synchronized_'), reviewAIChanges: mode === 'review_disabled' ? false : undefined, codeZip, audioFile, timeoutMs: 5000, runTimeoutMs: 5000, pollMs: 20,
+          maxRunCpus: mode === 'custom_allocation_limits' ? 4 : 2,
+          maxRunMemoryGiB: mode === 'excessive_memory' ? 2 : 4, onProgress: () => {} });
+        assert.equal(report.failure, null, JSON.stringify(report));
+        assert.equal(report.passed, ['success', 'synchronized_success', 'custom_allocation_limits', 'preview_success', 'review_disabled', 'destination_copy'].includes(mode), JSON.stringify(report));
+        assert.deepEqual(report.allocation_limits, { cpu: mode === 'custom_allocation_limits' ? 4 : 2,
+          memory_bytes: (mode === 'excessive_memory' ? 2 : 4) * 1024 ** 3 });
+        const expectedMessages = mode === 'preview_apply_failure' ? AUDIO_PROMPTS.slice(0, 1) : AUDIO_PROMPTS;
+        assert.equal(server.messages.length, users * expectedMessages.length);
+        for (let i = 1; i <= users; i++) assert.deepEqual(server.messages.filter(message => message.user === `user${i}`).map(item => item.message), expectedMessages);
+        const shouldRun = !['second_chat_failure', 'invalid_zip', 'synchronized_invalid_zip', 'preview_apply_failure'].includes(mode);
+        const expectedRuns = mode === 'one_design_failure' ? users - 1 : shouldRun ? users : 0;
+        assert.equal(server.submissions.length, expectedRuns);
+        assert.equal(server.uploadedCodes.length, expectedRuns);
+        assert.ok(server.uploadedAudio.every(body => body.includes(audioBytes)));
+        assert.equal(report.results.length, users);
+        if (['success', 'synchronized_success'].includes(mode)) {
+          assert.ok(report.summary.peak_observed_chat_requests > 1);
+          assert.ok(report.results.every(result => result.stages.length === 5 && result.stages.at(-1).artifacts_verified.length === 4));
+          assert.equal(report.shared_assets.audio_bytes, audioBytes.length);
+        }
+        if (mode === 'second_chat_failure') assert.ok(report.results.every(result => result.failure === 'chat_http_524' && result.outcome_may_be_running));
+        if (mode === 'run_failure' || mode === 'missing_artifact') assert.ok(report.results.every(result => !result.outcome_may_be_running));
+        if (['excessive_allocation', 'excessive_memory'].includes(mode)) assert.ok(report.results.every(result => result.failure === 'execution_allocation_exceeds_configured_limits'));
+        if (mode === 'preview_success') {
+          assert.equal(server.appliedPreviews.length, users * 2);
+          assert.ok(report.results.every(result => result.stages.slice(0, 2).every(stage => stage.preview_applied)));
+        }
+        if (mode === 'review_disabled') {
+          assert.equal(report.review_ai_changes, false);
+          assert.equal(server.appliedPreviews.length, 0);
+          assert.ok(server.messages.every(message => message.preview_changes === false));
+        }
+        if (mode === 'preview_apply_failure') assert.ok(report.results.every(result => result.failure === 'graph_preview_apply_http_409'));
+        if (mode === 'conflicting_copy') assert.ok(report.results.every(result => result.failure === 'conflicting_sentiment_json'));
+        if (mode === 'one_design_failure') {
+          assert.equal(report.results[0].failure, 'chat_http_524');
+          assert.equal(report.results[1].ok, true);
+        }
+        const text = JSON.stringify(report);
+        assert.ok(!text.includes('fixture-password') && !text.includes('Hello Alice'));
+      } finally { await server.close(); await rm(dir, { recursive: true }); }
+    });
+  }
+});
 
 test('missing session assets fail before launching a browser', async () => {
   await assert.rejects(loadSessionAssets(), /audio_session_requires/);

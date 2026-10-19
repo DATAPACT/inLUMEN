@@ -87,12 +87,44 @@ jobs:
           docker run --rm inlumen-frontend:ci npm exec vite -- --version
       - name: Audit frontend dependencies
         run: npm audit --prefix frontend --audit-level=moderate
+
+  # Browser suites run in parallel jobs; the e2e specs are split across two shards.
+  frontend-browser:
+    name: Frontend browser (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: e2e 1/2
+            command: npm run test:e2e --prefix frontend -- --shard=1/2
+          - name: e2e 2/2
+            command: npm run test:e2e --prefix frontend -- --shard=2/2
+          - name: stress harness
+            command: npm run test:stress --prefix frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+      - name: Restore test browser
+        id: playwright-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
       - name: Install test browser
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: cd frontend && npx playwright install --with-deps chromium
-      - name: Browser recovery and accessibility tests
-        run: npm run test:e2e --prefix frontend
-      - name: Stress harness regression tests
-        run: npm run test:stress --prefix frontend
+      - name: Install test browser system dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: cd frontend && npx playwright install-deps chromium
+      - name: Run ${{ matrix.name }} tests
+        run: ${{ matrix.command }}
 
   integration:
     name: Graph transactions and workspace isolation
@@ -130,14 +162,25 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.lock
       - run: python -m pip install --require-hashes -r backend/requirements.lock
       # MinIO's old public images are no longer reliably pullable. Build the
       # source-only release using its declared toolchain and an immutable commit.
+      # The binary is cached by that commit, so it is only compiled once.
+      - name: Restore disposable attachment storage
+        id: minio-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/minio-bin
+          key: minio-${{ runner.os }}-go1.24.8-9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a
       - uses: actions/setup-go@v7
+        if: steps.minio-cache.outputs.cache-hit != 'true'
         with:
           go-version: '1.24.8'
           cache: false
       - name: Build disposable attachment storage
+        if: steps.minio-cache.outputs.cache-hit != 'true'
         timeout-minutes: 10
         env:
           GOBIN: ${{ runner.temp }}/minio-bin
