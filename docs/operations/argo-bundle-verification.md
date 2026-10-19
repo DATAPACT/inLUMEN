@@ -127,3 +127,23 @@ Workflows v4.1.5 quick-start.
   large CRDs need server-side apply, results reaching a Destination were not
   stored, the image installed the CUDA build of PyTorch, and reviewed models had
   no model store.
+
+### 2026-10-19 (issue #161, phase 2: baked models, resources, plugin URLs)
+
+Environment: Docker 29.8.0 on macOS ARM64, k3d v5.9.0 (k3s v1.35.5), Argo
+Workflows v4.1.5 quick-start.
+
+- Uploaded-audio pipeline (4 steps, Whisper and RoBERTa sentiment), bundle
+  built with this branch from the pipeline in a local inLUMEN instance.
+- `make -C argo image MODELS=bake ASR_PROFILE=fast`: the build downloaded and
+  verified `Systran/faster-whisper-small` and the RoBERTa sentiment model into
+  the image (2.7 GB).
+- `setup` and `submit` with `MODELS=bake`, no PVC in the namespace, and the
+  egress policy above (checked first: a labelled pod could reach the in-cluster
+  object store but not huggingface.co, once the policy applied about a second
+  after the pod started): 4/4 steps succeeded in 1m28s with no prefetch task;
+  the result was stored under `inlumen/output/bake-1/step-4/data/`.
+- Pods had the profile resources: 1 CPU / 1 GiB for the source and destination,
+  4 CPU / 4 GiB for the two model steps; none mounted a model volume.
+- Not run on a cluster: `ACCELERATOR=gpu` (no GPU available) and plugin URL
+  parameters; both are covered by unit tests only.
