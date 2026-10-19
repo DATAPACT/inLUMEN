@@ -1,7 +1,7 @@
 {
   "schema_version": "inlumen.plugin@1",
   "id": "jsi.wikifier",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "JSI Wikifier",
   "description": "Annotates text with the Wikipedia and Wikidata concepts it mentions (entity linking), with optional Wikidata classes and DBpedia types.",
   "publisher": "Jožef Stefan Institute (JSI)",
@@ -86,6 +86,15 @@
     {
       "name": "support",
       "label": "Include supporting text ranges",
+      "type": "boolean",
+      "enum": [true, false],
+      "default": false,
+      "location": "body"
+    },
+    {
+      "name": "ranges",
+      "label": "Include candidate ranges",
+      "description": "For every possible mention, list all its candidate Wikipedia pages and scores. This makes the output many times larger (megabytes for a short transcript); keep it off unless you need the candidates.",
       "type": "boolean",
       "enum": [true, false],
       "default": false,
