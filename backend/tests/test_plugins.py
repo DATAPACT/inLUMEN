@@ -704,9 +704,12 @@ class PluginDeploymentTest(unittest.TestCase):
             }]
             bundle = build_deployment_bundle_files(graph, result, targets={"argo": True, "dagster": False})
         paths = {item["path"]: item for item in bundle["files"]}
-        workflow = next(content["content"] for path, content in paths.items() if path.endswith(".yaml") and "argo" in path.lower())
+        workflow = paths["argo/workflow.yaml"]["content"]
         self.assertIn("INLUMEN_PARAM_API_KEY", workflow)
         self.assertIn("secretKeyRef", workflow)
+        # The bundle creates the Secret the workflow reads from the .env name.
+        self.assertIn("'2.api_key|INLUMEN_SECRET_2_API_KEY|required'", paths["argo/create-secrets.sh"]["content"])
+        self.assertIn("INLUMEN_SECRET_2_API_KEY=", paths[".env.example"]["content"])
         self.assertNotIn("demo-key", json.dumps(bundle))
 
         with installed():

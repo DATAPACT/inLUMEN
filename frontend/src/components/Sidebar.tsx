@@ -4,6 +4,11 @@ import { normalizeGraph } from '@/features/flow/flowGraph';
 import { readNodeFile } from '@/features/nodes/nodePersistence';
 
 import { apiFetch } from '@/utils/apiFetch';
+import {
+  buildDeploymentZip,
+  safeZipPath,
+  type DeploymentBundleFile,
+} from '@/features/deployment/deploymentBundleZip';
 import { INLUMEN_API_URL } from '@/config/api';
 import type { ChatbotConfig } from '@/services/chatbotService';
 import { cn } from "@/lib/utils";
@@ -160,18 +165,6 @@ type PipelineRunResult = {
   outputs?: Array<{ path?: string; filename?: string; size_bytes?: number }>;
 };
 
-type DeploymentBundleFile = {
-  path?: string;
-  filename?: string;
-  flow_id?: string;
-  content?: string;
-  content_encoding?: "utf-8" | "base64" | string;
-  content_type?: string;
-  size_bytes?: number;
-  sha256?: string;
-  role?: string;
-  encoding?: "base64";
-};
 
 type PipelineOverviewResponse = {
   version?: string;
@@ -217,7 +210,7 @@ const deploymentFailureMessage = (
 
 type RuntimeArtifactDownload = { name: string; url: string };
 type YamlDownload = { name: string; url: string };
-type DeploymentBundleDownload = { name: string; url: string };
+type DeploymentBundleDownload = { name: string; url: string; target: "argo" | "dagster" };
 const groupRuntimeArtifactDownloads = (downloads: RuntimeArtifactDownload[]) => {
   const groups = new Map<string, {
     label: string;
@@ -420,83 +413,6 @@ export function Sidebar({
     // The reset key changes only after a confirmed workspace-wide clear.
   }, [workspaceResetKey]);
 
-  const sanitizeZipSegment = (value: unknown, fallback: string) => {
-    const cleaned = String(value || "")
-      .trim()
-      .replace(/[^A-Za-z0-9_.-]+/g, "-")
-      .replace(/^[-.]+|[-.]+$/g, "");
-    return cleaned || fallback;
-  };
-
-  const safeZipPath = (file: DeploymentBundleFile, index: number) => {
-    const rawPath = String(file.path || "").trim();
-    if (rawPath) {
-      const parts = rawPath.replace(/\\/g, "/")
-        .split("/")
-        .map((part) => part.trim())
-        .filter((part) => part && part !== ".");
-      if (parts.length > 0 && !rawPath.startsWith("/") && !parts.includes("..")) {
-        return parts.join("/");
-      }
-    }
-    const rawFallbackPath = String(file.path || "").trim();
-    if (rawFallbackPath) {
-      const parts = rawFallbackPath
-        .replace(/\\/g, "/")
-        .split("/")
-        .map((part) => sanitizeZipSegment(part, "file"))
-        .filter((part) => part && part !== "." && part !== "..");
-      if (parts.length > 0) return parts.join("/");
-    }
-    const flowId = sanitizeZipSegment(file.flow_id, "node");
-    const filename = sanitizeZipSegment(file.filename, `artifact-${index + 1}.txt`);
-    return `nodes/${flowId}/${filename}`;
-  };
-
-  const buildDeploymentZip = async (
-    files: DeploymentBundleFile[],
-  ) => {
-    const { default: JSZip } = await import("jszip");
-      const zip = new JSZip();
-    const written = new Set<string>();
-    const writeFile = (
-      path: string,
-      content: string,
-      contentEncoding?: string,
-    ) => {
-      let nextPath = path;
-      let suffix = 2;
-      while (written.has(nextPath)) {
-        const dot = path.lastIndexOf(".");
-        nextPath = dot > 0
-          ? `${path.slice(0, dot)}-${suffix}${path.slice(dot)}`
-          : `${path}-${suffix}`;
-        suffix += 1;
-      }
-      written.add(nextPath);
-      zip.file(
-        nextPath,
-        content,
-        contentEncoding === "base64" ? { base64: true } : undefined,
-      );
-      return nextPath;
-    };
-
-    files.forEach((file, index) => {
-      const path = safeZipPath(file, index);
-      writeFile(
-        path,
-        file.content ?? "",
-        file.content_encoding ?? file.encoding,
-      );
-    });
-
-    return zip.generateAsync({
-      type: "blob",
-      compression: "DEFLATE",
-    });
-  };
-
   const prepareDeploymentRuntime = async (): Promise<DockerfileGenerationResponse> => {
     const genRes = await apiFetch(`${INLUMEN_API_URL}/agentic_generate_dockerfiles`, {
       method: "POST",
@@ -601,7 +517,7 @@ export function Sidebar({
       setIsGeneratingDeployment(true);
       clearRuntimeArtifactDownloads();
       if (target === "argo") clearYamlDownload();
-      if (target === "dagster") clearDeploymentBundleDownload();
+      clearDeploymentBundleDownload();
 
       const dockerfile_json = await prepareDeploymentRuntime();
 
@@ -650,25 +566,23 @@ export function Sidebar({
             url: URL.createObjectURL(new Blob([argoWorkflowFile.content ?? ""], { type: "application/x-yaml;charset=utf-8" })),
           }
         : null;
-      const bundleUrl = target === "dagster"
-        ? URL.createObjectURL(await buildDeploymentZip(bundledFiles))
-        : null;
+      // Both targets download the whole bundle: inLUMEN's job ends at the zip.
+      const bundleUrl = URL.createObjectURL(await buildDeploymentZip(bundledFiles));
 
       setRuntimeArtifactDownloads(deploymentRuntimeLinks.length > 0 ? deploymentRuntimeLinks : runtimeLinks);
       if (target === "argo") setYamlDownload(yamlDownloadLink);
       setDeploymentValidationReport(bundle.validation_report || null);
       setDeploymentRepairReport(bundle.repair_report || null);
       setPipelineRunResult(bundle.run || null);
-      if (target === "dagster" && bundleUrl) {
-        setDeploymentBundleDownload({
-          name: `inlumen-dagster-bundle-${Date.now()}.zip`,
-          url: bundleUrl,
-        });
-      }
+      setDeploymentBundleDownload({
+        name: `inlumen-${target}-bundle-${Date.now()}.zip`,
+        url: bundleUrl,
+        target,
+      });
     } catch (e: unknown) {
       clearRuntimeArtifactDownloads();
       if (target === "argo") clearYamlDownload();
-      if (target === "dagster") clearDeploymentBundleDownload();
+      clearDeploymentBundleDownload();
       setDeploymentValidationReport(null);
       setDeploymentRepairReport(null);
       setPipelineRunResult(null);
@@ -1092,7 +1006,8 @@ export function Sidebar({
             <div className="min-w-0 overflow-hidden rounded-lg border border-border p-3">
               <h3 className="text-sm font-medium mb-2">Build deployment artifacts</h3>
               <p className="text-xs text-muted-foreground mb-3">
-                Export Dagster and Argo independently from the same pipeline contract.
+                Export Dagster and Argo independently from the same pipeline contract. Each export is a
+                self-contained bundle you build and run outside inLUMEN.
               </p>
 
               <div className="space-y-2">
@@ -1109,7 +1024,7 @@ export function Sidebar({
                   onClick={() => { void handleGenerateDeploymentArtifact("argo"); }}
                   disabled={isGeneratingDeployment}
                 >
-                  {isGeneratingDeployment ? "Generating..." : "Export Argo Workflow"}
+                  {isGeneratingDeployment ? "Generating..." : "Export Argo bundle"}
                 </Button>
               </div>
 
@@ -1158,7 +1073,9 @@ export function Sidebar({
 
               {deploymentBundleDownload && (
                 <div className="mt-4 min-w-0">
-                  <div className="mb-2 text-xs font-medium">Dagster bundle (.zip)</div>
+                  <div className="mb-2 text-xs font-medium">
+                    {deploymentBundleDownload.target === "argo" ? "Argo bundle (.zip)" : "Dagster bundle (.zip)"}
+                  </div>
                   <a
                     href={deploymentBundleDownload.url}
                     download={deploymentBundleDownload.name}
@@ -1166,15 +1083,22 @@ export function Sidebar({
                     className="flex w-full min-w-0 items-center justify-center gap-2 overflow-hidden rounded-md border border-border bg-background px-2 py-2 text-xs font-medium hover:bg-muted"
                   >
                     <Download className="h-3.5 w-3.5 shrink-0" />
-                    <span className="min-w-0 truncate">Download Dagster bundle</span>
+                    <span className="min-w-0 truncate">
+                      {deploymentBundleDownload.target === "argo" ? "Download Argo bundle" : "Download Dagster bundle"}
+                    </span>
                   </a>
+                  {deploymentBundleDownload.target === "argo" && (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      README.md in the zip explains how to build the image and run the workflow on Argo Workflows.
+                    </p>
+                  )}
                   <Button
                     variant="outline"
                     size="sm"
                     className="mt-2 h-auto w-full whitespace-normal px-2 py-1.5 text-xs"
                     onClick={clearDeploymentBundleDownload}
                   >
-                    Remove Dagster bundle link
+                    Remove bundle link
                   </Button>
                 </div>
               )}
@@ -1221,7 +1145,7 @@ export function Sidebar({
 
               {yamlDownload && (
                 <div className="mt-3 min-w-0">
-                  <div className="mb-2 text-xs font-medium">Argo Workflow (.yaml)</div>
+                  <div className="mb-2 text-xs font-medium">Argo Workflow only (.yaml)</div>
                   <a
                     href={yamlDownload.url}
                     download={yamlDownload.name}

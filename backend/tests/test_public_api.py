@@ -138,6 +138,11 @@ class PublicApiTest(unittest.TestCase):
         )
         self.assertIn("/api/v1/pipelines/{pipeline_id}/artifacts/dockerfiles", schema["paths"])
         self.assertIn("/api/v1/pipelines/{pipeline_id}/artifacts/argo-workflow.yaml", schema["paths"])
+        self.assertIn("/api/v1/pipelines/{pipeline_id}/artifacts/argo-bundle.zip", schema["paths"])
+        self.assertIn(
+            "/api/v1/pipelines/{pipeline_id}/versions/{version_id}/artifacts/argo-bundle.zip",
+            schema["paths"],
+        )
         self.assertIn("/api/graph/nodes", schema["paths"])
         self.assertIn("/api/pipeline/history/restore", schema["paths"])
         self.assertIn("/api/pipeline-runs", schema["paths"])
@@ -341,6 +346,69 @@ class PublicApiTest(unittest.TestCase):
         yaml_text = yaml_response.get_data(as_text=True)
         self.assertIn('apiVersion: "argoproj.io/v1alpha1"', yaml_text)
         self.assertIn('kind: "Workflow"', yaml_text)
+
+    @patch("public_api.build_deployment_bundle_files")
+    @patch("public_api._build_dockerfile_artifacts_or_error")
+    @patch("public_api.fetch_pipeline_graph")
+    def test_argo_bundle_endpoint_returns_the_bundle_as_zip(
+        self,
+        fetch_pipeline_graph_mock,
+        build_dockerfile_artifacts_mock,
+        build_bundle_mock,
+    ):
+        import io
+        import zipfile
+
+        fetch_pipeline_graph_mock.side_effect = _async_return(_sample_graph())
+        build_dockerfile_artifacts_mock.return_value = {"dockerfiles": []}
+        build_bundle_mock.return_value = {
+            "files": [
+                {"path": "argo/workflow.yaml", "content": "kind: Workflow\n"},
+                {"path": "argo/submit.sh", "content": "#!/usr/bin/env bash\n", "executable": True},
+                {"path": "inputs/node-1/a.bin", "content": "AAE=", "content_encoding": "base64"},
+            ]
+        }
+
+        response = self.client.get(
+            "/api/v1/pipelines/pipeline-123/artifacts/argo-bundle.zip",
+            headers=_auth_headers(),
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("application/zip", response.headers["Content-Type"])
+        self.assertIn("inlumen-argo-bundle-pipeline-123.zip", response.headers["Content-Disposition"])
+        build_dockerfile_artifacts_mock.assert_called_once()
+        self.assertTrue(build_dockerfile_artifacts_mock.call_args.kwargs["require_attached_runtime"])
+        self.assertEqual(
+            {"argo": True, "dagster": False},
+            build_bundle_mock.call_args.kwargs["targets"],
+        )
+        with zipfile.ZipFile(io.BytesIO(response.get_data())) as archive:
+            self.assertEqual(b"kind: Workflow\n", archive.read("argo/workflow.yaml"))
+            self.assertEqual(b"\x00\x01", archive.read("inputs/node-1/a.bin"))
+            self.assertEqual(0o755, archive.getinfo("argo/submit.sh").external_attr >> 16)
+            self.assertEqual(0o644, archive.getinfo("argo/workflow.yaml").external_attr >> 16)
+
+    @patch("public_api.build_deployment_bundle_files")
+    @patch("public_api._build_dockerfile_artifacts_or_error")
+    @patch("public_api.fetch_pipeline_graph")
+    def test_argo_bundle_endpoint_reports_export_errors(
+        self,
+        fetch_pipeline_graph_mock,
+        build_dockerfile_artifacts_mock,
+        build_bundle_mock,
+    ):
+        fetch_pipeline_graph_mock.side_effect = _async_return(_sample_graph())
+        build_dockerfile_artifacts_mock.return_value = {"dockerfiles": []}
+        build_bundle_mock.side_effect = ValueError("No pipeline steps were found.")
+
+        response = self.client.get(
+            "/api/v1/pipelines/pipeline-123/artifacts/argo-bundle.zip",
+            headers=_auth_headers(),
+        )
+
+        self.assertEqual(422, response.status_code)
+        self.assertIn("No pipeline steps", response.get_data(as_text=True))
 
     @patch("public_api._build_dockerfile_artifacts_or_error")
     @patch("public_api.fetch_pipeline_versions")

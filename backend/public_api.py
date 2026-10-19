@@ -16,6 +16,8 @@ from async_runtime import run_async
 from deployment_artifacts import (
     DeploymentArtifactValidationError,
     build_argo_workflow_yaml,
+    build_deployment_bundle_files,
+    deployment_bundle_zip,
     extract_pipeline_steps,
 )
 from graph_client import (
@@ -208,6 +210,14 @@ def create_public_api_blueprint(
         response.headers["Content-Type"] = "application/x-yaml; charset=utf-8"
         return response
 
+    @public_api.route("/api/v1/pipelines/<pipeline_id>/artifacts/argo-bundle.zip", methods=["GET", "OPTIONS"])
+    @api_auth_required
+    def get_pipeline_argo_bundle_zip(pipeline_id: str):
+        if request.method == "OPTIONS":
+            return _preflight_response()
+        graph, pipeline = _pipeline_graph_or_404(neo4j_api_base_url, pipeline_id)
+        return _argo_bundle_zip_response_or_error(graph, str(pipeline["id"]))
+
     @public_api.route(
         "/api/v1/pipelines/<pipeline_id>/versions/<version_id>/artifacts/dockerfiles",
         methods=["GET", "OPTIONS"],
@@ -248,6 +258,25 @@ def create_public_api_blueprint(
         response = make_response(yaml_text, 200)
         response.headers["Content-Type"] = "application/x-yaml; charset=utf-8"
         return response
+
+    @public_api.route(
+        "/api/v1/pipelines/<pipeline_id>/versions/<version_id>/artifacts/argo-bundle.zip",
+        methods=["GET", "OPTIONS"],
+    )
+    @api_auth_required
+    def get_pipeline_version_argo_bundle_zip(pipeline_id: str, version_id: str):
+        if request.method == "OPTIONS":
+            return _preflight_response()
+        graph, pipeline, version = _pipeline_version_graph_or_404(
+            neo4j_api_base_url,
+            pipeline_id,
+            version_id,
+        )
+        public_version = _public_version(version)
+        return _argo_bundle_zip_response_or_error(
+            graph,
+            f"{pipeline['id']}-{public_version['id']}",
+        )
 
     @public_api.route("/api/v1/workflows", methods=["GET", "OPTIONS"])
     @api_auth_required
@@ -683,7 +712,11 @@ def _version_id_matches(version: dict[str, Any], requested_version_id: str) -> b
     return requested_version_id in aliases
 
 
-def _build_dockerfile_artifacts_or_error(graph: dict[str, Any]) -> dict[str, Any]:
+def _build_dockerfile_artifacts_or_error(
+    graph: dict[str, Any],
+    *,
+    require_attached_runtime: bool = False,
+) -> dict[str, Any]:
     try:
         from deployment_agents import generate_dockerfiles_with_agent
 
@@ -701,6 +734,7 @@ def _build_dockerfile_artifacts_or_error(graph: dict[str, Any]) -> dict[str, Any
                 ids,
                 pipeline_graph=graph,
                 file_refs=file_refs,
+                require_attached_runtime=require_attached_runtime,
             )
         )
         if hasattr(dockerfiles, "model_dump"):
@@ -724,6 +758,31 @@ def _build_argo_workflow_yaml_or_error(graph: dict[str, Any]) -> str:
             "artifact_generation_failed",
             str(error),
         ) from error
+
+
+def _argo_bundle_zip_response_or_error(graph: dict[str, Any], name: str):
+    # Same bundle as the editor's Argo export. Building it never contacts a
+    # registry or cluster; that is left to whoever deploys the bundle.
+    dockerfiles = _build_dockerfile_artifacts_or_error(graph, require_attached_runtime=True)
+    try:
+        bundle = build_deployment_bundle_files(
+            graph,
+            dockerfiles,
+            targets={"argo": True, "dagster": False},
+        )
+    except (ValueError, DeploymentArtifactValidationError) as error:
+        raise ApiError(
+            422,
+            "artifact_generation_failed",
+            str(error),
+        ) from error
+    response = make_response(deployment_bundle_zip(bundle["files"]), 200)
+    response.headers["Content-Type"] = "application/zip"
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip("-.") or "pipeline"
+    response.headers["Content-Disposition"] = (
+        f'attachment; filename="inlumen-argo-bundle-{safe_name}.zip"'
+    )
+    return response
 
 
 def _public_version(version: dict[str, Any]) -> dict[str, Any]:
@@ -1178,6 +1237,27 @@ def build_openapi_schema() -> dict[str, Any]:
                     },
                 }
             },
+            "/api/v1/pipelines/{pipeline_id}/artifacts/argo-bundle.zip": {
+                "get": {
+                    "tags": ["Artifacts"],
+                    "summary": "Export a self-contained Argo Workflows bundle for a pipeline",
+                    "description": "ZIP with the workflow, the shared image build context, step code, inputs, scripts and cluster setup templates. Building the image and running the workflow happen outside inLUMEN.",
+                    "operationId": "getPipelineArgoBundleZip",
+                    "parameters": [{"$ref": "#/components/parameters/PipelineId"}],
+                    "responses": {
+                        "200": {
+                            "description": "Argo bundle ZIP for the active pipeline graph.",
+                            "content": {
+                                "application/zip": {
+                                    "schema": {"type": "string", "format": "binary"}
+                                }
+                            },
+                        },
+                        "422": {"description": "The pipeline has no attached runtime code or cannot be exported."},
+                        **not_found_responses,
+                    },
+                }
+            },
             "/api/v1/pipelines/{pipeline_id}/versions/{version_id}/artifacts/dockerfiles": {
                 "get": {
                     "tags": ["Artifacts"],
@@ -1218,6 +1298,30 @@ def build_openapi_schema() -> dict[str, Any]:
                                 }
                             },
                         },
+                        **not_found_responses,
+                    },
+                }
+            },
+            "/api/v1/pipelines/{pipeline_id}/versions/{version_id}/artifacts/argo-bundle.zip": {
+                "get": {
+                    "tags": ["Artifacts"],
+                    "summary": "Export a self-contained Argo Workflows bundle for a pipeline version",
+                    "description": "ZIP with the workflow, the shared image build context, step code, inputs, scripts and cluster setup templates. Building the image and running the workflow happen outside inLUMEN.",
+                    "operationId": "getPipelineVersionArgoBundleZip",
+                    "parameters": [
+                        {"$ref": "#/components/parameters/PipelineId"},
+                        {"$ref": "#/components/parameters/VersionId"},
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Argo bundle ZIP for the selected pipeline version.",
+                            "content": {
+                                "application/zip": {
+                                    "schema": {"type": "string", "format": "binary"}
+                                }
+                            },
+                        },
+                        "422": {"description": "The pipeline has no attached runtime code or cannot be exported."},
                         **not_found_responses,
                     },
                 }

@@ -9,6 +9,7 @@ from urllib.parse import unquote, urlsplit
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import InvalidWheelFilename, parse_wheel_filename
 
+import argo_bundle
 from artifact_runtime import ArtifactContractError, CONTRACT_ID, assign_output_ports, validate_connection_contract, validate_declaration
 from artifact_content import decode_artifact_content, verify_artifact_integrity
 from artifact_contract import ArtifactBinding, artifact_bindings, classify_artifact
@@ -1384,6 +1385,16 @@ def _build_codegen_argo_workflow_object(
         for parent in parents:
             child_lookup[parent].append(child)
     leaf_ids = [step_id for step_id in ordered_ids if not child_lookup[step_id]]
+    # Steps without output ports (Destinations) publish nothing themselves, so
+    # keep what reaches them under the run's output prefix instead.
+    delivered_keys: Dict[tuple[str, str], str] = {}
+    for binding in sorted(bindings, key=lambda item: (item.target_node, item.target_port)):
+        target_outputs = (steps_by_id[binding.target_node].get("ports") or {}).get("outputs") or []
+        if not target_outputs:
+            delivered_keys.setdefault(
+                (binding.source_node, binding.source_port),
+                f"{_argo_name(binding.target_node)}/{_argo_name(binding.target_port, 'input')}",
+            )
 
     tasks = []
     entry_template = {
@@ -1418,6 +1429,56 @@ def _build_codegen_argo_workflow_object(
 
     templates = [entry_template]
     shared_image_parameter = "pipeline-image"
+    # Reviewed models are fetched once into a persistent volume by the first
+    # task, then mounted read-only at /models by the steps that use them.
+    model_store = (shared_runtime or {}).get("models") or {}
+    model_flow_ids = set(model_store.get("flow_ids") or [])
+    model_parameters = []
+    if model_store:
+        model_parameters.append({"name": "asr-profile", "value": "auto"})
+        tasks.append({
+            "name": argo_bundle.MODEL_PREFETCH_TASK,
+            "template": argo_bundle.MODEL_PREFETCH_TASK,
+        })
+        model_selection_env = [
+            {"name": "INLUMEN_ACCELERATOR", "value": "cpu"},
+            {"name": "INLUMEN_ASR_DEVICE", "value": "auto"},
+            {"name": "INLUMEN_ASR_PROFILE", "value": "{{workflow.parameters.asr-profile}}"},
+            {"name": "INLUMEN_MODEL_ROOT", "value": argo_bundle.MODEL_ROOT},
+        ]
+        templates.append({
+            "name": argo_bundle.MODEL_PREFETCH_TASK,
+            "metadata": {"annotations": {"inlumen.ai/role": "model-prefetch"}},
+            "container": {
+                "image": f"{{{{workflow.parameters.{shared_image_parameter}}}}}",
+                "imagePullPolicy": "IfNotPresent",
+                "command": ["python", model_store["script_path"]],
+                "env": [
+                    *model_selection_env,
+                    {"name": "INLUMEN_MODEL_REQUIREMENTS", "value": model_store["requirements_path"]},
+                    {"name": "INLUMEN_MODEL_VERIFY_ON_START", "value": "manifest"},
+                    {"name": "HF_HOME", "value": f"{argo_bundle.MODEL_ROOT}/huggingface"},
+                    {"name": "HF_HUB_CACHE", "value": f"{argo_bundle.MODEL_ROOT}/huggingface"},
+                    {"name": "HF_HUB_ETAG_TIMEOUT", "value": "30"},
+                    {"name": "HF_HUB_DOWNLOAD_TIMEOUT", "value": "600"},
+                    {"name": "HF_HUB_DISABLE_XET", "value": "1"},
+                    {"name": "PYTHONUNBUFFERED", "value": "1"},
+                    {
+                        "name": "HF_TOKEN",
+                        "valueFrom": {
+                            "secretKeyRef": {
+                                "name": argo_bundle.RUNTIME_SECRET_NAME,
+                                "key": "HF_TOKEN",
+                                "optional": True,
+                            },
+                        },
+                    },
+                ],
+                "volumeMounts": [
+                    {"name": argo_bundle.MODEL_STORE_VOLUME, "mountPath": argo_bundle.MODEL_ROOT},
+                ],
+            },
+        })
     input_parameters = []
     environment_parameters = []
     seen_environment_parameters = set()
@@ -1433,6 +1494,9 @@ def _build_codegen_argo_workflow_object(
         else []
     )
 
+    # Bundles copy the root inputs into the shared image, so root steps read
+    # them from there instead of downloading an input archive.
+    inputs_embedded = bool((shared_runtime or {}).get("inputs_embedded"))
     for step_id in ordered_ids:
         parent_ids = dependencies.get(step_id) or []
         step = steps_by_id[step_id]
@@ -1458,7 +1522,7 @@ def _build_codegen_argo_workflow_object(
                     for binding in incoming_bindings
                 ]
             }
-        elif not is_database_source:
+        elif not is_database_source and not inputs_embedded:
             input_parameter = _argo_name(f"input-artifact-key-{step_id}")
             input_parameters.append(
                 {
@@ -1476,6 +1540,11 @@ def _build_codegen_argo_workflow_object(
             }
         if parent_ids:
             task["dependencies"] = [_argo_name(parent) for parent in parent_ids]
+        if step_id in model_flow_ids:
+            task["dependencies"] = [
+                argo_bundle.MODEL_PREFETCH_TASK,
+                *(task.get("dependencies") or []),
+            ]
         tasks.append(task)
 
     for step_id in ordered_ids:
@@ -1523,12 +1592,26 @@ def _build_codegen_argo_workflow_object(
                         f"{_argo_name(step_id)}/{_argo_name(port_id)}"
                     )
                 }
+            elif (step_id, port_id) in delivered_keys:
+                output_artifact["s3"] = {
+                    "key": (
+                        f"{{{{workflow.parameters.output-artifact-prefix}}}}/"
+                        f"{delivered_keys[(step_id, port_id)]}"
+                    )
+                }
             output_artifacts.append(output_artifact)
 
         env = [
             {"name": "INLUMEN_FLOW_ID", "value": step_id},
             # The public Task ABI is intentionally just these two directories.
-            {"name": "PIPELINE_INPUT_DIR", "value": "/inlumen/inputs"},
+            {
+                "name": "PIPELINE_INPUT_DIR",
+                "value": (
+                    _clean_string(shared_node.get("input_dir"))
+                    if inputs_embedded and not incoming_bindings
+                    else "/inlumen/inputs"
+                ),
+            },
             {"name": "PIPELINE_OUTPUT_DIR", "value": "/inlumen/outputs"},
         ]
         if step.get("label"):
@@ -1556,7 +1639,7 @@ def _build_codegen_argo_workflow_object(
             direct_name = _direct_parameter_environment_name(key)
             if direct_name:
                 env.append({"name": direct_name, "value": str(value)})
-        for key in _step_secret_parameters(step):
+        for key in _runtime_secret_parameters(step, dockerfiles_payload):
             env_name = "INLUMEN_PARAM_" + re.sub(r"[^A-Za-z0-9]+", "_", key).upper().strip("_")
             if env_name != "INLUMEN_PARAM_":
                 env.append({
@@ -1592,6 +1675,8 @@ def _build_codegen_argo_workflow_object(
             dockerfiles_payload,
             step_id,
         )
+        if step_id in model_flow_ids:
+            env.extend(model_selection_env)
         existing_env_names = {item.get("name") for item in env}
         for requirement in runtime_environment:
             name = _clean_string(requirement.get("name"))
@@ -1661,6 +1746,12 @@ def _build_codegen_argo_workflow_object(
                     "env": env,
                 },
             }
+        if step_id in model_flow_ids:
+            template["container"]["volumeMounts"] = [{
+                "name": argo_bundle.MODEL_STORE_VOLUME,
+                "mountPath": argo_bundle.MODEL_ROOT,
+                "readOnly": True,
+            }]
         if output_artifacts:
             template["outputs"] = {"artifacts": output_artifacts}
         if incoming_bindings:
@@ -1673,7 +1764,7 @@ def _build_codegen_argo_workflow_object(
                     for binding in incoming_bindings
                 ]
             }
-        elif not (
+        elif not inputs_embedded and not (
             _clean_string(step.get("type")).lower() == "source"
             and _clean_string(step.get("template")).lower() == "database"
         ):
@@ -1682,7 +1773,7 @@ def _build_codegen_argo_workflow_object(
             }
         templates.append(template)
 
-    return {
+    workflow = {
         "apiVersion": "argoproj.io/v1alpha1",
         "kind": "Workflow",
         "metadata": {
@@ -1706,12 +1797,19 @@ def _build_codegen_argo_workflow_object(
                         "name": "output-artifact-prefix",
                         "value": "inlumen/output",
                     },
+                    *model_parameters,
                     *image_parameters,
                 ],
             },
             "templates": templates,
         },
     }
+    if model_store:
+        workflow["spec"]["volumes"] = [{
+            "name": argo_bundle.MODEL_STORE_VOLUME,
+            "persistentVolumeClaim": {"claimName": argo_bundle.MODEL_STORE_CLAIM},
+        }]
+    return workflow
 
 
 def build_argo_workflow_object(
@@ -3751,6 +3849,7 @@ def _deployment_bundle_readme_content(
     has_model_requirements: bool = False,
     secret_environment_names: Sequence[str] = (),
     runtime_environment: Sequence[dict[str, Any]] = (),
+    argo_plan: Optional[argo_bundle.ArgoBundlePlan] = None,
 ) -> str:
     dagster_section = ""
     if targets.get("dagster"):
@@ -3776,21 +3875,13 @@ docker compose up --build
 Then open Dagster at `http://localhost:3000` and materialize the generated assets. The generated image pins Dagster to `{DAGSTER_PINNED_VERSION}`, uses `uv`, installs one consolidated dependency set, mounts `inputs/` and `outputs/`, and executes node scripts through `run-spec.json` plus their node manifests. The Compose topology separates the webserver, daemon, and user-code execution service and uses PostgreSQL for concurrent orchestration writes. CPU-only PyTorch is the default; set `INLUMEN_ACCELERATOR=gpu` only for a GPU-capable runtime. ASR defaults to `INLUMEN_ASR_PROFILE=auto`, which selects the pinned multilingual `balanced` model on CPU and the pinned `accuracy` model on CUDA. Set the profile explicitly to `accuracy`, `balanced`, or `fast` when the runtime trade-off is known.{model_note}
 """
 
-    argo_section = ""
-    if targets.get("argo"):
-        argo_section = """
-## Argo
-
-Argo is an optional Kubernetes export, not the local runner. The bundle uses one shared image for the whole compatible Python environment—there is no image per step.
-
-```bash
-docker build -f argo/Dockerfile -t YOUR_REGISTRY/inlumen-pipeline:TAG .
-docker push YOUR_REGISTRY/inlumen-pipeline:TAG
-argo submit argo/workflow.yaml -p pipeline-image=YOUR_REGISTRY/inlumen-pipeline:TAG
-```
-
-The workflow still requires an Argo-enabled cluster and an artifact repository. Split images only when nodes genuinely have incompatible dependency environments.
-"""
+    argo_section = argo_bundle.readme_section(argo_plan) if argo_plan else ""
+    argo_layout = (
+        "- `argo/`: Argo workflow, shared image build, scripts and cluster setup templates\n"
+        "- `ci/`: CI templates that build the pipeline image\n"
+        if argo_plan
+        else ""
+    )
 
     secrets_section = ""
     if secret_environment_names:
@@ -3798,7 +3889,7 @@ The workflow still requires an Argo-enabled cluster and an artifact repository. 
         secrets_section = f"""
 ## Sensitive parameters
 
-Copy `.env.example` to `.env` and provide the listed values before local execution. Values are never included in this bundle. For Argo, create the `inlumen-runtime-secrets` Kubernetes Secret using the keys referenced by `argo/workflow.yaml`.
+Copy `.env.example` to `.env` and provide the listed values before running the bundle. Values are never included in this bundle. For Argo, `make -C argo secrets` creates the `inlumen-runtime-secrets` Kubernetes Secret from `.env`.
 
 {formatted_names}
 """
@@ -3828,6 +3919,8 @@ This bundle was generated deterministically from persisted InLumen runtime artif
 - `outputs/`: per-node output folders used during local Dagster execution
 - `run-spec.json`: engine-neutral runtime and filesystem hand-off contract
 - `bundle-manifest.json`: machine-readable bundle index
+{argo_layout}
+The bundle is ready to commit to git: `.gitignore` keeps `.env` and run outputs out.
 {dagster_section}{argo_section}{runtime_environment_section}{secrets_section}"""
 
 
@@ -4510,6 +4603,7 @@ def _bundle_file(
     content_encoding: str = "",
     size_bytes: Any = None,
     sha256: str = "",
+    executable: bool = False,
 ) -> dict:
     file_payload = {
         "path": path,
@@ -4519,6 +4613,8 @@ def _bundle_file(
         "content_type": content_type,
         "role": role,
     }
+    if executable:
+        file_payload["executable"] = True
     if content_encoding:
         file_payload["content_encoding"] = content_encoding
     if size_bytes is not None:
@@ -4544,8 +4640,9 @@ def _shared_argo_runtime(
     steps: Sequence[dict],
     ordered_ids: Sequence[str],
     dockerfiles_payload: Any,
+    input_files: Sequence[dict] = (),
 ) -> dict:
-    """Describe one Python image that can execute every node in the workflow."""
+    """Describe one Python image that holds every node and the root inputs."""
     steps_by_id = {step["flow_id"]: step for step in steps}
     requirements: List[str] = []
     digest_entries: List[dict] = []
@@ -4595,7 +4692,47 @@ def _shared_argo_runtime(
             "working_dir": working_dir,
             "command": ["python", f"{working_dir}/{entrypoint_filename}"],
             "context_path": f"{working_dir}/node-manifest.json",
+            "input_dir": f"/workspace/inputs/{node_dir}",
         }
+    for file_entry in input_files:
+        content = str(file_entry.get("content") or "")
+        digest_entries.append(
+            {
+                "flow_id": "inputs",
+                "filename": _clean_string(file_entry.get("path")),
+                "sha256": _clean_string(file_entry.get("sha256"))
+                or hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            }
+        )
+
+    model_requirements = _model_requirements_for_dagster(
+        [steps_by_id[step_id] for step_id in ordered_ids],
+        dockerfiles_payload,
+    )
+    models = None
+    if model_requirements["models"]:
+        models = {
+            "flow_ids": sorted({model["flow_id"] for model in model_requirements["models"]}),
+            "requirements_path": "/workspace/model-prefetch/model-requirements.json",
+            "script_path": "/workspace/model-prefetch/model_prefetch.py",
+            "requirements_content": json.dumps(model_requirements, indent=2, sort_keys=True) + "\n",
+            "script_content": _model_prefetch_source(),
+        }
+        for filename, content in (
+            ("model-requirements.json", models["requirements_content"]),
+            ("model_prefetch.py", models["script_content"]),
+        ):
+            digest_entries.append({
+                "flow_id": "model-prefetch",
+                "filename": filename,
+                "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            })
+        if not any(
+            re.match(r"huggingface[-_]hub\b", requirement.strip(), re.IGNORECASE)
+            for requirement in requirements
+        ):
+            # The prefetch step downloads reviewed snapshots with huggingface_hub.
+            requirements.append("huggingface-hub")
 
     requirements.append("jsonschema>=4.23,<5")
     unique_requirements: List[str] = []
@@ -4624,22 +4761,41 @@ def _shared_argo_runtime(
     requirements_content = "\n".join(unique_requirements)
     if requirements_content:
         requirements_content += "\n"
+    model_prefetch_copy = (
+        "# The model-prefetch task fills the model store before the model steps run.\n"
+        "COPY argo/model-prefetch /workspace/model-prefetch\n"
+        if models
+        else ""
+    )
     dockerfile = f"""# syntax=docker/dockerfile:1.7
 FROM python:3.11-slim
 COPY --from=ghcr.io/astral-sh/uv:{UV_PINNED_VERSION} /uv /uvx /bin/
 ENV PYTHONUNBUFFERED=1
+# CPU-only PyTorch by default; build with --build-arg INLUMEN_ACCELERATOR=gpu for CUDA.
+ARG INLUMEN_ACCELERATOR=cpu
+ARG INLUMEN_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
 WORKDIR /workspace
-COPY argo/requirements.txt /tmp/inlumen-requirements.txt
-COPY argo/constraints.txt /tmp/inlumen-constraints.txt
+# requirements.lock is optional: `make -C argo lock` creates it.
+COPY argo/requirements.txt argo/constraints.txt argo/requirements.lock* /tmp/inlumen/
 RUN --mount=type=cache,target=/root/.cache/uv \\
-    if [ -s /tmp/inlumen-requirements.txt ]; then \\
-      uv pip install --system -r /tmp/inlumen-requirements.txt -c /tmp/inlumen-constraints.txt; \\
+    if [ "$INLUMEN_ACCELERATOR" = "cpu" ] && grep -Eiq '^torch([<>=!~].*)?$' /tmp/inlumen/requirements.txt; then \\
+      TORCH_REQUIREMENT="$(grep -Ei '^torch([<>=!~].*)?$' /tmp/inlumen/requirements.txt | head -n 1)" \\
+      && uv pip install --system --index-url "$INLUMEN_PYTORCH_CPU_INDEX_URL" "$TORCH_REQUIREMENT"; \\
+    fi \\
+    && if [ -s /tmp/inlumen/requirements.lock ]; then \\
+      uv pip install --system -r /tmp/inlumen/requirements.lock; \\
+    elif [ -s /tmp/inlumen/requirements.txt ]; then \\
+      uv pip install --system -r /tmp/inlumen/requirements.txt -c /tmp/inlumen/constraints.txt; \\
     fi
 COPY nodes /workspace/nodes
+{model_prefetch_copy}# Root inputs travel inside the image: keep it in a private registry.
+COPY inputs /workspace/inputs
 LABEL inlumen.runtime.environment-hash="{environment_hash}"
 """
     return {
         "strategy": "shared",
+        "inputs_embedded": True,
+        "models": models,
         "image": image,
         "environment_hash": environment_hash,
         "dockerfile": "argo/Dockerfile",
@@ -4648,6 +4804,105 @@ LABEL inlumen.runtime.environment-hash="{environment_hash}"
         "requirements_content": requirements_content,
         "nodes": nodes,
     }
+
+
+def _argo_bundle_plan(
+    workflow: dict,
+    steps_by_id: Dict[str, dict],
+    ordered_ids: Sequence[str],
+    dockerfiles_payload: Any,
+    shared_runtime: dict,
+) -> argo_bundle.ArgoBundlePlan:
+    """Read the settings and secrets the generated workflow expects."""
+    spec = workflow.get("spec") or {}
+    # The .env variable behind each Secret key the workflow references.
+    secret_environment: Dict[str, str] = {}
+    for step_id in ordered_ids:
+        for key in _runtime_secret_parameters(steps_by_id[step_id], dockerfiles_payload):
+            secret_environment[_kubernetes_secret_key(step_id, key)] = runtime_secret_name(
+                step_id, key
+            )
+        for requirement in _runtime_environment_for_step(dockerfiles_payload, step_id):
+            name = _clean_string(requirement.get("name"))
+            if name and requirement.get("secret"):
+                secret_environment[_kubernetes_secret_key(step_id, name)] = name
+
+    environment_parameters = []
+    secrets: Dict[str, argo_bundle.ArgoSecretKey] = {}
+    seen_parameters = set()
+    for template in spec.get("templates") or []:
+        flow_id = _clean_string(
+            ((template.get("metadata") or {}).get("annotations") or {}).get(
+                "inlumen.ai/flow-id"
+            )
+        )
+        for item in (template.get("container") or {}).get("env") or []:
+            value = item.get("value")
+            match = re.fullmatch(r"\{\{workflow\.parameters\.([^}]+)\}\}", str(value or ""))
+            if match and match.group(1) not in seen_parameters:
+                seen_parameters.add(match.group(1))
+                environment_parameters.append(
+                    argo_bundle.ArgoEnvironmentParameter(
+                        flow_id=flow_id,
+                        parameter=match.group(1),
+                        environment=item["name"],
+                    )
+                )
+            reference = (item.get("valueFrom") or {}).get("secretKeyRef") or {}
+            key = reference.get("key")
+            if reference.get("name") != argo_bundle.RUNTIME_SECRET_NAME or not key:
+                continue
+            required = not reference.get("optional", False)
+            previous = secrets.get(key)
+            secrets[key] = argo_bundle.ArgoSecretKey(
+                flow_id=flow_id,
+                key=key,
+                environment=secret_environment.get(key) or item["name"],
+                required=required or bool(previous and previous.required),
+            )
+
+    return argo_bundle.ArgoBundlePlan(
+        image_tag=shared_runtime["environment_hash"][:12],
+        model_store=bool(shared_runtime.get("models")),
+        environment_parameters=tuple(environment_parameters),
+        secrets=tuple(secrets[key] for key in sorted(secrets)),
+    )
+
+
+def _argo_helper_bundle_files(
+    plan: argo_bundle.ArgoBundlePlan,
+    shared_runtime: dict,
+) -> List[dict]:
+    files = [
+        _bundle_file("argo/Makefile", argo_bundle.makefile(plan, uv_version=UV_PINNED_VERSION),
+                     role="argo-tooling", content_type="text/x-makefile"),
+        _bundle_file("argo/submit.sh", argo_bundle.submit_script(plan),
+                     role="argo-tooling", content_type="text/x-shellscript", executable=True),
+        _bundle_file("argo/k8s/rbac.yaml", argo_bundle.rbac_manifest(),
+                     role="argo-cluster-setup", content_type="application/x-yaml;charset=utf-8"),
+        _bundle_file("argo/k8s/artifact-repositories.yaml", argo_bundle.artifact_repositories_manifest(),
+                     role="argo-cluster-setup", content_type="application/x-yaml;charset=utf-8"),
+        _bundle_file("ci/github-actions/build-image.yml", argo_bundle.github_actions_template(),
+                     role="ci-template", content_type="application/x-yaml;charset=utf-8"),
+    ]
+    models = shared_runtime.get("models")
+    if models:
+        files.extend([
+            _bundle_file("argo/model-prefetch/model-requirements.json", models["requirements_content"],
+                         role="argo-model-prefetch", content_type="application/json"),
+            _bundle_file("argo/model-prefetch/model_prefetch.py", models["script_content"],
+                         role="argo-model-prefetch", content_type="text/x-python"),
+            _bundle_file("argo/k8s/model-store-pvc.yaml", argo_bundle.model_store_pvc_manifest(),
+                         role="argo-cluster-setup", content_type="application/x-yaml;charset=utf-8"),
+        ])
+    if plan.secrets:
+        files.extend([
+            _bundle_file("argo/create-secrets.sh", argo_bundle.create_secrets_script(plan),
+                         role="argo-tooling", content_type="text/x-shellscript", executable=True),
+            _bundle_file("argo/k8s/runtime-secrets.example.yaml", argo_bundle.runtime_secrets_example(plan),
+                         role="argo-cluster-setup", content_type="application/x-yaml;charset=utf-8"),
+        ])
+    return files
 
 
 def build_run_spec(
@@ -4828,6 +5083,31 @@ def build_run_spec(
     }
 
 
+def deployment_bundle_zip(files: Sequence[dict]) -> bytes:
+    """Pack bundle files into a ZIP with fixed timestamps and script modes."""
+    import base64
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for file_entry in files:
+            path = PurePosixPath(_clean_string(file_entry.get("path")))
+            if not path.parts or path.is_absolute() or ".." in path.parts:
+                raise ValueError(f"Unsafe bundle path: {file_entry.get('path')!r}")
+            content = file_entry.get("content") or ""
+            data = (
+                base64.b64decode(content)
+                if file_entry.get("content_encoding") == "base64"
+                else str(content).encode("utf-8")
+            )
+            info = zipfile.ZipInfo(path.as_posix(), date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = (0o755 if file_entry.get("executable") else 0o644) << 16
+            archive.writestr(info, data)
+    return buffer.getvalue()
+
+
 def _dedupe_bundle_files(files: Sequence[dict]) -> List[dict]:
     by_path: dict[str, dict] = {}
     for file_entry in files:
@@ -5006,23 +5286,59 @@ def build_deployment_bundle_files(
         )
     argo_workflow_path = None
     shared_argo_runtime = None
+    argo_plan = None
     if selected_targets["argo"]:
+        embedded_inputs = [
+            file_entry for file_entry in bundle_files if file_entry["role"] == "input"
+        ]
+        for step_id in root_step_ids:
+            step = steps_by_id[step_id]
+            node_dir = _bundle_node_dir(step)
+            is_database_source = (
+                _clean_string(step.get("type")).lower() == "source"
+                and _clean_string(step.get("template")).lower() == "database"
+            )
+            if not is_database_source and not any(
+                file_entry["path"].startswith(f"inputs/{node_dir}/")
+                for file_entry in embedded_inputs
+            ):
+                # Root steps read their inputs from this directory in the image.
+                bundle_files.append(
+                    _bundle_file(
+                        f"inputs/{node_dir}/.gitkeep",
+                        "",
+                        role="input-directory-placeholder",
+                        flow_id=step_id,
+                        content_type="text/plain",
+                    )
+                )
         shared_argo_runtime = _shared_argo_runtime(
             steps,
             ordered_ids,
             dockerfiles_payload,
+            embedded_inputs,
         )
         argo_workflow_path = "argo/workflow.yaml"
+        argo_workflow = build_argo_workflow_object(
+            pipeline_graph,
+            dockerfiles_payload,
+            files,
+            shared_runtime=shared_argo_runtime,
+        )
+        argo_workflow_yaml = dump_yaml(argo_workflow)
+        validate_argo_workflow_yaml(argo_workflow_yaml, step_ids)
+        argo_plan = _argo_bundle_plan(
+            argo_workflow,
+            steps_by_id,
+            ordered_ids,
+            dockerfiles_payload,
+            shared_argo_runtime,
+        )
         bundle_files.extend(
             [
                 _bundle_file(
                     argo_workflow_path,
-                    build_argo_workflow_yaml(
-                        pipeline_graph,
-                        dockerfiles_payload,
-                        files,
-                        shared_runtime=shared_argo_runtime,
-                    ),
+                    argo_workflow_yaml,
                     role="argo-workflow",
                     content_type="application/x-yaml;charset=utf-8",
                 ),
@@ -5042,6 +5358,7 @@ def build_deployment_bundle_files(
                     shared_argo_runtime["requirements_content"],
                     role="argo-runtime",
                 ),
+                *_argo_helper_bundle_files(argo_plan, shared_argo_runtime),
             ]
         )
 
@@ -5073,11 +5390,16 @@ def build_deployment_bundle_files(
             )
         )
 
+    bundle_files.extend([
+        _bundle_file(".gitignore", argo_bundle.gitignore(), role="bundle-gitignore"),
+        _bundle_file(".dockerignore", argo_bundle.dockerignore(), role="bundle-dockerignore"),
+    ])
     bundle_files.append(
         _bundle_file(
             "README.md",
             _deployment_bundle_readme_content(
                 targets=selected_targets,
+                argo_plan=argo_plan if selected_targets["argo"] else None,
                 has_model_requirements=has_model_requirements,
                 secret_environment_names=secret_environment_names,
                 runtime_environment=runtime_environment,
@@ -5090,6 +5412,8 @@ def build_deployment_bundle_files(
     env_example_names = sorted(
         set(secret_environment_names)
         | {item["name"] for item in runtime_environment}
+        # Optional: authenticated Hugging Face access for the model prefetch.
+        | ({"HF_TOKEN"} if has_model_requirements else set())
     )
     if env_example_names:
         bundle_files.append(
@@ -5152,6 +5476,58 @@ def build_deployment_bundle_files(
                 "image": shared_argo_runtime["image"],
                 "image_strategy": "shared",
                 "environment_hash": shared_argo_runtime["environment_hash"],
+                "image_tag": argo_plan.image_tag,
+                "makefile": "argo/Makefile",
+                "scripts": {
+                    "submit": "argo/submit.sh",
+                    **(
+                        {"create_secrets": "argo/create-secrets.sh"}
+                        if argo_plan.secrets
+                        else {}
+                    ),
+                },
+                "cluster_setup": [
+                    "argo/k8s/rbac.yaml",
+                    "argo/k8s/artifact-repositories.yaml",
+                    *(["argo/k8s/model-store-pvc.yaml"] if argo_plan.model_store else []),
+                    *(
+                        ["argo/k8s/runtime-secrets.example.yaml"]
+                        if argo_plan.secrets
+                        else []
+                    ),
+                ],
+                "ci_templates": ["ci/github-actions/build-image.yml"],
+                "artifact_repository": {
+                    "config_map": argo_bundle.ARTIFACT_REPOSITORY_CONFIGMAP,
+                    "key": argo_bundle.ARTIFACT_REPOSITORY_KEY,
+                },
+                "service_account": argo_bundle.SERVICE_ACCOUNT_NAME,
+                "model_store": (
+                    {
+                        "claim": argo_bundle.MODEL_STORE_CLAIM,
+                        "mount_path": argo_bundle.MODEL_ROOT,
+                        "prefetch_task": argo_bundle.MODEL_PREFETCH_TASK,
+                        "requirements": "argo/model-prefetch/model-requirements.json",
+                        "flow_ids": shared_argo_runtime["models"]["flow_ids"],
+                    }
+                    if argo_plan.model_store
+                    else None
+                ),
+                "runtime_secret": argo_bundle.RUNTIME_SECRET_NAME,
+                "inputs": {
+                    "transport": "image",
+                    "path": "inputs",
+                    "image_path": "/workspace/inputs",
+                },
+                "secret_keys": [
+                    {
+                        "flow_id": item.flow_id,
+                        "key": item.key,
+                        "environment": item.environment,
+                        "required": item.required,
+                    }
+                    for item in argo_plan.secrets
+                ],
             }
             if shared_argo_runtime
             else None
