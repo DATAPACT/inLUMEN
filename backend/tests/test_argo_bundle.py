@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch
 from copy import deepcopy
 from pathlib import Path
 
@@ -72,6 +73,15 @@ def plugin_payload(base=None):
 
 def templates_by_name(workflow):
     return {template["name"]: template for template in workflow["spec"]["templates"]}
+
+
+def conflicting_payload(models=False):
+    """Step 1 needs pandas 1.5, step 2 pandas 2: they cannot share an image."""
+    payload = whisper_payload() if models else codegen_payload()
+    for item in payload["deployment_files"]:
+        if item["filename"] == "requirements.txt":
+            item["content"] = "pandas==1.5.3\n" if item["flow_id"] == "1" else "pandas>=2.0\nnumpy\n"
+    return payload
 
 
 def fake_tool(directory: Path, name: str, body: str) -> None:
@@ -436,7 +446,7 @@ class ArgoBundleLayoutTest(unittest.TestCase):
         self.assertNotIn("### Plugin steps", {item["path"]: item["content"] for item in argo_bundle()["files"]}["README.md"])
 
 
-    def _shared_runtime(self):
+    def _shared_runtime(self, payload=None):
         from deployment_artifacts import (
             _shared_argo_runtime,
             extract_pipeline_steps,
@@ -444,7 +454,113 @@ class ArgoBundleLayoutTest(unittest.TestCase):
         )
 
         steps = select_runtime_steps(extract_pipeline_steps(CodegenDeploymentArtifactsTest().graph()))
-        return _shared_argo_runtime(steps, [step["flow_id"] for step in steps], whisper_payload())
+        return _shared_argo_runtime(steps, [step["flow_id"] for step in steps], payload or whisper_payload())
+
+    def test_invalid_workflows_are_reported_at_export_without_network(self):
+        import deployment_artifacts
+
+        real_builder = deployment_artifacts.build_argo_workflow_object
+
+        def broken(break_workflow):
+            def build(*args, **kwargs):
+                workflow = real_builder(*args, **kwargs)
+                break_workflow(workflow)
+                return workflow
+            return build
+
+        def missing_template(workflow):
+            workflow["spec"]["templates"] = [
+                template for template in workflow["spec"]["templates"] if template["name"] != "step-2"
+            ]
+
+        def missing_dependency(workflow):
+            tasks = workflow["spec"]["templates"][0]["dag"]["tasks"]
+            next(task for task in tasks if task["name"] == "step-2")["dependencies"] = ["step-9"]
+
+        def missing_image(workflow):
+            del workflow["spec"]["templates"][1]["container"]["image"]
+
+        for break_workflow, message in (
+            (missing_template, "references missing template 'step-2'"),
+            (missing_dependency, "depends on missing task 'step-9'"),
+            (missing_image, "is missing image"),
+        ):
+            with self.subTest(message=message), \
+                    patch.object(deployment_artifacts, "build_argo_workflow_object", broken(break_workflow)), \
+                    patch("socket.socket", side_effect=AssertionError("export must not use the network")):
+                with self.assertRaises(deployment_artifacts.DeploymentArtifactValidationError) as raised:
+                    argo_bundle()
+                self.assertIn(message, " ".join(raised.exception.errors))
+
+    def test_requirement_conflicts_are_found_offline(self):
+        from deployment_artifacts import _requirement_conflict
+
+        for first, second, conflict in (
+            (["pandas==1.5.3"], ["pandas>=2.0"], "pandas"),
+            (["pandas==1.5.3"], ["pandas==2.2.0"], "pandas"),
+            (["numpy<1.25"], ["numpy>=1.26"], "numpy"),
+            (["Torch==2.1.0"], ["torch==2.2.0"], "torch"),
+            (["pandas>=1.5,<3"], ["pandas>=2.0"], ""),
+            (["pandas>1.0"], ["pandas<1.1"], ""),
+            (["pandas==1.5.*"], ["pandas>=1.5.2,<1.6"], ""),
+            (["pandas"], ["pandas==2.2.0"], ""),
+            (["pandas==1.5.3"], ["numpy==1.26.0"], ""),
+            (["-r extra.txt", "--index-url https://x"], ["pandas==2.0"], ""),
+        ):
+            with self.subTest(first=first, second=second):
+                self.assertEqual(conflict, _requirement_conflict(first, second))
+
+    def test_steps_with_conflicting_packages_get_separate_images(self):
+        bundle = argo_bundle(conflicting_payload())
+        by_path = {item["path"]: item["content"] for item in bundle["files"]}
+        manifest = bundle["manifest"]["argo"]
+
+        self.assertEqual("grouped", manifest["image_strategy"])
+        self.assertNotIn("argo/Dockerfile", by_path)
+        self.assertEqual(
+            [("env-1", ["1"], []), ("env-2", ["2"], [{"flow_ids": ["1"], "package": "pandas"}])],
+            [(image["group"], image["flow_ids"], image["conflicts"]) for image in manifest["images"]],
+        )
+        self.assertIn("pandas==1.5.3", by_path["argo/images/env-1/requirements.txt"])
+        self.assertNotIn("pandas>=2.0", by_path["argo/images/env-1/requirements.txt"])
+        self.assertIn("pandas>=2.0", by_path["argo/images/env-2/requirements.txt"])
+        self.assertIn(
+            "COPY argo/images/env-2/requirements.txt argo/constraints.txt argo/images/env-2/requirements.lock*",
+            by_path["argo/images/env-2/Dockerfile"],
+        )
+
+        workflow = by_path["argo/workflow.yaml"]
+        self.assertIn('image: "{{workflow.parameters.pipeline-image-env-1}}"', workflow)
+        self.assertIn('image: "{{workflow.parameters.pipeline-image-env-2}}"', workflow)
+        self.assertNotIn('name: "pipeline-image"', workflow)
+        templates = {
+            template["name"]: template
+            for template in build_argo_workflow_object(
+                CodegenDeploymentArtifactsTest().graph(),
+                conflicting_payload(),
+                shared_runtime=self._shared_runtime(conflicting_payload()),
+            )["spec"]["templates"]
+        }
+        self.assertEqual("{{workflow.parameters.pipeline-image-env-1}}", templates["step-1"]["container"]["image"])
+        self.assertEqual("{{workflow.parameters.pipeline-image-env-2}}", templates["step-2"]["container"]["image"])
+
+        readme = by_path["README.md"]
+        self.assertIn("runs on **2 images**", readme)
+        self.assertIn("| `env-2` | Preprocessing | `pandas` |", readme)
+        self.assertIn("make -C argo image push", by_path["ci/github-actions/build-image.yml"])
+
+    def test_model_prefetch_runs_on_the_image_of_a_model_step(self):
+        bundle = argo_bundle(conflicting_payload(models=True))
+        by_path = {item["path"]: item["content"] for item in bundle["files"]}
+        self.assertIn("huggingface-hub", by_path["argo/images/env-2/requirements.txt"])
+        self.assertNotIn("huggingface-hub", by_path["argo/images/env-1/requirements.txt"])
+        workflow = build_argo_workflow_object(
+            CodegenDeploymentArtifactsTest().graph(),
+            conflicting_payload(models=True),
+            shared_runtime=self._shared_runtime(conflicting_payload(models=True)),
+        )
+        prefetch = next(t for t in workflow["spec"]["templates"] if t["name"] == "inlumen-model-prefetch")
+        self.assertEqual("{{workflow.parameters.pipeline-image-env-2}}", prefetch["container"]["image"])
 
     def test_bundle_never_contains_secret_values(self):
         bundle = argo_bundle()
@@ -570,6 +686,42 @@ class ArgoBundleScriptsTest(unittest.TestCase):
         # Values travel through files, never as command-line arguments.
         self.assertNotIn("s3cret value --", calls)
         self.assertNotIn("from-literal", calls)
+
+    def test_make_builds_and_submits_every_image_group(self):
+        root = (Path(self.temp.name) / "grouped").resolve()
+        with zipfile.ZipFile(io.BytesIO(deployment_bundle_zip(argo_bundle(conflicting_payload())["files"]))) as archive:
+            archive.extractall(root)
+        root.mkdir(parents=True, exist_ok=True)
+        root = root.resolve()
+        fake_tool(self.bin, "docker", 'echo "docker $@" >> "$CALLS"\n')
+        fake_tool(self.bin, "argo", 'echo "argo $@" >> "$CALLS"\n')
+        tags = {
+            image["group"]: image["image"].split(":")[1]
+            for image in argo_bundle(conflicting_payload())["manifest"]["argo"]["images"]
+        }
+
+        def make(*arguments):
+            return subprocess.run(
+                ["make", "--no-print-directory", "-s", "-C", "argo", *arguments, "REGISTRY=ghcr.io/acme", "ARGO_FLAGS="],
+                cwd=root, env=self.env, capture_output=True, text=True, check=False,
+            )
+
+        printed = make("print-image")
+        self.assertEqual(
+            [f"ghcr.io/acme/inlumen-pipeline-env-1:{tags['env-1']}", f"ghcr.io/acme/inlumen-pipeline-env-2:{tags['env-2']}"],
+            printed.stdout.split(),
+            printed.stderr,
+        )
+        for target in ("image", "push", "submit"):
+            result = make(target)
+            self.assertEqual(0, result.returncode, result.stderr)
+        calls = self.calls.read_text()
+        self.assertIn(f"docker build -f {root}/argo/images/env-2/Dockerfile -t ghcr.io/acme/inlumen-pipeline-env-2:{tags['env-2']} {root}", calls)
+        self.assertIn(f"docker push ghcr.io/acme/inlumen-pipeline-env-1:{tags['env-1']}", calls)
+        submit = next(line for line in calls.splitlines() if line.startswith("argo submit"))
+        self.assertIn(f"-p pipeline-image-env-1=ghcr.io/acme/inlumen-pipeline-env-1:{tags['env-1']}", submit)
+        self.assertIn(f"-p pipeline-image-env-2=ghcr.io/acme/inlumen-pipeline-env-2:{tags['env-2']}", submit)
+        self.assertNotIn("pipeline-image=", submit)
 
     def test_submit_passes_image_output_prefix_and_service_account(self):
         fake_tool(self.bin, "argo", 'echo "$@" >> "$CALLS"\n')

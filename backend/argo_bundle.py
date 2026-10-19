@@ -160,8 +160,22 @@ class ArgoPluginEndpoint:
 
 
 @dataclass(frozen=True)
+class ArgoImageGroup:
+    """One image of a bundle whose steps need incompatible packages."""
+
+    name: str
+    image_tag: str
+    flow_ids: Sequence[str]
+    labels: Sequence[str]
+    # Packages that kept these steps out of the earlier groups.
+    conflicts: Sequence[str] = ()
+
+
+@dataclass(frozen=True)
 class ArgoBundlePlan:
     image_tag: str
+    # Empty for the usual single shared image.
+    image_groups: Sequence[ArgoImageGroup] = ()
     model_store: bool = False
     # Whether some step can use a GPU, so ACCELERATOR=gpu means something.
     gpu: bool = False
@@ -271,7 +285,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${{BASH_SOURCE[0]}}")/.." && pwd)"
 ENV_FILE="${{ENV_FILE:-$ROOT/.env}}"
 WORKFLOW="${{WORKFLOW:-$ROOT/{WORKFLOW_PATH}}}"
-IMAGE="${{IMAGE:?Set IMAGE to the pipeline image, for example with make -C argo submit}}"
+# IMAGE for one shared image; IMAGE_PARAMETERS ("pipeline-image-<group>=<image> ...")
+# when the steps run on several images. make -C argo submit sets the right one.
+IMAGE="${{IMAGE:-}}"
+IMAGE_PARAMETERS="${{IMAGE_PARAMETERS:-}}"
+if [ -z "$IMAGE" ] && [ -z "$IMAGE_PARAMETERS" ]; then
+  echo "Set IMAGE (or IMAGE_PARAMETERS), for example with make -C argo submit" >&2
+  exit 1
+fi
 NAMESPACE="${{NAMESPACE:-argo}}"
 SERVICE_ACCOUNT="${{SERVICE_ACCOUNT:-{SERVICE_ACCOUNT_NAME}}}"
 RUN_ID="${{RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}}"
@@ -285,9 +306,15 @@ OUTPUT_PREFIX="${{OUTPUT_PREFIX:-inlumen/output/$RUN_ID}}"
 args=(
   -n "$NAMESPACE"
   --serviceaccount "$SERVICE_ACCOUNT"
-  -p "pipeline-image=$IMAGE"
   -p "output-artifact-prefix=$OUTPUT_PREFIX"
 )
+if [ -n "$IMAGE_PARAMETERS" ]; then
+  for parameter in $IMAGE_PARAMETERS; do
+    args+=(-p "$parameter")
+  done
+else
+  args+=(-p "pipeline-image=$IMAGE")
+fi
 for entry in ${{ENV_PARAMETERS[@]+"${{ENV_PARAMETERS[@]}}"}}; do
   IFS='|' read -r parameter name <<<"$entry"
   value="$(env_value "$name")"
@@ -338,6 +365,72 @@ def makefile(plan: ArgoBundlePlan, *, uv_version: str) -> str:
     options_block = ("\n" + "\n\n".join(options) + "\n") if options else ""
     tag_note = "\n# The options above add a suffix, so each variant gets its own tag." if options else ""
     build_args_line = " ".join(build_args)
+    build_args_part = build_args_line + " " if build_args_line else ""
+    torch_lock_flags = (
+        "--universal --python-version 3.11 --emit-index-url --torch-backend $(TORCH_BACKEND)"
+    )
+    if plan.image_groups:
+        group_lines = "\n".join(
+            f"#   {group.name}: {', '.join(group.labels)}" for group in plan.image_groups
+        )
+        image_block = f"""# The steps need packages that cannot be installed together, so they run on
+# {len(plan.image_groups)} images, one per group of compatible steps (argo/images/<group>/):
+{group_lines}
+# Each tag is computed by inLUMEN from that group's requirements, the step code
+# and the input files copied into the image. When
+# argo/images/<group>/requirements.lock exists (make lock), its checksum is appended.{tag_note}
+GROUPS := {' '.join(group.name for group in plan.image_groups)}
+""" + "".join(
+            f"EXPORT_TAG_{group.name} := {group.image_tag}\n" for group in plan.image_groups
+        ) + f"""lock_sum = $(shell [ -f $(ARGO_DIR)/images/$(1)/requirements.lock ] && cksum < $(ARGO_DIR)/images/$(1)/requirements.lock | cut -d' ' -f1)
+REGISTRY ?=
+IMAGE_NAME ?= {IMAGE_NAME}
+image_of = $(if $(REGISTRY),$(REGISTRY)/)$(IMAGE_NAME)-$(1):$(EXPORT_TAG_$(1))$(if $(call lock_sum,$(1)),-$(call lock_sum,$(1))){variant_tag}
+IMAGES = $(foreach g,$(GROUPS),$(call image_of,$(g)))
+IMAGE_PARAMETERS = $(foreach g,$(GROUPS),pipeline-image-$(g)=$(call image_of,$(g)))
+WORKFLOW_FILE ?= $(ARGO_DIR)/workflow{workflow_suffix}.yaml"""
+        image_help = "build the pipeline images $(IMAGES) (step code and inputs/)"
+        print_image_recipe = "\t@printf '%s\\n' $(IMAGES)"
+        image_recipe = (
+            f"\t$(foreach g,$(GROUPS),docker build -f $(ARGO_DIR)/images/$(g)/Dockerfile "
+            f"{build_args_part}-t $(call image_of,$(g)) $(ROOT) &&) true"
+        )
+        push_recipe = "\t$(foreach g,$(GROUPS),docker push $(call image_of,$(g)) &&) true"
+        k3d_recipe = "\tk3d image import $(IMAGES) -c $(K3D_CLUSTER)"
+        kind_recipe = (
+            "\t$(foreach g,$(GROUPS),kind load docker-image $(call image_of,$(g)) "
+            "--name $(KIND_CLUSTER) &&) true"
+        )
+        lock_recipe = (
+            "\t$(foreach g,$(GROUPS),$(UV) pip compile $(ARGO_DIR)/images/$(g)/requirements.txt "
+            f"-c $(ARGO_DIR)/constraints.txt {torch_lock_flags} "
+            "-o $(ARGO_DIR)/images/$(g)/requirements.lock &&) true"
+        )
+        lock_help = "resolve exact package versions into argo/images/<group>/requirements.lock"
+        image_variables = 'IMAGE_PARAMETERS="$(IMAGE_PARAMETERS)"'
+    else:
+        image_block = f"""# Image tag computed by inLUMEN from the requirements, step code and the
+# input files copied into the image. When
+# argo/requirements.lock exists (make lock), its checksum is appended.{tag_note}
+EXPORT_TAG := {plan.image_tag}
+LOCK_SUM := $(shell [ -f $(ARGO_DIR)/requirements.lock ] && cksum < $(ARGO_DIR)/requirements.lock | cut -d' ' -f1)
+REGISTRY ?=
+IMAGE_NAME ?= {IMAGE_NAME}
+TAG ?= $(EXPORT_TAG)$(if $(LOCK_SUM),-$(LOCK_SUM)){variant_tag}
+IMAGE ?= $(if $(REGISTRY),$(REGISTRY)/)$(IMAGE_NAME):$(TAG)
+WORKFLOW_FILE ?= $(ARGO_DIR)/workflow{workflow_suffix}.yaml"""
+        image_help = "build the pipeline image $(IMAGE) (step code and inputs/)"
+        print_image_recipe = "\t@echo $(IMAGE)"
+        image_recipe = f"\tdocker build -f $(ARGO_DIR)/Dockerfile {build_args_part}-t $(IMAGE) $(ROOT)"
+        push_recipe = "\tdocker push $(IMAGE)"
+        k3d_recipe = "\tk3d image import $(IMAGE) -c $(K3D_CLUSTER)"
+        kind_recipe = "\tkind load docker-image $(IMAGE) --name $(KIND_CLUSTER)"
+        lock_recipe = (
+            "\tcd $(ARGO_DIR) && $(UV) pip compile requirements.txt -c constraints.txt \\\n"
+            f"\t  {torch_lock_flags} -o requirements.lock"
+        )
+        lock_help = "resolve exact package versions into argo/requirements.lock"
+        image_variables = "IMAGE=$(IMAGE)"
     model_store_setup = (
         "\t$(if $(filter volume,$(MODELS)),kubectl apply -n $(NAMESPACE) -f $(ARGO_DIR)/k8s/model-store-pvc.yaml,"
         "@echo \"MODELS=bake: the models are in the image, no model store volume needed.\")\n"
@@ -368,16 +461,7 @@ ARGO_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 ROOT := $(abspath $(ARGO_DIR)/..)
 comma := ,
 {options_block}
-# Image tag computed by inLUMEN from the requirements, step code and the
-# input files copied into the image. When
-# argo/requirements.lock exists (make lock), its checksum is appended.{tag_note}
-EXPORT_TAG := {plan.image_tag}
-LOCK_SUM := $(shell [ -f $(ARGO_DIR)/requirements.lock ] && cksum < $(ARGO_DIR)/requirements.lock | cut -d' ' -f1)
-REGISTRY ?=
-IMAGE_NAME ?= {IMAGE_NAME}
-TAG ?= $(EXPORT_TAG)$(if $(LOCK_SUM),-$(LOCK_SUM)){variant_tag}
-IMAGE ?= $(if $(REGISTRY),$(REGISTRY)/)$(IMAGE_NAME):$(TAG)
-WORKFLOW_FILE ?= $(ARGO_DIR)/workflow{workflow_suffix}.yaml
+{image_block}
 
 NAMESPACE ?= argo
 SERVICE_ACCOUNT ?= {SERVICE_ACCOUNT_NAME}
@@ -391,41 +475,40 @@ UV ?= uv
 
 help:
 \t@echo "Targets (run from the bundle root with make -C argo <target>):"
-\t@echo "  image        build the pipeline image $(IMAGE) (step code and inputs/)"
+\t@echo "  image        {image_help}"
 \t@echo "  push         push the image to REGISTRY"
 \t@echo "  k3d-import   load the image into a local k3d cluster (no registry)"
 \t@echo "  kind-load    load the image into a local kind cluster (no registry)"
-\t@echo "  lock         resolve exact package versions into argo/requirements.lock"
+\t@echo "  lock         {lock_help}"
 \t@echo "  setup        apply the service account, RBAC, artifact repository{' and model store' if plan.model_store else ''}"
 \t@echo "  secrets      create the {RUNTIME_SECRET_NAME} Secret from .env"
 \t@echo "  submit       submit $(notdir $(WORKFLOW_FILE))"
 {option_help}
 print-image:
-\t@echo $(IMAGE)
+{print_image_recipe}
 
 print-workflow:
 \t@echo $(WORKFLOW_FILE)
 
 image:
-\tdocker build -f $(ARGO_DIR)/Dockerfile {build_args_line + " " if build_args_line else ""}-t $(IMAGE) $(ROOT)
+{image_recipe}
 
 push:
 \t@test -n "$(REGISTRY)" || (echo "Set REGISTRY, for example make -C argo push REGISTRY=ghcr.io/acme" >&2; exit 1)
-\tdocker push $(IMAGE)
+{push_recipe}
 
 k3d-import:
-\tk3d image import $(IMAGE) -c $(K3D_CLUSTER)
+{k3d_recipe}
 
 kind-load:
-\tkind load docker-image $(IMAGE) --name $(KIND_CLUSTER)
+{kind_recipe}
 
 # Needs uv {uv_version} or newer on the machine that runs it. Commit the
 # result: later builds then install exactly the same versions. PyTorch is
 # locked to its CPU-only build, like the image; use TORCH_BACKEND=auto for CUDA.
 TORCH_BACKEND ?= cpu
 lock:
-\tcd $(ARGO_DIR) && $(UV) pip compile requirements.txt -c constraints.txt \\
-\t  --universal --python-version 3.11 --emit-index-url --torch-backend $(TORCH_BACKEND) -o requirements.lock
+{lock_recipe}
 
 setup:
 \tkubectl apply -n $(NAMESPACE) -f $(ARGO_DIR)/k8s/rbac.yaml
@@ -435,7 +518,7 @@ secrets:
 {secrets_recipe}
 
 submit:
-\t{asr_submit}WORKFLOW=$(WORKFLOW_FILE) IMAGE=$(IMAGE) NAMESPACE=$(NAMESPACE) SERVICE_ACCOUNT=$(SERVICE_ACCOUNT) ENV_FILE=$(ENV_FILE) \\
+\t{asr_submit}WORKFLOW=$(WORKFLOW_FILE) {image_variables} NAMESPACE=$(NAMESPACE) SERVICE_ACCOUNT=$(SERVICE_ACCOUNT) ENV_FILE=$(ENV_FILE) \\
 \t  bash $(ARGO_DIR)/submit.sh $(ARGO_FLAGS)
 '''
 
@@ -535,7 +618,9 @@ def runtime_secrets_example(plan: ArgoBundlePlan) -> str:
     return "\n".join(lines) + "\n"
 
 
-def github_actions_template() -> str:
+def github_actions_template(plan: ArgoBundlePlan) -> str:
+    if plan.image_groups:
+        return _grouped_github_actions_template()
     return '''# Generated by inLUMEN. Builds and pushes the pipeline image to the GitHub
 # Container Registry. Copy this file to .github/workflows/build-image.yml in
 # the repository that holds the bundle to turn it on.
@@ -580,6 +665,46 @@ jobs:
 '''
 
 
+def _grouped_github_actions_template() -> str:
+    return '''# Generated by inLUMEN. Builds and pushes the pipeline images (one per group
+# of compatible steps, see argo/images/) to the GitHub Container Registry.
+# Copy this file to .github/workflows/build-image.yml in the repository that
+# holds the bundle to turn it on.
+name: Build pipeline images
+
+on:
+  push:
+    branches: [main]
+    paths: ["argo/**", "nodes/**", "inputs/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Add image scanning (for example aquasecurity/trivy-action) and signing
+      # (for example sigstore/cosign-installer) here, as your policy requires.
+      # For another variant, add its options (for example MODELS=bake or
+      # ACCELERATOR=gpu) to both make commands.
+      - name: Build and push
+        run: |
+          registry="ghcr.io/${GITHUB_REPOSITORY,,}"
+          make -C argo image push REGISTRY="$registry"
+          make --no-print-directory -s -C argo print-image REGISTRY="$registry"
+'''
+
+
 def gitignore() -> str:
     return '''# Generated by inLUMEN. Keeps local values and run results out of git.
 .env
@@ -599,13 +724,19 @@ validation
 
 
 def readme_section(plan: ArgoBundlePlan) -> str:
+    dockerfiles = (
+        "every `argo/images/<group>/Dockerfile`" if plan.image_groups else "`argo/Dockerfile`"
+    )
+    lock_files = (
+        "`argo/images/<group>/requirements.lock`" if plan.image_groups else "`argo/requirements.lock`"
+    )
     steps = [
         "**Image.** `make -C argo image push REGISTRY=registry.example.com/team` builds "
-        "`argo/Dockerfile` and pushes it. Use a **private** registry: the image contains "
+        f"{dockerfiles} and pushes it. Use a **private** registry: the image contains "
         "`inputs/`. In CI, use `ci/github-actions/build-image.yml` (copy it to "
         "`.github/workflows/`); add image scanning and signing there as your policy requires.",
         "**Exact versions (recommended).** `make -C argo lock` resolves every package into "
-        "`argo/requirements.lock`. Commit it: later builds install exactly those versions, "
+        f"{lock_files}. Commit it: later builds install exactly those versions, "
         "and the tag gets the lock checksum.",
         "**Cluster objects.** Edit `argo/k8s/artifact-repositories.yaml` to point at your "
         "bucket and credentials Secret, then run `make -C argo setup NAMESPACE=<namespace>`.",
@@ -693,12 +824,27 @@ Each plugin step reads its server address from a workflow parameter. The default
 
 For example `{plan.plugin_endpoints[0].environment}=http://<service>.<namespace>.svc.cluster.local:<port>`. Redirects are never followed, so use the final address.
 """
+    if plan.image_groups:
+        group_rows = "\n".join(
+            f"| `{group.name}` | {', '.join(group.labels)} | "
+            f"{', '.join(f'`{package}`' for package in group.conflicts) or '-'} |"
+            for group in plan.image_groups
+        )
+        image_section = f"""The steps need Python packages that cannot be installed together, so the workflow runs on **{len(plan.image_groups)} images**, one per group of compatible steps. Each group has its own `argo/images/<group>/Dockerfile` and `requirements.txt`; `make -C argo image`, `push`, `k3d-import`, `kind-load` and `lock` handle all of them, and `make -C argo submit` passes each image to the workflow as `pipeline-image-<group>`. All images also contain the step code and the files in `inputs/`, which the first steps read from `/workspace/inputs/<step>/`. Each tag is computed from its group's requirements, the step code and the input files.
+
+| Image group | Steps | Kept apart by |
+|---|---|---|
+{group_rows}
+
+"Kept apart by" names the packages whose required versions conflict with an earlier group."""
+    else:
+        image_section = f"""The workflow uses **one shared image** for every step: the steps differ only in the command they run. The image also contains the files in `inputs/`, which the first steps read from `/workspace/inputs/<step>/`. The image tag (`{plan.image_tag}`) is computed from the step code, requirements and input files, so the same pipeline with the same inputs always gets the same tag."""
     return f"""
 ## Argo
 
 inLUMEN's job ends with this bundle. You build the image, set up the cluster and run the workflow with your own tools; inLUMEN never contacts your registry or cluster.
 
-The workflow uses **one shared image** for every step: the steps differ only in the command they run. The image also contains the files in `inputs/`, which the first steps read from `/workspace/inputs/<step>/`. The image tag (`{plan.image_tag}`) is computed from the step code, requirements and input files, so the same pipeline with the same inputs always gets the same tag.
+{image_section}
 
 {models_section}**Keep the image private.** Because it contains your input data, load it straight into a local cluster or push it only to a private registry. To run the pipeline on other data, replace the files under `inputs/<step>/` and build again.
 

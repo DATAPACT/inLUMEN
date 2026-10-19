@@ -726,6 +726,7 @@ class PluginDeploymentTest(unittest.TestCase):
         # The bundle creates the Secret the workflow reads from the .env name.
         self.assertIn("'2.api_key|INLUMEN_SECRET_2_API_KEY|required'", paths["argo/create-secrets.sh"]["content"])
         self.assertIn("INLUMEN_SECRET_2_API_KEY=", paths[".env.example"]["content"])
+        self.assertIn("INLUMEN_PLUGIN_URL_STEP_2=", paths[".env.example"]["content"])
         self.assertNotIn("demo-key", json.dumps(bundle))
 
         with installed():
