@@ -72,8 +72,11 @@ workflow; native frontend development requires Node 22.12+ and `npm ci`.
 2. Select **Orders CSV**, open **Inspector**, and upload
    [`orders.csv`](../examples/order-summary/orders.csv) under **Input Files**.
 3. Select **Summarize orders** and attach
-   [`main.py`](../examples/order-summary/main.py) as its Python runtime package.
-   It uses only the Python standard library; no `requirements.txt` is needed.
+   [`main.py`](../examples/order-summary/main.py) and
+   [`inlumen.task.json`](../examples/order-summary/inlumen.task.json) as its
+   Python runtime package. The declaration names the Task's output artifact
+   (`summary.json`), which deployment exports require. The script uses only the
+   Python standard library; no `requirements.txt` is needed.
 4. Open **Library → Run → Runtime code** and choose **Download code ZIP**. The
    downloaded `pipeline-code.zip` contains the Task's code in its own folder; it
    does not include `orders.csv` or the pipeline design. The existing uploader can
@@ -82,7 +85,7 @@ workflow; native frontend development requires Node 22.12+ and `npm ci`.
    Reload the browser. Check that all three components, their connections, the
    Source input, and the Task script are still present.
 
-The JSON file contains the design only. Uploading the two files is intentional:
+The JSON file contains the design only. Uploading the files is intentional:
 design JSON import does not package or restore code and data. An existing canvas
 is replaced on import; use a fresh evaluation workspace or save its version first.
 
@@ -147,11 +150,13 @@ parent execution works.
 - **Missing input:** attach `orders.csv` to Orders CSV, preserving the filename.
 - **Missing implementation:** attach `main.py` to Summarize orders, not to the
   Source or Destination.
+- **Artifact contract upgrade required:** attach `inlumen.task.json` next to
+  `main.py` on Summarize orders.
 - **Depth-limit error:** remove Subpipeline components from the canvas before
   saving it as a reusable pipeline; save the enclosing graph as an ordinary
   pipeline version instead.
 - **Repeat the example:** import its design JSON into an empty evaluation
-  canvas and attach the two files again. **Clear canvas** affects the drawing;
+  canvas and attach the three files again. **Clear canvas** affects the drawing;
   **Clear all** removes the workspace's history and saved reusable pipelines.
 - **Stop the installation:** `docker compose down` stops its services while
   retaining persisted data. Keep storage and encryption credentials when

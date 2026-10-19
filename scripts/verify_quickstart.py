@@ -33,11 +33,13 @@ def main():
     example = ROOT / "examples" / "order-summary"
     graph = json.loads((example / "pipeline.json").read_text())
     stored = {}
-    for node_id, filename, role in (("orders", "orders.csv", "data"), ("summary", "main.py", "code")):
+    attachments = {"orders": (("orders.csv", "data"),), "summary": (("main.py", "code"), ("inlumen.task.json", "code"))}
+    for node_id, files in attachments.items():
         bucket = f"files-step-id-{node_id}"
         node = next(node for node in graph["nodes"] if node["id"] == node_id)
-        node["data"]["files"] = [{"filename": filename, "bucket": bucket, "role": role}]
-        stored[(bucket, filename)] = (example / filename).read_bytes()
+        node["data"]["files"] = [{"filename": filename, "bucket": bucket, "role": role} for filename, role in files]
+        for filename, _ in files:
+            stored[(bucket, filename)] = (example / filename).read_bytes()
     validation = validate_pipeline_graph(graph)
     if not validation["valid"]:
         raise RuntimeError(validation["issues"])
