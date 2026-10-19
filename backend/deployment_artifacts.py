@@ -1513,8 +1513,8 @@ def _build_codegen_argo_workflow_object(
         else []
     )
 
-    # Bundles copy the root inputs into the shared image, so root steps read
-    # them from there instead of downloading an input archive.
+    # Bundles exported with embedded inputs copy them into the shared image, so
+    # root steps read them from there instead of downloading an input archive.
     inputs_embedded = bool((shared_runtime or {}).get("inputs_embedded"))
     for step_id in ordered_ids:
         parent_ids = dependencies.get(step_id) or []
@@ -1546,7 +1546,7 @@ def _build_codegen_argo_workflow_object(
             input_parameters.append(
                 {
                     "name": input_parameter,
-                    "value": f"inlumen/input/{_argo_name(step_id)}.tgz",
+                    "value": f"{argo_bundle.INPUT_PREFIX}/{_argo_name(step_id)}.tgz",
                 }
             )
             task["arguments"] = {
@@ -4711,8 +4711,23 @@ def _shared_argo_runtime(
     ordered_ids: Sequence[str],
     dockerfiles_payload: Any,
     input_files: Sequence[dict] = (),
+    *,
+    inputs: str = argo_bundle.INPUTS_ARTIFACT,
 ) -> dict:
-    """Describe one Python image that holds every node and the root inputs."""
+    """Describe one Python image that holds every node.
+
+    With inputs="embedded" the image also holds the root inputs, and they are
+    part of the image tag. With inputs="artifact" (the default) root steps
+    download them from the artifact repository at run time, so the image holds
+    no data.
+    """
+    inputs_embedded = inputs == argo_bundle.INPUTS_EMBEDDED
+    # Older payloads list the root inputs among the node files too; they are
+    # data, not code, so they never change the tag of a data-free image.
+    input_keys = {
+        (_clean_string(file_entry.get("flow_id")), _clean_string(file_entry.get("filename")))
+        for file_entry in input_files
+    }
     steps_by_id = {step["flow_id"]: step for step in steps}
     requirements: List[str] = []
     digest_entries: List[dict] = []
@@ -4744,6 +4759,10 @@ def _shared_argo_runtime(
             _package_dependencies(dockerfiles_payload, step_id)
         )
         for file_entry in step_files:
+            if not inputs_embedded and (
+                step_id, _clean_string(file_entry.get("filename"))
+            ) in input_keys:
+                continue
             content = str(file_entry.get("content") or "")
             digest_entries.append(
                 {
@@ -4764,7 +4783,7 @@ def _shared_argo_runtime(
             "context_path": f"{working_dir}/node-manifest.json",
             "input_dir": f"/workspace/inputs/{node_dir}",
         }
-    for file_entry in input_files:
+    for file_entry in input_files if inputs_embedded else ():
         content = str(file_entry.get("content") or "")
         digest_entries.append(
             {
@@ -4856,6 +4875,12 @@ RUN --mount=type=secret,id=hf_token \\
         if models
         else ""
     )
+    inputs_copy = (
+        "# Root inputs travel inside the image: keep it in a private registry.\n"
+        "COPY inputs /workspace/inputs\n"
+        if inputs_embedded
+        else ""
+    )
     dockerfile = f"""# syntax=docker/dockerfile:1.7
 FROM python:3.11-slim
 COPY --from=ghcr.io/astral-sh/uv:{UV_PINNED_VERSION} /uv /uvx /bin/
@@ -4877,13 +4902,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \\
       uv pip install --system -r /tmp/inlumen/requirements.txt -c /tmp/inlumen/constraints.txt; \\
     fi
 {model_prefetch_copy}COPY nodes /workspace/nodes
-# Root inputs travel inside the image: keep it in a private registry.
-COPY inputs /workspace/inputs
-LABEL inlumen.runtime.environment-hash="{environment_hash}"
+{inputs_copy}LABEL inlumen.runtime.environment-hash="{environment_hash}"
 """
     return {
         "strategy": "shared",
-        "inputs_embedded": True,
+        "inputs": inputs,
+        "inputs_embedded": inputs_embedded,
         "models": models,
         "image": image,
         "environment_hash": environment_hash,
@@ -4915,6 +4939,22 @@ def _argo_bundle_plan(
             name = _clean_string(requirement.get("name"))
             if name and requirement.get("secret"):
                 secret_environment[_kubernetes_secret_key(step_id, name)] = name
+
+    workflow_parameters = {
+        item.get("name")
+        for item in (spec.get("arguments") or {}).get("parameters") or []
+    }
+    input_steps = []
+    for step_id in ordered_ids:
+        parameter = _argo_name(f"input-artifact-key-{step_id}")
+        if parameter in workflow_parameters:
+            input_steps.append(
+                argo_bundle.ArgoInputStep(
+                    step=_argo_name(step_id),
+                    directory=_bundle_node_dir(steps_by_id[step_id]),
+                    parameter=parameter,
+                )
+            )
 
     environment_parameters = []
     plugin_endpoints = []
@@ -4975,6 +5015,8 @@ def _argo_bundle_plan(
     return argo_bundle.ArgoBundlePlan(
         image_tag=shared_runtime["environment_hash"][:12],
         model_store=bool(shared_runtime.get("models")),
+        inputs=shared_runtime.get("inputs") or argo_bundle.INPUTS_ARTIFACT,
+        input_steps=tuple(input_steps),
         environment_parameters=tuple(environment_parameters),
         secrets=tuple(secrets[key] for key in sorted(secrets)),
         plugin_endpoints=tuple(plugin_endpoints),
@@ -4994,7 +5036,7 @@ def _argo_helper_bundle_files(
                      role="argo-cluster-setup", content_type="application/x-yaml;charset=utf-8"),
         _bundle_file("argo/k8s/artifact-repositories.yaml", argo_bundle.artifact_repositories_manifest(),
                      role="argo-cluster-setup", content_type="application/x-yaml;charset=utf-8"),
-        _bundle_file("ci/github-actions/build-image.yml", argo_bundle.github_actions_template(),
+        _bundle_file("ci/github-actions/build-image.yml", argo_bundle.github_actions_template(plan),
                      role="ci-template", content_type="application/x-yaml;charset=utf-8"),
     ]
     models = shared_runtime.get("models")
@@ -5007,6 +5049,11 @@ def _argo_helper_bundle_files(
             _bundle_file("argo/k8s/model-store-pvc.yaml", argo_bundle.model_store_pvc_manifest(),
                          role="argo-cluster-setup", content_type="application/x-yaml;charset=utf-8"),
         ])
+    if plan.input_steps:
+        files.append(
+            _bundle_file("argo/upload-inputs.sh", argo_bundle.upload_inputs_script(plan),
+                         role="argo-tooling", content_type="text/x-shellscript", executable=True),
+        )
     if plan.secrets:
         files.extend([
             _bundle_file("argo/create-secrets.sh", argo_bundle.create_secrets_script(plan),
@@ -5163,6 +5210,7 @@ def build_run_spec(
                 "environment_hash": (shared_argo_runtime or {}).get(
                     "environment_hash"
                 ),
+                "inputs": (shared_argo_runtime or {}).get("inputs"),
             }
             if targets.get("argo")
             else None
@@ -5236,7 +5284,15 @@ def build_deployment_bundle_files(
     *,
     targets: Optional[dict] = None,
     files: Any = None,
+    argo_inputs: Optional[str] = None,
 ) -> dict:
+    argo_inputs = _clean_string(argo_inputs).lower() or argo_bundle.INPUTS_ARTIFACT
+    if argo_inputs not in argo_bundle.INPUT_MODES:
+        raise ValueError(
+            f"Unknown Argo input mode {argo_inputs!r}; use "
+            + " or ".join(repr(mode) for mode in argo_bundle.INPUT_MODES)
+            + "."
+        )
     selected_targets = {
         "argo": bool((targets or {}).get("argo", True)),
         "dagster": bool((targets or {}).get("dagster", False)),
@@ -5403,6 +5459,19 @@ def build_deployment_bundle_files(
         embedded_inputs = [
             file_entry for file_entry in bundle_files if file_entry["role"] == "input"
         ]
+        if argo_inputs == argo_bundle.INPUTS_ARTIFACT:
+            # Older payloads also list the root inputs among the node files;
+            # leave that copy out so `COPY nodes` puts no data in the image.
+            input_copies = {
+                f"nodes/{_bundle_node_dir(steps_by_id[file_entry['flow_id']])}/"
+                f"{PurePosixPath(file_entry['path']).name}"
+                for file_entry in embedded_inputs
+                if file_entry.get("flow_id") in steps_by_id
+            }
+            bundle_files = [
+                file_entry for file_entry in bundle_files
+                if file_entry["path"] not in input_copies
+            ]
         for step_id in root_step_ids:
             step = steps_by_id[step_id]
             node_dir = _bundle_node_dir(step)
@@ -5414,7 +5483,8 @@ def build_deployment_bundle_files(
                 file_entry["path"].startswith(f"inputs/{node_dir}/")
                 for file_entry in embedded_inputs
             ):
-                # Root steps read their inputs from this directory in the image.
+                # Root steps read their inputs from this directory (packed and
+                # uploaded, or copied into the image).
                 bundle_files.append(
                     _bundle_file(
                         f"inputs/{node_dir}/.gitkeep",
@@ -5429,6 +5499,7 @@ def build_deployment_bundle_files(
             ordered_ids,
             dockerfiles_payload,
             embedded_inputs,
+            inputs=argo_inputs,
         )
         argo_workflow_path = "argo/workflow.yaml"
         argo_workflow = build_argo_workflow_object(
@@ -5547,7 +5618,19 @@ def build_deployment_bundle_files(
 
     bundle_files.extend([
         _bundle_file(".gitignore", argo_bundle.gitignore(), role="bundle-gitignore"),
-        _bundle_file(".dockerignore", argo_bundle.dockerignore(), role="bundle-dockerignore"),
+        _bundle_file(
+            ".dockerignore",
+            # The Dagster image copies inputs/, so only an Argo-only bundle
+            # with run-time input artifacts leaves them out of the build.
+            argo_bundle.dockerignore(
+                exclude_inputs=bool(
+                    argo_plan
+                    and argo_plan.inputs == argo_bundle.INPUTS_ARTIFACT
+                    and not selected_targets["dagster"]
+                )
+            ),
+            role="bundle-dockerignore",
+        ),
     ])
     bundle_files.append(
         _bundle_file(
@@ -5659,6 +5742,11 @@ def build_deployment_bundle_files(
                 "scripts": {
                     "submit": "argo/submit.sh",
                     **(
+                        {"upload_inputs": "argo/upload-inputs.sh"}
+                        if argo_plan.input_steps
+                        else {}
+                    ),
+                    **(
                         {"create_secrets": "argo/create-secrets.sh"}
                         if argo_plan.secrets
                         else {}
@@ -5692,11 +5780,30 @@ def build_deployment_bundle_files(
                     else None
                 ),
                 "runtime_secret": argo_bundle.RUNTIME_SECRET_NAME,
-                "inputs": {
-                    "transport": "image",
-                    "path": "inputs",
-                    "image_path": "/workspace/inputs",
-                },
+                "inputs": (
+                    {
+                        "mode": argo_bundle.INPUTS_EMBEDDED,
+                        "transport": "image",
+                        "path": "inputs",
+                        "image_path": "/workspace/inputs",
+                    }
+                    if argo_plan.inputs == argo_bundle.INPUTS_EMBEDDED
+                    else {
+                        "mode": argo_bundle.INPUTS_ARTIFACT,
+                        "transport": "artifact",
+                        "path": "inputs",
+                        "upload": "make -C argo inputs",
+                        "steps": [
+                            {
+                                "step": item.step,
+                                "path": f"inputs/{item.directory}",
+                                "parameter": item.parameter,
+                                "key": f"{argo_bundle.INPUT_PREFIX}/{item.step}.tgz",
+                            }
+                            for item in argo_plan.input_steps
+                        ],
+                    }
+                ),
                 "secret_keys": [
                     {
                         "flow_id": item.flow_id,

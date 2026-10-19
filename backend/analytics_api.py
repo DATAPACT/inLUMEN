@@ -365,6 +365,7 @@ def agentic_generate_deployment_bundle():
             pipeline_graph,
             dockerfile_json,
             targets=targets,
+            argo_inputs=data.get("argo_inputs"),
         )
 
         validation_report = None

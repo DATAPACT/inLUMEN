@@ -13,8 +13,8 @@ on a current Argo Workflows release.
 
 ## What you need
 
-Docker, `k3d`, `kubectl`, the `argo` CLI and `make`, plus internet access for the
-image build and for the model download.
+Docker, `k3d`, `kubectl`, the `argo` CLI, `make` and the AWS CLI (or MinIO's
+`mc`), plus internet access for the image build and for the model download.
 
 ## 1. Cluster with Argo Workflows
 
@@ -38,6 +38,10 @@ Export with **Export Argo bundle** in the deployment panel:
 - a pipeline **with** reviewed models (for example the uploaded-audio pipeline:
   Speech-to-Text and Sentiment).
 
+These bundles use the default input mode, `artifact`. Also export one with
+embedded inputs (`GET /api/v1/pipelines/<id>/artifacts/argo-bundle.zip?inputs=embedded`)
+and run it the same way, without `make -C argo inputs`.
+
 ## 3. Run each bundle
 
 From each unzipped bundle:
@@ -45,6 +49,7 @@ From each unzipped bundle:
 ```bash
 make -C argo image k3d-import K3D_CLUSTER=inlumen
 make -C argo setup NAMESPACE=argo
+make -C argo inputs NAMESPACE=argo
 make -C argo submit NAMESPACE=argo
 ```
 
@@ -58,6 +63,12 @@ then open https://localhost:2746.
 
 - The image builds in a few minutes and installs CPU-only PyTorch (no `nvidia-*`
   packages).
+- `make -C argo inputs` needs no settings: it forwards `svc/minio`, reads the
+  credentials from the `my-minio-cred` Secret, and prints one
+  `Uploaded inputs/<step> to s3://my-bucket/inlumen/input/<step>.tgz` line per
+  first step.
+- In artifact mode the image has no `/workspace/inputs`
+  (`docker run --rm --entrypoint ls <image> /workspace`).
 - Every step succeeds.
 - With reviewed models, `inlumen-model-prefetch` runs first and logs `verified`
   for each model; a second run logs `verified cache hit` instead of downloading.
@@ -147,3 +158,20 @@ Workflows v4.1.5 quick-start.
   4 CPU / 4 GiB for the two model steps; none mounted a model volume.
 - Not run on a cluster: `ACCELERATOR=gpu` (no GPU available) and plugin URL
   parameters; both are covered by unit tests only.
+
+### 2026-10-19 (input artifacts, follow-up to #161)
+
+Environment: Docker 29.8.0 on macOS ARM64, k3d v5.9.0, Argo Workflows v4.1.5
+quick-start, AWS CLI.
+
+- Order-summary bundle, **artifact** mode (the default): the image has no
+  `/workspace/inputs`. `make -C argo inputs`, with no settings, forwarded
+  `svc/minio`, read the `my-minio-cred` Secret and uploaded
+  `inlumen/input/orders.tgz` (one top-level directory, no `._` files). 3/3 steps
+  succeeded in 40 s and `summary.json` matched `expected-summary.json`.
+- Submitting with an `INPUT_PREFIX` that was never uploaded fails the first step
+  with `artifact run-inputs failed to load: The specified key does not exist.`,
+  as the README troubleshooting describes.
+- Same pipeline, **embedded** mode: different image tag (inputs are part of it),
+  `make -C argo inputs` only says the inputs are in the image, and the run
+  succeeded.

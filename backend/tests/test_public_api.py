@@ -383,6 +383,7 @@ class PublicApiTest(unittest.TestCase):
             {"argo": True, "dagster": False},
             build_bundle_mock.call_args.kwargs["targets"],
         )
+        self.assertEqual("artifact", build_bundle_mock.call_args.kwargs["argo_inputs"])
         with zipfile.ZipFile(io.BytesIO(response.get_data())) as archive:
             self.assertEqual(b"kind: Workflow\n", archive.read("argo/workflow.yaml"))
             self.assertEqual(b"\x00\x01", archive.read("inputs/node-1/a.bin"))
@@ -409,6 +410,34 @@ class PublicApiTest(unittest.TestCase):
 
         self.assertEqual(422, response.status_code)
         self.assertIn("No pipeline steps", response.get_data(as_text=True))
+
+    @patch("public_api.build_deployment_bundle_files")
+    @patch("public_api._build_dockerfile_artifacts_or_error")
+    @patch("public_api.fetch_pipeline_graph")
+    def test_argo_bundle_endpoint_takes_the_input_mode(
+        self,
+        fetch_pipeline_graph_mock,
+        build_dockerfile_artifacts_mock,
+        build_bundle_mock,
+    ):
+        fetch_pipeline_graph_mock.side_effect = _async_return(_sample_graph())
+        build_dockerfile_artifacts_mock.return_value = {"dockerfiles": []}
+        build_bundle_mock.return_value = {"files": []}
+
+        response = self.client.get(
+            "/api/v1/pipelines/pipeline-123/artifacts/argo-bundle.zip?inputs=embedded",
+            headers=_auth_headers(),
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("embedded", build_bundle_mock.call_args.kwargs["argo_inputs"])
+
+        fetch_pipeline_graph_mock.side_effect = _async_return(_sample_graph())
+        response = self.client.get(
+            "/api/v1/pipelines/pipeline-123/artifacts/argo-bundle.zip?inputs=s3",
+            headers=_auth_headers(),
+        )
+        self.assertEqual(400, response.status_code)
+        self.assertIn("artifact or embedded", response.get_data(as_text=True))
 
     @patch("public_api._build_dockerfile_artifacts_or_error")
     @patch("public_api.fetch_pipeline_versions")

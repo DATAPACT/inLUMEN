@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 import zipfile
@@ -33,11 +34,12 @@ from test_codegen_deployment_artifacts import (
 HAS_SHELL_TOOLS = all(shutil.which(tool) for tool in ("bash", "make", "tar"))
 
 
-def argo_bundle(payload=None):
+def argo_bundle(payload=None, **options):
     return build_deployment_bundle_files(
         CodegenDeploymentArtifactsTest().graph(),
         payload or codegen_payload(),
         targets={"argo": True, "dagster": False},
+        **options,
     )
 
 
@@ -92,6 +94,7 @@ class ArgoBundleLayoutTest(unittest.TestCase):
             "argo/constraints.txt",
             "argo/Makefile",
             "argo/submit.sh",
+            "argo/upload-inputs.sh",
             "argo/create-secrets.sh",
             "argo/k8s/rbac.yaml",
             "argo/k8s/artifact-repositories.yaml",
@@ -103,8 +106,7 @@ class ArgoBundleLayoutTest(unittest.TestCase):
             "README.md",
         ):
             self.assertIn(path, by_path)
-        self.assertNotIn("argo/upload-inputs.sh", by_path)
-        for script in ("argo/submit.sh", "argo/create-secrets.sh"):
+        for script in ("argo/submit.sh", "argo/upload-inputs.sh", "argo/create-secrets.sh"):
             self.assertTrue(by_path[script].get("executable"), script)
         self.assertNotIn("dagster/Dockerfile", by_path)
 
@@ -113,9 +115,21 @@ class ArgoBundleLayoutTest(unittest.TestCase):
         self.assertEqual(manifest["environment_hash"][:12], manifest["image_tag"])
         self.assertIn(f"EXPORT_TAG := {manifest['image_tag']}", by_path["argo/Makefile"]["content"])
         self.assertEqual(
-            {"transport": "image", "path": "inputs", "image_path": "/workspace/inputs"},
+            {
+                "mode": "artifact",
+                "transport": "artifact",
+                "path": "inputs",
+                "upload": "make -C argo inputs",
+                "steps": [{
+                    "step": "step-1",
+                    "path": "inputs/node-1-ingestion",
+                    "parameter": "input-artifact-key-1",
+                    "key": "inlumen/input/step-1.tgz",
+                }],
+            },
             manifest["inputs"],
         )
+        self.assertEqual("argo/upload-inputs.sh", manifest["scripts"]["upload_inputs"])
         self.assertEqual(
             [{"flow_id": "1", "key": "1.api_key", "environment": "INLUMEN_SECRET_1_API_KEY", "required": True}],
             manifest["secret_keys"],
@@ -145,9 +159,62 @@ class ArgoBundleLayoutTest(unittest.TestCase):
         self.assertIn("--torch-backend $(TORCH_BACKEND)", by_path["argo/Makefile"])
         self.assertIn("TORCH_BACKEND ?= cpu", by_path["argo/Makefile"])
 
-    def test_root_steps_read_inputs_copied_into_the_image(self):
-        by_path = {item["path"]: item["content"] for item in argo_bundle()["files"]}
+    def test_root_steps_download_their_inputs_by_default_so_the_image_holds_no_data(self):
+        bundle = argo_bundle()
+        by_path = {item["path"]: item["content"] for item in bundle["files"]}
+        self.assertNotIn("COPY inputs", by_path["argo/Dockerfile"])
+        self.assertIn("\ninputs\n", by_path[".dockerignore"])
+        # Older payloads also list the inputs among the node files: no copy under nodes/.
+        self.assertIn("inputs/node-1-ingestion/sample.wav", by_path)
+        self.assertNotIn("nodes/node-1-ingestion/sample.wav", by_path)
+        self.assertNotIn("nodes/node-1-ingestion/vital_signs_short.csv", by_path)
+        self.assertEqual("artifact", json.loads(by_path["run-spec.json"])["engines"]["argo"]["inputs"])
+
+        workflow = build_argo_workflow_object(
+            CodegenDeploymentArtifactsTest().graph(),
+            codegen_payload(),
+            shared_runtime=self._shared_runtime(codegen_payload()),
+        )
+        parameters = {item["name"]: item["value"] for item in workflow["spec"]["arguments"]["parameters"]}
+        self.assertEqual("inlumen/input/step-1.tgz", parameters["input-artifact-key-1"])
+        self.assertNotIn("input-artifact-key-2", parameters)
+        tasks = {task["name"]: task for task in workflow["spec"]["templates"][0]["dag"]["tasks"]}
+        self.assertEqual(
+            [{"name": "run-inputs", "s3": {"key": "{{workflow.parameters.input-artifact-key-1}}"}}],
+            tasks["step-1"]["arguments"]["artifacts"],
+        )
+        templates = {template["name"]: template for template in workflow["spec"]["templates"]}
+        self.assertEqual(
+            [{"name": "run-inputs", "path": "/inlumen/inputs"}],
+            templates["step-1"]["inputs"]["artifacts"],
+        )
+        environment = {item["name"]: item.get("value") for item in templates["step-1"]["container"]["env"]}
+        self.assertEqual("/inlumen/inputs", environment["PIPELINE_INPUT_DIR"])
+
+        makefile = by_path["argo/Makefile"]
+        self.assertIn("bash $(ARGO_DIR)/upload-inputs.sh", makefile)
+        self.assertIn("INPUT_PREFIX ?= inlumen/input", makefile)
+        readme = by_path["README.md"]
+        self.assertIn("make -C argo inputs", readme)
+        self.assertIn("holds **no data**", readme)
+        self.assertNotIn("Keep the image private", readme)
+        self.assertIn('paths: ["argo/**", "nodes/**"]', by_path["ci/github-actions/build-image.yml"])
+
+    def test_unknown_input_mode_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Unknown Argo input mode"):
+            argo_bundle(argo_inputs="s3")
+
+    def test_root_steps_read_inputs_copied_into_the_image_when_embedded(self):
+        bundle = argo_bundle(argo_inputs="embedded")
+        by_path = {item["path"]: item["content"] for item in bundle["files"]}
         self.assertIn("COPY inputs /workspace/inputs", by_path["argo/Dockerfile"])
+        self.assertNotIn("argo/upload-inputs.sh", by_path)
+        self.assertNotIn("inputs", by_path[".dockerignore"].split())
+        self.assertEqual(
+            {"mode": "embedded", "transport": "image", "path": "inputs", "image_path": "/workspace/inputs"},
+            bundle["manifest"]["argo"]["inputs"],
+        )
+        self.assertNotIn("upload_inputs", bundle["manifest"]["argo"]["scripts"])
 
         workflow = by_path["argo/workflow.yaml"]
         self.assertNotIn("run-inputs", workflow)
@@ -159,8 +226,10 @@ class ArgoBundleLayoutTest(unittest.TestCase):
 
         readme = by_path["README.md"]
         self.assertIn("Keep the image private", readme)
-        self.assertNotIn("make -C argo inputs", readme)
-        self.assertNotIn("inputs:", by_path["argo/Makefile"])
+        self.assertNotIn("make -C argo inputs ", readme)
+        self.assertIn("The inputs are copied into the image", by_path["argo/Makefile"])
+        self.assertNotIn("upload-inputs.sh", by_path["argo/Makefile"])
+        self.assertIn('"inputs/**"', by_path["ci/github-actions/build-image.yml"])
 
     def test_root_steps_without_files_still_get_an_input_directory(self):
         payload = codegen_payload()
@@ -176,9 +245,9 @@ class ArgoBundleLayoutTest(unittest.TestCase):
             if item["flow_id"] == "1" and item["filename"] == "requirements.txt":
                 item["content"] = "pandas\n"
 
-        paths = {item["path"] for item in argo_bundle(payload)["files"]}
-
-        self.assertIn("inputs/node-1-ingestion/.gitkeep", paths)
+        for mode in ("artifact", "embedded"):
+            paths = {item["path"] for item in argo_bundle(payload, argo_inputs=mode)["files"]}
+            self.assertIn("inputs/node-1-ingestion/.gitkeep", paths)
 
     def test_reviewed_models_are_prefetched_into_a_shared_read_only_store(self):
         bundle = argo_bundle(whisper_payload())
@@ -436,7 +505,7 @@ class ArgoBundleLayoutTest(unittest.TestCase):
         self.assertNotIn("### Plugin steps", {item["path"]: item["content"] for item in argo_bundle()["files"]}["README.md"])
 
 
-    def _shared_runtime(self):
+    def _shared_runtime(self, payload=None):
         from deployment_artifacts import (
             _shared_argo_runtime,
             extract_pipeline_steps,
@@ -444,7 +513,7 @@ class ArgoBundleLayoutTest(unittest.TestCase):
         )
 
         steps = select_runtime_steps(extract_pipeline_steps(CodegenDeploymentArtifactsTest().graph()))
-        return _shared_argo_runtime(steps, [step["flow_id"] for step in steps], whisper_payload())
+        return _shared_argo_runtime(steps, [step["flow_id"] for step in steps], payload or whisper_payload())
 
     def test_bundle_never_contains_secret_values(self):
         bundle = argo_bundle()
@@ -460,7 +529,14 @@ class ArgoBundleLayoutTest(unittest.TestCase):
 
         changed_input = codegen_payload()
         next(item for item in changed_input["deployment_files"] if item["filename"] == "vital_signs_short.csv")["content"] = "heart_rate\n80\n"
-        self.assertNotEqual(tag, argo_bundle(changed_input)["manifest"]["argo"]["image_tag"])
+        # Inputs are uploaded at run time, so they do not change the image.
+        self.assertEqual(tag, argo_bundle(changed_input)["manifest"]["argo"]["image_tag"])
+        embedded_tag = argo_bundle(argo_inputs="embedded")["manifest"]["argo"]["image_tag"]
+        self.assertNotEqual(tag, embedded_tag)
+        self.assertNotEqual(
+            embedded_tag,
+            argo_bundle(changed_input, argo_inputs="embedded")["manifest"]["argo"]["image_tag"],
+        )
 
         changed_requirements = codegen_payload()
         next(item for item in changed_requirements["deployment_files"] if item["path"] == "nodes/2/requirements.txt")["content"] = "pandas\nnumpy\nrequests\n"
@@ -587,6 +663,104 @@ class ArgoBundleScriptsTest(unittest.TestCase):
         self.assertIn("argo/workflow.yaml -n pipelines --serviceaccount inlumen-workflow", call)
         self.assertIn(f"-p pipeline-image=ghcr.io/acme/inlumen-pipeline:{tag}", call)
         self.assertIn("-p output-artifact-prefix=inlumen/output/run-1", call)
+        self.assertIn("-p input-artifact-key-1=inlumen/input/step-1.tgz", call)
+
+    def test_submit_uses_the_input_prefix(self):
+        fake_tool(self.bin, "argo", 'echo "$@" >> "$CALLS"\n')
+        result = self.run_in_bundle(
+            "make", "--no-print-directory", "-s", "-C", "argo", "submit", "ARGO_FLAGS=",
+            "INPUT_PREFIX=team/inputs/v2",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("-p input-artifact-key-1=team/inputs/v2/step-1.tgz", self.calls.read_text())
+
+    def fake_aws(self):
+        self.uploads = Path(self.temp.name) / "uploads"
+        self.uploads.mkdir()
+        fake_tool(
+            self.bin,
+            "aws",
+            'echo "aws $* key=$AWS_ACCESS_KEY_ID" >> "$CALLS"\n'
+            'for arg in "$@"; do [ -f "$arg" ] && cp "$arg" "$UPLOADS/"; done; exit 0\n',
+        )
+        self.env["UPLOADS"] = str(self.uploads)
+
+    def fake_kubectl(self):
+        # Answers the credentials Secret lookup and a port-forward.
+        fake_tool(
+            self.bin,
+            "kubectl",
+            'echo "kubectl $*" >> "$CALLS"\n'
+            'case "$*" in\n'
+            '  *port-forward*) echo "Forwarding from 127.0.0.1:19000 -> 9000"; exec sleep 30 ;;\n'
+            '  *accesskey*) printf admin | base64 ;;\n'
+            '  *secretkey*) printf password | base64 ;;\n'
+            'esac\n',
+        )
+
+    def test_upload_inputs_packs_one_directory_per_step_with_cluster_credentials(self):
+        self.fake_aws()
+        self.fake_kubectl()
+        (self.root / "inputs" / "node-1-ingestion" / ".DS_Store").write_text("finder")
+        env = {key: value for key, value in self.env.items() if not key.startswith("AWS_")}
+
+        result = self.run_in_bundle("make", "--no-print-directory", "-s", "-C", "argo", "inputs", env=env)
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Uploaded inputs/node-1-ingestion to s3://my-bucket/inlumen/input/step-1.tgz", result.stdout)
+        calls = self.calls.read_text()
+        self.assertIn("get secret my-minio-cred -o jsonpath={.data.accesskey}", calls)
+        self.assertIn("port-forward svc/minio 19000:9000", calls)
+        self.assertIn("--endpoint-url http://127.0.0.1:19000 s3 cp", calls)
+        self.assertIn("s3://my-bucket/inlumen/input/step-1.tgz key=admin", calls)
+        with tarfile.open(self.uploads / "step-1.tgz") as archive:
+            names = archive.getnames()
+        self.assertEqual({"node-1-ingestion"}, {name.split("/")[0] for name in names})
+        self.assertIn("node-1-ingestion/vital_signs_short.csv", names)
+        self.assertFalse([name for name in names if "/._" in name or name.endswith((".DS_Store", ".gitkeep"))], names)
+
+    def test_upload_inputs_uses_env_file_settings(self):
+        self.fake_aws()
+        (self.root / ".env").write_text(
+            "S3_ENDPOINT=https://s3.example.com\nS3_BUCKET=team-bucket\n"
+            "AWS_ACCESS_KEY_ID=from-env-file\nAWS_SECRET_ACCESS_KEY=hidden\n"
+        )
+        env = {key: value for key, value in self.env.items() if not key.startswith("AWS_")}
+
+        result = self.run_in_bundle("bash", "argo/upload-inputs.sh", env=env)
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        calls = self.calls.read_text()
+        self.assertIn("--endpoint-url https://s3.example.com s3 cp", calls)
+        self.assertIn("s3://team-bucket/inlumen/input/step-1.tgz key=from-env-file", calls)
+        self.assertNotIn("kubectl", calls)
+
+    def test_upload_inputs_explains_missing_credentials_and_tools(self):
+        self.fake_aws()
+        fake_tool(self.bin, "kubectl", 'echo "Error from server (NotFound)" >&2; exit 1\n')
+        env = {key: value for key, value in self.env.items() if not key.startswith("AWS_")}
+        result = self.run_in_bundle("bash", "argo/upload-inputs.sh", env=env)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("no S3 credentials", result.stderr)
+        self.assertIn("AWS_ACCESS_KEY_ID", result.stderr)
+        self.assertIn("my-minio-cred", result.stderr)
+
+        result = self.run_in_bundle("bash", "argo/upload-inputs.sh", env={**env, "S3_TOOL": "rclone"})
+        self.assertIn("S3_TOOL must be aws or mc", result.stderr)
+
+    def test_upload_inputs_can_use_mc(self):
+        fake_tool(self.bin, "mc", 'echo "mc $* host=$MC_HOST_inlumen" >> "$CALLS"\n')
+        env = {
+            **self.env,
+            "S3_TOOL": "mc",
+            "S3_ENDPOINT": "http://localhost:19000",
+            "AWS_ACCESS_KEY_ID": "admin",
+            "AWS_SECRET_ACCESS_KEY": "password",
+        }
+        result = self.run_in_bundle("bash", "argo/upload-inputs.sh", env=env)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("inlumen/my-bucket/inlumen/input/step-1.tgz host=http://admin:password@localhost:19000",
+                      self.calls.read_text())
 
 
 @unittest.skipUnless(HAS_SHELL_TOOLS, "bash, make and tar are required")

@@ -760,15 +760,33 @@ def _build_argo_workflow_yaml_or_error(graph: dict[str, Any]) -> str:
         ) from error
 
 
+_ARGO_INPUTS_PARAMETER = {
+    "name": "inputs",
+    "in": "query",
+    "required": False,
+    "description": (
+        "How the first steps get their input files. `artifact` (default): "
+        "`make -C argo inputs` uploads them to the artifact repository and the "
+        "image holds no data. `embedded`: they are copied into the image, which "
+        "must then stay private."
+    ),
+    "schema": {"type": "string", "enum": ["artifact", "embedded"], "default": "artifact"},
+}
+
+
 def _argo_bundle_zip_response_or_error(graph: dict[str, Any], name: str):
     # Same bundle as the editor's Argo export. Building it never contacts a
     # registry or cluster; that is left to whoever deploys the bundle.
+    argo_inputs = (request.args.get("inputs") or "artifact").strip().lower()
+    if argo_inputs not in ("artifact", "embedded"):
+        raise ApiError(400, "invalid_parameter", "inputs must be artifact or embedded.")
     dockerfiles = _build_dockerfile_artifacts_or_error(graph, require_attached_runtime=True)
     try:
         bundle = build_deployment_bundle_files(
             graph,
             dockerfiles,
             targets={"argo": True, "dagster": False},
+            argo_inputs=argo_inputs,
         )
     except (ValueError, DeploymentArtifactValidationError) as error:
         raise ApiError(
@@ -1241,9 +1259,12 @@ def build_openapi_schema() -> dict[str, Any]:
                 "get": {
                     "tags": ["Artifacts"],
                     "summary": "Export a self-contained Argo Workflows bundle for a pipeline",
-                    "description": "ZIP with the workflow, the shared image build context, step code, inputs, scripts and cluster setup templates. Building the image and running the workflow happen outside inLUMEN.",
+                    "description": "ZIP with the workflow, the shared image build context, step code, inputs, scripts and cluster setup templates. By default the image holds no data and `make -C argo inputs` uploads the inputs to the artifact repository. Building the image and running the workflow happen outside inLUMEN.",
                     "operationId": "getPipelineArgoBundleZip",
-                    "parameters": [{"$ref": "#/components/parameters/PipelineId"}],
+                    "parameters": [
+                        {"$ref": "#/components/parameters/PipelineId"},
+                        _ARGO_INPUTS_PARAMETER,
+                    ],
                     "responses": {
                         "200": {
                             "description": "Argo bundle ZIP for the active pipeline graph.",
@@ -1306,11 +1327,12 @@ def build_openapi_schema() -> dict[str, Any]:
                 "get": {
                     "tags": ["Artifacts"],
                     "summary": "Export a self-contained Argo Workflows bundle for a pipeline version",
-                    "description": "ZIP with the workflow, the shared image build context, step code, inputs, scripts and cluster setup templates. Building the image and running the workflow happen outside inLUMEN.",
+                    "description": "ZIP with the workflow, the shared image build context, step code, inputs, scripts and cluster setup templates. By default the image holds no data and `make -C argo inputs` uploads the inputs to the artifact repository. Building the image and running the workflow happen outside inLUMEN.",
                     "operationId": "getPipelineVersionArgoBundleZip",
                     "parameters": [
                         {"$ref": "#/components/parameters/PipelineId"},
                         {"$ref": "#/components/parameters/VersionId"},
+                        _ARGO_INPUTS_PARAMETER,
                     ],
                     "responses": {
                         "200": {
