@@ -244,12 +244,12 @@ describe('JsonOutputView', () => {
   });
 
   it('shows large raw JSON a page at a time', async () => {
-    const value = { rows: Array.from({ length: 30000 }, (_, index) => ({ index })) };
-    const view = await mount(<JsonOutputView value={value} />);
+    const value = { rows: Array.from({ length: 100 }, (_, index) => ({ index })) };
+    const view = await mount(<JsonOutputView value={value} rawPageChars={1024} />);
     await click(buttonNamed(view.container, 'Raw'));
     const lines = () => view.container.querySelectorAll('pre > div').length;
     const firstPage = lines();
-    expect(view.container.textContent).toMatch(/Showing the first 256\.0 KB of 985\.3 KB/);
+    expect(view.container.textContent).toMatch(/Showing the first 1020 B of 3\.0 KB/);
     await click(buttonNamed(view.container, 'Show more'));
     expect(lines()).toBeGreaterThan(firstPage);
     await view.unmount();

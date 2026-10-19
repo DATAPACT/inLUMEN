@@ -381,14 +381,21 @@ const RawJson = ({
   );
 };
 
-export const JsonOutputView = ({ value }: { value: unknown }) => {
+export const JsonOutputView = ({
+  value,
+  rawPageChars = RAW_PAGE_CHARS,
+}: {
+  value: unknown;
+  /** Characters of Raw text per page. */
+  rawPageChars?: number;
+}) => {
   const tableSources = useMemo(() => findRecordArrays(value), [value]);
   const [savedMode, setSavedMode] = useState(readViewMode);
   const [tablePath, setTablePath] = useState<JsonSegment[] | null>(null);
   const [query, setQuery] = useState('');
   // Typing stays responsive while a large tree re-renders with the new query.
   const searchQuery = useDeferredValue(query.trim().toLocaleLowerCase());
-  const [rawChars, setRawChars] = useState(RAW_PAGE_CHARS);
+  const [rawChars, setRawChars] = useState(rawPageChars);
   const [minified, setMinified] = useState(false);
   // Expand/collapse remounts the tree so every node takes the new default depth.
   const [expansion, setExpansion] = useState({ depth: DEFAULT_DEPTH, generation: 0 });
@@ -520,7 +527,7 @@ export const JsonOutputView = ({ value }: { value: unknown }) => {
           )}
         </>
       )}
-      {mode === 'raw' && <RawJson text={raw} shownChars={rawChars} onShowMore={() => setRawChars(rawChars + RAW_PAGE_CHARS)} />}
+      {mode === 'raw' && <RawJson text={raw} shownChars={rawChars} onShowMore={() => setRawChars(rawChars + rawPageChars)} />}
     </div>
   );
 };
