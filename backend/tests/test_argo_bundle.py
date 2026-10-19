@@ -1,5 +1,6 @@
 """The Argo export is a self-contained bundle that runs outside inLUMEN."""
 
+import importlib.util
 import io
 import json
 import os
@@ -15,7 +16,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from deployment_artifacts import build_argo_workflow_object, build_deployment_bundle_files, deployment_bundle_zip
+import argo_bundle as argo_helpers
+from deployment_artifacts import (
+    DeploymentArtifactValidationError,
+    build_argo_workflow_object,
+    build_deployment_bundle_files,
+    deployment_bundle_zip,
+)
 from model_plans import FASTER_WHISPER_PLAN
 from test_codegen_deployment_artifacts import (
     CodegenDeploymentArtifactsTest,
@@ -40,6 +47,31 @@ def whisper_payload():
         if item["flow_id"] == "2" and item["filename"] == "node-manifest.json":
             item["content"] = node_manifest_content(deepcopy(FASTER_WHISPER_PLAN))
     return payload
+
+
+def edit_node_manifest(payload, flow_id, change):
+    for item in payload["deployment_files"]:
+        if item["flow_id"] == flow_id and item["filename"] == "node-manifest.json":
+            manifest = json.loads(item["content"])
+            change(manifest)
+            item["content"] = json.dumps(manifest, indent=2) + "\n"
+    return payload
+
+
+def plugin_payload(base=None):
+    def make_plugin_step(manifest):
+        manifest["adapter"] = {
+            "kind": "task",
+            "plugin": {"id": "jsi-wikifier", "version": "1.0.0", "name": "Wikifier"},
+            "operation": "annotate",
+            "endpoint": "https://wikifier.example.org",
+        }
+
+    return edit_node_manifest(base or codegen_payload(), "2", make_plugin_step)
+
+
+def templates_by_name(workflow):
+    return {template["name"]: template for template in workflow["spec"]["templates"]}
 
 
 def fake_tool(directory: Path, name: str, body: str) -> None:
@@ -207,6 +239,203 @@ class ArgoBundleLayoutTest(unittest.TestCase):
         self.assertNotIn("inlumen-model-prefetch", workflow)
         self.assertNotIn("volumes:", workflow)
 
+    def test_baked_models_skip_the_prefetch_task_and_the_volume(self):
+        bundle = argo_bundle(whisper_payload())
+        by_path = {item["path"]: item["content"] for item in bundle["files"]}
+        dockerfile = by_path["argo/Dockerfile"]
+
+        # The image build runs the same prefetch script, only when asked to.
+        self.assertIn("ARG INLUMEN_MODELS=volume", dockerfile)
+        self.assertIn('if [ "$INLUMEN_MODELS" = "bake" ]', dockerfile)
+        self.assertIn("python /workspace/model-prefetch/model_prefetch.py", dockerfile)
+        self.assertIn("INLUMEN_MODEL_ROOT=/models", dockerfile)
+        self.assertIn("--mount=type=secret,id=hf_token", dockerfile)
+        # Changing step code must not download the models again.
+        self.assertLess(dockerfile.index("model_prefetch.py"), dockerfile.index("COPY nodes"))
+
+        baked = by_path["argo/workflow-models-baked.yaml"]
+        self.assertNotIn("inlumen-model-prefetch", baked)
+        self.assertNotIn("inlumen-model-store", baked)
+        self.assertNotIn("volumes:", baked)
+        workflow = build_argo_workflow_object(
+            CodegenDeploymentArtifactsTest().graph(),
+            whisper_payload(),
+            shared_runtime=self._shared_runtime(),
+            models_baked=True,
+        )
+        templates = templates_by_name(workflow)
+        self.assertNotIn("inlumen-model-prefetch", templates)
+        tasks = {task["name"]: task for task in templates["inlumen-pipeline"]["dag"]["tasks"]}
+        self.assertEqual(["step-1"], tasks["step-2"]["dependencies"])
+        step = templates["step-2"]["container"]
+        self.assertNotIn("volumeMounts", step)
+        environment = {item["name"]: item.get("value") for item in step["env"]}
+        self.assertEqual("/models", environment["INLUMEN_MODEL_ROOT"])
+        self.assertIn("asr-profile", [item["name"] for item in workflow["spec"]["arguments"]["parameters"]])
+
+        # The default is still the shared volume.
+        self.assertIn("inlumen-model-prefetch", by_path["argo/workflow.yaml"])
+        self.assertIn("MODELS ?= volume", by_path["argo/Makefile"])
+        self.assertEqual(
+            [("argo/workflow.yaml", "cpu", "volume"), ("argo/workflow-models-baked.yaml", "cpu", "image"),
+             ("argo/workflow-gpu.yaml", "gpu", "volume"), ("argo/workflow-gpu-models-baked.yaml", "gpu", "image")],
+            [(item["path"], item["accelerator"], item["models"]) for item in bundle["manifest"]["argo"]["workflows"]],
+        )
+        self.assertIn("MODELS=bake", by_path["README.md"])
+
+    def test_pipelines_without_models_or_gpu_steps_get_one_workflow(self):
+        bundle = argo_bundle()
+        paths = {item["path"] for item in bundle["files"]}
+        self.assertEqual({"argo/workflow.yaml"}, {path for path in paths if path.startswith("argo/workflow")})
+        self.assertEqual(
+            [{"path": "argo/workflow.yaml", "accelerator": "cpu", "models": None}],
+            bundle["manifest"]["argo"]["workflows"],
+        )
+        by_path = {item["path"]: item["content"] for item in bundle["files"]}
+        self.assertNotIn("MODELS", by_path["argo/Makefile"])
+        self.assertNotIn("ACCELERATOR ?=", by_path["argo/Makefile"])
+        self.assertNotIn("INLUMEN_MODELS", by_path["argo/Dockerfile"])
+        self.assertNotIn("MODELS=bake", by_path["README.md"])
+
+    def test_steps_get_requests_and_limits_from_their_resource_profile(self):
+        workflow = build_argo_workflow_object(
+            CodegenDeploymentArtifactsTest().graph(),
+            whisper_payload(),
+            shared_runtime=self._shared_runtime(),
+        )
+        templates = templates_by_name(workflow)
+        # step-1 needs pandas (standard); step-2 runs a reviewed model (ml_cpu).
+        self.assertEqual(
+            {"requests": {"cpu": "2", "memory": "2Gi"}, "limits": {"cpu": "2", "memory": "2Gi"}},
+            templates["step-1"]["container"]["resources"],
+        )
+        self.assertEqual(
+            {"requests": {"cpu": "4", "memory": "4Gi"}, "limits": {"cpu": "4", "memory": "4Gi"}},
+            templates["step-2"]["container"]["resources"],
+        )
+        self.assertIn("resources", templates["inlumen-model-prefetch"]["container"])
+
+    def test_resources_a_node_declares_win_over_its_profile(self):
+        def declare(manifest):
+            manifest["capabilities"] = {"resources": {"cpu": "500m", "memory": "3Gi"}}
+
+        workflow = build_argo_workflow_object(
+            CodegenDeploymentArtifactsTest().graph(),
+            edit_node_manifest(codegen_payload(), "1", declare),
+        )
+        self.assertEqual(
+            {"requests": {"cpu": "500m", "memory": "3Gi"}, "limits": {"cpu": "500m", "memory": "3Gi"}},
+            templates_by_name(workflow)["step-1"]["container"]["resources"],
+        )
+
+        def declare_invalid(manifest):
+            manifest["capabilities"] = {"resources": {"memory": "lots"}}
+
+        with self.assertRaises(DeploymentArtifactValidationError) as raised:
+            build_argo_workflow_object(
+                CodegenDeploymentArtifactsTest().graph(),
+                edit_node_manifest(codegen_payload(), "1", declare_invalid),
+            )
+        self.assertIn("capabilities.resources.memory", str(raised.exception.errors))
+
+    def test_gpu_runs_give_model_steps_a_gpu_and_build_cuda_pytorch(self):
+        workflow = build_argo_workflow_object(
+            CodegenDeploymentArtifactsTest().graph(),
+            whisper_payload(),
+            shared_runtime=self._shared_runtime(),
+            gpu=True,
+        )
+        templates = templates_by_name(workflow)
+        step = templates["step-2"]["container"]
+        self.assertEqual("1", step["resources"]["limits"]["nvidia.com/gpu"])
+        self.assertNotIn("nvidia.com/gpu", step["resources"]["requests"])
+        environment = {item["name"]: item.get("value") for item in step["env"]}
+        self.assertEqual("gpu", environment["INLUMEN_ACCELERATOR"])
+        prefetch = {item["name"]: item.get("value") for item in templates["inlumen-model-prefetch"]["container"]["env"]}
+        self.assertEqual("gpu", prefetch["INLUMEN_ACCELERATOR"])
+        # Steps that cannot use a GPU do not hold one.
+        self.assertNotIn("nvidia.com/gpu", templates["step-1"]["container"]["resources"]["limits"])
+
+        cpu = build_argo_workflow_object(
+            CodegenDeploymentArtifactsTest().graph(), whisper_payload(), shared_runtime=self._shared_runtime(),
+        )
+        self.assertNotIn("nvidia.com/gpu", json.dumps(cpu))
+
+        by_path = {item["path"]: item["content"] for item in argo_bundle(whisper_payload())["files"]}
+        self.assertIn("nvidia.com/gpu", by_path["argo/workflow-gpu.yaml"])
+        self.assertNotIn("nvidia.com/gpu", by_path["argo/workflow.yaml"])
+        self.assertIn("ACCELERATOR ?= cpu", by_path["argo/Makefile"])
+        self.assertIn("--build-arg INLUMEN_ACCELERATOR=$(ACCELERATOR)", by_path["argo/Makefile"])
+        self.assertIn("ACCELERATOR=gpu", by_path["README.md"])
+
+    def test_resource_profiles_match_local_runs(self):
+        path = Path(__file__).resolve().parents[2] / "codegen" / "app" / "resource_policy.py"
+        if not path.is_file():
+            self.skipTest("codegen sources are not available")
+        spec = importlib.util.spec_from_file_location("codegen_resource_policy", path)
+        policy = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = policy  # dataclasses look their module up here
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        spec.loader.exec_module(policy)
+
+        self.assertEqual(
+            {name: {"cpu": item.cpu, "memory_bytes": item.memory_bytes} for name, item in policy.RESOURCE_PROFILES.items()},
+            argo_helpers.RESOURCE_PROFILES,
+        )
+        cases = [
+            ([], ""),
+            ([], "requests\n"),
+            ([], "pandas>=2\n"),
+            ([], "torch\n"),
+            (["lightweight_cpu"], ""),
+            (["heavy_cpu_or_gpu"], ""),
+            (["gpu_preferred", "lightweight_cpu"], ""),
+            ([""], "pandas\n"),
+        ]
+        for classes, requirements in cases:
+            with self.subTest(classes=classes, requirements=requirements), tempfile.TemporaryDirectory() as root:
+                (Path(root) / "requirements.txt").write_text(requirements)
+                if classes:
+                    (Path(root) / "model-requirements.json").write_text(
+                        json.dumps({"models": [{"resource_class": item} for item in classes]})
+                    )
+                expected, _ = policy.select_resource_profile(Path(root))
+                self.assertEqual(
+                    expected.name,
+                    argo_helpers.select_resource_profile(classes, requirements.splitlines()),
+                )
+
+    def test_plugin_base_url_is_a_workflow_parameter(self):
+        workflow = build_argo_workflow_object(CodegenDeploymentArtifactsTest().graph(), plugin_payload())
+        parameters = {item["name"]: item["value"] for item in workflow["spec"]["arguments"]["parameters"]}
+        self.assertEqual("https://wikifier.example.org", parameters["plugin-url-step-2"])
+        template = templates_by_name(workflow)["step-2"]
+        environment = {item["name"]: item.get("value") for item in template["container"]["env"]}
+        self.assertEqual("{{workflow.parameters.plugin-url-step-2}}", environment["INLUMEN_PLUGIN_BASE_URL"])
+        self.assertEqual("jsi-wikifier@1.0.0", template["metadata"]["annotations"]["inlumen.ai/plugin"])
+        self.assertNotIn("INLUMEN_PLUGIN_BASE_URL", json.dumps(templates_by_name(workflow)["step-1"]))
+
+        bundle = argo_bundle(plugin_payload())
+        self.assertEqual(
+            [{
+                "flow_id": "2",
+                "plugin": "jsi-wikifier@1.0.0",
+                "parameter": "plugin-url-step-2",
+                "environment": "INLUMEN_PLUGIN_URL_STEP_2",
+                "default_url": "https://wikifier.example.org",
+            }],
+            bundle["manifest"]["argo"]["plugin_endpoints"],
+        )
+        by_path = {item["path"]: item["content"] for item in bundle["files"]}
+        self.assertIn("plugin-url-step-2|INLUMEN_PLUGIN_URL_STEP_2", by_path["argo/submit.sh"])
+        readme = by_path["README.md"]
+        self.assertIn("### Plugin steps", readme)
+        self.assertIn("egress", readme)
+        self.assertIn("DNS", readme)
+        self.assertIn("| `2` | jsi-wikifier@1.0.0 | `plugin-url-step-2` | `INLUMEN_PLUGIN_URL_STEP_2` |", readme)
+        self.assertNotIn("### Plugin steps", {item["path"]: item["content"] for item in argo_bundle()["files"]}["README.md"])
+
+
     def _shared_runtime(self):
         from deployment_artifacts import (
             _shared_argo_runtime,
@@ -359,6 +588,90 @@ class ArgoBundleScriptsTest(unittest.TestCase):
         self.assertIn(f"-p pipeline-image=ghcr.io/acme/inlumen-pipeline:{tag}", call)
         self.assertIn("-p output-artifact-prefix=inlumen/output/run-1", call)
 
+
+@unittest.skipUnless(HAS_SHELL_TOOLS, "bash, make and tar are required")
+class ArgoBundleOptionsScriptsTest(ArgoBundleScriptsTest):
+    """make -C argo with MODELS, ACCELERATOR and plugin URLs, on a model pipeline."""
+
+    def setUp(self):
+        super().setUp()
+        shutil.rmtree(self.root)
+        self.bundle = argo_bundle(plugin_payload(whisper_payload()))
+        with zipfile.ZipFile(io.BytesIO(deployment_bundle_zip(self.bundle["files"]))) as archive:
+            archive.extractall(self.root)
+        self.tag = self.bundle["manifest"]["argo"]["image_tag"]
+
+    def make(self, *arguments, env=None):
+        return self.run_in_bundle("make", "--no-print-directory", "-s", "-C", "argo", *arguments, env=env)
+
+    def test_options_pick_the_image_tag_and_workflow(self):
+        for arguments, tag, workflow in (
+            ((), self.tag, "workflow.yaml"),
+            (("MODELS=bake",), f"{self.tag}-models", "workflow-models-baked.yaml"),
+            (("MODELS=bake", "ASR_PROFILE=fast"), f"{self.tag}-models-fast", "workflow-models-baked.yaml"),
+            (("ACCELERATOR=gpu",), f"{self.tag}-gpu", "workflow-gpu.yaml"),
+            (("ACCELERATOR=gpu", "MODELS=bake"), f"{self.tag}-gpu-models", "workflow-gpu-models-baked.yaml"),
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(f"inlumen-pipeline:{tag}", self.make("print-image", *arguments).stdout.strip())
+                printed = self.make("print-workflow", *arguments).stdout.strip()
+                self.assertEqual(workflow, Path(printed).name)
+                self.assertTrue(Path(printed).is_file(), printed)
+
+        wrong = self.make("print-image", "MODELS=pvc")
+        self.assertNotEqual(0, wrong.returncode)
+        self.assertIn("MODELS must be volume or bake", wrong.stderr)
+
+    def test_image_build_passes_the_options_and_the_token_as_a_secret(self):
+        fake_tool(self.bin, "docker", 'echo "$@" >> "$CALLS"\n')
+        result = self.make(
+            "image", "MODELS=bake", "ACCELERATOR=gpu", "ASR_PROFILE=fast",
+            env={**self.env, "HF_TOKEN": "hf_do_not_print"},
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        call = self.calls.read_text()
+        for argument in (
+            "--build-arg INLUMEN_ACCELERATOR=gpu",
+            "--build-arg INLUMEN_MODELS=bake",
+            "--build-arg INLUMEN_ASR_PROFILE=fast",
+            "--secret id=hf_token,env=HF_TOKEN",
+            f"-t inlumen-pipeline:{self.tag}-gpu-models-fast",
+        ):
+            self.assertIn(argument, call)
+        self.assertNotIn("hf_do_not_print", call)
+
+        self.calls.unlink()
+        self.env.pop("HF_TOKEN", None)
+        self.assertEqual(0, self.make("image").returncode)
+        call = self.calls.read_text()
+        self.assertIn("--build-arg INLUMEN_MODELS=volume", call)
+        self.assertIn("--build-arg INLUMEN_ACCELERATOR=cpu", call)
+        self.assertNotIn("--secret", call)
+
+    def test_setup_creates_the_model_volume_only_without_baked_models(self):
+        fake_tool(self.bin, "kubectl", 'echo "$@" >> "$CALLS"\n')
+        self.assertEqual(0, self.make("setup").returncode)
+        self.assertIn("model-store-pvc.yaml", self.calls.read_text())
+        self.calls.unlink()
+        result = self.make("setup", "MODELS=bake")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertNotIn("model-store-pvc.yaml", self.calls.read_text())
+
+    def test_submit_uses_the_chosen_workflow_profile_and_plugin_url(self):
+        fake_tool(self.bin, "argo", 'echo "$@" >> "$CALLS"\n')
+        (self.root / ".env").write_text("INLUMEN_PLUGIN_URL_STEP_2=http://wikifier.tools.svc:8080\n")
+        result = self.make("submit", "MODELS=bake", "ASR_PROFILE=fast", "ARGO_FLAGS=")
+        self.assertEqual(0, result.returncode, result.stderr)
+        call = self.calls.read_text().strip()
+        self.assertIn("argo/workflow-models-baked.yaml -n argo", call)
+        self.assertIn(f"-p pipeline-image=inlumen-pipeline:{self.tag}-models-fast", call)
+        self.assertIn("-p asr-profile=fast", call)
+        self.assertIn("-p plugin-url-step-2=http://wikifier.tools.svc:8080", call)
+
+    # The base class's checks of the default bundle do not apply here.
+    test_make_prints_the_image_name = None
+    test_create_secrets_reads_env_file_and_requires_missing_values = None
+    test_submit_passes_image_output_prefix_and_service_account = None
 
 if __name__ == "__main__":
     unittest.main()

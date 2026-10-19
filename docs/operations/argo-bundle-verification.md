@@ -61,11 +61,47 @@ then open https://localhost:2746.
 - Every step succeeds.
 - With reviewed models, `inlumen-model-prefetch` runs first and logs `verified`
   for each model; a second run logs `verified cache hit` instead of downloading.
+- Each step's pod has the CPU and memory requests and limits of its resource
+  profile (`kubectl -n argo get pod <pod> -o jsonpath='{.spec.containers[0].resources}'`).
 - The final results are under `inlumen/output/<run id>/` in the `my-bucket`
   bucket (download them from the Argo UI, or with an S3 client after
   `kubectl -n argo port-forward svc/minio 19000:9000`).
 
-## 5. Clean up
+## 5. Models baked into the image
+
+For the bundle with reviewed models, check that it also runs without the model
+volume and without internet access:
+
+```bash
+kubectl -n argo delete pvc inlumen-model-store --ignore-not-found
+make -C argo image k3d-import MODELS=bake ASR_PROFILE=fast K3D_CLUSTER=inlumen
+make -C argo setup MODELS=bake NAMESPACE=argo
+kubectl -n argo apply -f - <<'YAML'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: inlumen-no-internet
+spec:
+  podSelector:
+    matchExpressions:
+      - {key: workflows.argoproj.io/workflow, operator: Exists}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock: {cidr: 10.0.0.0/8}
+        - ipBlock: {cidr: 172.16.0.0/12}
+        - ipBlock: {cidr: 192.168.0.0/16}
+YAML
+make -C argo submit MODELS=bake ASR_PROFILE=fast NAMESPACE=argo
+kubectl -n argo delete networkpolicy inlumen-no-internet
+```
+
+The policy lets workflow pods reach the cluster (k3s enforces it) but not the
+internet, so Hugging Face is unreachable during the run. Expected: the image
+build logs `verified` for each model, there is no `inlumen-model-prefetch` task,
+no PVC exists, and every step succeeds.
+
+## 6. Clean up
 
 ```bash
 k3d cluster delete inlumen
