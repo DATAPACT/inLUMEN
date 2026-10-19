@@ -22,14 +22,13 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: backend/requirements.lock
       - name: Check generated contracts and service modules
         run: python scripts/sync_shared.py --check
       - name: Install backend dependencies
         run: |
-          python -m pip install --require-hashes -r backend/requirements.lock
-          python -m pip install pytest==9.1.1
+          python -m pip install uv==0.11.32
+          uv pip install --system --require-hashes -r backend/requirements.lock
+          uv pip install --system pytest==9.1.1
       - name: Run backend tests
         run: python scripts/run_tests.py --component backend
 
@@ -162,9 +161,10 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: backend/requirements.lock
-      - run: python -m pip install --require-hashes -r backend/requirements.lock
+      - name: Install backend dependencies
+        run: |
+          python -m pip install uv==0.11.32
+          uv pip install --system --require-hashes -r backend/requirements.lock
       # MinIO's old public images are no longer reliably pullable. Build the
       # source-only release using its declared toolchain and an immutable commit.
       # The binary is cached by that commit, so it is only compiled once.
