@@ -7,11 +7,7 @@ import { Label } from '@/components/ui/label';
 import { checkPluginEndpoint, type EndpointCheck, type PluginManifest, type PluginParameter } from '@/features/plugins/pluginApi';
 import { DEFAULT_PLUGIN_OUTPUT_MODE, isRequiredParameter, parametersForOperation, PLUGIN_OUTPUT_MODES } from '@/features/plugins/pluginTemplates';
 
-export type PluginOption = { value: string; label: string; description?: string };
-
 type Props = {
-  options: PluginOption[];
-  currentTemplate: string;
   manifest?: PluginManifest;
   missingPluginId?: string | null;
   param: Record<string, unknown>;
@@ -19,13 +15,10 @@ type Props = {
   secretDrafts: Record<string, string>;
   configuredSecrets: Set<string>;
   revealedSecrets: Set<string>;
-  canManagePlugins: boolean;
-  onSelectPlugin: (template: string | null) => void;
   onParameterChange: (name: string, value: string) => void;
   onSecretCommit: (name: string) => void;
   onToggleSecret: (name: string) => void;
   onAddSecret: (name: string) => void;
-  onManagePlugins: () => void;
 };
 
 const displayValue = (value: unknown) =>
@@ -34,8 +27,6 @@ const displayValue = (value: unknown) =>
 const fieldId = (name: string) => `plugin-parameter-${name}`;
 
 export function PluginStepSettings({
-  options,
-  currentTemplate,
   manifest,
   missingPluginId,
   param,
@@ -43,17 +34,13 @@ export function PluginStepSettings({
   secretDrafts,
   configuredSecrets,
   revealedSecrets,
-  canManagePlugins,
-  onSelectPlugin,
   onParameterChange,
   onSecretCommit,
   onToggleSecret,
   onAddSecret,
-  onManagePlugins,
 }: Props) {
   const [check, setCheck] = useState<EndpointCheck | null>(null);
   const [checking, setChecking] = useState(false);
-  const selected = manifest ? currentTemplate : missingPluginId ? currentTemplate : '';
   const operationId = String(param.operation || manifest?.operations[0]?.id || '');
   const operation = manifest?.operations.find((item) => item.id === operationId) || manifest?.operations[0];
   const parameters: PluginParameter[] = manifest ? parametersForOperation(manifest, operationId) : [];
@@ -72,30 +59,9 @@ export function PluginStepSettings({
 
   return (
     <div className="space-y-3">
-      <div className="space-y-2">
-        <Label htmlFor="plugin-selection">Tool</Label>
-        <select
-          id="plugin-selection"
-          className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-          value={selected}
-          onChange={(event) => onSelectPlugin(event.target.value || null)}
-        >
-          <option value="">No plugin</option>
-          {missingPluginId && !manifest && (
-            <option value={currentTemplate}>{missingPluginId} (not installed)</option>
-          )}
-          {options.map((option) => (
-            <option key={option.value} value={option.value}>{option.label}</option>
-          ))}
-        </select>
-        <Button type="button" variant="link" size="sm" className="h-auto p-0 text-xs" onClick={onManagePlugins}>
-          {canManagePlugins ? 'Manage plugins…' : 'View plugins…'}
-        </Button>
-      </div>
-
       {missingPluginId && !manifest && (
         <p role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
-          Plugin {missingPluginId} is not available on this server. Ask an administrator to add its definition, or choose another tool.
+          Plugin {missingPluginId} is not available on this server. Ask an administrator to add its definition, or replace this step with one from the palette.
         </p>
       )}
 

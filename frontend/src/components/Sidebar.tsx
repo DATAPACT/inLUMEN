@@ -36,6 +36,10 @@ import {
   PackageOpen,
   Wand2,
   Puzzle,
+  ChevronDown,
+  ChevronRight,
+  Search,
+  Eye,
 } from 'lucide-react';
 import {
   createNodeDataFromDefinition,
@@ -82,6 +86,68 @@ type PipelineOverviewUpdate = {
   updatedAt?: string | null;
   createdAt?: string | null;
 };
+
+// Above this many entries a palette group offers a filter box.
+const PALETTE_FILTER_THRESHOLD = 5;
+
+type PaletteGroupProps = {
+  title: string;
+  count: number;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  actionLabel: string;
+  onAction: () => void;
+  filter: string;
+  onFilterChange: (value: string) => void;
+  matchCount: number;
+  children: React.ReactNode;
+};
+
+/** A collapsible palette group with compact rows and a filter once it grows long. */
+export function PaletteGroup({
+  title, count, open, onOpenChange, actionLabel, onAction, filter, onFilterChange, matchCount, children,
+}: PaletteGroupProps) {
+  const query = filter.trim();
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <button
+          type="button"
+          className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground"
+          aria-expanded={open}
+          onClick={() => onOpenChange(!open)}
+        >
+          {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+          {title}
+          {count > 0 && <span className="font-normal normal-case">({count})</span>}
+        </button>
+        <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-[11px]" onClick={onAction}>
+          {actionLabel}
+        </Button>
+      </div>
+      {open && (
+        <>
+          {count > PALETTE_FILTER_THRESHOLD && (
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                aria-label={`Filter ${title.toLowerCase()}`}
+                value={filter}
+                onChange={(event) => onFilterChange(event.target.value)}
+                placeholder={`Filter ${title.toLowerCase()}`}
+                className="h-8 pl-7 text-xs"
+              />
+            </div>
+          )}
+          {count > PALETTE_FILTER_THRESHOLD && query && matchCount === 0 && (
+            <p className="px-1 text-xs text-muted-foreground">No {title.toLowerCase()} match “{query}”.</p>
+          )}
+          <div className="space-y-1">{children}</div>
+        </>
+      )}
+    </div>
+  );
+}
 
 interface SidebarProps {
   className?: string;
@@ -323,6 +389,17 @@ export function Sidebar({
 
   const pluginRegistry = usePluginRegistry();
   const [isPluginManagerOpen, setIsPluginManagerOpen] = useState(false);
+  const [isPluginListOpen, setIsPluginListOpen] = useState(true);
+  const [isReusableListOpen, setIsReusableListOpen] = useState(true);
+  const [reusableFilter, setReusableFilter] = useState("");
+  const [pluginFilter, setPluginFilter] = useState("");
+  // Ignore a leftover filter once the group is short enough to hide the box.
+  const pluginQuery = pluginRegistry.plugins.length > PALETTE_FILTER_THRESHOLD ? pluginFilter.trim().toLowerCase() : "";
+  const visiblePlugins = pluginQuery
+    ? pluginRegistry.plugins.filter((plugin) =>
+        [plugin.name, plugin.description, plugin.publisher, plugin.step_type]
+          .some((value) => value?.toLowerCase().includes(pluginQuery)))
+    : pluginRegistry.plugins;
 
   const refreshReusablePipelineCatalog = async () => {
     const pipelines = await fetchReusablePipelines();
@@ -658,6 +735,13 @@ export function Sidebar({
     }
   };
 
+  const reusableQuery = reusablePipelines.length > PALETTE_FILTER_THRESHOLD ? reusableFilter.trim().toLowerCase() : "";
+  const visibleReusablePipelines = reusableQuery
+    ? reusablePipelines.filter((pipeline) =>
+        [pipeline.name, pipeline.description]
+          .some((value) => value?.toLowerCase().includes(reusableQuery)))
+    : reusablePipelines;
+
   return (
     <>
     <div className={cn("flex w-64 min-w-0 flex-col overflow-hidden border-r border-border bg-card", className)}>
@@ -720,21 +804,17 @@ export function Sidebar({
                     })}
                   </div>
                 ))}
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                      Plugins
-                    </p>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 px-2 text-[11px]"
-                      onClick={() => setIsPluginManagerOpen(true)}
-                    >
-                      {pluginRegistry.canManage ? "Manage" : "View"}
-                    </Button>
-                  </div>
+                <PaletteGroup
+                  title="Plugins"
+                  count={pluginRegistry.plugins.length}
+                  open={isPluginListOpen}
+                  onOpenChange={setIsPluginListOpen}
+                  actionLabel={pluginRegistry.canManage ? "Manage" : "View"}
+                  onAction={() => setIsPluginManagerOpen(true)}
+                  filter={pluginFilter}
+                  onFilterChange={setPluginFilter}
+                  matchCount={visiblePlugins.length}
+                >
                   {pluginRegistry.error && (
                     <p className="rounded-md border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-700 dark:text-amber-300">
                       {pluginRegistry.error}
@@ -745,7 +825,7 @@ export function Sidebar({
                       No plugins available. Plugins add third-party tools with a REST API as pipeline steps.
                     </p>
                   )}
-                  {pluginRegistry.plugins.map((plugin) => {
+                  {visiblePlugins.map((plugin) => {
                     const definition = nodeDefinitions.find(
                       (item) => item.base_type === plugin.step_type,
                     );
@@ -755,42 +835,35 @@ export function Sidebar({
                       <div
                         key={plugin.id}
                         draggable
+                        title={plugin.description}
                         onDragStart={(event) =>
                           onDragStart(event, {
                             type: "custom",
                             data: createNodeDataFromPluginTemplate(definition, template),
                           })
                         }
-                        className="flex items-start gap-3 rounded-md border border-violet-400/25 p-2.5 cursor-move transition-colors hover:bg-muted/50"
+                        className="flex items-center gap-2 rounded-md border border-violet-400/25 px-2 py-1.5 cursor-move transition-colors hover:bg-muted/50"
                       >
-                        <div className="rounded-md bg-violet-500/10 p-1.5 text-violet-600 dark:text-violet-300">
-                          <Puzzle className="h-4 w-4" />
-                        </div>
-                        <div className="min-w-0">
-                          <h4 className="truncate text-sm font-medium">{plugin.name}</h4>
-                          <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
-                            {plugin.step_type.charAt(0).toUpperCase() + plugin.step_type.slice(1)} · {plugin.description}
-                          </p>
-                        </div>
+                        <Puzzle className="h-3.5 w-3.5 shrink-0 text-violet-600 dark:text-violet-300" />
+                        <h4 className="min-w-0 flex-1 truncate text-sm font-normal">{plugin.name}</h4>
+                        <span className="shrink-0 rounded border border-border px-1 text-[10px] text-muted-foreground">
+                          {plugin.step_type.charAt(0).toUpperCase() + plugin.step_type.slice(1)}
+                        </span>
                       </div>
                     );
                   })}
-                </div>
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                      Reusable pipelines
-                    </p>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 px-2 text-[11px]"
-                      onClick={() => setIsReusablePipelineManagerOpen(true)}
-                    >
-                      Manage
-                    </Button>
-                  </div>
+                </PaletteGroup>
+                <PaletteGroup
+                  title="Reusable pipelines"
+                  count={reusablePipelines.length}
+                  open={isReusableListOpen}
+                  onOpenChange={setIsReusableListOpen}
+                  actionLabel="Manage"
+                  onAction={() => setIsReusablePipelineManagerOpen(true)}
+                  filter={reusableFilter}
+                  onFilterChange={setReusableFilter}
+                  matchCount={visibleReusablePipelines.length}
+                >
                   {reusablePipelineError && (
                     <p className="rounded-md border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-700 dark:text-amber-300">
                       {reusablePipelineError}
@@ -805,8 +878,8 @@ export function Sidebar({
                       </Button>
                     </div>
                   )}
-                  {reusablePipelines.map((pipeline) => {
-                    const definition = {
+                  {visibleReusablePipelines.map((pipeline) => {
+                        const definition = {
                       label: pipeline.name,
                       description: pipeline.description || "Reusable pipeline",
                       type: "subpipeline" as const,
@@ -832,29 +905,31 @@ export function Sidebar({
                       <div
                         key={pipeline.uid}
                         draggable={!pipeline.unavailable_reason}
+                        title={pipeline.unavailable_reason || pipeline.description || undefined}
                         onDragStart={(event) => {
                           if (pipeline.unavailable_reason) { event.preventDefault(); return; }
                           onDragStart(event, { type: "custom", data: definition });
                         }}
-                        className={cn("flex items-start gap-3 rounded-md border border-cyan-400/20 p-2.5 transition-colors", pipeline.unavailable_reason ? "opacity-60" : "cursor-move hover:bg-muted/50")}
+                        className={cn("rounded-md border border-cyan-400/20 px-2 py-1 transition-colors", pipeline.unavailable_reason ? "opacity-60" : "cursor-move hover:bg-muted/50")}
                       >
-                        <div className="rounded-md bg-cyan-500/10 p-1.5 text-cyan-600 dark:text-cyan-300">
-                          <LayoutGrid className="h-4 w-4" />
-                        </div>
-                        <div className="min-w-0">
-                          <h4 className="truncate text-sm font-medium">{pipeline.name}</h4>
-                          <p className="mt-0.5 text-xs text-muted-foreground">
+                        <div className="flex items-center gap-2">
+                          <LayoutGrid className="h-3.5 w-3.5 shrink-0 text-cyan-600 dark:text-cyan-300" />
+                          <h4 className="min-w-0 flex-1 truncate text-sm font-normal">{pipeline.name}</h4>
+                          <span className="shrink-0 text-[10px] text-muted-foreground">
                             {pipeline.interface.inputs.length} in / {pipeline.interface.outputs.length} out
-                          </p>
-                          <Button type="button" variant="ghost" size="sm" className="mt-1 h-7 px-0" draggable={false}
+                          </span>
+                          <Button type="button" variant="ghost" size="icon" className="h-6 w-6 shrink-0" draggable={false}
+                            aria-label="View pipeline"
                             onDragStart={(event) => { event.preventDefault(); event.stopPropagation(); }}
-                            onClick={() => setReusablePipelineToView(pipeline)}>View pipeline</Button>
-                          {pipeline.unavailable_reason && <p className="mt-1 text-xs text-destructive">{pipeline.unavailable_reason}</p>}
+                            onClick={() => setReusablePipelineToView(pipeline)}>
+                            <Eye className="h-3.5 w-3.5" />
+                          </Button>
                         </div>
+                        {pipeline.unavailable_reason && <p className="mt-0.5 text-xs text-destructive">{pipeline.unavailable_reason}</p>}
                       </div>
                     );
                   })}
-                </div>
+                </PaletteGroup>
               </div>
             </div>
           </div>

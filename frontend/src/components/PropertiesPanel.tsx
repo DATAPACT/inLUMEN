@@ -67,11 +67,9 @@ import {
   defaultParametersForTemplate,
   defaultTemplateForType,
   findTemplateForType,
-  pluginTemplatesForType,
   templateOptionsForType,
 } from '@/features/nodes/templateCatalog';
 import { PluginStepSettings } from '@/components/plugins/PluginStepSettings';
-import { PluginManagerDialog } from '@/components/plugins/PluginManagerDialog';
 import { usePluginRegistry } from '@/features/plugins/pluginRegistry';
 import { pluginIdFromTemplate } from '@/features/plugins/pluginTemplates';
 import {
@@ -276,20 +274,12 @@ export function PropertiesPanel({
   );
   const canManageInputFiles = nodeSupportsInputFiles(nodeType, currentTemplate);
   const pluginRegistry = usePluginRegistry();
-  const [isPluginManagerOpen, setIsPluginManagerOpen] = useState(false);
   const activePluginId = pluginIdFromTemplate(currentTemplate);
   const activePlugin = activePluginId
     ? pluginRegistry.plugins.find((plugin) => plugin.id === activePluginId)
     : undefined;
-  const pluginOptions = ["source", "task", "destination"].includes(nodeType)
-    ? pluginTemplatesForType(nodeType).map((template) => ({
-        value: template.value,
-        label: template.label,
-        description: template.description,
-      }))
-    : [];
-  const showPluginSection = ["source", "task", "destination"].includes(nodeType)
-    && (pluginOptions.length > 0 || Boolean(activePluginId) || pluginRegistry.canManage);
+  // Plugin steps are created from the palette; the inspector only configures them.
+  const showPluginSection = Boolean(activePluginId);
   // A plugin-backed Task runs the managed plugin adapter, not uploaded code.
   const showTaskImplementation = canManageImplementation && !activePluginId;
   const editableParamEntries: Array<[string, unknown]> = Object.entries(param).filter(([key]) => (
@@ -611,14 +601,6 @@ export function PropertiesPanel({
       secret_params: nextSecretParams,
       ...(nodeType === "flow" ? { label: nextLabel } : {}),
     });
-  };
-
-  const handlePluginChange = (pluginTemplate: string | null) => {
-    if (!pluginTemplate) {
-      handleTemplateChange(defaultTemplateForType(nodeType), { replaceParameters: true });
-      return;
-    }
-    handleTemplateChange(pluginTemplate, { replaceParameters: true });
   };
 
   const setFlowParameter = (key: string, value: unknown) => {
@@ -1457,12 +1439,10 @@ export function PropertiesPanel({
               <InspectorSection
                 id="inspector-plugin"
                 title="Plugin"
-                description="Run this step with a third-party tool. inLUMEN calls the tool's deployed REST API."
+                description="This step calls a third-party tool's deployed REST API."
                 status={activePluginId && !activePlugin ? "error" : undefined}
               >
                 <PluginStepSettings
-                  options={pluginOptions}
-                  currentTemplate={currentTemplate}
                   manifest={activePlugin?.manifest}
                   missingPluginId={pluginRegistry.loaded && !pluginRegistry.error ? activePluginId : null}
                   param={param}
@@ -1470,13 +1450,10 @@ export function PropertiesPanel({
                   secretDrafts={secretDrafts}
                   configuredSecrets={configuredSecretParams}
                   revealedSecrets={revealedSecretParams}
-                  canManagePlugins={pluginRegistry.canManage}
-                  onSelectPlugin={handlePluginChange}
                   onParameterChange={setParamValue}
                   onSecretCommit={(name) => { void commitSecretValue(name); }}
                   onToggleSecret={toggleSecretVisibility}
                   onAddSecret={(name) => addParameter(name, true)}
-                  onManagePlugins={() => setIsPluginManagerOpen(true)}
                 />
               </InspectorSection>
             )}
@@ -1806,9 +1783,6 @@ export function PropertiesPanel({
         reference={isReusableViewerOpen ? selectedNode?.data.subpipeline?.reference || null : null}
         onClose={() => setIsReusableViewerOpen(false)}
       />
-      {isPluginManagerOpen && (
-        <PluginManagerDialog open onOpenChange={setIsPluginManagerOpen} />
-      )}
       <AlertDialog open={isAttachmentReviewOpen} onOpenChange={setIsAttachmentReviewOpen}>
         <AlertDialogContent className="max-w-2xl">
           <AlertDialogHeader>
