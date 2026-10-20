@@ -24,8 +24,8 @@ hosts or runs the tool's code; a plugin step runs a small platform-owned adapter
      in **Lab → Plugins → Manage → Add plugin**. Useful for trying a tool or for a
      tool specific to one installation. A UI definition with the same id overrides
      the built-in one; removing it falls back to the built-in file.
-4. Users drag the plugin from the **Plugins** palette group (or pick it in the
-   **Plugin** section of a step), fill in its parameters and secret, and run.
+4. Users drag the plugin from the **Plugins** palette group, fill in its
+   parameters and secret in the step's **Plugin** section, and run.
 
 ## How it runs
 
