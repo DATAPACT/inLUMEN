@@ -845,7 +845,7 @@ export function Sidebar({
                         className="flex items-center gap-2 rounded-md border border-violet-400/25 px-2 py-1.5 cursor-move transition-colors hover:bg-muted/50"
                       >
                         <Puzzle className="h-3.5 w-3.5 shrink-0 text-violet-600 dark:text-violet-300" />
-                        <span className="min-w-0 flex-1 truncate text-sm">{plugin.name}</span>
+                        <h4 className="min-w-0 flex-1 truncate text-sm font-normal">{plugin.name}</h4>
                         <span className="shrink-0 rounded border border-border px-1 text-[10px] text-muted-foreground">
                           {plugin.step_type.charAt(0).toUpperCase() + plugin.step_type.slice(1)}
                         </span>
@@ -914,12 +914,12 @@ export function Sidebar({
                       >
                         <div className="flex items-center gap-2">
                           <LayoutGrid className="h-3.5 w-3.5 shrink-0 text-cyan-600 dark:text-cyan-300" />
-                          <span className="min-w-0 flex-1 truncate text-sm">{pipeline.name}</span>
+                          <h4 className="min-w-0 flex-1 truncate text-sm font-normal">{pipeline.name}</h4>
                           <span className="shrink-0 text-[10px] text-muted-foreground">
                             {pipeline.interface.inputs.length} in / {pipeline.interface.outputs.length} out
                           </span>
                           <Button type="button" variant="ghost" size="icon" className="h-6 w-6 shrink-0" draggable={false}
-                            aria-label={`View pipeline ${pipeline.name}`}
+                            aria-label="View pipeline"
                             onDragStart={(event) => { event.preventDefault(); event.stopPropagation(); }}
                             onClick={() => setReusablePipelineToView(pipeline)}>
                             <Eye className="h-3.5 w-3.5" />
