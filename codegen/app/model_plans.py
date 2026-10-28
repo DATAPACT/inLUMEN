@@ -40,12 +40,18 @@ FASTER_WHISPER_PLAN: dict[str, Any] = {
             "model_id": "Systran/faster-whisper-small",
             "model_revision": "536b0662742c02347bc0e980a01041f333bce120",
         },
+        "fastest": {
+            "model_id": "Systran/faster-whisper-tiny",
+            "model_revision": "d90ca5fe260221311c53c58e660288d3deb8d356",
+        },
     },
     "runtime_selection": {
         "default_profile": "auto",
+        # Favour turnaround time; set INLUMEN_ASR_PROFILE to fast, balanced
+        # or accuracy when transcript quality matters more than speed.
         "auto_profile_by_device": {
-            "cpu": "balanced",
-            "cuda": "accuracy",
+            "cpu": "fastest",
+            "cuda": "fastest",
         },
     },
     "device": "auto",

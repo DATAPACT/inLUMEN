@@ -52,6 +52,18 @@ _DEPLOYMENT_EXECUTION_PROGRESS: dict[str, dict[str, Any]] = {}
 _DEPLOYMENT_PROCESS_LOCK = threading.RLock()
 
 
+def observe_host_capacity() -> None:
+    """Probe Docker once so the workload view shows the host's real slots."""
+    if RESOURCE_ADMISSION.has_capacity():
+        return
+    try:
+        RESOURCE_ADMISSION.observe_capacity(
+            host_allocatable_resources(docker.from_env().info())
+        )
+    except (DockerException, OSError):
+        pass
+
+
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
@@ -489,6 +501,7 @@ def _isolated_dagster_execution(
         client = docker.from_env()
         profile, profile_reason = select_resource_profile(project_root)
         capacity = host_allocatable_resources(client.info())
+        RESOURCE_ADMISSION.observe_capacity(capacity)
         requested_allocation = profile_allocation(
             profile,
             capacity,
