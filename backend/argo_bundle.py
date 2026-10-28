@@ -350,7 +350,7 @@ def makefile(plan: ArgoBundlePlan, *, uv_version: str) -> str:
             "# them into the image, so runs need neither the volume nor internet access.\n"
             "MODELS ?= volume\n"
             "$(if $(filter-out volume bake,$(MODELS)),$(error MODELS must be volume or bake))\n"
-            "# Speech-to-text model size: auto, fast, balanced or accuracy. With\n"
+            "# Speech-to-text model size: auto, fastest, fast, balanced or accuracy. With\n"
             "# MODELS=bake, build and submit with the same value.\n"
             "ASR_PROFILE ?="
         )
@@ -449,7 +449,7 @@ WORKFLOW_FILE ?= $(ARGO_DIR)/workflow{workflow_suffix}.yaml"""
     if plan.model_store:
         option_help += (
             "\t@echo \"  MODELS=volume|bake    models in a shared volume (default) or in the image\"\n"
-            "\t@echo \"  ASR_PROFILE=<profile> speech-to-text model size (auto, fast, balanced, accuracy)\"\n"
+            "\t@echo \"  ASR_PROFILE=<profile> speech-to-text model size (auto, fastest, fast, balanced, accuracy)\"\n"
         )
     if option_help:
         option_help = "\t@echo \"Options (use the same ones for image and submit):\"\n" + option_help
@@ -770,7 +770,7 @@ def readme_section(plan: ArgoBundlePlan) -> str:
         else ""
     )
     models_section = (
-        f"""**Reviewed models** stay out of the image by default. The first task of the workflow, `{MODEL_PREFETCH_TASK}`, downloads the pinned model revisions (listed in `argo/model-prefetch/model-requirements.json`) into the `{MODEL_STORE_CLAIM}` volume and verifies their SHA-256 manifests. The model steps mount that volume read-only at `{MODEL_ROOT}`. Only the first run downloads; later runs reuse the verified models. The prefetch task needs internet access to Hugging Face; set `HF_TOKEN` in `.env` (then `make -C argo secrets`) for gated models. To choose the speech-to-text model size, add `ASR_PROFILE=fast` (or `balanced`, `accuracy`; the default `auto` picks `balanced` on CPU and `accuracy` on GPU) to `make -C argo submit`, or set `INLUMEN_ASR_PROFILE` in `.env`. If your cluster has no shared storage or no internet access, bake the models into the image instead (`MODELS=bake`, see "Options" below).
+        f"""**Reviewed models** stay out of the image by default. The first task of the workflow, `{MODEL_PREFETCH_TASK}`, downloads the pinned model revisions (listed in `argo/model-prefetch/model-requirements.json`) into the `{MODEL_STORE_CLAIM}` volume and verifies their SHA-256 manifests. The model steps mount that volume read-only at `{MODEL_ROOT}`. Only the first run downloads; later runs reuse the verified models. The prefetch task needs internet access to Hugging Face; set `HF_TOKEN` in `.env` (then `make -C argo secrets`) for gated models. To choose the speech-to-text model size, add `ASR_PROFILE=balanced` (or `fast`, `accuracy`; the default `auto` picks the `fastest` model on both CPU and GPU) to `make -C argo submit`, or set `INLUMEN_ASR_PROFILE` in `.env`. If your cluster has no shared storage or no internet access, bake the models into the image instead (`MODELS=bake`, see "Options" below).
 
 """
         if plan.model_store

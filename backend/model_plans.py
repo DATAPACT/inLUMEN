@@ -41,12 +41,18 @@ FASTER_WHISPER_PLAN: dict[str, Any] = {
             "model_id": "Systran/faster-whisper-small",
             "model_revision": "536b0662742c02347bc0e980a01041f333bce120",
         },
+        "fastest": {
+            "model_id": "Systran/faster-whisper-tiny",
+            "model_revision": "d90ca5fe260221311c53c58e660288d3deb8d356",
+        },
     },
     "runtime_selection": {
         "default_profile": "auto",
+        # Favour turnaround time; set INLUMEN_ASR_PROFILE to fast, balanced
+        # or accuracy when transcript quality matters more than speed.
         "auto_profile_by_device": {
-            "cpu": "balanced",
-            "cuda": "accuracy",
+            "cpu": "fastest",
+            "cuda": "fastest",
         },
     },
     "device": "auto",
@@ -361,8 +367,8 @@ def _literal_whisper_model_argument(
 def _faster_whisper_plan_for_literal(model: str) -> dict[str, Any]:
     normalized = model.strip().lower()
     variant_aliases = {
-        "tiny": "tiny",
-        "systran/faster-whisper-tiny": "tiny",
+        "tiny": "fastest",
+        "systran/faster-whisper-tiny": "fastest",
         "small": "fast",
         "systran/faster-whisper-small": "fast",
         "medium": "balanced",
@@ -374,14 +380,7 @@ def _faster_whisper_plan_for_literal(model: str) -> dict[str, Any]:
     variant_name = variant_aliases.get(normalized)
     if not variant_name:
         return {}
-    variant = (
-        {
-            "model_id": "Systran/faster-whisper-tiny",
-            "model_revision": "d90ca5fe260221311c53c58e660288d3deb8d356",
-        }
-        if variant_name == "tiny"
-        else FASTER_WHISPER_PLAN["model_variants"][variant_name]
-    )
+    variant = FASTER_WHISPER_PLAN["model_variants"][variant_name]
     plan = _copy_value(FASTER_WHISPER_PLAN)
     plan["model_id"] = variant["model_id"]
     plan["model_revision"] = variant["model_revision"]

@@ -609,7 +609,7 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             clear=True,
         ):
             selected = namespace["_selected_specs"](requirements)
-        self.assertEqual("Systran/faster-whisper-medium", selected[0]["model_id"])
+        self.assertEqual("Systran/faster-whisper-tiny", selected[0]["model_id"])
         with patch.dict(
             "os.environ",
             {
@@ -620,7 +620,7 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
             clear=False,
         ):
             selected = namespace["_selected_specs"](requirements)
-        self.assertEqual("Systran/faster-whisper-medium", selected[0]["model_id"])
+        self.assertEqual("Systran/faster-whisper-tiny", selected[0]["model_id"])
         with patch.dict(
             "os.environ",
             {"INLUMEN_ASR_PROFILE": "accuracy"},

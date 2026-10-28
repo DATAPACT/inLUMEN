@@ -21,6 +21,7 @@ from .deployment_validation import (
     cancel_deployment_execution,
     deployment_execution_progress,
     finish_deployment_execution,
+    observe_host_capacity,
     prepare_deployment_execution,
     validate_deployment_bundle_files,
 )
@@ -959,6 +960,7 @@ async def _execute_registered_deployment(request: DeploymentBundleValidationRequ
 
 @app.get("/v1/execution-workload", dependencies=SERVICE_AUTH)
 def execution_workload(workspace_id: Annotated[str, Depends(workspace_context)]) -> dict[str, Any]:
+    observe_host_capacity()
     return {**RESOURCE_ADMISSION.snapshot(), "observed_at": datetime.now(UTC).isoformat(),
             "pending_limit": DEPLOYMENT_PENDING_LIMIT}
 

@@ -3964,7 +3964,7 @@ Run the exported bundle directly from this directory:
 docker compose up --build
 ```
 
-Then open Dagster at `http://localhost:3000` and materialize the generated assets. The generated image pins Dagster to `{DAGSTER_PINNED_VERSION}`, uses `uv`, installs one consolidated dependency set, mounts `inputs/` and `outputs/`, and executes node scripts through `run-spec.json` plus their node manifests. The Compose topology separates the webserver, daemon, and user-code execution service and uses PostgreSQL for concurrent orchestration writes. CPU-only PyTorch is the default; set `INLUMEN_ACCELERATOR=gpu` only for a GPU-capable runtime. ASR defaults to `INLUMEN_ASR_PROFILE=auto`, which selects the pinned multilingual `balanced` model on CPU and the pinned `accuracy` model on CUDA. Set the profile explicitly to `accuracy`, `balanced`, or `fast` when the runtime trade-off is known.{model_note}
+Then open Dagster at `http://localhost:3000` and materialize the generated assets. The generated image pins Dagster to `{DAGSTER_PINNED_VERSION}`, uses `uv`, installs one consolidated dependency set, mounts `inputs/` and `outputs/`, and executes node scripts through `run-spec.json` plus their node manifests. The Compose topology separates the webserver, daemon, and user-code execution service and uses PostgreSQL for concurrent orchestration writes. CPU-only PyTorch is the default; set `INLUMEN_ACCELERATOR=gpu` only for a GPU-capable runtime. ASR defaults to `INLUMEN_ASR_PROFILE=auto`, which selects the pinned multilingual `fastest` model on both CPU and CUDA. Set the profile explicitly to `fast`, `balanced`, or `accuracy` when transcript quality matters more than speed.{model_note}
 """
 
     argo_section = argo_bundle.readme_section(argo_plan) if argo_plan else ""

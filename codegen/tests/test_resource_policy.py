@@ -169,6 +169,20 @@ def test_active_run_limit_applies_even_when_small_jobs_fit():
     controller.release("next")
 
 
+def test_snapshot_reports_slots_the_host_can_fit(monkeypatch):
+    for name in ("CODEGEN_EXECUTION_CPU_BUDGET", "CODEGEN_EXECUTION_MEMORY_GIB", "CODEGEN_EXECUTION_MAX_ACTIVE_RUNS"):
+        monkeypatch.delenv(name, raising=False)
+    controller = ResourceAdmissionController()
+    assert controller.snapshot()["max_active_runs"] == 10000
+    # 8 CPUs minus 2 reserved fit six 1-CPU/1-GiB runs; 21 GiB is not the bound.
+    controller.observe_capacity(host_allocatable_resources({"NCPU": 8, "MemTotal": 30 * GIB}))
+    assert controller.snapshot()["max_active_runs"] == 6
+    assert ResourceAdmissionController(max_active_runs=2)._effective_max_active_runs() == 2
+    capped = ResourceAdmissionController(max_active_runs=2)
+    capped.observe_capacity(host_allocatable_resources({"NCPU": 8, "MemTotal": 30 * GIB}))
+    assert capped.snapshot()["max_active_runs"] == 2
+
+
 @pytest.mark.parametrize("name", ["CODEGEN_EXECUTION_CPU_BUDGET", "CODEGEN_EXECUTION_MEMORY_GIB", "CODEGEN_EXECUTION_MAX_ACTIVE_RUNS", "CODEGEN_ML_CPU_THREADS"])
 @pytest.mark.parametrize("value", ["0", "-1", "invalid"])
 def test_bad_execution_settings_fail_closed(monkeypatch, name, value):

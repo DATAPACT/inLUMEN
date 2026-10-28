@@ -893,9 +893,9 @@ def test_trusted_faster_whisper_adapter_emits_confidence_metrics(
         "faster_whisper",
         types.SimpleNamespace(WhisperModel=FakeWhisperModel),
     )
-    balanced_snapshot, balanced_tree = install_verified_model(
-        "Systran/faster-whisper-medium",
-        "08e178d48790749d25932bbc082711ddcfdfbc4f",
+    fastest_snapshot, fastest_tree = install_verified_model(
+        "Systran/faster-whisper-tiny",
+        "d90ca5fe260221311c53c58e660288d3deb8d356",
     )
     accuracy_snapshot, _ = install_verified_model(
         "Systran/faster-whisper-large-v3",
@@ -933,10 +933,10 @@ def test_trusted_faster_whisper_adapter_emits_confidence_metrics(
         result["confidence_metrics"]["reference_evaluation"]["word_error_rate"]
         == 0.0
     )
-    assert calls["model"][0] == balanced_snapshot
+    assert calls["model"][0] == fastest_snapshot
     assert calls["model"][1:] == ("cpu", "int8", 2, 1)
-    assert result["processing_metadata"]["profile"] == "balanced"
-    assert result["processing_metadata"]["model_tree_sha256"] == balanced_tree
+    assert result["processing_metadata"]["profile"] == "fastest"
+    assert result["processing_metadata"]["model_tree_sha256"] == fastest_tree
     assert calls["transcribe"][1]["vad_filter"] is True
 
     monkeypatch.setenv("INLUMEN_ASR_PROFILE", "accuracy")

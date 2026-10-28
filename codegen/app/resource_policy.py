@@ -186,6 +186,27 @@ class ResourceAdmissionController:
         self._condition = threading.Condition(threading.RLock())
         self._active: dict[str, dict[str, Any]] = {}
         self._waiting: list[str] = []
+        self._capacity: dict[str, int] | None = None
+
+    def observe_capacity(self, capacity: dict[str, int]) -> None:
+        """Remember the host budget so snapshots report real concurrency."""
+        with self._condition:
+            self._capacity = dict(capacity)
+
+    def has_capacity(self) -> bool:
+        with self._condition:
+            return self._capacity is not None
+
+    def _effective_max_active_runs(self) -> int:
+        """Configured cap, bounded by how many smallest-profile runs fit."""
+        if self._capacity is None:
+            return self.max_active_runs
+        smallest = RESOURCE_PROFILES["lightweight"]
+        fitting = min(
+            int(self._capacity["allocatable_cpu"]) // smallest.cpu,
+            int(self._capacity["allocatable_memory_bytes"]) // smallest.memory_bytes,
+        )
+        return min(self.max_active_runs, max(fitting, 1))
 
     def enqueue(self, execution_id: str) -> None:
         """Register arrival before a worker thread or bundle preparation starts."""
@@ -199,7 +220,7 @@ class ResourceAdmissionController:
             return {
                 "active_runs": len(self._active),
                 "queued_runs": len(self._waiting),
-                "max_active_runs": self.max_active_runs,
+                "max_active_runs": self._effective_max_active_runs(),
                 "queue_position": self._waiting.index(execution_id) + 1
                 if execution_id in self._waiting else None,
             }

@@ -559,6 +559,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const [isHistoryRestoring, setIsHistoryRestoring] = useState(false);
   const [isGeneratingScripts, setIsGeneratingScripts] = useState(false);
   const [isCancellingScripts, setIsCancellingScripts] = useState(false);
+  const [isStartingGeneration, setIsStartingGeneration] = useState(false);
   const generationCancelRequestedRef = useRef(false);
   const handledGenerationRunsRef = useRef(new Set<string>());
   const [isScriptGenerationOpen, setIsScriptGenerationOpen] = useState(false);
@@ -1805,6 +1806,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     };
     generationCancelRequestedRef.current = false;
     setIsGeneratingScripts(true);
+    setIsStartingGeneration(true);
     setGenerationJob(null);
     try {
       const started = await startPipelineScriptGenerationRun(
@@ -1828,6 +1830,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         description: error instanceof Error ? error.message : "Unknown error",
       });
       setIsGeneratingScripts(false);
+    } finally {
+      setIsStartingGeneration(false);
     }
   };
 
@@ -2059,7 +2063,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     : `${scriptGenerationSelectedFlowIds.length} selected nodes`;
   const codegenModelName = activeChatbotConfig?.codegenModel?.trim() || "";
   const canStartGeneration = Boolean(
-    generationPreflight
+    !isGeneratingScripts
+    && generationPreflight
     && generationPreflight.target_count > 0
     && !isGenerationPreflightLoading
     && !generationPreflightError
@@ -2775,8 +2780,8 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
                   onClick={() => { void handleRunPipelineScriptGeneration(); }}
                   disabled={!canStartGeneration}
                 >
-                  {isGenerationPreflightLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                  Generate and attach
+                  {(isGenerationPreflightLoading || isStartingGeneration) && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  {isStartingGeneration ? "Starting generation…" : "Generate and attach"}
                 </Button>
               </>
             ) : isGeneratingScripts ? (
