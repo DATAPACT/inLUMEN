@@ -36,7 +36,7 @@ export const nodeDefinitionSchema = z.object({
   palette: nodePaletteMetadataSchema,
   editor: nodeEditorDescriptorSchema,
   runtime: nodeRuntimeDescriptorSchema,
-  default_implementation: z.record(z.unknown()).default({}),
+  default_implementation: z.record(z.string(), z.unknown()).default({}),
 });
 
 export const nodeDefinitionResponseSchema = z.object({
