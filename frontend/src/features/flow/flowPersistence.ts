@@ -122,6 +122,9 @@ export type PipelineScriptGenerationOptions = {
   generationStrategy?: "auto" | "single_pass" | "per_node";
   allowDeterministicFallback?: boolean;
   repairAttempts?: number;
+  /** Pipeline request from the design chat; always sent to the code model. */
+  pipelineRequest?: string;
+  /** Optional extra notes typed in the Generate dialog. */
   userInstruction?: string;
 };
 
@@ -618,7 +621,8 @@ const buildPipelineGenerationPayload = (
     overwrite_manual_code: options.overwriteManualCode ?? false,
     allow_deterministic_fallback: options.allowDeterministicFallback ?? false,
     repair_attempts: options.repairAttempts ?? 7,
-    high_level_prompt: options.userInstruction?.trim() || "",
+    high_level_prompt: options.pipelineRequest?.trim() || "",
+    additional_instructions: options.userInstruction?.trim() || "",
   };
 };
 

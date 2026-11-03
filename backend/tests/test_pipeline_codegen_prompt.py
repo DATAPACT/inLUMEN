@@ -57,6 +57,23 @@ class PipelineCodegenPromptTests(unittest.TestCase):
             metadata["high_level_prompt"],
         )
 
+    def test_additional_instructions_are_sent_beside_the_pipeline_request(self):
+        codegen_payload, metadata = inlumen_api._build_pipeline_codegen_payload(
+            {"nodes": [], "edges": []},
+            {
+                "high_level_prompt": "Clean and join stock prices.",
+                "additional_instructions": "Use polars instead of pandas.",
+                "include_sample_data": False,
+            },
+        )
+
+        instruction = codegen_payload["options"]["user_instruction"]
+        self.assertIn("HIGH-LEVEL PIPELINE REQUEST:\nClean and join stock prices.", instruction)
+        self.assertIn("ADDITIONAL GENERATION INSTRUCTIONS", instruction)
+        self.assertIn("Use polars instead of pandas.", instruction)
+        self.assertEqual("Clean and join stock prices.", metadata["high_level_prompt"])
+        self.assertEqual("Use polars instead of pandas.", metadata["additional_instructions"])
+
     def test_attachment_contract_is_sent_without_a_custom_prompt(self):
         codegen_payload, metadata = inlumen_api._build_pipeline_codegen_payload(
             {"nodes": [], "edges": []},

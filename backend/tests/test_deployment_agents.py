@@ -104,6 +104,49 @@ class DeploymentAgentsTest(unittest.TestCase):
         self.assertFalse(by_name["API_KEY"]["required"])
         self.assertFalse(by_name["API_ENDPOINT"]["required"])
 
+    def test_custom_source_with_several_files_publishes_one_directory_bundle(self):
+        artifact, _ = _managed_adapter_runtime(
+            {
+                "flow_id": "1",
+                "label": "Stock Data Ingress",
+                "type": "source",
+                "template": "Custom",
+                "param": {},
+                "files": [
+                    {"filename": "market_indices.csv", "kind": "table", "format": "csv"},
+                    {"filename": "stocks.csv", "kind": "table", "format": "csv"},
+                ],
+            }
+        )
+        files = {item["filename"]: item for item in artifact["files"]}
+        manifest = json.loads(files["node-manifest.json"]["content"])
+        (bundle,) = manifest["data_contract"]["outputs"]
+        self.assertEqual("stock_data_ingress", bundle["name"])
+        self.assertEqual("directory", bundle["representation"])
+        self.assertEqual(
+            ["market_indices.csv", "stocks.csv"],
+            [member["filename"] for member in bundle["members"]],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            (input_dir / "market_indices.csv").write_text("date,sp500\n", encoding="utf-8")
+            (input_dir / "stocks.csv").write_text("date,ticker\n", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {"PIPELINE_INPUT_DIR": str(input_dir), "PIPELINE_OUTPUT_DIR": str(output_dir)},
+            ):
+                namespace = {"__name__": "source_adapter"}
+                exec(files["main.py"]["content"], namespace)
+                namespace["main"]()
+            published = output_dir / bundle["filename"]
+            self.assertEqual(
+                ["market_indices.csv", "stocks.csv"],
+                sorted(path.name for path in published.iterdir()),
+            )
+
     def test_custom_destination_preserves_filesystem_artifacts(self):
         artifact, _ = _managed_adapter_runtime(
             {

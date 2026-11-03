@@ -1793,16 +1793,27 @@ def _build_pipeline_codegen_payload(
         "pipeline_first": "pipeline_first",
         "node_first": "node_first",
     }.get(requested_generation_strategy, "pipeline_first")
-    high_level_prompt = str(
-        payload.get("high_level_prompt")
+    # high_level_prompt is the pipeline request from the design chat;
+    # additional_instructions are the optional notes typed in the Generate dialog.
+    high_level_prompt = str(payload.get("high_level_prompt") or "").strip()
+    additional_instructions = str(
+        payload.get("additional_instructions")
         or payload.get("user_instruction")
         or ""
     ).strip()
+    if additional_instructions == high_level_prompt:
+        additional_instructions = ""
     user_instruction = PIPELINE_RUNTIME_ATTACHMENT_INSTRUCTION
     if high_level_prompt:
         user_instruction += (
             "\n\nHIGH-LEVEL PIPELINE REQUEST:\n"
             + high_level_prompt
+        )
+    if additional_instructions:
+        user_instruction += (
+            "\n\nADDITIONAL GENERATION INSTRUCTIONS (take precedence over the "
+            "high-level request where they conflict):\n"
+            + additional_instructions
         )
     target_flow_ids = list(preflight["target_flow_ids"])
     reusable_nodes: list[dict[str, Any]] = []
@@ -1843,6 +1854,7 @@ def _build_pipeline_codegen_payload(
         "generation_mode": str(payload.get("generation_mode") or "").strip(),
         "data_awareness": _pipeline_sample_data_summary(graph),
         "high_level_prompt": high_level_prompt,
+        "additional_instructions": additional_instructions,
         "options": options,
         "generation_scope": preflight["scope"],
         "target_flow_ids": target_flow_ids,

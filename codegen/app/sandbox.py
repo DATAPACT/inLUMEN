@@ -453,10 +453,19 @@ def write_generated_files(workspace: Path, artifact: GeneratedArtifact) -> None:
 def validation_workspace(flow_id: str):
     root = Path(os.getenv(VALIDATION_WORKDIR_ENV, DEFAULT_VALIDATION_WORKDIR))
     root.mkdir(parents=True, exist_ok=True)
-    return tempfile.TemporaryDirectory(
-        prefix=f"inlumen-codegen-{flow_id}-",
-        dir=str(root),
-    )
+    try:
+        return tempfile.TemporaryDirectory(
+            prefix=f"inlumen-codegen-{flow_id}-",
+            dir=str(root),
+        )
+    except FileNotFoundError as exc:
+        # The directory is listed but nothing can be created in it: the host
+        # folder behind this bind mount was deleted (e.g. a /tmp cleanup).
+        raise RuntimeError(
+            f"Validation workspace {root} is a stale bind mount; its host folder "
+            "was removed. Recreate the codegen container "
+            "(docker compose up -d --force-recreate codegen)."
+        ) from exc
 
 
 def existing_sample_file(sample: FileSample | None) -> Path | None:

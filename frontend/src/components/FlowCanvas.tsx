@@ -1385,7 +1385,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       : "missing_changed";
     setScriptGenerationSelectedFlowIds(normalizedSelectedIds);
     setScriptGenerationScope(nextScope);
-    setScriptGenerationPrompt(String(pipelinePrompt || "").trim());
+    setScriptGenerationPrompt("");
     setScriptGenerationMode(uploadedSampleDataAvailable ? "validated" : "draft");
     setOverwriteProtectedCode(false);
     setGenerationJob(null);
@@ -1398,7 +1398,6 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   }, [
     isGeneratingScripts,
     loadRecentGenerationRuns,
-    pipelinePrompt,
     uploadedSampleDataAvailable,
   ]);
 
@@ -1802,6 +1801,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       scope: scriptGenerationScope,
       selectedFlowIds: scriptGenerationSelectedFlowIds,
       overwriteManualCode: overwriteProtectedCode,
+      pipelineRequest: String(pipelinePrompt || "").trim(),
       userInstruction: scriptGenerationPrompt.trim(),
     };
     generationCancelRequestedRef.current = false;
@@ -2501,6 +2501,11 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
                     placeholder="Add implementation constraints, preferred libraries, or performance requirements."
                     className="min-h-20"
                   />
+                  {String(pipelinePrompt || "").trim() && (
+                    <p className="text-xs text-muted-foreground">
+                      The pipeline request from the chat is already sent to the code model.
+                    </p>
+                  )}
                 </div>
 
                 <div className="space-y-2">

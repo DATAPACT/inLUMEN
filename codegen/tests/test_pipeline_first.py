@@ -549,6 +549,62 @@ def test_model_training_contract_includes_row_level_predictions() -> None:
     ]
 
 
+def test_source_with_several_files_publishes_one_directory_bundle() -> None:
+    outputs = expected_outputs_for_node(
+        NodeDescriptor(flow_id="1", label="Stock Prices", type="input"),
+        ["2"],
+        [
+            FileDescriptor(filename="prices.csv", kind="table", format="csv",
+                           columns=["date", "ticker", "close"]),
+            FileDescriptor(filename="sectors.json", kind="json", format="json"),
+        ],
+    )
+
+    assert len(outputs) == 1
+    bundle = outputs[0]
+    assert bundle.representation == "directory" and bundle.kind == "directory"
+    assert [member["filename"] for member in bundle.members] == ["prices.csv", "sectors.json"]
+    assert bundle.members[0]["columns"] == ["date", "ticker", "close"]
+
+
+def test_multi_file_source_data_flows_through_every_task() -> None:
+    labels = [
+        ("1", "Stock Data Ingress", "source"),
+        ("2", "Data Loading & Profiling", "task"),
+        ("3", "Data Cleaning & Standardization", "task"),
+        ("4", "Feature Engineering", "task"),
+        ("5", "Statistical Analysis & Model Training", "task"),
+        ("6", "Final Output", "destination"),
+    ]
+    nodes = [{"flow_id": i, "label": label, "type": kind} for i, label, kind in labels]
+    nodes[0]["files"] = [
+        {"filename": "market_indices.csv", "kind": "table", "format": "csv",
+         "columns": ["date", "sp500"]},
+        {"filename": "stocks.csv", "kind": "table", "format": "csv",
+         "columns": ["ticker", "date", "close", "volume"]},
+    ]
+    edges = [{"source": labels[k][0], "target": labels[k + 1][0]} for k in range(len(labels) - 1)]
+    request = GeneratePipelineScriptsRequest.model_validate(
+        {"context": {"pipeline": {"name": "Stocks"}, "graph": {"nodes": nodes, "edges": edges}}}
+    )
+    plan, _contexts = build_pipeline_generation_plan(request)
+    outputs = {node["flow_id"]: node["outputs"][0] for node in plan["nodes"] if node.get("outputs")}
+
+    def members(flow_id: str) -> list[str]:
+        return [member["filename"] for member in outputs[flow_id]["members"]]
+
+    assert members("1") == ["market_indices.csv", "stocks.csv"]
+    # Profiling keeps the data and adds its report beside it.
+    assert members("2") == ["market_indices.csv", "stocks.csv", "data_loading_profiling_report.json"]
+    assert members("3") == ["market_indices.csv", "stocks.csv"]
+    assert members("4") == ["market_indices.csv", "stocks.csv"]
+    predictions = next(
+        member for member in outputs["5"]["members"]
+        if member["semantic_role"] == "model_predictions"
+    )
+    assert "ticker" in predictions["columns"]
+
+
 def test_reviewed_model_dependencies_are_compiler_owned() -> None:
     request = GeneratePipelineScriptsRequest.model_validate(
         reviewed_audio_pipeline_payload()

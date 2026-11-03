@@ -1113,6 +1113,36 @@ if __name__ == "__main__":
     return source
 
 
+def _multi_file_source_bundle(step: dict[str, Any], source_files: list[dict[str, Any]]) -> dict[str, Any]:
+    """Declare the directory bundle a Source with several files publishes.
+
+    Mirrors codegen's ``expected_outputs_for_node`` naming so the bundle name
+    matches the input the generated downstream Task was built against.
+    """
+    label = str(step.get("label") or step.get("flow_id") or "")
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "-", label).strip(".-").replace("-", "_").lower() or "output"
+    members = []
+    for item in source_files:
+        filename = str(item["filename"])
+        file_format = str(item.get("format") or Path(filename).suffix.lstrip(".")) or None
+        members.append({
+            "name": Path(filename).stem,
+            "filename": filename,
+            "kind": str(item.get("kind") or "binary"),
+            "format": file_format,
+            "representation": "file",
+        })
+    return {
+        "name": name,
+        "filename": f"{name}_files",
+        "kind": "directory",
+        "representation": "directory",
+        "semantic_role": "source_files",
+        "description": f"All files supplied to {label}, one member per file.",
+        "members": members,
+    }
+
+
 def _managed_adapter_runtime(
     step: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1214,8 +1244,13 @@ def _managed_adapter_runtime(
         else:
             source_files = [item for item in step.get("files", []) if item.get("role") != "code" and item.get("filename") not in {"main.py", "requirements.txt", "node-manifest.json", "validation-report.json"}]
             if len(source_files) > 1:
-                raise DeploymentArtifactValidationError("Source artifact declaration required", [f"Node {flow_id}: multiple files require an explicit directory output_artifact."])
-            if source_files:
+                # Same bundle codegen declares for a multi-file Source, so the
+                # generated downstream Tasks receive the directory they expect.
+                declared = _multi_file_source_bundle(step, source_files)
+                data_outputs = [declared]
+                adapter_spec["parameters"]["output_artifact"] = declared
+                main_content = _managed_adapter_main_source_v2(adapter_spec)
+            elif source_files:
                 filename = source_files[0]["filename"]
                 data_outputs = [{"name": Path(filename).stem, "filename": filename, "kind": "binary", "format": Path(filename).suffix.lstrip(".")}]
             data_inputs = [{"name": Path(item["filename"]).stem, "filename": item["filename"], "kind": "binary"} for item in source_files]
