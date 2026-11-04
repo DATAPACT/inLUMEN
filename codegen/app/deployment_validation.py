@@ -409,7 +409,17 @@ print(json.dumps({"asset_keys": asset_keys}, indent=2))
 
 def _materialize_script() -> str:
     return r"""
+import importlib.util
+
 import dagster as dg
+
+if importlib.util.find_spec("inlumen_dagster_project.run") is not None:
+    # Multiprocess job: independent branches run in parallel, capped by
+    # INLUMEN_MAX_PARALLEL_STEPS.
+    from inlumen_dagster_project.run import main
+    raise SystemExit(main())
+
+# Bundles exported before the parallel run job materialize serially.
 from inlumen_dagster_project.definitions import defs
 
 definitions = defs() if callable(defs) else defs
@@ -419,6 +429,15 @@ result = dg.materialize(assets, resources=resources, raise_on_error=False)
 if not result.success:
     raise SystemExit(1)
 """
+
+
+def parallel_step_limit(cpu: int, *, has_models: bool) -> int:
+    """Nodes that may run at once inside one execution container.
+
+    Parallel nodes share the container's memory limit; steps that load local
+    models can each need gigabytes, so those pipelines keep one node at a time.
+    """
+    return 1 if has_models else max(1, int(cpu))
 
 
 def _prepare_worker_directories(root: Path) -> None:
@@ -713,6 +732,9 @@ def _isolated_dagster_execution(
             name: str(allocation["cpu"])
             for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS")
         })
+        environment["INLUMEN_MAX_PARALLEL_STEPS"] = str(
+            parallel_step_limit(int(allocation["cpu"]), has_models=has_models)
+        )
         step_cache_dir = STEP_CACHE_DIRS.get(execution_id)
         if step_cache_dir is not None:
             environment["INLUMEN_STEP_CACHE_DIR"] = STEP_CACHE_MOUNT

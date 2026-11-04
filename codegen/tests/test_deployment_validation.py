@@ -648,3 +648,22 @@ ENV PYTHONPATH=/workspace/dagster/src
             results = list((root / 'outputs').glob('*/*/result.txt'))
             self.assertEqual(len(results), 1)
             self.assertEqual(results[0].read_text(), 'isolated attached input')
+
+
+class ParallelExecutionTest(unittest.TestCase):
+    def test_parallel_step_limit_follows_cpu_and_keeps_model_steps_serial(self):
+        from app.deployment_validation import parallel_step_limit
+
+        self.assertEqual(4, parallel_step_limit(4, has_models=False))
+        self.assertEqual(1, parallel_step_limit(0, has_models=False))
+        self.assertEqual(1, parallel_step_limit(8, has_models=True))
+
+    def test_materialize_script_prefers_the_parallel_run_job(self):
+        from app.deployment_validation import _materialize_script
+
+        script = _materialize_script()
+        compile(script, "materialize.py", "exec")
+        self.assertLess(
+            script.index("inlumen_dagster_project.run"),
+            script.index("dg.materialize("),
+        )

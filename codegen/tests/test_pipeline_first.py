@@ -2096,3 +2096,58 @@ def test_typed_collection_output_keeps_a_bundle_even_for_one_table() -> None:
 
     assert len(outputs) == 1 and outputs[0].representation == "directory"
     assert [member["filename"] for member in outputs[0].members] == ["a.csv"]
+
+
+def _timed_source_plan(names: list[str]) -> tuple[dict, str]:
+    nodes, functions = [], []
+    for name in names:
+        nodes.append({
+            "flow_id": name, "function_name": f"node_{name}", "parents": [],
+            "input_filenames": [f"{name}.csv"], "descriptor": {"type": "source"},
+            "outputs": [{"name": name, "filename": f"{name}.json", "kind": "json", "format": "json"}],
+        })
+        functions.append(
+            f"def node_{name}(inputs, output_dir, context):\n"
+            "    started = time.time()\n"
+            "    time.sleep(0.6)\n"
+            f"    output = Path(output_dir) / '{name}.json'\n"
+            "    output.write_text(json.dumps({'started': started, 'ended': time.time()}), encoding='utf-8')\n"
+            f"    return [{{'name': '{name}', 'path': str(output)}}]\n"
+        )
+    source = "import json\nimport time\nfrom pathlib import Path\n\n" + "\n\n".join(functions)
+    return {"schema_version": "inlumen.pipeline-plan@2", "pipeline": {}, "nodes": nodes, "edges": []}, source
+
+
+@pytest.mark.parametrize("limit, overlap", [("4", True), ("1", False)])
+def test_compiled_pipeline_runs_independent_branches_concurrently(
+    tmp_path, monkeypatch, limit, overlap
+) -> None:
+    plan, source = _timed_source_plan(["customers", "orders"])
+    program = compose_pipeline_program(source, plan)
+    input_dir, output_dir = tmp_path / "inputs", tmp_path / "outputs"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    entries = []
+    for name in ("customers", "orders"):
+        path = input_dir / f"{name}.csv"
+        path.write_text("id\n1\n", encoding="utf-8")
+        entries.append({"filename": path.name, "path": str(path), "kind": "table", "format": "csv"})
+    manifest = input_dir / "input_manifest.json"
+    manifest.write_text(json.dumps({"inputs": entries}), encoding="utf-8")
+    script = tmp_path / "pipeline.py"
+    script.write_text(program, encoding="utf-8")
+    monkeypatch.setenv("INLUMEN_INPUT_MANIFEST", str(manifest))
+    monkeypatch.setenv("INLUMEN_OUTPUT_DIR", str(output_dir))
+    monkeypatch.setenv("INLUMEN_OUTPUT_MANIFEST", str(output_dir / "output_manifest.json"))
+    monkeypatch.setenv("INLUMEN_MAX_PARALLEL_STEPS", limit)
+
+    runpy.run_path(str(script), run_name="__main__")
+
+    spans = [
+        json.loads((output_dir / "nodes" / name / f"{name}.json").read_text(encoding="utf-8"))
+        for name in ("customers", "orders")
+    ]
+    overlapped = max(span["started"] for span in spans) < min(span["ended"] for span in spans)
+    assert overlapped is overlap
+    final = json.loads((output_dir / "output_manifest.json").read_text(encoding="utf-8"))
+    assert sorted(item["source_node"] for item in final["outputs"]) == ["customers", "orders"]

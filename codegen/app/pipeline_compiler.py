@@ -397,6 +397,7 @@ def _compiled_pipeline_runner() -> str:
     return r'''
 import subprocess
 import sys
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 def _run_compiled_pipeline():
     root = Path(os.environ.get("PIPELINE_OUTPUT_DIR") or os.environ["INLUMEN_OUTPUT_DIR"]).resolve()
@@ -404,7 +405,7 @@ def _run_compiled_pipeline():
     input_manifest = json.loads(Path(os.environ["INLUMEN_INPUT_MANIFEST"]).read_text())
     supplied = input_manifest.get("inputs", [])
     produced = {}
-    for node in INLUMEN_PIPELINE_PLAN["nodes"]:
+    def _run_node(node):
         flow_id = node["flow_id"]
         work = root / ".runtime" / flow_id
         if work.exists():
@@ -453,8 +454,39 @@ def _run_compiled_pipeline():
         destination.parent.mkdir(parents=True, exist_ok=True)
         publish_artifact_directory(output, destination)
         actual = [{**item, "path": str(destination / item["filename"]), "source_node": flow_id} for item in actual]
-        produced[flow_id] = actual
         atomic_json(root / ".runtime" / (flow_id + ".json"), {"outputs": actual})
+        return actual
+
+    # Independent branches run concurrently: a node starts as soon as every
+    # node it depends on has published, up to INLUMEN_MAX_PARALLEL_STEPS.
+    nodes = {node["flow_id"]: node for node in INLUMEN_PIPELINE_PLAN["nodes"]}
+    depends_on = {
+        flow_id: {parent for parent in node.get("parents", [])}
+        | {item["source_node"] for item in node.get("inputs", []) if item.get("source_node")}
+        for flow_id, node in nodes.items()
+    }
+    limit = max(1, int(os.environ.get("INLUMEN_MAX_PARALLEL_STEPS") or min(4, os.cpu_count() or 1)))
+    pending = list(nodes)
+    running = {}
+    with ThreadPoolExecutor(max_workers=limit) as pool:
+        while pending or running:
+            for flow_id in [item for item in pending if depends_on[item] <= produced.keys()]:
+                if len(running) >= limit:
+                    break
+                pending.remove(flow_id)
+                running[pool.submit(_run_node, nodes[flow_id])] = flow_id
+            if not running:
+                raise RuntimeError("Pipeline nodes wait on each other: " + ", ".join(pending))
+            finished, _ = wait(running, return_when=FIRST_COMPLETED)
+            for future in finished:
+                flow_id = running.pop(future)
+                try:
+                    produced[flow_id] = future.result()
+                except BaseException:
+                    pending.clear()  # start nothing new; let running nodes finish
+                    for other in running:
+                        other.cancel()
+                    raise
     parents = {parent for node in INLUMEN_PIPELINE_PLAN["nodes"] for parent in node.get("parents", [])}
     final = [item for node in INLUMEN_PIPELINE_PLAN["nodes"] if node["flow_id"] not in parents for item in produced[node["flow_id"]]]
     atomic_json(os.environ.get("INLUMEN_OUTPUT_MANIFEST") or root / "output_manifest.json", {"outputs": final})

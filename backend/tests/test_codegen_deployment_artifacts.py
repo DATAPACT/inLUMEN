@@ -245,6 +245,18 @@ class CodegenDeploymentArtifactsTest(unittest.TestCase):
         self.assertIn("PIPELINE_OUTPUT_DIR", yaml_text)
         self.assertIn("INLUMEN_OUTPUT_MANIFEST", yaml_text)
 
+    def test_dagster_project_runs_independent_nodes_in_parallel(self):
+        files = build_dagster_project_files(self.graph(), codegen_payload())
+        by_path = {item["path"]: item["content"] for item in files}
+        definitions = by_path["dagster_project/src/inlumen_dagster_project/definitions.py"]
+        run = by_path["dagster_project/src/inlumen_dagster_project/run.py"]
+        self.assertIn('RUN_JOB = "inlumen_run"', definitions)
+        self.assertIn("executor_def=dg.multiprocess_executor", definitions)
+        self.assertIn("dg.reconstructable(run_job_definition)", run)
+        self.assertIn("INLUMEN_MAX_PARALLEL_STEPS", run)
+        compile(definitions, "definitions.py", "exec")
+        compile(run, "run.py", "exec")
+
     def test_dagster_project_files_use_persisted_scripts_and_graph_dependencies(self):
         files = build_dagster_project_files(self.graph(), codegen_payload())
         by_path = {item["path"]: item["content"] for item in files}

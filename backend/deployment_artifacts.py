@@ -4016,15 +4016,64 @@ The bundle is ready to commit to git: `.gitignore` keeps `.env` and run outputs 
 {dagster_section}{argo_section}{runtime_environment_section}{secrets_section}"""
 
 
+DAGSTER_RUN_JOB = "inlumen_run"
+
+
 def _dagster_definitions_source() -> str:
-    return """from pathlib import Path
+    return f"""from pathlib import Path
 
 import dagster as dg
+
+RUN_JOB = "{DAGSTER_RUN_JOB}"
 
 
 @dg.definitions
 def defs():
-    return dg.load_from_defs_folder(project_root=Path(__file__).resolve().parents[2])
+    loaded = dg.load_from_defs_folder(project_root=Path(__file__).resolve().parents[2])
+    # Every node as one job on the multiprocess executor: independent branches
+    # run at the same time, a node starts once its upstream assets exist.
+    run_job = dg.define_asset_job(
+        RUN_JOB,
+        selection=dg.AssetSelection.all(),
+        executor_def=dg.multiprocess_executor,
+    )
+    return dg.Definitions.merge(loaded, dg.Definitions(jobs=[run_job]))
+"""
+
+
+def _dagster_run_source() -> str:
+    return """\"\"\"Run every pipeline node, independent branches in parallel.
+
+    python -m inlumen_dagster_project.run
+
+INLUMEN_MAX_PARALLEL_STEPS caps how many nodes run at once (default: CPU count).
+\"\"\"
+import os
+
+import dagster as dg
+
+from inlumen_dagster_project.definitions import RUN_JOB, defs
+
+
+def run_job_definition():
+    definitions = defs() if callable(defs) else defs
+    return definitions.resolve_job_def(RUN_JOB)
+
+
+def main() -> int:
+    limit = max(1, int(os.environ.get("INLUMEN_MAX_PARALLEL_STEPS") or os.cpu_count() or 1))
+    with dg.DagsterInstance.get() as instance:
+        result = dg.execute_job(
+            dg.reconstructable(run_job_definition),
+            instance=instance,
+            run_config={"execution": {"config": {"max_concurrent": limit}}},
+            raise_on_error=False,
+        )
+    return 0 if result.success else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 """
 
 
@@ -4638,6 +4687,11 @@ def build_dagster_project_files(
             _dagster_file(
                 f"{project_dir}/src/inlumen_dagster_project/definitions.py",
                 _dagster_definitions_source(),
+                "dagster-project",
+            ),
+            _dagster_file(
+                f"{project_dir}/src/inlumen_dagster_project/run.py",
+                _dagster_run_source(),
                 "dagster-project",
             ),
             _dagster_file(

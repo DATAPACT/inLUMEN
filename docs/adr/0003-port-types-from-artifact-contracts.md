@@ -51,7 +51,14 @@ spec's cases. `scripts/sync_shared.py` distributes the copies.
   rule Argo export already enforces.
 - Switching a Source between modes changes its output ports. Connections from
   removed ports are flagged and must be reconnected.
+- Independent branches now run in parallel:
+  - the generated Dagster project defines an `inlumen_run` job on the
+    multiprocess executor, and the in-app run uses it, capped by
+    `INLUMEN_MAX_PARALLEL_STEPS` (the CPU allocation, or 1 for pipelines that
+    load local models);
+  - the compiled pipeline runner schedules nodes as their dependencies
+    finish;
+  - Argo's DAG already ran branches in parallel.
 - Next steps, not covered by this ADR:
-  - run independent branches in parallel in the local and Dagster run path;
   - give Parallel Map real per-item execution with gather;
   - implement Merge/Join and Condition semantics.
