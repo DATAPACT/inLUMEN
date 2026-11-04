@@ -591,3 +591,38 @@ describe("joins", () => {
     )).not.toContain("shared-input-port");
   });
 });
+
+describe("parallel map scopes", () => {
+  const flow = (id: string, template: string, params: Record<string, unknown> = {}) => ({
+    id, position: { x: 0, y: 0 },
+    data: { type: "flow", label: id, template_label: template, param: params, ports: template === "Collect"
+      ? { inputs: [{ id: "item", name: "item", type: "any", required: true, description: "" }],
+          outputs: [{ id: "items", name: "items", type: "any[]", required: true, description: "" }] }
+      : { inputs: [{ id: "items", name: "items", type: "any[]", required: true, description: "" }],
+          outputs: [{ id: "item", name: "item", type: "any", required: true, description: "" }] } },
+  });
+  const step = (id: string, type = "task") => ({ id, position: { x: 0, y: 0 }, data: { type, label: id } });
+  const link = (source: string, sourceHandle: string, target: string, targetHandle: string) =>
+    ({ id: `${source}-${target}`, source, target, sourceHandle, targetHandle });
+  const codes = (nodes: object[], edges: object[], mode: "draft" | "complete" = "complete") => {
+    const graph = normalizeGraph({ nodes, edges });
+    return validateGraph(graph.nodes, graph.edges, { mode }).issues
+      .filter((issue) => issue.category === "graph").map((issue) => `${issue.severity}:${issue.code}`);
+  };
+  const map = flow("map", "Parallel Map", { max_concurrency: 4, failure_policy: "stop" });
+
+  it("accepts Map -> per-item steps -> Collect", () => {
+    expect(codes(
+      [step("src", "source"), map, step("extract"), flow("collect", "Collect"), step("out", "destination")],
+      [link("src", "data", "map", "items"), link("map", "item", "extract", "input"),
+        link("extract", "output", "collect", "item"), link("collect", "items", "out", "data")],
+    )).toEqual([]);
+  });
+
+  it("flags a map without Collect, as a warning while drafting", () => {
+    const nodes = [step("src", "source"), map, step("extract"), step("out", "destination")];
+    const edges = [link("src", "data", "map", "items"), link("map", "item", "extract", "input"), link("extract", "output", "out", "data")];
+    expect(codes(nodes, edges)).toEqual(["error:map-without-collect"]);
+    expect(codes(nodes, edges, "draft")).toEqual(["warning:map-without-collect"]);
+  });
+});

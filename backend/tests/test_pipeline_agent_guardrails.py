@@ -333,6 +333,25 @@ class PipelineGraphValidationTest(unittest.TestCase):
                     "failure_policy": "continue",
                 }),
                 node(3, "task", "Resize Image", GENERATED_CODE),
+                flow_node(5, "Collect", {}),
+                node(4, "destination", "Export"),
+            ],
+            "edges": [
+                edge(1, 2, "data", "items"),
+                edge(2, 3, "item", "input"),
+                edge(3, 5, "output", "item"),
+                edge(5, 4, "items", "data"),
+            ],
+        }
+
+        self.assertTrue(validate_pipeline_graph(graph)["valid"])
+
+    def test_parallel_map_without_collect_is_rejected(self):
+        graph = {
+            "nodes": [
+                node(1, "source", "Image Upload"),
+                flow_node(2, "Parallel Map", {"max_concurrency": 4, "failure_policy": "continue"}),
+                node(3, "task", "Resize Image", GENERATED_CODE),
                 node(4, "destination", "Export"),
             ],
             "edges": [
@@ -342,7 +361,8 @@ class PipelineGraphValidationTest(unittest.TestCase):
             ],
         }
 
-        self.assertTrue(validate_pipeline_graph(graph)["valid"])
+        codes = [issue["code"] for issue in validate_pipeline_graph(graph)["issues"]]
+        self.assertIn("map-without-collect", codes)
 
     def test_generic_flow_is_rejected_by_backend_guardrail(self):
         graph = {
@@ -912,6 +932,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("value.is_valid == true", system_message)
         self.assertIn("Complaint has exactly one outgoing edge", system_message)
         self.assertIn("owns iteration", system_message)
+        self.assertIn("Every Parallel Map is closed by a Collect", system_message)
         self.assertIn("another distinct saved PIPELINE", system_message)
         self.assertIn("Conversation Understanding", system_message)
         self.assertIn("create_step pins the reference", system_message)

@@ -89,6 +89,10 @@ def artifact_port_type(artifact: dict[str, Any]) -> str:
     )
     if not is_directory:
         return _item_kind(artifact)
+    item = artifact.get("item")
+    if isinstance(item, dict) and item:
+        # A collection of per-item results (Parallel Map / Collect).
+        return f"{artifact_port_type(item).removesuffix('[]')}[]"
     members = [member for member in artifact.get("members") or [] if isinstance(member, dict)]
     return collection_type(_item_kind(member) for member in members)
 

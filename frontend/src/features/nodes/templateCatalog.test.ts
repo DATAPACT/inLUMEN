@@ -33,6 +33,7 @@ describe("component template catalog", () => {
     expect(COMPONENT_TEMPLATE_CATALOG.flow.map(({ value }) => value)).toEqual([
       "Condition",
       "Parallel Map",
+      "Collect",
       "Flow",
     ]);
     expect(defaultTemplateForType("flow")).toBe("Condition");

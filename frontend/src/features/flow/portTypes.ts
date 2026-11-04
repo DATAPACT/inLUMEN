@@ -22,6 +22,7 @@ type ArtifactLike = {
   format?: unknown;
   representation?: unknown;
   members?: unknown;
+  item?: unknown;
   port?: unknown;
   name?: unknown;
 };
@@ -72,9 +73,13 @@ export const collectionType = (kinds: Iterable<string>) => {
   return 'bundle';
 };
 
-export const artifactPortType = (artifact: ArtifactLike) => {
+export const artifactPortType = (artifact: ArtifactLike): string => {
   const isDirectory = artifact.representation === 'directory' || artifact.kind === 'directory';
   if (!isDirectory) return itemKind(artifact);
+  if (artifact.item && typeof artifact.item === 'object') {
+    // A collection of per-item results (Parallel Map / Collect).
+    return `${artifactPortType(artifact.item as ArtifactLike).replace(/\[\]$/, '')}[]`;
+  }
   const members = Array.isArray(artifact.members)
     ? artifact.members.filter((member): member is ArtifactLike => Boolean(member) && typeof member === 'object')
     : [];

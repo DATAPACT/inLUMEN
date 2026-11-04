@@ -88,6 +88,8 @@ class FileSample(BaseModel):
 
 class FileDescriptor(BaseModel):
     members: list[dict[str, Any]] = Field(default_factory=list)
+    # A collection of per-item results (Collect): what each item holds.
+    item: dict[str, Any] = Field(default_factory=dict)
     filename: str
     source_node: str = ""
     source_port: str = ""
@@ -157,6 +159,7 @@ class RuntimeConstraints(BaseModel):
 
 class ExpectedArtifact(BaseModel):
     members: list[dict[str, Any]] = Field(default_factory=list)
+    item: dict[str, Any] = Field(default_factory=dict)
     source_node: str = ""
     source_port: str = ""
     connection_id: str = ""

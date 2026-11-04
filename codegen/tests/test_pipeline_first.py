@@ -1,4 +1,5 @@
 import pytest
+from pathlib import Path
 import ast
 import asyncio
 import base64
@@ -2151,3 +2152,74 @@ def test_compiled_pipeline_runs_independent_branches_concurrently(
     assert overlapped is overlap
     final = json.loads((output_dir / "output_manifest.json").read_text(encoding="utf-8"))
     assert sorted(item["source_node"] for item in final["outputs"]) == ["customers", "orders"]
+
+
+def _invoice_map_request():
+    nodes = [
+        {"flow_id": "1", "label": "Invoice PDFs", "type": "source",
+         "files": [{"filename": "inv_a.pdf", "kind": "document", "format": "pdf"},
+                   {"filename": "inv_b.pdf", "kind": "document", "format": "pdf"}]},
+        {"flow_id": "2", "label": "Each Invoice", "type": "flow", "template": "Parallel Map",
+         "ports": {"inputs": [{"id": "items"}], "outputs": [{"id": "item"}]},
+         "parameters": {"max_concurrency": 2, "failure_policy": "continue"}},
+        {"flow_id": "3", "label": "Extract Invoice Fields", "type": "task"},
+        {"flow_id": "4", "label": "Collect Invoices", "type": "flow", "template": "Collect",
+         "ports": {"inputs": [{"id": "item"}], "outputs": [{"id": "items"}]}},
+        {"flow_id": "5", "label": "Aggregate Invoices", "type": "task"},
+        {"flow_id": "6", "label": "Invoices CSV", "type": "destination"},
+    ]
+    edges = [
+        {"source": "1", "source_port": "data", "target": "2", "target_port": "items"},
+        {"source": "2", "source_port": "item", "target": "3", "target_port": "input"},
+        {"source": "3", "source_port": "output", "target": "4", "target_port": "item"},
+        {"source": "4", "source_port": "items", "target": "5", "target_port": "input"},
+        {"source": "5", "source_port": "output", "target": "6", "target_port": "data"},
+    ]
+    return GeneratePipelineScriptsRequest.model_validate(
+        {"context": {"pipeline": {"name": "Invoices"}, "graph": {"nodes": nodes, "edges": edges}}}
+    )
+
+
+def test_map_steps_are_planned_for_one_item_and_collect_declares_the_item() -> None:
+    plan, contexts = build_pipeline_generation_plan(_invoice_map_request())
+    by_id = {node["flow_id"]: node for node in plan["nodes"]}
+
+    (item,) = by_id["2"]["outputs"]
+    assert (item["port"], item["filename"], item["kind"], item["format"]) == ("item", "inv_a.pdf", "document", "pdf")
+    # The per-item step is generated against a single document, not the bundle.
+    (body_input,) = contexts["3"].available_inputs
+    assert (body_input.kind, body_input.representation) == ("document", "file")
+    (collected,) = by_id["4"]["outputs"]
+    assert collected["representation"] == "directory" and collected["port"] == "items"
+    assert collected["item"]["filename"] == Path(by_id["3"]["outputs"][0]["filename"]).name
+    (after_collect,) = contexts["5"].available_inputs
+    assert after_collect.item == collected["item"]
+
+
+def test_map_and_collect_run_as_compiler_owned_functions(tmp_path, monkeypatch) -> None:
+    plan, _ = build_pipeline_generation_plan(_invoice_map_request())
+    normalized = normalize_pipeline_payload(deterministic_pipeline_payload(plan), plan)
+    program = compose_pipeline_program(normalized["pipeline_py"], plan)
+    input_dir, output_dir = tmp_path / "inputs", tmp_path / "outputs"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    entries = []
+    for name in ("inv_a.pdf", "inv_b.pdf"):
+        path = input_dir / name
+        path.write_bytes(b"%PDF-1.4 " + name.encode())
+        entries.append({"filename": name, "path": str(path), "kind": "document", "format": "pdf"})
+    manifest = input_dir / "input_manifest.json"
+    manifest.write_text(json.dumps({"inputs": entries}), encoding="utf-8")
+    script = tmp_path / "pipeline.py"
+    script.write_text(program, encoding="utf-8")
+    monkeypatch.setenv("INLUMEN_INPUT_MANIFEST", str(manifest))
+    monkeypatch.setenv("INLUMEN_OUTPUT_DIR", str(output_dir))
+    monkeypatch.setenv("INLUMEN_OUTPUT_MANIFEST", str(output_dir / "output_manifest.json"))
+
+    runpy.run_path(str(script), run_name="__main__")
+
+    item = output_dir / "nodes" / "2" / "inv_a.pdf"
+    assert item.read_bytes().startswith(b"%PDF")
+    collected = output_dir / "nodes" / "4" / "collect_invoices_items"
+    assert json.loads((collected / "_items.json").read_text())["items"][0]["key"] == "item-1"
+    assert len(list((collected / "item-1").iterdir())) == 1

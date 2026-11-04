@@ -11,6 +11,7 @@ COPIES = {
     'shared/artifact_runtime.py': ['backend/artifact_runtime.py', 'codegen/app/artifact_runtime.py'],
     'shared/run_artifact_names.py': ['backend/run_artifact_names.py', 'codegen/app/run_artifact_names.py'],
     'shared/request_diagnostics.py': ['runner/app/request_diagnostics.py', 'codegen/app/request_diagnostics.py'],
+    'shared/map_scope.py': ['backend/map_scope.py', 'codegen/app/map_scope.py'],
     'shared/port_types.py': ['backend/port_types.py', 'codegen/app/port_types.py'],
     'shared/port_types.json': ['backend/port_types.json', 'codegen/app/port_types.json', 'frontend/src/features/flow/portTypes.generated.json'],
     'shared/leases.py': ['runner/app/leases.py', 'codegen/app/leases.py'],

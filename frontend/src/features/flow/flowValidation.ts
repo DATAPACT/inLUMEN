@@ -13,6 +13,7 @@ import { findTemplateForType } from "@/features/nodes/templateCatalog";
 import { normalizeSubpipelineInterface, reusablePipelineNestingError, SUBPIPELINE_DEPTH_ERROR } from "@/features/flow/subpipeline";
 import { taskImplementationMigrationError } from "@/features/nodes/propertyPanelPolicy";
 import { checkConnection, effectivePortType, inferOutputTypes } from "@/features/flow/portTypes";
+import { mapScopes } from "@/features/flow/mapScope";
 
 export type ValidationCategory =
   | "configuration"
@@ -255,7 +256,7 @@ export const validateGraph = (
         category: "configuration",
         code: "missing-flow-behavior",
         nodeId,
-        message: "Choose a Flow behavior: Condition or Parallel Map.",
+        message: "Choose a Flow behavior: Condition, Parallel Map, or Collect.",
       });
 
       if (
@@ -447,6 +448,21 @@ export const validateGraph = (
   });
 
   sharedInputPortIssues(portConnections, nodeById).forEach(add);
+  const flowTemplates = Object.fromEntries(nodes
+    .filter((node) => normalizeType(node.data?.type) === "flow")
+    .map((node) => [String(node.id), String(objectValue(node.data).template_label || "")]));
+  mapScopes(
+    flowTemplates,
+    portConnections,
+    Object.fromEntries(nodes.map((node) => [String(node.id), String(objectValue(node.data).label || "")])),
+  ).issues.forEach((issue) => add({
+    // While drafting, an unfinished map (no Collect yet) is only a warning.
+    severity: wiringSeverity,
+    category: "graph",
+    code: issue.code,
+    nodeId: issue.nodeId,
+    message: issue.message,
+  }));
 
   const byNode: Record<string, ValidationIssue[]> = {};
   issues.forEach((issue) => {

@@ -1,59 +1,310 @@
 {
   "version": 1,
   "description": "Canonical port-type rules. A port type is a kind, optionally followed by [] for a collection of that kind (e.g. table, table[], any[]). Python (shared/port_types.py) and TypeScript (frontend/src/features/flow/portTypes.ts) both implement these rules and are tested against the cases below.",
-  "wildcards": ["", "any", "unknown", "*"],
-  "opaque_kinds": ["bundle", "directory"],
+  "wildcards": [
+    "",
+    "any",
+    "unknown",
+    "*"
+  ],
+  "opaque_kinds": [
+    "bundle",
+    "directory"
+  ],
   "extension_kinds": {
-    "csv": "table", "tsv": "table", "parquet": "table", "xlsx": "table", "xls": "table", "feather": "table",
-    "json": "json", "jsonl": "json", "ndjson": "json", "geojson": "json",
-    "txt": "text", "md": "text", "xml": "text", "html": "text",
-    "png": "image", "jpg": "image", "jpeg": "image", "webp": "image", "bmp": "image", "gif": "image", "tif": "image", "tiff": "image",
-    "wav": "audio", "wave": "audio", "mp3": "audio", "m4a": "audio", "aac": "audio", "flac": "audio", "ogg": "audio",
-    "mp4": "video", "mov": "video", "avi": "video", "mkv": "video", "webm": "video",
-    "pdf": "document", "docx": "document", "doc": "document", "pptx": "document",
-    "pkl": "model", "pickle": "model", "joblib": "model", "onnx": "model", "pt": "model", "safetensors": "model"
+    "csv": "table",
+    "tsv": "table",
+    "parquet": "table",
+    "xlsx": "table",
+    "xls": "table",
+    "feather": "table",
+    "json": "json",
+    "jsonl": "json",
+    "ndjson": "json",
+    "geojson": "json",
+    "txt": "text",
+    "md": "text",
+    "xml": "text",
+    "html": "text",
+    "png": "image",
+    "jpg": "image",
+    "jpeg": "image",
+    "webp": "image",
+    "bmp": "image",
+    "gif": "image",
+    "tif": "image",
+    "tiff": "image",
+    "wav": "audio",
+    "wave": "audio",
+    "mp3": "audio",
+    "m4a": "audio",
+    "aac": "audio",
+    "flac": "audio",
+    "ogg": "audio",
+    "mp4": "video",
+    "mov": "video",
+    "avi": "video",
+    "mkv": "video",
+    "webm": "video",
+    "pdf": "document",
+    "docx": "document",
+    "doc": "document",
+    "pptx": "document",
+    "pkl": "model",
+    "pickle": "model",
+    "joblib": "model",
+    "onnx": "model",
+    "pt": "model",
+    "safetensors": "model"
   },
   "cases": {
     "check": [
-      {"source": "table", "target": "table", "result": null},
-      {"source": "table", "target": "any", "result": null},
-      {"source": "any", "target": "table", "result": null},
-      {"source": "table[]", "target": "any", "result": null},
-      {"source": "table[]", "target": "table[]", "result": null},
-      {"source": "table[]", "target": "any[]", "result": null},
-      {"source": "any[]", "target": "table[]", "result": null},
-      {"source": "bundle", "target": "any[]", "result": null},
-      {"source": "bundle", "target": "bundle", "result": null},
-      {"source": "json", "target": "table", "result": "error:incompatible-port-kinds"},
-      {"source": "image[]", "target": "table[]", "result": "error:incompatible-port-kinds"},
-      {"source": "table[]", "target": "table", "result": "warning:collection-into-single"},
-      {"source": "table", "target": "table[]", "result": "warning:single-into-collection"},
-      {"source": "table", "target": "any[]", "result": "warning:single-into-collection"},
-      {"source": "bundle", "target": "table", "result": "warning:unchecked-bundle"}
+      {
+        "source": "table",
+        "target": "table",
+        "result": null
+      },
+      {
+        "source": "table",
+        "target": "any",
+        "result": null
+      },
+      {
+        "source": "any",
+        "target": "table",
+        "result": null
+      },
+      {
+        "source": "table[]",
+        "target": "any",
+        "result": null
+      },
+      {
+        "source": "table[]",
+        "target": "table[]",
+        "result": null
+      },
+      {
+        "source": "table[]",
+        "target": "any[]",
+        "result": null
+      },
+      {
+        "source": "any[]",
+        "target": "table[]",
+        "result": null
+      },
+      {
+        "source": "bundle",
+        "target": "any[]",
+        "result": null
+      },
+      {
+        "source": "bundle",
+        "target": "bundle",
+        "result": null
+      },
+      {
+        "source": "json",
+        "target": "table",
+        "result": "error:incompatible-port-kinds"
+      },
+      {
+        "source": "image[]",
+        "target": "table[]",
+        "result": "error:incompatible-port-kinds"
+      },
+      {
+        "source": "table[]",
+        "target": "table",
+        "result": "warning:collection-into-single"
+      },
+      {
+        "source": "table",
+        "target": "table[]",
+        "result": "warning:single-into-collection"
+      },
+      {
+        "source": "table",
+        "target": "any[]",
+        "result": "warning:single-into-collection"
+      },
+      {
+        "source": "bundle",
+        "target": "table",
+        "result": "warning:unchecked-bundle"
+      }
     ],
     "artifact": [
-      {"artifact": {"kind": "table", "filename": "a.csv"}, "type": "table"},
-      {"artifact": {"kind": "binary", "filename": "talk.wav"}, "type": "audio"},
-      {"artifact": {"filename": "result.json"}, "type": "json"},
-      {"artifact": {"kind": "directory", "representation": "directory", "members": [{"kind": "table", "filename": "a.csv"}, {"filename": "b.tsv"}]}, "type": "table[]"},
-      {"artifact": {"kind": "directory", "representation": "directory", "members": [{"kind": "model", "filename": "m.pickle"}, {"kind": "json", "filename": "metrics.json"}]}, "type": "bundle"},
-      {"artifact": {"kind": "directory", "representation": "directory"}, "type": "directory"}
+      {
+        "artifact": {
+          "kind": "table",
+          "filename": "a.csv"
+        },
+        "type": "table"
+      },
+      {
+        "artifact": {
+          "kind": "binary",
+          "filename": "talk.wav"
+        },
+        "type": "audio"
+      },
+      {
+        "artifact": {
+          "filename": "result.json"
+        },
+        "type": "json"
+      },
+      {
+        "artifact": {
+          "kind": "directory",
+          "representation": "directory",
+          "members": [
+            {
+              "kind": "table",
+              "filename": "a.csv"
+            },
+            {
+              "filename": "b.tsv"
+            }
+          ]
+        },
+        "type": "table[]"
+      },
+      {
+        "artifact": {
+          "kind": "directory",
+          "representation": "directory",
+          "members": [
+            {
+              "kind": "model",
+              "filename": "m.pickle"
+            },
+            {
+              "kind": "json",
+              "filename": "metrics.json"
+            }
+          ]
+        },
+        "type": "bundle"
+      },
+      {
+        "artifact": {
+          "kind": "directory",
+          "representation": "directory"
+        },
+        "type": "directory"
+      },
+      {
+        "artifact": {
+          "kind": "directory",
+          "representation": "directory",
+          "item": {
+            "kind": "json",
+            "filename": "fields.json"
+          }
+        },
+        "type": "json[]"
+      }
     ],
     "file_port_ids": [
-      {"filenames": ["Patients.csv", "visits 2024.csv", "2025.csv", "patients.json"], "ids": ["patients", "visits_2024", "f_2025", "patients_2"]}
+      {
+        "filenames": [
+          "Patients.csv",
+          "visits 2024.csv",
+          "2025.csv",
+          "patients.json"
+        ],
+        "ids": [
+          "patients",
+          "visits_2024",
+          "f_2025",
+          "patients_2"
+        ]
+      }
     ],
     "source_outputs": [
-      {"filenames": ["a.csv"], "files_as": "collection", "ports": ["data"], "types": {"data": "table"}},
-      {"filenames": ["a.csv", "b.csv"], "files_as": "collection", "ports": ["data"], "types": {"data": "table[]"}},
-      {"filenames": ["a.csv", "scan.png"], "files_as": "collection", "ports": ["data"], "types": {"data": "bundle"}},
-      {"filenames": ["a.csv", "scan.png"], "files_as": "separate", "ports": ["a", "scan"], "types": {"a": "table", "scan": "image"}}
+      {
+        "filenames": [
+          "a.csv"
+        ],
+        "files_as": "collection",
+        "ports": [
+          "data"
+        ],
+        "types": {
+          "data": "table"
+        }
+      },
+      {
+        "filenames": [
+          "a.csv",
+          "b.csv"
+        ],
+        "files_as": "collection",
+        "ports": [
+          "data"
+        ],
+        "types": {
+          "data": "table[]"
+        }
+      },
+      {
+        "filenames": [
+          "a.csv",
+          "scan.png"
+        ],
+        "files_as": "collection",
+        "ports": [
+          "data"
+        ],
+        "types": {
+          "data": "bundle"
+        }
+      },
+      {
+        "filenames": [
+          "a.csv",
+          "scan.png"
+        ],
+        "files_as": "separate",
+        "ports": [
+          "a",
+          "scan"
+        ],
+        "types": {
+          "a": "table",
+          "scan": "image"
+        }
+      }
     ],
     "effective": [
-      {"declared": "any", "inferred": "table[]", "type": "table[]"},
-      {"declared": "any[]", "inferred": "table[]", "type": "table[]"},
-      {"declared": "any[]", "inferred": "table", "type": "any[]"},
-      {"declared": "json", "inferred": "table", "type": "json"},
-      {"declared": "any", "inferred": null, "type": "any"}
+      {
+        "declared": "any",
+        "inferred": "table[]",
+        "type": "table[]"
+      },
+      {
+        "declared": "any[]",
+        "inferred": "table[]",
+        "type": "table[]"
+      },
+      {
+        "declared": "any[]",
+        "inferred": "table",
+        "type": "any[]"
+      },
+      {
+        "declared": "json",
+        "inferred": "table",
+        "type": "json"
+      },
+      {
+        "declared": "any",
+        "inferred": null,
+        "type": "any"
+      }
     ]
   }
 }

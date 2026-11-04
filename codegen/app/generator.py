@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifact_runtime import ArtifactContractError, assign_output_ports, validate_declaration
+from .map_scope import is_collect, is_map
 from .port_types import FILES_AS_SEPARATE, file_port_ids, files_as, parse_port_type
 from .task_package_contract import public_manifest, validate_package
 from .generation_budget import budgeted
@@ -625,6 +626,7 @@ def build_pipeline_generation_plan(
                 target_port=edge.target_port,
                 representation=output.representation,
                 members=output.members,
+                item=output.item,
                 kind=output.kind,
                 format=output.format,
                 columns=output.columns,
@@ -1821,6 +1823,10 @@ def expected_outputs_for_node(
     # destination label into a second generated transformation contract.
     if is_output_node_kind(node.type):
         return []
+    if node.type == "flow" and is_map(node.template):
+        return [map_item_artifact(available_inputs or [])]
+    if node.type == "flow" and is_collect(node.template):
+        return [collected_artifact(node, available_inputs or [])]
     label = node.label or node.flow_id
     name = sanitize_fragment(label).replace("-", "_").lower() or "output"
     inputs = available_inputs or []
@@ -2336,6 +2342,63 @@ def expected_outputs_for_node(
             ),
         )
     ]
+
+
+ITEM_FIELDS = ("kind", "format", "representation", "columns", "required_columns", "schema", "members")
+
+
+def _item_declaration(source: dict[str, Any], name: str) -> dict[str, Any]:
+    item = {key: source[key] for key in ITEM_FIELDS if source.get(key) not in (None, [], {})}
+    return {**item, "name": name, "filename": Path(str(source.get("filename") or name)).name}
+
+
+def map_item_artifact(inputs: list[FileDescriptor]) -> ExpectedArtifact:
+    """What one item of a Parallel Map holds; the steps after the map get one item.
+
+    Items of a directory bundle are its members, items of a Collect output are
+    its per-item results, and a single file is a collection of one.
+    """
+    if not inputs:
+        return ExpectedArtifact(name="item", kind="binary", filename="item",
+            semantic_role="map_item", port="item",
+            description="One item of the collection the Parallel Map receives.")
+    source = inputs[0]
+    if source.item:
+        sample = dict(source.item)
+    elif source.members:
+        sample = dict(source.members[0])
+    else:
+        sample = source.model_dump(mode="json", exclude={"members", "item"})
+    declaration = _item_declaration(sample, "item")
+    declaration.setdefault("kind", "binary")
+    return ExpectedArtifact.model_validate({
+        **declaration,
+        "semantic_role": "map_item",
+        "port": "item",
+        "description": "One item of the collection; the steps up to the Collect run once per item.",
+    })
+
+
+def collected_artifact(node, inputs: list[FileDescriptor]) -> ExpectedArtifact:
+    """A Collect's output: one directory with a subfolder per item."""
+    name = sanitize_fragment(node.label or node.flow_id).replace("-", "_").lower() or "collected"
+    item = (
+        _item_declaration(inputs[0].model_dump(mode="json"), Path(inputs[0].filename).stem)
+        if inputs else {"name": "item", "filename": "item"}
+    )
+    return ExpectedArtifact(
+        name=name,
+        kind="directory",
+        representation="directory",
+        filename=f"{name}_items",
+        item=item,
+        semantic_role="collection",
+        port="items",
+        description=(
+            f"One subfolder per item (named by its item key), each holding {item['filename']}; "
+            "_items.json lists the item keys and their status."
+        ),
+    )
 
 
 SUMMARY_KEYWORDS = ("profil", "summar", "statistic", "exploratory", "eda", "inspect", "quality")

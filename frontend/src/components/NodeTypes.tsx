@@ -217,8 +217,10 @@ export const CustomNode: React.FC<NodeProps> = ({ id, data, selected }) => {
               {templateLabel === 'Condition'
                 ? `If ${String(data.param?.expression || '…set an expression')}`
                 : templateLabel === 'Parallel Map'
-                  ? `One run per item · max ${String(data.param?.max_concurrency || 4)} at once`
-                  : 'Choose Condition or Parallel Map'}
+                  ? `Steps up to Collect run once per item · max ${String(data.param?.max_concurrency || 4)} at once`
+                  : templateLabel === 'Collect'
+                    ? 'Gathers every per-item result into one collection'
+                    : 'Choose Condition, Parallel Map, or Collect'}
             </div>
           )}
 

@@ -111,6 +111,8 @@ SEVERAL INPUTS, PARALLEL BRANCHES AND JOINS
   one Source stand in for data it does not hold.
 - Many files of the same kind (daily CSVs, a folder of images) are one Source
   whose items a Parallel Map processes; do not draw one branch per file.
+  Process the whole collection in one Task instead when the request says to
+  combine or handle all files together.
 - Before reporting, compare overview with your summary: every Source, branch
   and join you describe must exist exactly as described.
 
@@ -135,6 +137,13 @@ FLOW BEHAVIOR
 - Parallel Map uses items -> item. Capture the intended parallel behavior in its
   description; do not choose concurrency or failure-policy parameters. The Flow
   owns iteration, so never duplicate a task once per item.
+- Every Parallel Map is closed by a Collect Flow (create_step type flow,
+  template "Collect"; ports item -> items). The steps between the Map and its
+  Collect run once per item and are described for a single item; the Collect
+  gathers their results into one collection. Steps that need all items
+  (aggregate, merge, summarize, save one file) come after the Collect, never
+  inside the map. Per-item steps take input only from the Map or other per-item
+  steps and feed only per-item steps or the Collect. Do not nest maps.
 - When repairing a legacy Flow, use configure_flow_step with the required
   Condition expression, then make all requested branches explicit.
 
@@ -146,9 +155,13 @@ with source_port `when_false`. Use connect_steps only for later merges or repair
 between steps that already exist. Connect the final result to Delivery.
 Complaint has exactly one outgoing edge.
 
-Canonical parallel example: Upload -> Parallel Map -> Resize Image -> Export,
-using source_port `data` to target_port `items`, then source_port `item` to
-target_port `input`, and source_port `output` to target_port `data`.
+Canonical parallel example: Upload -> Parallel Map -> Resize Image -> Collect
+Images -> Export, using source_port `data` to target_port `items`, source_port
+`item` to target_port `input`, source_port `output` to target_port `item` (the
+Collect), and source_port `items` to target_port `data`. For "extract fields
+from each invoice, then combine into one table": Invoice PDFs -> Parallel Map ->
+Extract Text -> Extract Invoice Fields -> Collect Invoices -> Combine Into Table
+-> Invoices CSV.
 
 REUSABLE PIPELINES
 - Saved reusable pipelines cannot be edited or versioned. Save a new named item

@@ -606,7 +606,7 @@ export function PropertiesPanel({
         .filter((field) => field.secret)
         .map((field) => field.name),
     ])).filter((key) => key in nextParam);
-    const replaceGenericFlowLabel = nodeType === "flow" && ["Flow", "Condition", "Parallel Map"].includes(label);
+    const replaceGenericFlowLabel = nodeType === "flow" && ["Flow", "Condition", "Parallel Map", "Collect"].includes(label);
     const nextLabel = replaceGenericFlowLabel ? (template?.label || templateLabel) : label;
     if (options.replaceParameters) {
       // Stored credentials are keyed by node + name. Never let a credential
@@ -1624,7 +1624,7 @@ export function PropertiesPanel({
                 {currentTemplate === "Parallel Map" && (
                   <div className="space-y-3">
                     <div className="rounded-md border border-purple-500/25 bg-purple-500/10 p-3 text-xs text-muted-foreground">
-                      The <strong className="text-foreground">items</strong> input must be an array. The downstream branch connected to <strong className="text-foreground">item</strong> is scheduled once for each array item.
+                      The <strong className="text-foreground">items</strong> input is a collection (a folder of files or a Collect result). Every step between <strong className="text-foreground">item</strong> and the next <strong className="text-foreground">Collect</strong> runs once per item; write those steps for a single item.
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       <div className="space-y-2">
@@ -1657,9 +1657,15 @@ export function PropertiesPanel({
                   </div>
                 )}
 
+                {currentTemplate === "Collect" && (
+                  <div className="rounded-md border border-purple-500/25 bg-purple-500/10 p-3 text-xs text-muted-foreground">
+                    Closes the Parallel Map before it. The <strong className="text-foreground">items</strong> output is one folder with a subfolder per item and an <code className="rounded bg-muted px-1 py-0.5">_items.json</code> index; failed items are listed there and left out.
+                  </div>
+                )}
+
                 {currentTemplate === "Flow" && (
                   <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
-                    This compatibility template has no behavior. Select Condition or Parallel Map above.
+                    This compatibility template has no behavior. Select Condition, Parallel Map, or Collect above.
                   </div>
                 )}
               </InspectorSection>

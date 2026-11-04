@@ -15,6 +15,7 @@ from plugins import (
 )
 from plugins.manifest import resolve_operation
 from subpipeline_reference import SUBPIPELINE_DEPTH_ERROR, reusable_pipeline_nesting_error, subpipeline_reference
+from map_scope import map_scopes
 from port_types import check_connection, effective_port_type, infer_output_types
 from step_types import normalize_step_type
 
@@ -206,6 +207,8 @@ def _shared_input_port_issues(
     return issues
 
 
+FLOW_BEHAVIORS = {"Condition", "Parallel Map", "Collect"}
+
 FLOW_EXPRESSION_PATTERN = re.compile(
     r'^value(?:(?:\.[A-Za-z_][A-Za-z0-9_]*)|(?:\[(?:\d+|"[^"]+"|\'[^\']+\')\]))*'
     r'(?:\s*(?:==|!=|>=|<=|>|<)\s*(?:"[^"]*"|\'[^\']*\'|-?\d+(?:\.\d+)?|true|false|null))?$'
@@ -255,11 +258,11 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
 
         if kind == "flow":
             parameters = _parameters(data)
-            if template_label not in {"Condition", "Parallel Map"}:
+            if template_label not in FLOW_BEHAVIORS:
                 issues.append(_issue(
                     "configuration",
                     "missing-flow-behavior",
-                    "Choose a Flow behavior: Condition or Parallel Map.",
+                    "Choose a Flow behavior: Condition, Parallel Map, or Collect.",
                     node_id=node_id,
                 ))
             elif template_label == "Condition":
@@ -582,6 +585,19 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
             ))
 
     issues.extend(_shared_input_port_issues(port_connections, node_by_id))
+    _, scope_issues = map_scopes(
+        {
+            node_id: str(data.get("template_label") or "")
+            for node_id, data in node_by_id.items()
+            if kinds[node_id] == "flow"
+        },
+        [(source, source_port, target, target_port)
+         for _, source, source_port, target, target_port in port_connections],
+        {node_id: str(data.get("label") or "") for node_id, data in node_by_id.items()},
+    )
+    issues.extend(
+        _issue("graph", item.code, item.message, node_id=item.node_id) for item in scope_issues
+    )
 
     for node_id, ports in ports_by_node.items():
         for port in ports["inputs"]:

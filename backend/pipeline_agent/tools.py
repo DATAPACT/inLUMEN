@@ -335,9 +335,9 @@ def build_pipeline_editor_tools(
                 "the high-level pipeline has been designed."
             )
         if step_type == "flow":
-            if resolved_template_label not in {"Condition", "Parallel Map"}:
+            if resolved_template_label not in {"Condition", "Parallel Map", "Collect"}:
                 raise ValueError(
-                    "Flow template must be Condition or Parallel Map; generic Flow has no behavior."
+                    "Flow template must be Condition, Parallel Map, or Collect; generic Flow has no behavior."
                 )
         props_lines = [
             f"type:       '{step_type}'",
@@ -415,11 +415,15 @@ def build_pipeline_editor_tools(
         normalized_template = raw_template.lower()
         if normalized_template == "parallel map":
             return "Parallel Map"
+        if normalized_template in {"collect", "gather"}:
+            return "Collect"
         if normalized_template == "condition":
             return "Condition"
         if raw_template and normalized_template != "flow":
             return raw_template
         behavior_hint = f"{label or ''} {description or ''}".lower()
+        if behavior_hint.strip().startswith(("collect", "gather")):
+            return "Collect"
         if "parallel" in behavior_hint or "for each" in behavior_hint:
             return "Parallel Map"
         return "Condition"
@@ -1001,6 +1005,7 @@ def build_pipeline_editor_tools(
                     WHEN prev.type = 'subpipeline' THEN coalesce(prev.primary_output_port, 'output')
                     WHEN prev.type = 'flow' AND toLower(coalesce(prev.template_label, '')) = 'condition' THEN 'when_true'
                     WHEN prev.type = 'flow' AND toLower(coalesce(prev.template_label, '')) = 'parallel map' THEN 'item'
+                    WHEN prev.type = 'flow' AND toLower(coalesce(prev.template_label, '')) = 'collect' THEN 'items'
                     ELSE 'output'
                 END,
                 flow.target_port = '{target_port}'
@@ -1043,7 +1048,8 @@ def build_pipeline_editor_tools(
         Port ids never include a component-type prefix. Standard exact ids are:
         Source output `data`; Task input `input` and output `output`; Destination
         input `data`; Condition input `value` and outputs `when_true`/`when_false`;
-        Parallel Map input `items` and output `item`. When a side exposes exactly
+        Parallel Map input `items` and output `item`; Collect input `item` and
+        output `items`. When a side exposes exactly
         one port, its port field may be omitted and will be inferred.
         Subpipeline handles are the public port ids returned by create_step.
         For compatibility, type-prefixed aliases such as task.output are
@@ -1262,8 +1268,8 @@ def build_pipeline_editor_tools(
             ):
                 raise ValueError("configure_flow_step requires a valid flow_id")
             behavior = str(data.get("behavior") or "").strip()
-            if behavior not in {"Condition", "Parallel Map"}:
-                raise ValueError("Flow behavior must be Condition or Parallel Map")
+            if behavior not in {"Condition", "Parallel Map", "Collect"}:
+                raise ValueError("Flow behavior must be Condition, Parallel Map, or Collect")
             if data.get("parameters"):
                 raise ValueError(
                     "Pipeline design does not accept Flow runtime parameters; "
@@ -1286,7 +1292,7 @@ def build_pipeline_editor_tools(
             serialized_ports = ports_json_for_template(None, "flow", behavior)
             escaped_ports = serialized_ports.replace("\\", "\\\\").replace("'", "\\'")
             input_port = default_input_port_id("flow", behavior)
-            default_output_port = "when_true" if behavior == "Condition" else "item"
+            default_output_port = {"Condition": "when_true", "Collect": "items"}.get(behavior, "item")
             query = f"""
             MATCH (p:PIPELINE {{status:'design'}})-[:HAS_STEP]->(flowStep:STEP {{flow_id:'{flow_id}'}})
             WHERE flowStep.type = 'flow'

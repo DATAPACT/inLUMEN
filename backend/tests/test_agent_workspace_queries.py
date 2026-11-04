@@ -86,6 +86,29 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
         self.assertIn("primary_input_port: 'customers'", query)
         self.assertIn("flow.target_port = 'customers'", query)
 
+    def test_collect_closes_a_map_after_the_per_item_step(self):
+        captured = []
+
+        async def run_query(query, query_type, **kwargs):
+            _validate_workspace_cypher(query)
+            captured.append(query)
+            if query_type == "resolve_step_predecessor":
+                return json.dumps([{"predecessor": {
+                    "pipeline_uid": "design", "flow_id": "4", "type": "task",
+                    "primary_output_port": "output",
+                }}])
+            return json.dumps([{"step": {"flow_id": "5"}}])
+
+        tools = {tool.__name__: tool for tool in build_pipeline_editor_tools()}
+        with patch("pipeline_agent.tools.run_neo4j_query", side_effect=run_query):
+            asyncio.run(tools["create_step"](json.dumps({
+                "type": "flow", "label": "Collect Invoices", "template": "Collect", "after_flow_id": "4",
+            })))
+        query = captured[-1]
+        self.assertIn("template_label:'Collect'", query)
+        self.assertIn('"id": "items"', query)
+        self.assertIn("flow.target_port = 'item'", query)
+
     def test_preview_uses_existing_reusable_catalog_but_rejects_new_catalog_writes(self):
         run_query = AsyncMock(return_value="[]")
         tools = build_pipeline_editor_tools(
