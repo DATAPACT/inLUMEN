@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifact_runtime import ArtifactContractError, assign_output_ports, validate_declaration
+from .port_types import FILES_AS_SEPARATE, file_port_ids, files_as, parse_port_type
 from .task_package_contract import public_manifest, validate_package
 from .generation_budget import budgeted
 from .llm import (
@@ -1831,9 +1832,18 @@ def expected_outputs_for_node(
         declared = _declared_output_artifacts(node)
         if declared:
             return declared
+        if len(inputs) > 1 and files_as(node.parameters) == FILES_AS_SEPARATE:
+            # Files with different roles: one output port per file, so each
+            # branch receives only its own file (port ids match the canvas).
+            return [ExpectedArtifact(name=Path(item.filename).stem, filename=item.filename,
+                kind=item.kind or "binary", representation=item.representation,
+                format=item.format, schema=item.schema, columns=item.columns,
+                required_columns=item.required_columns,
+                semantic_role=item.semantic_role, port=port)
+                for item, port in zip(inputs, file_port_ids(item.filename for item in inputs))]
         if len(inputs) > 1:
-            # One output port carries one artifact, so several uploaded files
-            # are published together as a directory bundle with one member each.
+            # Files of one kind form a collection: one output port carries one
+            # artifact, a directory bundle with one member per file.
             members = [
                 ExpectedArtifact(name=Path(item.filename).stem, filename=item.filename,
                     kind=item.kind or "binary", representation=item.representation,
@@ -1855,6 +1865,9 @@ def expected_outputs_for_node(
     declared = _declared_output_artifacts(node)
     if declared:
         return declared
+    typed = typed_table_outputs(node, name, label, inputs)
+    if typed:
+        return typed
     if task == "speech_to_text":
         return [
             ExpectedArtifact(
@@ -2342,17 +2355,41 @@ def table_inputs(inputs: list[FileDescriptor]) -> list[FileDescriptor]:
     return found
 
 
+def typed_table_outputs(
+    node, name: str, label: str, inputs: list[FileDescriptor]
+) -> list[ExpectedArtifact]:
+    """Honour a Task whose single output port is typed ``table`` or ``table[]``.
+
+    A typed port is the author's contract, so it decides the output shape
+    instead of label keywords; untyped (``any``) ports keep the heuristics.
+    """
+    outputs = (node.ports or {}).get("outputs") or []
+    if len(outputs) != 1 or not isinstance(outputs[0], dict):
+        return []
+    port_type = parse_port_type(outputs[0].get("type"))
+    if port_type.kind != "table":
+        return []
+    return data_passthrough_outputs(name, label, inputs, collection=port_type.many)
+
+
 def data_passthrough_outputs(
     name: str,
     label: str,
     inputs: list[FileDescriptor],
     *,
     with_report: bool = False,
+    collection: bool | None = None,
 ) -> list[ExpectedArtifact]:
-    """Publish the step's tables in the shape they arrived: one table or a bundle."""
+    """Publish the step's tables in the shape they arrived: one table or a bundle.
+
+    ``collection`` forces the shape a typed output port asks for: True always
+    publishes a bundle, False one table (the widest, as the primary dataset).
+    """
     tables = table_inputs(inputs)
     if not tables:
         return []
+    if collection is False:
+        tables = [max(tables, key=lambda table: len(table.columns))]
     members = [
         ExpectedArtifact(
             name=Path(table.filename).stem,
@@ -2365,7 +2402,7 @@ def data_passthrough_outputs(
         )
         for table in tables
     ]
-    if len(members) == 1 and not with_report:
+    if len(members) == 1 and not with_report and not collection:
         member = members[0]
         return [member.model_copy(update={
             "name": name,

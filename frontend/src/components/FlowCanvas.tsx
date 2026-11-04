@@ -87,6 +87,7 @@ import {
 import { normalizeNodePorts, normalizeType } from '@/features/nodes/nodeSchema';
 import { uploadNodeFile } from '@/features/nodes/nodePersistence';
 import { remapSubpipelineParentEdges } from '@/features/flow/subpipeline';
+import { checkConnection, effectivePortType, inferOutputTypes } from '@/features/flow/portTypes';
 import {
   ASSISTANT_GRAPH_FIT_DURATION,
   GRAPH_FIT_VIEW_OPTIONS,
@@ -1605,14 +1606,23 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         });
         return;
       }
-      const sourceType = sourcePort.type.toLowerCase();
-      const targetType = targetPort.type.toLowerCase();
-      const wildcard = (value: string) => ["", "any", "unknown", "*"].includes(value);
-      if (!wildcard(sourceType) && !wildcard(targetType) && sourceType !== targetType) {
-        toast.error("Incompatible port contracts", {
-          description: `${sourcePort.name} (${sourcePort.type}) cannot connect to ${targetPort.name} (${targetPort.type}).`,
-        });
-        return;
+      // Gradual typing: the connection is kept and validation reports it, so
+      // an author can wire first and fix contracts (or regenerate) afterwards.
+      const sourceKind = normalizeType(sourceNode?.data?.type);
+      const sourceOutputs = normalizeNodePorts(sourceNode?.data?.ports, sourceKind).outputs;
+      const portIssue = checkConnection(
+        effectivePortType(
+          sourcePort.type,
+          inferOutputTypes(sourceKind, (sourceNode?.data || {}) as Record<string, unknown>,
+            sourceOutputs.map((port) => port.id))[sourcePort.id],
+        ),
+        targetPort.type,
+      );
+      if (portIssue) {
+        (portIssue.severity === "error" ? toast.error : toast.warning)(
+          portIssue.severity === "error" ? "Incompatible port types" : "Check this connection",
+          { description: portIssue.message },
+        );
       }
 
       const duplicate = edges.some((edge) =>

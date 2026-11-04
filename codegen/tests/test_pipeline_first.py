@@ -2041,3 +2041,58 @@ def test_plan_rejects_several_outputs_without_ports() -> None:
     })
     with pytest.raises(ValueError, match="must name the output port"):
         build_pipeline_generation_plan(request)
+
+
+def test_source_with_separate_files_feeds_each_branch_its_own_file() -> None:
+    nodes = [
+        {"flow_id": "1", "label": "Clinic Data", "type": "source",
+         "parameters": {"files_as": "separate"},
+         "ports": {"inputs": [], "outputs": [
+             {"id": "patients", "name": "patients", "type": "table"},
+             {"id": "visits", "name": "visits", "type": "table"}]},
+         "files": [
+             {"filename": "patients.csv", "kind": "table", "format": "csv", "columns": ["id", "age"]},
+             {"filename": "visits.csv", "kind": "table", "format": "csv", "columns": ["id", "date"]},
+         ]},
+        {"flow_id": "2", "label": "Clean Patients", "type": "task"},
+        {"flow_id": "3", "label": "Clean Visits", "type": "task"},
+        {"flow_id": "4", "label": "Join Patients and Visits", "type": "task",
+         "ports": {"inputs": [{"id": "left", "name": "left"}, {"id": "right", "name": "right"}],
+                   "outputs": [{"id": "output", "name": "output", "type": "table"}]}},
+        {"flow_id": "5", "label": "Final Output", "type": "destination"},
+    ]
+    edges = [
+        {"source": "1", "source_port": "patients", "target": "2", "target_port": "input"},
+        {"source": "1", "source_port": "visits", "target": "3", "target_port": "input"},
+        {"source": "2", "source_port": "output", "target": "4", "target_port": "left"},
+        {"source": "3", "source_port": "output", "target": "4", "target_port": "right"},
+        {"source": "4", "source_port": "output", "target": "5", "target_port": "data"},
+    ]
+    request = GeneratePipelineScriptsRequest.model_validate(
+        {"context": {"pipeline": {"name": "Clinic"}, "graph": {"nodes": nodes, "edges": edges}}}
+    )
+    plan, _contexts = build_pipeline_generation_plan(request)
+    by_id = {node["flow_id"]: node for node in plan["nodes"]}
+
+    assert [(item["port"], item["filename"]) for item in by_id["1"]["outputs"]] == [
+        ("patients", "patients.csv"), ("visits", "visits.csv"),
+    ]
+    assert [item["source_port"] for item in by_id["2"]["inputs"]] == ["patients"]
+    assert [item["source_port"] for item in by_id["3"]["inputs"]] == ["visits"]
+    assert sorted(item["target_port"] for item in by_id["4"]["inputs"]) == ["left", "right"]
+    # The join's typed `table` output is one table, not a bundle of its inputs.
+    assert [(item["kind"], item["representation"]) for item in by_id["4"]["outputs"]] == [("table", "file")]
+
+
+def test_typed_collection_output_keeps_a_bundle_even_for_one_table() -> None:
+    node = NodeDescriptor.model_validate({
+        "flow_id": "2", "label": "Enrich", "type": "task",
+        "ports": {"inputs": [{"id": "input", "name": "input"}],
+                  "outputs": [{"id": "output", "name": "output", "type": "table[]"}]},
+    })
+    inputs = [FileDescriptor(filename="1/a.csv", kind="table", format="csv", columns=["x"])]
+
+    outputs = expected_outputs_for_node(node, ["3"], inputs)
+
+    assert len(outputs) == 1 and outputs[0].representation == "directory"
+    assert [member["filename"] for member in outputs[0].members] == ["a.csv"]

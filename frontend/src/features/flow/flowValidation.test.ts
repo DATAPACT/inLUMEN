@@ -518,3 +518,76 @@ describe("pipeline design validation", () => {
     expect(completeIssue?.severity).toBe("error");
   });
 });
+
+describe("port types inferred from contracts", () => {
+  const graphWith = (sourceData: Record<string, unknown>, sourceHandle: string, inputType: string) => normalizeGraph({
+    nodes: [
+      { id: "source", position: { x: 0, y: 0 }, data: { type: "source", ...sourceData } },
+      {
+        id: "task",
+        position: { x: 1, y: 0 },
+        data: {
+          type: "task",
+          ports: {
+            inputs: [{ id: "input", name: "input", type: inputType, required: true, description: "" }],
+            outputs: [{ id: "output", name: "output", type: "any", required: true, description: "" }],
+          },
+        },
+      },
+    ],
+    edges: [{ id: "e", source: "source", target: "task", sourceHandle, targetHandle: "input" }],
+  });
+  const edgeIssues = (graph: ReturnType<typeof normalizeGraph>) =>
+    validateGraph(graph.nodes, graph.edges).issues
+      .filter((issue) => issue.edgeId === "e")
+      .map((issue) => `${issue.severity}:${issue.code}`);
+
+  it("warns when a multi-file collection reaches a single-table input", () => {
+    const graph = graphWith({ files: [{ filename: "a.csv" }, { filename: "b.csv" }] }, "data", "table");
+    expect(edgeIssues(graph)).toEqual(["warning:collection-into-single"]);
+    expect(edgeIssues(graphWith({ files: [{ filename: "a.csv" }, { filename: "b.csv" }] }, "data", "table[]"))).toEqual([]);
+  });
+
+  it("types each output of a Source that publishes files separately", () => {
+    const source = {
+      param: { files_as: "separate" },
+      ports: { outputs: [{ id: "patients", name: "patients", type: "any" }, { id: "scan", name: "scan", type: "any" }] },
+      files: [{ filename: "patients.csv" }, { filename: "scan.png" }],
+    };
+    expect(edgeIssues(graphWith(source, "patients", "table"))).toEqual([]);
+    expect(edgeIssues(graphWith(source, "scan", "table"))).toEqual(["error:incompatible-port-types"]);
+  });
+});
+
+describe("joins", () => {
+  const task = (id: string, inputs = ["input"]) => ({
+    id, position: { x: 0, y: 0 },
+    data: { type: "task", label: id, ports: {
+      inputs: inputs.map((port) => ({ id: port, name: port, type: "any", required: true, description: "" })),
+      outputs: [{ id: "output", name: "output", type: "any", required: true, description: "" }],
+    } },
+  });
+  const source = (id: string) => ({ id, position: { x: 0, y: 0 }, data: { type: "source", label: id } });
+  const link = (source: string, sourceHandle: string, target: string, targetHandle: string) =>
+    ({ id: `${source}-${target}`, source, target, sourceHandle, targetHandle });
+  const codes = (nodes: object[], edges: object[]) => {
+    const graph = normalizeGraph({ nodes, edges });
+    return validateGraph(graph.nodes, graph.edges).issues.map((issue) => issue.code);
+  };
+
+  it("flags two parallel branches on one input port", () => {
+    expect(codes(
+      [source("customers"), source("orders"), task("dedupe"), task("filter"), task("merge")],
+      [link("customers", "data", "dedupe", "input"), link("orders", "data", "filter", "input"),
+        link("dedupe", "output", "merge", "input"), link("filter", "output", "merge", "input")],
+    )).toContain("shared-input-port");
+  });
+
+  it("accepts a join with one named input per branch", () => {
+    expect(codes(
+      [source("customers"), source("orders"), task("dedupe"), task("filter"), task("merge", ["customers", "orders"])],
+      [link("customers", "data", "dedupe", "input"), link("orders", "data", "filter", "input"),
+        link("dedupe", "output", "merge", "customers"), link("filter", "output", "merge", "orders")],
+    )).not.toContain("shared-input-port");
+  });
+});

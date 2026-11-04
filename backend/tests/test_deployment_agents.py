@@ -104,6 +104,49 @@ class DeploymentAgentsTest(unittest.TestCase):
         self.assertFalse(by_name["API_KEY"]["required"])
         self.assertFalse(by_name["API_ENDPOINT"]["required"])
 
+    def test_source_with_separate_files_publishes_one_port_per_file(self):
+        from artifact_runtime import assign_output_ports, publish_port_artifacts, validate_result
+
+        artifact, _ = _managed_adapter_runtime(
+            {
+                "flow_id": "1",
+                "label": "Clinic Data",
+                "type": "source",
+                "template": "Custom",
+                "param": {"files_as": "separate"},
+                "ports": {"inputs": [], "outputs": [{"id": "patients"}, {"id": "visit_log"}]},
+                "files": [
+                    {"filename": "patients.csv", "kind": "table", "format": "csv"},
+                    {"filename": "Visit Log.json", "kind": "json", "format": "json"},
+                ],
+            }
+        )
+        files = {item["filename"]: item for item in artifact["files"]}
+        outputs = json.loads(files["node-manifest.json"]["content"])["data_contract"]["outputs"]
+        self.assertEqual(
+            [("patients", "patients.csv", "table"), ("visit_log", "Visit Log.json", "json")],
+            [(item["port"], item["filename"], item["kind"]) for item in outputs],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir, output_dir = root / "input", root / "output"
+            input_dir.mkdir()
+            (input_dir / "patients.csv").write_text("id,age\n", encoding="utf-8")
+            (input_dir / "Visit Log.json").write_text("{}", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {"PIPELINE_INPUT_DIR": str(input_dir), "PIPELINE_OUTPUT_DIR": str(output_dir)},
+            ):
+                namespace = {"__name__": "source_adapter"}
+                exec(files["main.py"]["content"], namespace)
+                namespace["main"]()
+            declarations = assign_output_ports(outputs, ["patients", "visit_log"])
+            validated = validate_result(output_dir, declarations)
+            published = root / "published"
+            publish_port_artifacts(output_dir, validated, published)
+            self.assertEqual(["patients.csv"], [p.name for p in (published / "patients").iterdir()])
+            self.assertEqual(["Visit Log.json"], [p.name for p in (published / "visit_log").iterdir()])
+
     def test_custom_source_with_several_files_publishes_one_directory_bundle(self):
         artifact, _ = _managed_adapter_runtime(
             {

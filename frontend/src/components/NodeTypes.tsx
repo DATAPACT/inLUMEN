@@ -16,6 +16,7 @@ import {
   type NodePorts,
 } from '@/features/nodes/nodeSchema';
 import { PortDisplayContext } from '@/features/nodes/PortDisplayContext';
+import { describePortType, effectivePortType, inferOutputTypes } from '@/features/flow/portTypes';
 
 interface NodeProps {
   id: string;
@@ -107,7 +108,7 @@ const PortList = ({
         >
           <span className="truncate font-medium text-slate-300">{port.name}</span>
           {port.type !== 'any' && (
-            <span className="shrink-0 text-slate-500">{port.type}</span>
+            <span className="shrink-0 text-slate-500" title={describePortType(port.type)}>{port.type}</span>
           )}
           {port.required && <span className="shrink-0 text-amber-400" title="Required">*</span>}
         </div>
@@ -125,7 +126,20 @@ export const CustomNode: React.FC<NodeProps> = ({ id, data, selected }) => {
   // Compact mode collapses labels and validation details, but handles always
   // remain visible so connections are understandable and editable.
   const showPortDetails = display.advanced || visualType === 'flow';
-  const ports = normalizeNodePorts(data.ports, visualType);
+  const declaredPorts = normalizeNodePorts(data.ports, visualType);
+  // Untyped outputs show what their contract (files or declared artifacts) carries.
+  const inferredOutputs = inferOutputTypes(
+    visualType,
+    data as unknown as Record<string, unknown>,
+    declaredPorts.outputs.map((port) => port.id),
+  );
+  const ports = {
+    ...declaredPorts,
+    outputs: declaredPorts.outputs.map((port) => ({
+      ...port,
+      type: effectivePortType(port.type, inferredOutputs[port.id]),
+    })),
+  };
   const style = TYPE_STYLES[visualType];
   const Icon = icons[visualType] || PanelLeft;
   const templateLabel = String(data.template_label || '').trim();

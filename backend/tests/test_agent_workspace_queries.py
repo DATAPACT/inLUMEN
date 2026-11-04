@@ -22,7 +22,9 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
             create_step = next(tool for tool in build_pipeline_editor_tools() if tool.__name__ == "create_step")
             asyncio.run(create_step(json.dumps({"type": "source", "label": "Audio upload"})))
         self.assertTrue(captured)
-        self.assertIn("[:FLOWS_TO]->(:STEP)", captured[-1])
+        # A Source is an independent root: it is never chained after a tail.
+        self.assertNotIn("FLOWS_TO", captured[-1])
+        self.assertIn("existingSource", captured[-1])
         self.assertNotEqual(_scope_cypher(captured[-1], "alice"), _scope_cypher(captured[-1], "bob"))
 
     def test_explicit_predecessor_and_clear_pass_workspace_validation(self):
@@ -45,6 +47,44 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
             })))
             asyncio.run(tools["delete_all_steps"]("{}"))
         self.assertEqual(captured, ["resolve_step_predecessor", "create_step", "delete_all_steps"])
+
+    def test_source_cannot_follow_another_step(self):
+        tools = {tool.__name__: tool for tool in build_pipeline_editor_tools()}
+        with patch("pipeline_agent.tools.run_neo4j_query", AsyncMock()) as run_query:
+            with self.assertRaisesRegex(RuntimeError, "starts its own branch"):
+                asyncio.run(tools["create_step"](json.dumps({
+                    "type": "source", "label": "Orders CSV", "after_flow_id": "1",
+                })))
+        run_query.assert_not_awaited()
+
+    def test_joining_task_declares_named_inputs(self):
+        captured = []
+
+        async def run_query(query, query_type, **kwargs):
+            _validate_workspace_cypher(query)
+            captured.append(query)
+            if query_type == "resolve_step_predecessor":
+                return json.dumps([{"predecessor": {
+                    "pipeline_uid": "design", "flow_id": "3", "type": "task",
+                    "primary_output_port": "output",
+                }}])
+            return json.dumps([{"step": {"flow_id": "5"}}])
+
+        tools = {tool.__name__: tool for tool in build_pipeline_editor_tools()}
+        with patch("pipeline_agent.tools.run_neo4j_query", side_effect=run_query):
+            asyncio.run(tools["create_step"](json.dumps({
+                "type": "task", "label": "Merge Datasets", "after_flow_id": "3",
+                "inputs": ["customers", "orders"], "target_port": "customers",
+            })))
+            with self.assertRaisesRegex(RuntimeError, "not one of"):
+                asyncio.run(tools["create_step"](json.dumps({
+                    "type": "task", "label": "Merge", "after_flow_id": "3",
+                    "inputs": ["customers", "orders"], "target_port": "input",
+                })))
+        query = captured[-1]
+        self.assertIn('"id": "customers"', query)
+        self.assertIn("primary_input_port: 'customers'", query)
+        self.assertIn("flow.target_port = 'customers'", query)
 
     def test_preview_uses_existing_reusable_catalog_but_rejects_new_catalog_writes(self):
         run_query = AsyncMock(return_value="[]")

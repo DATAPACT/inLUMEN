@@ -12,6 +12,7 @@ import {
 import { findTemplateForType } from "@/features/nodes/templateCatalog";
 import { normalizeSubpipelineInterface, reusablePipelineNestingError, SUBPIPELINE_DEPTH_ERROR } from "@/features/flow/subpipeline";
 import { taskImplementationMigrationError } from "@/features/nodes/propertyPanelPolicy";
+import { checkConnection, effectivePortType, inferOutputTypes } from "@/features/flow/portTypes";
 
 export type ValidationCategory =
   | "configuration"
@@ -85,10 +86,66 @@ export const getValidationIssueSubject = (
   return { label: "Pipeline", context: "Graph" };
 };
 
-const portTypesCompatible = (source: string, target: string) => {
-  const left = source.trim().toLowerCase();
-  const right = target.trim().toLowerCase();
-  return !left || !right || ["any", "unknown", "*"].includes(left) || ["any", "unknown", "*"].includes(right) || left === right;
+const portTypesCompatible = (source: string, target: string) =>
+  checkConnection(source, target)?.severity !== "error";
+
+type PortConnection = { edgeId: string; source: string; sourcePort: string; target: string; targetPort: string };
+
+/** Condition outputs every path into this connection passes through. */
+const conditionBranches = (start: PortConnection, connections: PortConnection[], nodeById: Map<string, Node>) => {
+  const branches = new Map<string, Set<string>>();
+  const pending = [start];
+  const seen = new Set<PortConnection>();
+  while (pending.length) {
+    const current = pending.pop()!;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    const template = String(objectValue(nodeById.get(current.source)?.data).template_label || "").trim().toLowerCase();
+    if (template === "condition") {
+      if (!branches.has(current.source)) branches.set(current.source, new Set());
+      branches.get(current.source)!.add(current.sourcePort);
+    }
+    pending.push(...connections.filter((item) => item.target === current.source));
+  }
+  return branches;
+};
+
+const mutuallyExclusive = (left: Map<string, Set<string>>, right: Map<string, Set<string>>) =>
+  [...left.entries()].some(([condition, ports]) => {
+    const other = right.get(condition);
+    return Boolean(other) && ports.size === 1 && other!.size === 1 && [...ports][0] !== [...other!][0];
+  });
+
+/**
+ * One producer per input port: a join declares one named input per branch.
+ * Alternative Condition branches may rejoin one port (only one delivers data).
+ * Mirrors backend/pipeline_graph_validation.py.
+ */
+const sharedInputPortIssues = (connections: PortConnection[], nodeById: Map<string, Node>): ValidationIssue[] => {
+  const byPort = new Map<string, PortConnection[]>();
+  connections.forEach((item) => {
+    const key = `${item.target}\u0000${item.targetPort}`;
+    byPort.set(key, [...(byPort.get(key) || []), item]);
+  });
+  return [...byPort.values()].flatMap((producers) => {
+    if (producers.length < 2) return [];
+    const branches = producers.map((item) => conditionBranches(item, connections, nodeById));
+    const exclusive = branches.every((left, i) => branches.slice(i + 1).every((right) => mutuallyExclusive(left, right)));
+    if (exclusive) return [];
+    const labels = producers
+      .map((item) => `“${String(objectValue(nodeById.get(item.source)?.data).label || item.source)}”`)
+      .join(", ");
+    const last = producers[producers.length - 1];
+    return [{
+      severity: "error" as const,
+      category: "ports" as const,
+      code: "shared-input-port",
+      nodeId: last.target,
+      edgeId: last.edgeId,
+      message: `Input “${last.targetPort}” receives ${producers.length} parallel branches (${labels}). `
+        + "Give this step one named input per branch so each branch has its own port.",
+    }];
+  });
 };
 
 const FLOW_EXPRESSION_PATTERN = /^value(?:(?:\.[A-Za-z_][A-Za-z0-9_]*)|(?:\[(?:\d+|"[^"]+"|'[^']+')\]))*(?:\s*(?:==|!=|>=|<=|>|<)\s*(?:"[^"]*"|'[^']*'|-?\d+(?:\.\d+)?|true|false|null))?$/;
@@ -109,6 +166,14 @@ export const validateGraph = (
     const kind = normalizeType(node.data?.type);
     return [String(node.id), normalizeNodePorts(node.data?.ports, kind)] as const;
   }));
+  const inferredOutputs = new Map(nodes.map((node) => [
+    String(node.id),
+    inferOutputTypes(
+      normalizeType(node.data?.type),
+      objectValue(node.data),
+      portsByNode.get(String(node.id))!.outputs.map((port) => port.id),
+    ),
+  ] as const));
   const add = (issue: ValidationIssue) => issues.push(issue);
 
   nodes.forEach((node) => {
@@ -340,6 +405,7 @@ export const validateGraph = (
   });
 
   const seenConnections = new Set<string>();
+  const portConnections: PortConnection[] = [];
   edges.forEach((edge) => {
     const edgeId = String(edge.id || "");
     const sourceId = String(edge.source || "");
@@ -364,15 +430,23 @@ export const validateGraph = (
       add({ severity: "error", category: "graph", code: "unknown-edge-port", edgeId, nodeId: targetId, message: "Connection references a port that does not exist." });
       return;
     }
-    if (!portTypesCompatible(sourcePort.type, targetPort.type)) add({
-      severity: "error",
+    portConnections.push({ edgeId, source: sourceId, sourcePort: sourcePortId, target: targetId, targetPort: targetPortId });
+    const portIssue = checkConnection(
+      effectivePortType(sourcePort.type, inferredOutputs.get(sourceId)?.[sourcePortId]),
+      targetPort.type,
+    );
+    if (portIssue) add({
+      severity: portIssue.severity,
       category: "ports",
-      code: "incompatible-port-types",
+      // Kind mismatches keep the established code; graded warnings carry their own.
+      code: portIssue.code === "incompatible-port-kinds" ? "incompatible-port-types" : portIssue.code,
       edgeId,
       nodeId: targetId,
-      message: `Port types are incompatible: ${sourcePort.type} → ${targetPort.type}.`,
+      message: portIssue.message,
     });
   });
+
+  sharedInputPortIssues(portConnections, nodeById).forEach(add);
 
   const byNode: Record<string, ValidationIssue[]> = {};
   issues.forEach((issue) => {

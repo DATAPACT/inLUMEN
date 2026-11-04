@@ -193,6 +193,16 @@ def _requested_topology_errors(graph: dict | None, user_message: str) -> list[st
         for source_id, branch_edges in outgoing.items()
         if len({edge["target"] for edge in branch_edges}) >= 2
     ]
+    # Independent Sources are parallel branches too (e.g. two input files
+    # cleaned separately and joined later); they need no fan-out node.
+    root_branch_edges = [
+        edge
+        for node_id, data in nodes.items()
+        if str(data.get("type") or "").lower() == "source"
+        for edge in outgoing[node_id][:1]
+    ]
+    if len(root_branch_edges) >= 2:
+        generic_branches.append(("", root_branch_edges))
     if (
         contract["two_branches"]
         and not contract["two_condition_branches"]

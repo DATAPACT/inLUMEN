@@ -15,6 +15,7 @@ from attachment_validation import attachment_input_errors
 from artifact_content import encode_artifact_bytes, is_text_artifact
 from artifact_contract import classify_artifact
 from artifact_runtime import ArtifactContractError
+from port_types import FILES_AS_SEPARATE, file_port_ids, files_as, kind_for_filename
 from task_artifacts import task_data_contract
 from task_package_contract import validate_package
 from async_runtime import run_async
@@ -1243,7 +1244,20 @@ def _managed_adapter_runtime(
             main_content = _managed_adapter_main_source_v2(adapter_spec)
         else:
             source_files = [item for item in step.get("files", []) if item.get("role") != "code" and item.get("filename") not in {"main.py", "requirements.txt", "node-manifest.json", "validation-report.json"}]
-            if len(source_files) > 1:
+            if len(source_files) > 1 and files_as(adapter_parameters) == FILES_AS_SEPARATE:
+                # One output port per file (ids match the canvas and codegen),
+                # so each downstream branch receives only its own file.
+                data_outputs = [
+                    {
+                        "name": Path(item["filename"]).stem,
+                        "port": port,
+                        "filename": item["filename"],
+                        "kind": kind_for_filename(item["filename"]),
+                        "format": Path(item["filename"]).suffix.lstrip("."),
+                    }
+                    for item, port in zip(source_files, file_port_ids(item["filename"] for item in source_files))
+                ]
+            elif len(source_files) > 1:
                 # Same bundle codegen declares for a multi-file Source, so the
                 # generated downstream Tasks receive the directory they expect.
                 declared = _multi_file_source_bundle(step, source_files)
