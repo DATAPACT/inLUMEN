@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
-from connector_catalog import require_supported_connector
+from inlumen.contracts.connector_catalog import require_supported_connector
 from plugins import is_plugin_template, plugin_manifest_for_template
 from plugins.runtime import plugin_data_contract, plugin_main_source, plugin_runtime_spec
 
@@ -45,7 +45,7 @@ from model_plans import (
     infer_implementation_plan_from_python_source,
     unresolved_model_plan_errors_from_python_source,
 )
-from node_parameters import normalize_secret_param_keys
+from inlumen.contracts.node_parameters import normalize_secret_param_keys
 from workspace_storage import node_bucket_name
 
 CODEGEN_GENERATOR = "inlumen-codegen-service"

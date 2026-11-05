@@ -38,7 +38,7 @@ def normalize_connector_template(value: object) -> str:
 
 def _plugin_definition(kind: str, template: object, parameters: Any = None) -> dict[str, Any] | None:
     """Connector definition derived from an installed plugin manifest."""
-    from plugins import plugin_manifest_for_template, required_parameter_names
+    from .plugins import plugin_manifest_for_template, required_parameter_names
 
     manifest = plugin_manifest_for_template(template)
     if manifest is None:
@@ -58,7 +58,7 @@ def _plugin_definition(kind: str, template: object, parameters: Any = None) -> d
 
 def connector_definition(step_type: object, template: object) -> dict[str, Any] | None:
     kind = str(step_type or "").strip().lower()
-    from plugins import is_plugin_template
+    from .plugins import is_plugin_template
 
     if is_plugin_template(template):
         try:
@@ -70,7 +70,7 @@ def connector_definition(step_type: object, template: object) -> dict[str, Any] 
 
 def require_supported_connector(step_type: object, template: object) -> None:
     kind = str(step_type or "").strip().lower()
-    from plugins import is_plugin_template
+    from .plugins import is_plugin_template
 
     if is_plugin_template(template):
         # Raises PluginNotInstalled / ValueError with an actionable message.
@@ -95,7 +95,7 @@ def missing_connector_parameters(
     template: object,
     parameters: Any,
 ) -> list[str]:
-    from plugins import is_plugin_template
+    from .plugins import is_plugin_template
 
     if is_plugin_template(template):
         try:

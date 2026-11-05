@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from step_types import CANONICAL_STEP_TYPES
+from ..step_types import CANONICAL_STEP_TYPES
 
 
 class NodeDefinitionValidationError(ValueError):

@@ -25,7 +25,7 @@ from pipeline_editor_team import (
     build_pipeline_editing_team,
     normalize_agent_implementation,
 )
-from pipeline_graph_validation import validate_pipeline_graph
+from inlumen.contracts.pipeline_graph_validation import validate_pipeline_graph
 
 
 def node(node_id, kind, label, implementation=None):

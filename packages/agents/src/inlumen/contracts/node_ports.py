@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any
 
-from step_types import normalize_step_type
+from .step_types import normalize_step_type
 
 
 DEFAULT_NODE_PORTS = {
@@ -181,7 +181,7 @@ def ports_for_template(
 def _plugin_template_ports(template_label: object, kind: str) -> dict[str, Any] | None:
     """Default ports declared by an installed plugin; None falls back to defaults."""
     try:
-        from plugins import plugin_manifest_for_template, plugin_ports
+        from .plugins import plugin_manifest_for_template, plugin_ports
 
         manifest = plugin_manifest_for_template(template_label, required=False)
     except Exception:

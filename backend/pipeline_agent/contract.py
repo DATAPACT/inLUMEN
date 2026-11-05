@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from connector_catalog import missing_connector_parameters
-from step_types import CANONICAL_STEP_TYPES
+from inlumen.contracts.connector_catalog import missing_connector_parameters
+from inlumen.contracts.step_types import CANONICAL_STEP_TYPES
 
 
 COMPONENT_DEFINITION_IDS = {

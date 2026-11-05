@@ -8,7 +8,7 @@ from pipeline_agent.context import (
     _graph_counts,
     _graph_signature,
 )
-from pipeline_graph_validation import (
+from inlumen.contracts.pipeline_graph_validation import (
     validate_pipeline_graph,
     validation_issue_messages,
 )

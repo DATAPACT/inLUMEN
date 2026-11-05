@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from subpipeline_reference import persisted_subpipeline_definition
+from inlumen.contracts.subpipeline_reference import persisted_subpipeline_definition
 
 from .artifacts import (
     configuration_definition_id,

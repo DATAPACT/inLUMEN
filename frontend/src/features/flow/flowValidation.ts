@@ -120,7 +120,8 @@ const mutuallyExclusive = (left: Map<string, Set<string>>, right: Map<string, Se
 /**
  * One producer per input port: a join declares one named input per branch.
  * Alternative Condition branches may rejoin one port (only one delivers data).
- * Mirrors backend/pipeline_graph_validation.py.
+ * Mirrors inlumen.contracts.pipeline_graph_validation
+ * (packages/agents/src/inlumen/contracts/pipeline_graph_validation.py).
  */
 const sharedInputPortIssues = (connections: PortConnection[], nodeById: Map<string, Node>): ValidationIssue[] => {
   const byPort = new Map<string, PortConnection[]>();

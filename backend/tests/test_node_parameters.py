@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from node_parameters import (  # noqa: E402
+from inlumen.contracts.node_parameters import (  # noqa: E402
     is_sensitive_parameter_name,
     normalize_secret_param_keys,
     secret_params_json,

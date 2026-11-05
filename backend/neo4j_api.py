@@ -17,14 +17,14 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 from runtime_config import add_cors_headers, get_neo4j_settings
-from step_types import normalize_step_type
-from node_ports import (
+from inlumen.contracts.step_types import normalize_step_type
+from inlumen.contracts.node_ports import (
     default_input_port_id,
     default_output_port_id,
     normalize_node_ports,
     ports_json,
 )
-from node_parameters import (
+from inlumen.contracts.node_parameters import (
     normalize_secret_param_keys,
     secret_params_json,
     without_secret_param_values,
@@ -36,9 +36,9 @@ from node_definitions.instance import (
     definition_properties_from_data,
     normalize_definition_properties,
 )
-from pipeline_graph_validation import validate_pipeline_graph
+from inlumen.contracts.pipeline_graph_validation import validate_pipeline_graph
 from plugins import with_plugin_secret_keys
-from subpipeline_reference import (
+from inlumen.contracts.subpipeline_reference import (
     derive_subpipeline_interface,
     normalize_reusable_pipeline_graph,
     plan_subpipeline_port_migration,

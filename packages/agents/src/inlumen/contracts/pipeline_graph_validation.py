@@ -5,19 +5,19 @@ import re
 from collections import defaultdict, deque
 from typing import Any
 
-from node_ports import ports_for_template
-from pipeline_agent.contract import missing_connector_parameters
-from plugins import (
+from .node_ports import ports_for_template
+from .connector_catalog import missing_connector_parameters
+from .plugins import (
     PluginManifestError,
     PluginNotInstalled,
     is_plugin_template,
     plugin_manifest_for_template,
 )
-from plugins.manifest import resolve_operation
-from subpipeline_reference import SUBPIPELINE_DEPTH_ERROR, reusable_pipeline_nesting_error, subpipeline_reference
-from inlumen.contracts.map_scope import map_scopes
-from inlumen.contracts.port_types import check_connection, effective_port_type, infer_output_types
-from step_types import normalize_step_type
+from .plugin_manifest import resolve_operation
+from .subpipeline_reference import SUBPIPELINE_DEPTH_ERROR, reusable_pipeline_nesting_error, subpipeline_reference
+from .map_scope import map_scopes
+from .port_types import check_connection, effective_port_type, infer_output_types
+from .step_types import normalize_step_type
 
 
 def _node_data(node: Any) -> dict[str, Any]:

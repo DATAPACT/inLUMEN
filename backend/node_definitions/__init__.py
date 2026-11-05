@@ -1,4 +1,5 @@
-from .registry import NodeDefinitionRegistry, get_node_definition_registry
+from inlumen.contracts.node_definitions import NodeDefinitionRegistry, get_node_definition_registry
+
 from .routes import create_node_definitions_blueprint
 
 __all__ = [

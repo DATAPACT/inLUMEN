@@ -62,7 +62,7 @@ from node_definitions.artifacts import (
     configuration_hash,
     implementation_plan_from_data,
 )
-from node_ports import normalize_node_ports
+from inlumen.contracts.node_ports import normalize_node_ports
 from node_secrets import (
     clear_node_secrets,
     configured_node_secrets,
@@ -96,7 +96,7 @@ from run_artifact_access import (
 )
 from runtime_environment import discover_runtime_environment, runtime_environment_from_files
 from runtime_config import add_cors_headers, get_service_port
-from step_types import normalize_step_type
+from inlumen.contracts.step_types import normalize_step_type
 from workspace_store import (
     LOCAL_TENANT_ID,
     LOCAL_WORKSPACE_ID,

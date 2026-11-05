@@ -1,6 +1,6 @@
 import unittest
 
-from step_types import normalize_step_type
+from inlumen.contracts.step_types import normalize_step_type
 
 
 class StepTypeNormalizationTest(unittest.TestCase):

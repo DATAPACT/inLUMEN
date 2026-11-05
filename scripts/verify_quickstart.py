@@ -28,7 +28,7 @@ def main():
 
     from deployment_agents import generate_dockerfiles_with_agent
     from deployment_artifacts import build_deployment_bundle_files
-    from pipeline_graph_validation import validate_pipeline_graph
+    from inlumen.contracts.pipeline_graph_validation import validate_pipeline_graph
 
     example = ROOT / "examples" / "order-summary"
     graph = json.loads((example / "pipeline.json").read_text())

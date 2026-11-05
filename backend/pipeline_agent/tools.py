@@ -2,10 +2,10 @@ import json
 import re
 from typing import Any
 
-from connector_catalog import require_supported_connector
+from inlumen.contracts.connector_catalog import require_supported_connector
 from graph_client import run_neo4j_query
-from node_definitions.registry import get_node_definition_registry
-from node_ports import (
+from inlumen.contracts.node_definitions.registry import get_node_definition_registry
+from inlumen.contracts.node_ports import (
     default_input_port_id,
     default_output_port_id,
     normalize_node_ports,
@@ -20,7 +20,7 @@ from pipeline_agent.contract import (
     require_agent_step_type,
     validate_insertion_kind,
 )
-from pipeline_graph_validation import FLOW_EXPRESSION_PATTERN, validate_pipeline_graph
+from inlumen.contracts.pipeline_graph_validation import FLOW_EXPRESSION_PATTERN, validate_pipeline_graph
 from plugins import (
     is_plugin_template,
     plugin_id_from_template,
@@ -28,9 +28,9 @@ from plugins import (
     plugin_summary,
     plugin_template,
 )
-from plugins.manifest import default_parameters as plugin_default_parameters
-from plugins.manifest import secret_parameter_names as plugin_secret_names
-from subpipeline_reference import (
+from inlumen.contracts.plugin_manifest import default_parameters as plugin_default_parameters
+from inlumen.contracts.plugin_manifest import secret_parameter_names as plugin_secret_names
+from inlumen.contracts.subpipeline_reference import (
     derive_subpipeline_interface,
     normalize_reusable_pipeline_graph,
     plan_subpipeline_port_migration,

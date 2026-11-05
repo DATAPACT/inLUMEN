@@ -16,8 +16,8 @@ COPIES = {
     'shared/request_diagnostics.py': ['runner/app/request_diagnostics.py', 'codegen/app/request_diagnostics.py'],
     'packages/agents/src/inlumen/contracts/port_types.json': ['frontend/src/features/flow/portTypes.generated.json'],
     'shared/leases.py': ['runner/app/leases.py', 'codegen/app/leases.py'],
-    'backend/node_definitions/manifests/core.json': ['frontend/src/features/nodes/registry/core.generated.json'],
-    'backend/plugins/plugin-manifest.schema.json': ['contracts/plugin-manifest-v1/schema.json'],
+    'packages/agents/src/inlumen/contracts/node_definitions/manifests/core.json': ['frontend/src/features/nodes/registry/core.generated.json'],
+    'packages/agents/src/inlumen/contracts/plugin-manifest.schema.json': ['contracts/plugin-manifest-v1/schema.json'],
     'backend/plugins/manifests/jsi-wikifier.plugin.json': ['contracts/plugin-manifest-v1/example.json'],
 }
 

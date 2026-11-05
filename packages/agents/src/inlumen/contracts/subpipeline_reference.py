@@ -4,8 +4,8 @@ import json
 import re
 from typing import Any
 
-from node_ports import ports_for_template
-from step_types import normalize_step_type
+from .node_ports import ports_for_template
+from .step_types import normalize_step_type
 
 _GENERIC_PORT_TYPES = {
     "",

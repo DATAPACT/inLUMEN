@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from node_ports import (  # noqa: E402
+from inlumen.contracts.node_ports import (  # noqa: E402
     default_input_port_id,
     default_output_port_id,
     normalize_node_ports,

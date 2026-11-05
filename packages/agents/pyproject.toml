@@ -25,6 +25,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "inlumen.contracts" = ["*.json"]
+"inlumen.contracts.node_definitions" = ["*.json", "manifests/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

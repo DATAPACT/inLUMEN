@@ -14,14 +14,14 @@ import argo_bundle
 from inlumen.contracts.artifact_runtime import ArtifactContractError, CONTRACT_ID, assign_output_ports, validate_connection_contract, validate_declaration
 from artifact_content import decode_artifact_content, verify_artifact_integrity
 from artifact_contract import ArtifactBinding, artifact_bindings, classify_artifact
-from connector_catalog import connector_definition
+from inlumen.contracts.connector_catalog import connector_definition
 from filesystem_runtime import filesystem_shell_component_source
-from node_parameters import normalize_secret_param_keys
-from node_ports import normalize_node_ports
+from inlumen.contracts.node_parameters import normalize_secret_param_keys
+from inlumen.contracts.node_ports import normalize_node_ports
 from node_secrets import runtime_secret_name
 from runtime_environment import discover_runtime_environment, merge_runtime_environment
-from step_types import normalize_step_type
-from subpipeline_reference import reusable_pipeline_nesting_error
+from inlumen.contracts.step_types import normalize_step_type
+from inlumen.contracts.subpipeline_reference import reusable_pipeline_nesting_error
 from workspace_storage import node_bucket_name
 from inlumen.contracts import artifact_runtime_source
 

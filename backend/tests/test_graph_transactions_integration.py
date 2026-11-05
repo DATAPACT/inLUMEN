@@ -10,8 +10,8 @@ from neo4j_api import app, _base_driver, driver
 @unittest.skipUnless(os.getenv('RUN_NEO4J_INTEGRATION') == '1', 'requires disposable Neo4j')
 class GraphTransactionIntegrationTests(unittest.TestCase):
     def test_single_level_reusable_pipeline_save_attach_reload_and_legacy_nesting(self):
-        from pipeline_graph_validation import validate_pipeline_graph
-        from subpipeline_reference import public_ports_for_interface
+        from inlumen.contracts.pipeline_graph_validation import validate_pipeline_graph
+        from inlumen.contracts.subpipeline_reference import public_ports_for_interface
 
         port = {"id": "data", "name": "data", "type": "Text", "required": True}
         source = {"id": "input", "data": {"type": "source", "label": "Input", "ports": {"inputs": [], "outputs": [port]}}}
