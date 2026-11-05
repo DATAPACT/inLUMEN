@@ -2041,3 +2041,24 @@ def test_plan_rejects_several_outputs_without_ports() -> None:
     })
     with pytest.raises(ValueError, match="must name the output port"):
         build_pipeline_generation_plan(request)
+
+
+def test_tables_with_the_same_name_stay_distinct_in_a_bundle() -> None:
+    from app.generator import data_passthrough_outputs
+
+    inputs = [
+        FileDescriptor(filename="data.csv", kind="table", format="csv", source_node="sales"),
+        FileDescriptor(filename="data.csv", kind="table", format="csv", source_node="stock"),
+    ]
+    (bundle,) = data_passthrough_outputs("joined", "Join", inputs)
+    assert [member["filename"] for member in bundle.members] == ["data.csv", "stock_data.csv"]
+
+
+def test_validation_workspace_accepts_any_step_id(tmp_path, monkeypatch) -> None:
+    from pathlib import Path
+
+    from app.sandbox import validation_workspace
+
+    monkeypatch.setenv("CODEGEN_VALIDATION_WORKDIR", str(tmp_path))
+    with validation_workspace("etl/clean") as workspace:
+        assert Path(workspace).parent == tmp_path
