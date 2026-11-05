@@ -762,7 +762,7 @@ class PluginAgentToolsTest(unittest.TestCase):
             self.assertIn("api_key", guidance["configured_after_design"])
 
             run_query = AsyncMock(return_value="[]")
-            with patch("pipeline_agent.tools.run_neo4j_query", run_query):
+            with patch("pipeline_agent.neo4j_store.run_neo4j_query", run_query):
                 try:
                     asyncio.run(tools["create_step"](json.dumps({
                         "type": "task", "label": "Anonymize", "description": "Remove PII",

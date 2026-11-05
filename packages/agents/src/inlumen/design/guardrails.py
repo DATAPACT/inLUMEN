@@ -3,7 +3,7 @@
 import re
 from collections import Counter, defaultdict, deque
 
-from pipeline_agent.context import (
+from .context import (
     _build_agent_task,
     _graph_counts,
     _graph_signature,
