@@ -124,6 +124,7 @@ async def generate(
     sandbox: Sandbox | None = None,
     files: str | Path | Sampler | None = None,
     instruction: str = "",
+    runtime: Mapping[str, Any] | None = None,
     options: GenerationOptions | Mapping[str, Any] | None = None,
     events: EventSink | None = None,
     progress: Callable[[PipelineGenerationRun], Awaitable[None] | None] | None = None,
@@ -139,6 +140,7 @@ async def generate(
     """
     sampler = directory_sampler(files) if isinstance(files, (str, Path)) else files
     context = pipeline_context(dict(graph), sample=sampler)
+    context["runtime_constraints"].update(runtime or {})
     if isinstance(options, GenerationOptions):
         resolved_options = options.model_copy()
     else:

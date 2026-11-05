@@ -74,6 +74,23 @@ def test_generate_returns_one_task_package_per_step(tmp_path):
     assert (tmp_path / "2" / "main.py") in written
 
 
+def test_runtime_constraints_reach_the_generator(monkeypatch):
+    import inlumen.codegen.run as run_module
+
+    seen = []
+    real = run_module.generate_pipeline_script_bundles
+
+    async def capture(request, **kwargs):
+        seen.append(request.context.runtime_constraints)
+        return await real(request, **kwargs)
+
+    monkeypatch.setattr(run_module, "generate_pipeline_script_bundles", capture)
+    runtime = {"allowed_packages": ["pandas"], "network_allowed": False}
+    result = asyncio.run(generate(_graph(), model=Scripted(_valid), runtime=runtime))
+    assert result.accepted, result.validation
+    assert seen[0].allowed_packages == ["pandas"] and seen[0].network_allowed is False
+
+
 def test_an_invalid_draft_is_repaired():
     model = Scripted({"nodes": "not a list"}, _valid)
     result = asyncio.run(generate(_graph(), model=model))

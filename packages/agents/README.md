@@ -52,7 +52,9 @@ It runs the same planning, generation, repair and validation as the codegen
 service. `sandbox` defaults to `NoSandbox()` (static checks only); pass
 `DockerSandbox()` to run the pipeline on sample inputs, which needs a Docker
 daemon. `files` is a folder of attached files, looked up as
-`<folder>/<flow_id>/<name>` and then `<folder>/<name>`. Any object with a
+`<folder>/<flow_id>/<name>` and then `<folder>/<name>`. `runtime=` overrides the runtime
+constraints for a fixed target environment, e.g. `{"allowed_packages": [...],
+"network_allowed": False}`. Any object with a
 `name` and an async `complete(system_prompt=…, user_prompt=…, json_output=…,
 max_tokens=…)` returning `inlumen.codegen.model.ModelReply` can be the model.
 
