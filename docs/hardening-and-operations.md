@@ -159,9 +159,10 @@ The backend environment also needs the agents library:
 `uv.lock` installs it from the same folder). Backend tests use pytest;
 the runner prefers the backend's managed virtualenv when present, otherwise its
 invoking interpreter. Install test dependencies into the selected environment.
-Port types, Parallel Map scopes, the artifact runtime and the Task package
-contract live in the `inlumen-agents` package
-(`packages/agents/src/inlumen/contracts`); the backend and codegen install it,
+The pipeline graph model (port types, Parallel Map scopes, the artifact
+runtime, the Task package contract, node ports and definitions, graph
+validation) and the design agent live in the `inlumen-agents` package
+(`packages/agents/src/inlumen`); the backend and codegen install it,
 so edits there need no sync, except that changes to `port_types.json` or
 `task_package_spec.json` regenerate browser copies. To update other shared code,
 edit `shared/leases.py`, `shared/request_diagnostics.py`,

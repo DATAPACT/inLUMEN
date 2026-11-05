@@ -50,58 +50,75 @@ What stops that today:
    - One package fits as long as both agents are released together. If one is
      ever needed on its own release schedule, it can be split out then.
 
-2. **Design entry point.**
+2. **Design entry point** (`inlumen.design.run`).
    ```python
    async def design(
        request: str,
        *,
        model: ChatCompletionClient,      # autogen client, from the caller
-       catalog: Catalog,                 # snapshot; see 4
-       store: GraphStore | None = None,  # default: InMemoryGraphStore
-       graph: ProjectIR | None = None,   # starting design; default: empty
+       catalog: Catalog | None = None,   # snapshot; see 4. Default: core components
+       graph: dict | None = None,        # starting canvas graph; default: empty
+       name: str = "",
        events: EventSink | None = None,  # see 5
        max_tool_iterations: int = 30,
-   ) -> DesignResult                     # project: ProjectIR, message, usage
+   ) -> DesignResult  # message, graph, project (Project JSON), sync, accepted,
+                      # repaired, requests, package_version, catalog_fingerprint
    ```
+   - It runs on an `InMemoryGraphStore`. A result that still fails validation
+     after the repair round is rejected and rolled back (`accepted` is False),
+     as in inLUMEN.
    - The library holds the prompt, the tools' logic (parameter parsing, port
-     resolution, template resolution), guardrails, graph validation and the
-     repair loop.
+     and template resolution), guardrails, graph validation and the turn loop
+     (`inlumen.design.turn.run_design_turn`: run, validate, repair once). The
+     turn loop needs only a `GraphAccess` (read the graph, restore a snapshot).
    - Session concerns stay in the backend's `pipeline_agent/service.py`: chat
      state on disk, reconciling the visible canvas, preview workspaces,
      cancellation with rollback, and saving the active version.
+   - The graph model the agent uses moves to `inlumen.contracts` too: step types,
+     node ports and parameters, subpipeline references, graph validation, the
+     connector catalog, plugin manifests, node definitions, implementation plans
+     (`model_plans`), conversion between stored records and the canvas graph
+     (`graph_records`) and Project JSON export (`project_ir`).
 
-3. **`GraphStore`: graph operations, not queries.**
-   - A protocol with the operations the tools need:
-     - read the graph
-     - create or update the pipeline
-     - add, insert, configure, delete and delete-all steps
-     - connect and disconnect steps
-     - list, find and create reusable pipelines
-   - `InMemoryGraphStore` ships with the library and works on Project IR.
-   - `Neo4jGraphStore` stays in the backend and holds the existing Cypher, moved
-     out of `tools.py`.
-   - Behaviour now encoded in Cypher (ordering, flow ids, port matching) moves
-     into the shared tool logic, so both stores behave the same.
-   - One contract test suite runs against both stores. The existing
-     `test_pipeline_agent_*` tests must pass unchanged.
+3. **`GraphStore`: graph operations, not queries** (`inlumen.design.store`).
+   - One method per graph change the tools make (create or update the
+     pipeline; create, insert, configure, delete and delete-all steps; connect
+     and disconnect; find, create and attach reusable pipelines), plus reads
+     and `restore_graph`.
+   - Each operation is atomic and returns the same result rows the tools show
+     the model, so the model sees the same thing with either store.
+   - `Neo4jGraphStore` (backend) keeps each operation as the single Cypher
+     query it was, so every graph change stays one transaction. Only the
+     argument checks, port resolution and template logic move into the shared
+     tools. (Moving the Cypher's own logic, such as layout and flow ids, into
+     Python would have split each change across several queries.)
+   - `InMemoryGraphStore` (library) reproduces each query in Python, including
+     the backend's side effects (provenance normalizes the design pipeline's
+     version after each change).
+   - `inlumen.design.store_contract` holds scenarios run through the tools.
+     `backend/tests/test_design_store_parity_integration.py` runs every scenario
+     on both stores against a disposable Neo4j and requires identical results
+     (ids, timestamps and attachment storage locations masked).
 
-4. **The catalog is passed in, as a snapshot.**
-   - `Catalog` holds node definitions, installed plugins, connectors and reusable
-     pipelines.
-   - `Catalog.default()` loads the core manifest
-     (`node_definitions/manifests/core.json`) with no plugins.
-   - The backend builds one from its registries and Neo4j for each request.
-   - `catalog.fingerprint()` returns a content hash, so a benchmark run can
-     record exactly what the agent could use.
+4. **The catalog is passed in, as a snapshot** (`inlumen.design.catalog`).
+   - `Catalog` holds node definitions, installed plugin manifests and reusable
+     pipelines. `Catalog.default()` has the core components and nothing else.
+   - Plugin lookups go through a plugin source
+     (`inlumen.contracts.plugins`): the backend registers its plugin store
+     process-wide, and `design()` scopes its catalog's plugins to the run.
+   - `catalog.fingerprint()` hashes the catalog and the package version, so a
+     benchmark run records exactly what the agent could use.
 
 5. **Callers supply the model and get usage reports.**
-   - Design takes an autogen `ChatCompletionClient`. Codegen takes a
-     `ModelClient` protocol built around today's `generate_json`. The default is
-     the current OpenAI-compatible httpx client.
-   - Both report every model request to an optional `EventSink`: purpose, tokens,
-     reported cost, latency and outcome. inLUMEN keeps its progress events this
-     way, and the bench gets accurate telemetry and can enforce its own budget.
-   - Codegen's `GenerationBudget` limits keep working.
+   - Design takes an autogen `ChatCompletionClient`;
+     `openai_model_client()` builds one for any OpenAI-compatible endpoint.
+     `design()` wraps it in a `RecordingModelClient` that reports every model
+     request to the optional `EventSink` (tokens, latency, finish reason,
+     error) and to `DesignResult.requests`.
+   - Codegen takes a `ModelClient` protocol built around today's
+     `generate_json`. The default is the current OpenAI-compatible httpx client.
+     It reports to an `EventSink` in the same way, and codegen's
+     `GenerationBudget` limits keep working.
 
 6. **Codegen entry point.**
    - `generate_pipeline_script_bundles(request, …)` keeps its signature and
@@ -141,11 +158,11 @@ What stops that today:
 - The bench measures inLUMEN's actual agents, and a change to an agent shows up
   in the next benchmark run.
 - The design agent gets tests that need no Neo4j, through `InMemoryGraphStore`.
-- Stage 2 is the risky one: Cypher behaviour has to be reproduced exactly in
-  the shared tool logic. The store contract tests and the existing agent tests
-  are the safety net.
-- `pipeline_agent/tools.py` gets smaller. Its Cypher moves into
-  `Neo4jGraphStore`, and its tool logic moves into the library.
+- A change to a Neo4j query needs the matching change in `InMemoryGraphStore`;
+  the parity test fails until both agree. Add a store contract scenario for any
+  new tool behaviour.
+- `pipeline_agent/tools.py` becomes a small builder: the Cypher lives in
+  `Neo4jGraphStore`, and the tool logic in the library.
 - The Docker images for the backend and the codegen service install the package
   from `packages/agents/` instead of copying `shared/`.
 - `DATAPACT/inLUMEN` must be readable wherever the bench installs from it. While

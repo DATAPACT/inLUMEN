@@ -52,6 +52,15 @@ def _props_str(props: dict[str, Any]) -> str:
     return ",\n            ".join(lines)
 
 
+def _cypher_map(mapping: dict[str, str]) -> str:
+    """A Cypher map literal of strings (JSON's quoted keys are not valid Cypher)."""
+    entries = (
+        "`" + str(key).replace("`", "``") + "`: '" + _cypher_string(value) + "'"
+        for key, value in mapping.items()
+    )
+    return "{" + ", ".join(entries) + "}"
+
+
 def _subpipeline_return(step: NewStep) -> str:
     if not step.subpipeline:
         return ""
@@ -767,8 +776,8 @@ class Neo4jGraphStore:
                      referenced_version_uid:'{version_uid}',
                      public_inputs:{json.dumps(input_ids)},
                      public_outputs:{json.dumps(output_ids)},
-                     input_port_mapping:{json.dumps(configuration.input_mapping)},
-                     output_port_mapping:{json.dumps(configuration.output_mapping)},
+                     input_port_mapping:{_cypher_map(configuration.input_mapping)},
+                     output_port_mapping:{_cypher_map(configuration.output_mapping)},
                      pipeline_updated_at:toString(p.updated_at)}} AS subpipeline_step;
             """
         return await self._run(query, "configure_subpipeline_step")

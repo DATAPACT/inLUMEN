@@ -27,12 +27,8 @@ from inlumen.contracts.node_parameters import (
     without_secret_param_values,
 )
 from minio_access import create_bucket, list_objects, read_object_bytes, remove_object, upload_object
-from inlumen.contracts.model_plans import resolve_implementation_plan
-from inlumen.contracts.node_definitions.instance import (
-    definition_properties_from_data,
-    normalize_definition_properties,
-)
-from inlumen.contracts.graph_records import flow_edges, reusable_graph, step_node
+from inlumen.contracts.node_definitions.instance import normalize_definition_properties
+from inlumen.contracts.graph_records import flow_edges, flows_from_edges, reusable_graph, step_node, step_properties
 from inlumen.contracts.pipeline_graph_validation import validate_pipeline_graph
 from plugins import with_plugin_secret_keys
 from inlumen.contracts.subpipeline_reference import (
@@ -367,102 +363,12 @@ def _parse_visible_graph(graph: dict) -> tuple[list[dict], list[dict]]:
             continue
         seen_node_ids.add(flow_id)
 
-        position = raw_node.get("position") if isinstance(raw_node.get("position"), dict) else {}
-        try:
-            x = float(position.get("x", data.get("x", 0)) or 0)
-        except Exception:
-            x = 0.0
-        try:
-            y = float(position.get("y", data.get("y", 0)) or 0)
-        except Exception:
-            y = 0.0
-
-        step_type = normalize_step_type(data.get("type"), default="task")
         files = _file_refs_from_graph_node(flow_id, data)
-        props = {
-            "flow_id": flow_id,
-            "type": step_type,
-            "label": str(data.get("label") or ""),
-            "description": str(data.get("description") or ""),
-            "template_label": str(data.get("template_label") or ""),
-            "ports_json": ports_json(data.get("ports"), step_type),
-            "x": x,
-            "y": y,
-        }
-        props.update(definition_properties_from_data(data))
-        param_obj = (
-            dict(data["param"])
-            if isinstance(data.get("param"), dict)
-            else {}
-        )
-        if (
-            "model_plan" not in param_obj
-            and isinstance(data.get("implementation"), dict)
-            and data["implementation"]
-        ):
-            param_obj["model_plan"] = resolve_implementation_plan(
-                data["implementation"],
-                label=str(data.get("label") or ""),
-                description=str(data.get("description") or ""),
-            )
-        elif isinstance(param_obj.get("model_plan"), dict):
-            param_obj["model_plan"] = resolve_implementation_plan(
-                param_obj["model_plan"],
-                label=str(data.get("label") or ""),
-                description=str(data.get("description") or ""),
-            )
-        # Parameters are inspector metadata for every structural node kind.
-        secret_param_keys = with_plugin_secret_keys(
-            data.get("secret_params"), data.get("template_label"), param_obj
-        )
-        param_obj = without_secret_param_values(param_obj, secret_param_keys)
-        props["param_json"] = json.dumps(
-            param_obj,
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        props["secret_params_json"] = secret_params_json(
-            secret_param_keys,
-            param_obj,
-        )
-        if step_type == "destination":
-            props["content"] = str(data.get("content") or "")
-        props["has_files"] = "yes" if files else str(data.get("has_files") or "no").lower().strip()
-        # Preserve legacy adapter fields during migration without treating them
-        # as structural kinds.
-        if "endpoint" in data:
-            props["endpoint"] = str(data.get("endpoint") or "")
-        if "database" in data:
-            props["database"] = str(data.get("database") or "").lower().strip()
+        props = step_properties(flow_id, raw_node, data, files)
         nodes.append({"props": props, "files": files})
 
     visible_ids = {node["props"]["flow_id"] for node in nodes}
-    edges = []
-    seen_edges = set()
-    for raw_edge in raw_edges:
-        if not isinstance(raw_edge, dict):
-            continue
-        source = str(raw_edge.get("source") or "").strip()
-        target = str(raw_edge.get("target") or "").strip()
-        source_port = str(raw_edge.get("sourceHandle") or raw_edge.get("source_port") or "").strip()
-        target_port = str(raw_edge.get("targetHandle") or raw_edge.get("target_port") or "").strip()
-        edge_key = (source, target, source_port, target_port)
-        if (
-            not source
-            or not target
-            or source == target
-            or source not in visible_ids
-            or target not in visible_ids
-            or edge_key in seen_edges
-        ):
-            continue
-        seen_edges.add(edge_key)
-        edges.append({
-            "source": source,
-            "target": target,
-            "source_port": source_port,
-            "target_port": target_port,
-        })
+    edges = flows_from_edges(raw_edges, visible_ids)
     return nodes, edges
 
 

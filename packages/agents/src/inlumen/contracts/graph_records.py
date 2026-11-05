@@ -1,4 +1,4 @@
-"""Stored pipeline records to the canvas graph (React Flow export shape).
+"""Stored pipeline records to and from the canvas graph (React Flow export shape).
 
 A stored pipeline is a set of STEP property maps, the files attached to each
 step and FLOWS_TO connections between steps. The inLUMEN backend reads them
@@ -11,9 +11,11 @@ import json
 from collections.abc import Callable, Iterable
 from typing import Any
 
-from .node_definitions.instance import definition_data_from_properties
-from .node_parameters import normalize_secret_param_keys
-from .node_ports import default_input_port_id, default_output_port_id, normalize_node_ports
+from .model_plans import resolve_implementation_plan
+from .node_definitions.instance import definition_data_from_properties, definition_properties_from_data
+from .node_parameters import normalize_secret_param_keys, secret_params_json, without_secret_param_values
+from .node_ports import default_input_port_id, default_output_port_id, normalize_node_ports, ports_json
+from .plugins import with_plugin_secret_keys
 from .step_types import normalize_step_type
 from .subpipeline_reference import (
     derive_subpipeline_interface,
@@ -165,5 +167,107 @@ def flow_edges(flows: Iterable[dict[str, Any]], nodes: list[dict[str, Any]]) -> 
             "target": tgt,
             "sourceHandle": source_port or None,
             "targetHandle": target_port or None,
+        })
+    return edges
+
+
+def step_properties(flow_id: str, raw_node: dict[str, Any], data: dict[str, Any], files: list) -> dict[str, Any]:
+    """STEP properties to store for one canvas node (``files``: its file references)."""
+    position = raw_node.get("position") if isinstance(raw_node.get("position"), dict) else {}
+    try:
+        x = float(position.get("x", data.get("x", 0)) or 0)
+    except Exception:
+        x = 0.0
+    try:
+        y = float(position.get("y", data.get("y", 0)) or 0)
+    except Exception:
+        y = 0.0
+
+    step_type = normalize_step_type(data.get("type"), default="task")
+    props = {
+        "flow_id": flow_id,
+        "type": step_type,
+        "label": str(data.get("label") or ""),
+        "description": str(data.get("description") or ""),
+        "template_label": str(data.get("template_label") or ""),
+        "ports_json": ports_json(data.get("ports"), step_type),
+        "x": x,
+        "y": y,
+    }
+    props.update(definition_properties_from_data(data))
+    param_obj = (
+        dict(data["param"])
+        if isinstance(data.get("param"), dict)
+        else {}
+    )
+    if (
+        "model_plan" not in param_obj
+        and isinstance(data.get("implementation"), dict)
+        and data["implementation"]
+    ):
+        param_obj["model_plan"] = resolve_implementation_plan(
+            data["implementation"],
+            label=str(data.get("label") or ""),
+            description=str(data.get("description") or ""),
+        )
+    elif isinstance(param_obj.get("model_plan"), dict):
+        param_obj["model_plan"] = resolve_implementation_plan(
+            param_obj["model_plan"],
+            label=str(data.get("label") or ""),
+            description=str(data.get("description") or ""),
+        )
+    # Parameters are inspector metadata for every structural node kind.
+    secret_param_keys = with_plugin_secret_keys(
+        data.get("secret_params"), data.get("template_label"), param_obj
+    )
+    param_obj = without_secret_param_values(param_obj, secret_param_keys)
+    props["param_json"] = json.dumps(
+        param_obj,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    props["secret_params_json"] = secret_params_json(
+        secret_param_keys,
+        param_obj,
+    )
+    if step_type == "destination":
+        props["content"] = str(data.get("content") or "")
+    props["has_files"] = "yes" if files else str(data.get("has_files") or "no").lower().strip()
+    # Preserve legacy adapter fields during migration without treating them
+    # as structural kinds.
+    if "endpoint" in data:
+        props["endpoint"] = str(data.get("endpoint") or "")
+    if "database" in data:
+        props["database"] = str(data.get("database") or "").lower().strip()
+    return props
+
+
+def flows_from_edges(raw_edges: list, visible_ids: set[str]) -> list[dict[str, str]]:
+    """FLOWS_TO rows to store for canvas edges between ``visible_ids``."""
+    edges = []
+    seen_edges = set()
+    for raw_edge in raw_edges:
+        if not isinstance(raw_edge, dict):
+            continue
+        source = str(raw_edge.get("source") or "").strip()
+        target = str(raw_edge.get("target") or "").strip()
+        source_port = str(raw_edge.get("sourceHandle") or raw_edge.get("source_port") or "").strip()
+        target_port = str(raw_edge.get("targetHandle") or raw_edge.get("target_port") or "").strip()
+        edge_key = (source, target, source_port, target_port)
+        if (
+            not source
+            or not target
+            or source == target
+            or source not in visible_ids
+            or target not in visible_ids
+            or edge_key in seen_edges
+        ):
+            continue
+        seen_edges.add(edge_key)
+        edges.append({
+            "source": source,
+            "target": target,
+            "source_port": source_port,
+            "target_port": target_port,
         })
     return edges
