@@ -3,11 +3,13 @@ from __future__ import annotations
 import inspect
 import json
 import re
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
 from .generation_budget import CURRENT_BUDGET
+from .model import CURRENT_EVENTS, CURRENT_MODEL, ModelClient, ModelReply
 
 from .schemas import (
     GenerateNodeScriptRequest,
@@ -98,98 +100,165 @@ def _json_from_model_content(content: Any) -> dict[str, Any]:
     return payload
 
 
+def _is_openrouter(provider: str) -> bool:
+    return provider.strip().lower().replace("-", "_") in {"openrouter", "open_router"}
+
+
+class HttpModelClient:
+    """The default model client: an OpenAI-compatible chat-completions endpoint."""
+
+    def __init__(self, config: LLMConfig):
+        self.config = config
+        self.name = config.model
+
+    async def complete(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        json_output: bool,
+        max_tokens: int,
+    ) -> ModelReply:
+        config = self.config
+        body: dict[str, Any] = {
+            "model": config.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.1,
+            # Canonical pipelines can contain several independently compiled node
+            # functions. Give the coding model enough room to finish the JSON
+            # envelope and every function instead of returning a syntactically
+            # truncated module for larger graphs.
+            "max_tokens": max_tokens,
+        }
+        if json_output:
+            body["response_format"] = {"type": "json_object"}
+        headers = {
+            "Authorization": f"Bearer {config.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if _is_openrouter(config.provider):
+            headers.update(_openrouter_headers())
+            if config.openrouter_provider_only:
+                body["provider"] = {"only": config.openrouter_provider_only}
+        timeout = httpx.Timeout(max(1, config.timeout_seconds))
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    _chat_completions_url(config.base_url),
+                    headers=headers,
+                    json=body,
+                )
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text[:1000]
+            raise LLMGenerationError(
+                f"Coding model request failed ({exc.response.status_code}): {detail}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise LLMGenerationError(f"Coding model request failed: {exc}") from exc
+
+        try:
+            response_payload = response.json()
+        except ValueError as exc:
+            raise LLMGenerationError(
+                "Coding model returned an unsupported chat-completions response."
+            ) from exc
+        if not isinstance(response_payload, dict):
+            raise LLMGenerationError(
+                "Coding model returned an unsupported chat-completions response."
+            )
+        try:
+            choice = response_payload["choices"][0]
+            content = choice["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise LLMGenerationError(
+                "Coding model returned an unsupported chat-completions response."
+            ) from exc
+        usage = response_payload.get("usage")
+        if isinstance(usage, dict) and not _is_openrouter(config.provider):
+            # Only OpenRouter reports a cost we can trust as USD.
+            usage = {key: value for key, value in usage.items() if key != "cost"}
+        return ModelReply(
+            content=content,
+            usage=usage if isinstance(usage, dict) else None,
+            finish_reason=choice.get("finish_reason") if isinstance(choice, dict) else None,
+            raw=response_payload,
+        )
+
+
 async def generate_json(
-    config: LLMConfig,
+    config: LLMConfig | None,
     *,
     system_prompt: str,
     user_prompt: str,
     usage_callback: UsageCallback | None = None,
 ) -> dict[str, Any]:
-    if not config.model.strip():
-        raise LLMGenerationError("Code-generation model is not configured.")
-    if not config.base_url.strip():
-        raise LLMGenerationError("Code-generation provider base URL is not configured.")
-    if not config.api_key.strip():
-        raise LLMGenerationError("Code-generation provider API key is missing.")
+    """Ask the model for one JSON object.
+
+    The request goes to the client installed with
+    :func:`inlumen.codegen.model.use_model`, else to ``config``'s endpoint.
+    Every request counts against the run's budget and is reported to the
+    usage callback and the event sink.
+    """
+    client = CURRENT_MODEL.get()
+    if client is None:
+        if config is None or not config.model.strip():
+            raise LLMGenerationError("Code-generation model is not configured.")
+        if not config.base_url.strip():
+            raise LLMGenerationError("Code-generation provider base URL is not configured.")
+        if not config.api_key.strip():
+            raise LLMGenerationError("Code-generation provider API key is missing.")
+        client = HttpModelClient(config)
 
     budget = CURRENT_BUDGET.get()
     if budget is not None: budget.reserve()
-    body: dict[str, Any] = {
-        "model": config.model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": 0.1,
-        # Canonical pipelines can contain several independently compiled node
-        # functions. Give the coding model enough room to finish the JSON
-        # envelope and every function instead of returning a syntactically
-        # truncated module for larger graphs.
-        "max_tokens": config.max_output_tokens,
-    }
-    if config.supports_json_output:
-        body["response_format"] = {"type": "json_object"}
-    headers = {
-        "Authorization": f"Bearer {config.api_key}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    if config.provider.strip().lower().replace("-", "_") in {
-        "openrouter",
-        "open_router",
-    }:
-        headers.update(_openrouter_headers())
-        if config.openrouter_provider_only:
-            body["provider"] = {"only": config.openrouter_provider_only}
-    timeout = httpx.Timeout(max(1, config.timeout_seconds))
+    events = CURRENT_EVENTS.get()
+    started = time.monotonic()
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                _chat_completions_url(config.base_url),
-                headers=headers,
-                json=body,
-            )
-            response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        detail = exc.response.text[:1000]
-        raise LLMGenerationError(
-            f"Coding model request failed ({exc.response.status_code}): {detail}"
-        ) from exc
-    except httpx.HTTPError as exc:
-        raise LLMGenerationError(f"Coding model request failed: {exc}") from exc
-
-    try:
-        response_payload = response.json()
-    except ValueError as exc:
-        raise LLMGenerationError(
-            "Coding model returned an unsupported chat-completions response."
-        ) from exc
-    if not isinstance(response_payload, dict):
-        raise LLMGenerationError(
-            "Coding model returned an unsupported chat-completions response."
+        reply = await client.complete(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            json_output=config.supports_json_output if config is not None else True,
+            max_tokens=config.max_output_tokens if config is not None else 16384,
         )
+    except BaseException as exc:
+        if events is not None:
+            events(_request_event(client, started, None, exc))
+        raise
+    if events is not None:
+        events(_request_event(client, started, reply, None))
+    usage = _usage_from_response({"usage": reply.usage}, include_usd_cost=True)
     if budget is not None:
-        usage = _usage_from_response(response_payload, include_usd_cost=config.provider.lower() in {"openrouter", "open_router"})
         budget.reported_cost_usd += usage.cost_usd or 0
     if usage_callback is not None:
-        callback_result = usage_callback(
-            _usage_from_response(
-                response_payload,
-                include_usd_cost=(
-                    config.provider.strip().lower().replace("-", "_")
-                    in {"openrouter", "open_router"}
-                ),
-            )
-        )
+        callback_result = usage_callback(usage.model_copy())
         if inspect.isawaitable(callback_result):
             await callback_result
-    try:
-        content = response_payload["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise LLMGenerationError(
-            "Coding model returned an unsupported chat-completions response."
-        ) from exc
-    return _json_from_model_content(content)
+    return _json_from_model_content(reply.content)
+
+
+def _request_event(
+    client: ModelClient,
+    started: float,
+    reply: ModelReply | None,
+    error: BaseException | None,
+) -> dict[str, Any]:
+    usage = (reply.usage if reply is not None else None) or {}
+    return {
+        "type": "model_request",
+        "purpose": "codegen",
+        "model": getattr(client, "name", ""),
+        "prompt_tokens": _optional_nonnegative_number(usage.get("prompt_tokens"), int) or 0,
+        "completion_tokens": _optional_nonnegative_number(usage.get("completion_tokens"), int) or 0,
+        "cost_usd": _optional_nonnegative_number(usage.get("cost"), float),
+        "latency_s": round(time.monotonic() - started, 3),
+        "finish_reason": reply.finish_reason if reply is not None else None,
+        "error": f"{type(error).__name__}: {error}" if error else None,
+    }
 
 
 NODE_SYSTEM_PROMPT = """You are the inLumen production code-generation engine.

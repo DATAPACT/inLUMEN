@@ -25,13 +25,13 @@ from .deployment_validation import (
     prepare_deployment_execution,
     validate_deployment_bundle_files,
 )
-from .generator import generate_node_script_bundle, generate_pipeline_script_bundles
+from inlumen.codegen.generator import generate_node_script_bundle, generate_pipeline_script_bundles
 from .job_store import PipelineJobStore
 from .leases import WorkerLeases
 from .execution_store import ExecutionStore
-from .llm import LLMGenerationError
-from .sandbox import cancel_sandbox_run
-from .schemas import (
+from inlumen.codegen.llm import LLMGenerationError
+from inlumen.codegen.sandbox import cancel_sandbox_run
+from inlumen.codegen.schemas import (
     DeploymentBundleValidationRequest,
     GenerateNodeScriptRequest,
     GenerateNodeScriptResponse,
@@ -51,8 +51,8 @@ from .security import (
     service_auth_configuration_error,
     workspace_context,
 )
-from .resource_policy import RESOURCE_ADMISSION
-from .validation import validate_generated_files
+from inlumen.codegen.resource_policy import RESOURCE_ADMISSION
+from inlumen.codegen.validation import validate_generated_files
 
 # These threads wait on bounded resource admission; control traffic uses separate pools.
 DEPLOYMENT_PENDING_LIMIT = int(os.getenv("CODEGEN_EXECUTION_MAX_PENDING_RUNS", "50"))

@@ -1,8 +1,8 @@
 import json
 import pytest
 from pydantic import ValidationError
-from app.generator import files_from_payload
-from app.schemas import GenerateNodeScriptRequest
+from inlumen.codegen.generator import files_from_payload
+from inlumen.codegen.schemas import GenerateNodeScriptRequest
 from inlumen.contracts.task_package_contract import validate_package, task_data_contract
 
 
@@ -29,8 +29,8 @@ def test_multiple_outputs_require_a_distinct_port_each():
 
 def test_sentiment_prefers_canonical_anonymized_transcript_over_original_alias():
     import ast
-    from app.trusted_adapters import roberta_sentiment_function_source
-    from app.model_plans import ROBERTA_SENTIMENT_PLAN
+    from inlumen.codegen.trusted_adapters import roberta_sentiment_function_source
+    from inlumen.codegen.model_plans import ROBERTA_SENTIMENT_PLAN
     node={'function_name':'sentiment','outputs':[{'name':'sentiment','filename':'sentiment.json','kind':'json','format':'json'}],'implementation_plan':ROBERTA_SENTIMENT_PLAN}
     tree=ast.parse(roberta_sentiment_function_source(node))
     extractor=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=='extract_text')

@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from attachment_validation import attachment_input_errors
 from artifact_content import encode_artifact_bytes, is_text_artifact
-from artifact_contract import classify_artifact
+from inlumen.contracts.artifact_contract import classify_artifact
 from inlumen.contracts.artifact_runtime import ArtifactContractError
 from inlumen.contracts.port_types import FILES_AS_SEPARATE, file_port_ids, files_as, kind_for_filename
 from task_artifacts import task_data_contract

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from app.generator import deterministic_pipeline_payload
+from inlumen.codegen.generator import deterministic_pipeline_payload
 from app.main import app
 
 CANONICAL_NODE_TYPES = [
@@ -220,7 +220,7 @@ def test_pipeline_codegen_generates_every_canonical_node_type(
         captured["plan"] = plan
         return deterministic_pipeline_payload(plan)
 
-    monkeypatch.setattr("app.generator.generate_pipeline_payload", fake_generate)
+    monkeypatch.setattr("inlumen.codegen.generator.generate_pipeline_payload", fake_generate)
 
     response = TestClient(app).post(
         "/v1/generate/pipeline-scripts",
@@ -261,7 +261,7 @@ def test_flow_and_subpipeline_context_survives_planning_and_compilation(
         captured["plan"] = plan
         return deterministic_pipeline_payload(plan)
 
-    monkeypatch.setattr("app.generator.generate_pipeline_payload", fake_generate)
+    monkeypatch.setattr("inlumen.codegen.generator.generate_pipeline_payload", fake_generate)
     response = TestClient(app).post(
         "/v1/generate/pipeline-scripts",
         headers={"X-LLM-API-Key": "test-provider-key"},

@@ -1,12 +1,11 @@
 import base64
-import csv
 import hashlib
 import json
 import os
 import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
-from io import StringIO, BytesIO
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -16,7 +15,16 @@ from urllib.request import Request, urlopen
 from flask import Flask, Response, g, jsonify, make_response, request, stream_with_context
 from minio.error import S3Error
 
-from artifact_contract import classify_artifact
+from inlumen.contracts.artifact_contract import classify_artifact
+from inlumen.codegen.context import (
+    DEFAULT_ALLOWED_PACKAGES,
+    is_codegen_runtime_file,
+    node_data,
+    node_descriptor,
+    node_file_entries,
+    pipeline_context,
+    sample_from_bytes,
+)
 from inlumen.contracts.artifact_runtime import ArtifactContractError
 from task_artifacts import TASK_METADATA_FILENAME, parse_task_metadata
 from inlumen.contracts.task_package_contract import AUTHORING_GUIDE, EXAMPLE, TASK_SCHEMA, public_manifest, validate_package
@@ -62,7 +70,6 @@ from inlumen.contracts.node_definitions.artifacts import (
     configuration_hash,
     implementation_plan_from_data,
 )
-from inlumen.contracts.node_ports import normalize_node_ports
 from node_secrets import (
     clear_node_secrets,
     configured_node_secrets,
@@ -126,24 +133,7 @@ CODEGEN_RUN_STORE = CodegenRunStore(
     os.getenv("DATABASE_URL")
     or os.getenv("INLUMEN_CODEGEN_RUN_DB_PATH", "state/codegen-runs.sqlite3")
 )
-DEFAULT_CODEGEN_ALLOWED_PACKAGES = [
-    "pandas",
-    "numpy",
-    "pillow",
-    "scikit-learn",
-    "requests",
-    "pypdf",
-    "SpeechRecognition",
-    "pocketsphinx",
-    "textblob",
-]
-CODEGEN_RUNTIME_FILENAMES = {
-    "main.py",
-    "requirements.txt",
-    TASK_METADATA_FILENAME,
-    "node-manifest.json",
-    "validation-report.json",
-}
+DEFAULT_CODEGEN_ALLOWED_PACKAGES = DEFAULT_ALLOWED_PACKAGES
 USER_TASK_RUNTIME_FILENAMES = {"main.py", "requirements.txt", TASK_METADATA_FILENAME}
 PIPELINE_RUNTIME_BEHAVIOR_INSTRUCTION = """Design the entire pipeline as one coherent program before writing any node.
 For every edge, decide the exact output filename, format, schema or object shape, and required runtime dependencies. The producer must write that contract and the consumer must read the same contract.
@@ -609,8 +599,7 @@ def _codegen_run_response_metadata(
 
 
 def _node_data(node: dict[str, Any]) -> dict[str, Any]:
-    data = node.get("data")
-    return data if isinstance(data, dict) else node
+    return node_data(node)
 
 
 def _node_file_entries(
@@ -619,58 +608,16 @@ def _node_file_entries(
     include_samples: bool = False,
     include_runtime_artifacts: bool = False,
 ) -> list[dict[str, Any]]:
-    data = _node_data(node)
-    raw_files = (
-        data.get("file_buckets")
-        if isinstance(data.get("file_buckets"), list)
-        else data.get("files")
+    return node_file_entries(
+        node,
+        bucket_for=node_bucket_name,
+        sample=_sample_file_descriptor if include_samples else None,
+        include_runtime_artifacts=include_runtime_artifacts,
     )
-    if not isinstance(raw_files, list):
-        return []
-    flow_id = str(node.get("id") or data.get("flow_id") or data.get("id") or "").strip()
-    default_bucket = node_bucket_name(flow_id)
-    entries = []
-    for item in raw_files:
-        if isinstance(item, str):
-            filename = item.strip()
-            bucket = default_bucket
-            content_type = None
-        elif isinstance(item, dict):
-            filename = str(item.get("filename") or item.get("name") or "").strip()
-            bucket = str(item.get("bucket") or default_bucket).strip().lower()
-            content_type = item.get("content_type")
-        else:
-            continue
-        if not filename:
-            continue
-        if not include_runtime_artifacts and _is_codegen_runtime_file(filename):
-            continue
-        entry = {
-            "filename": filename,
-            "bucket": bucket,
-            "content_type": content_type,
-            "role": item.get("role") if isinstance(item, dict) else None,
-            **_file_kind_and_format(filename),
-        }
-        if isinstance(item, dict) and item.get("snapshot_bucket") and item.get("snapshot_object"):
-            entry["snapshot_bucket"] = item["snapshot_bucket"]
-            entry["snapshot_object"] = item["snapshot_object"]
-        if include_samples:
-            entry.update(_sample_file_descriptor(
-                entry.get("snapshot_bucket", bucket), entry.get("snapshot_object", filename), entry
-            ))
-        entries.append(entry)
-    return entries
 
 
 def _is_codegen_runtime_file(filename: str) -> bool:
-    normalized = str(filename or "").strip()
-    lower = normalized.lower()
-    return (
-        lower in CODEGEN_RUNTIME_FILENAMES
-        or lower.startswith("dockerfile.")
-        or lower.endswith((".py", ".pyi", ".sh", ".bash", ".js", ".mjs", ".cjs", ".ts", ".tsx"))
-    )
+    return is_codegen_runtime_file(filename)
 
 
 def _sample_file_descriptor(
@@ -678,8 +625,6 @@ def _sample_file_descriptor(
     filename: str,
     descriptor: dict[str, Any],
 ) -> dict[str, Any]:
-    kind = descriptor.get("kind")
-    file_format = descriptor.get("format")
     try:
         response = _proxy(
             dispatch_object_request,
@@ -691,70 +636,9 @@ def _sample_file_descriptor(
         response.raise_for_status()
     except Exception:
         return {}
-    content = response.content
-    if kind not in {"table", "json", "text"}:
-        if len(content) > CODEGEN_SAMPLE_BINARY_MAX_BYTES:
-            return {
-                "size_bytes": len(content),
-                "sample_transport_error": (
-                    f"Real input exceeds the {CODEGEN_SAMPLE_BINARY_MAX_BYTES}-byte "
-                    "binary validation transport limit."
-                ),
-            }
-        return {
-            "size_bytes": len(content),
-            "sample": {
-                "content_base64": base64.b64encode(content).decode("ascii"),
-                "content_sha256": hashlib.sha256(content).hexdigest(),
-                "omitted_bytes": 0,
-            },
-        }
-    max_chars = 12000
-    text = content[:max_chars].decode("utf-8", errors="replace")
-    omitted = max(0, len(content) - len(content[:max_chars]))
-    if kind == "table" and file_format in {"csv", "tsv"}:
-        delimiter = "\t" if file_format == "tsv" else ","
-        try:
-            reader = csv.DictReader(StringIO(text), delimiter=delimiter)
-            rows = [row for _, row in zip(range(10), reader)]
-            columns = list(reader.fieldnames or [])
-        except Exception:
-            return {"sample": {"text": text, "omitted_bytes": omitted}}
-        return {
-            "columns": columns,
-            "sample": {
-                "rows": rows,
-                "omitted_bytes": omitted,
-            },
-            "size_bytes": len(content),
-        }
-    if kind == "json":
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            parsed = None
-        rows = []
-        columns = []
-        if isinstance(parsed, list):
-            rows = [item for item in parsed[:10] if isinstance(item, dict)]
-        elif isinstance(parsed, dict):
-            candidate_rows = parsed.get("records") or parsed.get("items")
-            if isinstance(candidate_rows, list):
-                rows = [item for item in candidate_rows[:10] if isinstance(item, dict)]
-        if rows:
-            columns = sorted({key for row in rows for key in row})
-        return {
-            **({"columns": columns} if columns else {}),
-            "sample": {
-                **({"rows": rows} if rows else {"text": text}),
-                "omitted_bytes": omitted,
-            },
-            "size_bytes": len(content),
-        }
-    return {
-        "sample": {"text": text, "omitted_bytes": omitted},
-        "size_bytes": len(content),
-    }
+    return sample_from_bytes(
+        response.content, descriptor, binary_max_bytes=CODEGEN_SAMPLE_BINARY_MAX_BYTES
+    )
 
 
 def _file_kind_and_format(filename: str) -> dict[str, str]:
@@ -766,45 +650,11 @@ def _node_descriptor(
     *,
     include_samples: bool = False,
 ) -> dict[str, Any]:
-    data = _node_data(node)
-    parameters = (
-        dict(data.get("param"))
-        if isinstance(data.get("param"), dict)
-        else {}
+    return node_descriptor(
+        node,
+        bucket_for=node_bucket_name,
+        sample=_sample_file_descriptor if include_samples else None,
     )
-    secret_parameter_names = {
-        str(name)
-        for name in (data.get("secret_params") or [])
-        if str(name).strip()
-    }
-    parameters = {
-        key: value
-        for key, value in parameters.items()
-        if str(key) not in secret_parameter_names
-    }
-    content = data.get("content")
-    if isinstance(content, str) and content.strip():
-        parameters["content"] = content.strip()
-    implementation = implementation_plan_from_data(data)
-    subpipeline = data.get("subpipeline")
-    if not isinstance(subpipeline, dict):
-        try:
-            subpipeline = json.loads(data.get("subpipeline_json") or "{}")
-        except (TypeError, ValueError):
-            subpipeline = {}
-    return {
-        "flow_id": str(node.get("id") or data.get("flow_id") or data.get("id") or ""),
-        "label": str(data.get("label") or ""),
-        "description": str(data.get("description") or ""),
-        "type": normalize_step_type(data.get("type")),
-        "template": str(data.get("template_label") or data.get("definition_id") or ""),
-        "parameters": parameters,
-        "secret_parameters": sorted(secret_parameter_names),
-        "implementation": implementation,
-        "subpipeline": subpipeline if isinstance(subpipeline, dict) else {},
-        "ports": normalize_node_ports(data.get("ports"), data.get("type")),
-        "files": _node_file_entries(node, include_samples=include_samples),
-    }
 
 
 def _build_codegen_context(
@@ -1416,43 +1266,11 @@ def _build_pipeline_codegen_context(
     *,
     include_samples: bool,
 ) -> dict[str, Any]:
-    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
-    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
-    descriptors = [
-        _node_descriptor(node, include_samples=include_samples)
-        for node in nodes
-        if isinstance(node, dict)
-    ]
-    return {
-        "schema_version": "inlumen.pipeline-script-generation-context@1",
-        "pipeline": graph.get("pipeline") if isinstance(graph.get("pipeline"), dict) else {},
-        "graph": {
-            "nodes": descriptors,
-            "edges": [
-                {
-                    "source": str(edge.get("source")),
-                    "target": str(edge.get("target")),
-                    "source_port": str(
-                        edge.get("sourceHandle") or edge.get("source_port") or ""
-                    ),
-                    "target_port": str(
-                        edge.get("targetHandle") or edge.get("target_port") or ""
-                    ),
-                }
-                for edge in edges
-                if isinstance(edge, dict) and edge.get("source") and edge.get("target")
-            ],
-        },
-        "runtime_constraints": {
-            "language": "python",
-            "python_version": "3.11",
-            "base_image": "python:3.11-slim",
-            "allowed_packages": DEFAULT_CODEGEN_ALLOWED_PACKAGES,
-            "allow_unlisted_model_packages": True,
-            "network_allowed": True,
-            "max_runtime_seconds": 900,
-        },
-    }
+    return pipeline_context(
+        graph,
+        bucket_for=node_bucket_name,
+        sample=_sample_file_descriptor if include_samples else None,
+    )
 
 
 def _build_external_ai_runtime_prompt(

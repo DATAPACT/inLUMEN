@@ -5,6 +5,12 @@ the dedicated code-generation model selected in inLUMEN Settings to turn the
 canonical graph into Python runtime packages, then validates them before the
 backend persists anything.
 
+The generator itself is the `inlumen.codegen` module of the agents library
+([`packages/agents`](../packages/agents/README.md)); other programs, such as
+`inlumen-bench`, call it directly with `inlumen.codegen.run.generate()`. This
+service adds the HTTP API, generation jobs and their store, worker leases, run
+artifact storage, the step cache, deployment validation and authentication.
+
 Each node artifact contains:
 
 - `main.py`

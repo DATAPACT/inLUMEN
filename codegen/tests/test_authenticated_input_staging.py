@@ -5,9 +5,9 @@ import os
 
 import pytest
 from app.job_store import PipelineJobStore
-from app.llm import without_validation_bytes
-from app.sandbox import fetch_configured_input, write_sample_inputs
-from app.schemas import FileDescriptor, FileSample
+from inlumen.codegen.llm import without_validation_bytes
+from inlumen.codegen.sandbox import fetch_configured_input, write_sample_inputs
+from inlumen.codegen.schemas import FileDescriptor, FileSample
 from app.security import EXECUTION_WORKSPACE
 
 
@@ -21,7 +21,7 @@ def test_authenticated_staging_uses_complete_bytes_and_survives_serialization(tm
     content = b'value\n' + b'real-row\n' * 3000
     item = FileDescriptor.model_validate_json(descriptor(content).model_dump_json())
     token = EXECUTION_WORKSPACE.set('authenticated-workspace')
-    monkeypatch.setattr('app.sandbox.httpx.stream', lambda *a, **k: pytest.fail('must not call the user API'))
+    monkeypatch.setattr('inlumen.codegen.sandbox.httpx.stream', lambda *a, **k: pytest.fail('must not call the user API'))
     try:
         for attempt in ('initial', 'retry'):
             inputs = tmp_path / attempt
@@ -38,7 +38,7 @@ def test_missing_authenticated_bytes_fail_closed(tmp_path, monkeypatch):
     token = EXECUTION_WORKSPACE.set('authenticated-workspace')
     monkeypatch.setenv('CODEGEN_INPUT_FILE_BASE_URL', 'https://backend/api/files/content')
     monkeypatch.setenv('CODEGEN_INPUT_FILE_API_KEY', 'must-not-be-used')
-    monkeypatch.setattr('app.sandbox.httpx.stream', lambda *a, **k: pytest.fail('credential must not be sent'))
+    monkeypatch.setattr('inlumen.codegen.sandbox.httpx.stream', lambda *a, **k: pytest.fail('credential must not be sent'))
     try:
         with pytest.raises(RuntimeError, match='not staged'):
             fetch_configured_input(tmp_path / 'input', FileDescriptor(filename='real.csv', bucket='files-ws-other'))
@@ -73,7 +73,7 @@ def test_real_authenticated_backend_attachment_stages_in_codegen(tmp_path, monke
     from pathlib import Path
     item = FileDescriptor.model_validate_json(Path(os.environ['AUTH_FILE_STAGED_INPUT']).read_text())
     token = EXECUTION_WORKSPACE.set('authenticated-workspace')
-    monkeypatch.setattr('app.sandbox.httpx.stream', lambda *a, **k: pytest.fail('no user API download'))
+    monkeypatch.setattr('inlumen.codegen.sandbox.httpx.stream', lambda *a, **k: pytest.fail('no user API download'))
     try:
         write_sample_inputs(tmp_path / 'manifest.json', tmp_path, [item])
         assert (tmp_path / 'real.csv').read_bytes() == b'value\nreplacement\n'
@@ -82,7 +82,7 @@ def test_real_authenticated_backend_attachment_stages_in_codegen(tmp_path, monke
 
 
 def test_durable_job_retry_keeps_bytes_and_workspace_scope(tmp_path):
-    from app.schemas import GeneratePipelineScriptsRequest
+    from inlumen.codegen.schemas import GeneratePipelineScriptsRequest
     request = GeneratePipelineScriptsRequest.model_validate({"context": {"graph": {
         "nodes": [{"flow_id": "1", "type": "source", "files": [descriptor().model_dump()]}], "edges": []}}})
     db = str(tmp_path / 'jobs.sqlite3')
@@ -101,7 +101,7 @@ def test_production_service_auth_allows_staging_real_attachment(tmp_path, monkey
     from pathlib import Path
     from fastapi.testclient import TestClient
     import app.main as main
-    from app.llm import LLMGenerationError
+    from inlumen.codegen.llm import LLMGenerationError
 
     monkeypatch.setenv('APP_ENV', 'production')
     monkeypatch.setenv('CODEGEN_AUTH_DISABLED', 'false')

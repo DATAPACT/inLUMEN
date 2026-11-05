@@ -3,9 +3,9 @@ import pytest
 
 from fastapi.testclient import TestClient
 
-from app.llm import generate_json
+from inlumen.codegen.llm import generate_json
 from app.main import app
-from app.schemas import LLMConfig
+from inlumen.codegen.schemas import LLMConfig
 
 
 class FakeResponse:
@@ -52,7 +52,7 @@ def test_chat_completions_uses_dedicated_model_and_ephemeral_key(monkeypatch, pr
             captured.update(url=url, headers=headers, body=json)
             return FakeResponse()
 
-    monkeypatch.setattr("app.llm.httpx.AsyncClient", FakeClient)
+    monkeypatch.setattr("inlumen.codegen.llm.httpx.AsyncClient", FakeClient)
     config = LLMConfig(
         provider="openrouter",
         model="openai/gpt-5.2-codex",
@@ -97,11 +97,11 @@ def test_chat_completions_uses_dedicated_model_and_ephemeral_key(monkeypatch, pr
 
 def test_node_endpoint_uses_ai_payload_without_generating_dockerfile(monkeypatch) -> None:
     async def fake_generate(_config, request, _usage_callback=None):
-        from app.generator import fallback_script_payload
+        from inlumen.codegen.generator import fallback_script_payload
 
         return fallback_script_payload(request)
 
-    monkeypatch.setattr("app.generator.generate_node_payload", fake_generate)
+    monkeypatch.setattr("inlumen.codegen.generator.generate_node_payload", fake_generate)
     response = TestClient(app).post(
         "/v1/generate/node-script",
         headers={"X-LLM-API-Key": "provider-secret"},

@@ -21,7 +21,7 @@ from app.deployment_validation import (
 class IsolatedRuntimeEnvironmentTest(unittest.TestCase):
     def test_vm_budget_is_applied_to_build_prefetch_and_runtime(self):
         from app.deployment_validation import _isolated_dagster_execution
-        from app.resource_policy import GIB, ResourceAdmissionController
+        from inlumen.codegen.resource_policy import GIB, ResourceAdmissionController
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()

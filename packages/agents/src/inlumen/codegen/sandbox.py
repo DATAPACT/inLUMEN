@@ -15,7 +15,9 @@ import tempfile
 import threading
 import wave
 import zlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -67,7 +69,45 @@ class SandboxNodeRunResult:
     outputs: list[FileDescriptor]
 
 
+@dataclass(frozen=True)
+class DockerSandbox:
+    """Run validation in Docker containers on the local Docker daemon.
+
+    ``workdir`` holds the per-run workspaces (default: $CODEGEN_VALIDATION_WORKDIR
+    or /tmp/inlumen-codegen-workspaces); it must be visible to the daemon.
+    """
+
+    workdir: str | None = None
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
+class NoSandbox:
+    """Skip execution checks: generated code is compiled and checked statically only."""
+
+    workdir: str | None = None
+    enabled: bool = False
+
+
+Sandbox = DockerSandbox | NoSandbox
+
+CURRENT_SANDBOX: ContextVar[Sandbox | None] = ContextVar("codegen_sandbox", default=None)
+
+
+@contextmanager
+def use_sandbox(sandbox: Sandbox | None) -> Iterator[None]:
+    """Choose where this context's generated code runs (default: the environment)."""
+    token = CURRENT_SANDBOX.set(sandbox)
+    try:
+        yield
+    finally:
+        CURRENT_SANDBOX.reset(token)
+
+
 def docker_validation_enabled() -> bool:
+    sandbox = CURRENT_SANDBOX.get()
+    if sandbox is not None:
+        return sandbox.enabled
     return os.getenv(DOCKER_VALIDATION_ENV, "").lower() in {"1", "true", "yes", "on"}
 
 
@@ -451,7 +491,11 @@ def write_generated_files(workspace: Path, artifact: GeneratedArtifact) -> None:
 
 
 def validation_workspace(flow_id: str):
-    root = Path(os.getenv(VALIDATION_WORKDIR_ENV, DEFAULT_VALIDATION_WORKDIR))
+    sandbox = CURRENT_SANDBOX.get()
+    root = Path(
+        (sandbox.workdir if sandbox is not None else None)
+        or os.getenv(VALIDATION_WORKDIR_ENV, DEFAULT_VALIDATION_WORKDIR)
+    )
     root.mkdir(parents=True, exist_ok=True)
     try:
         return tempfile.TemporaryDirectory(
@@ -557,7 +601,7 @@ def write_embedded_media(path: Path, file_item: FileDescriptor) -> bool:
 
 
 def fetch_configured_input(path: Path, file_item: FileDescriptor) -> bool:
-    from .security import EXECUTION_WORKSPACE
+    from .workspace import EXECUTION_WORKSPACE
     # Authenticated workspaces must receive bytes authorized by the backend.
     # Never substitute a preview or try a shared credential on the user API.
     if EXECUTION_WORKSPACE.get() != "local-workspace" and file_item.bucket:

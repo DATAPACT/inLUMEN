@@ -19,7 +19,7 @@ from inlumen.contracts.artifact_runtime import (
     validate_result,
 )
 from deployment_artifacts import _ARGO_PORT_RUNNER
-from app.pipeline_compiler import compile_pipeline_nodes
+from inlumen.codegen.pipeline_compiler import compile_pipeline_nodes
 
 
 def artifact(name="transcript", filename="transcript.json", **extra):

@@ -8,9 +8,18 @@
 - ``task_package_contract``: Task package v1 (spec in ``task_package_spec.json``).
 """
 
+from importlib.metadata import PackageNotFoundError, version
 from importlib.resources import files
 
 
 def artifact_runtime_source() -> str:
     """Return ``artifact_runtime.py``'s source, for embedding in bundles."""
     return files(__name__).joinpath("artifact_runtime.py").read_text(encoding="utf-8")
+
+
+def package_version() -> str:
+    """The installed inlumen-agents version, recorded with every agent result."""
+    try:
+        return version("inlumen-agents")
+    except PackageNotFoundError:  # running from a source checkout
+        return "0+unknown"

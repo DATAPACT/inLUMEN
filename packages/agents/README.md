@@ -8,7 +8,7 @@ by the inLUMEN backend, the codegen service and `inlumen-bench`. See
 | --- | --- | --- |
 | `inlumen.contracts` | The pipeline graph model: port types, Parallel Map scopes, the artifact runtime, the Task package contract, step types, node ports and definitions, graph validation, subpipelines, plugins, Project JSON | Done |
 | `inlumen.design` | The pipeline design agent (extra `design`) | Done |
-| `inlumen.codegen` | The code generator | Planned |
+| `inlumen.codegen` | The code generator (extra `codegen`) | Done |
 
 ## Design a pipeline
 
@@ -31,18 +31,43 @@ which behaves like the inLUMEN backend's Neo4j store: both run the scenarios in
 results. Pass `graph=` to start from an existing canvas graph and `catalog=` to
 offer plugins or reusable pipelines.
 
+## Generate Task packages
+
+```python
+from inlumen.codegen.run import generate, http_model
+from inlumen.codegen.sandbox import DockerSandbox
+
+model = http_model(
+    "openai/gpt-5.2-codex", base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY, provider="openrouter",
+)
+result = await generate(design_result.graph, model=model, files="data/")
+result.accepted            # the generated pipeline passed integration validation
+result.packages            # {flow_id: {filename: content}}: one Task package per step
+result.write_packages("out/")
+result.requests            # one record per model request: tokens, cost, latency
+```
+
+It runs the same planning, generation, repair and validation as the codegen
+service. `sandbox` defaults to `NoSandbox()` (static checks only); pass
+`DockerSandbox()` to run the pipeline on sample inputs, which needs a Docker
+daemon. `files` is a folder of attached files, looked up as
+`<folder>/<flow_id>/<name>` and then `<folder>/<name>`. Any object with a
+`name` and an async `complete(system_prompt=…, user_prompt=…, json_output=…,
+max_tokens=…)` returning `inlumen.codegen.model.ModelReply` can be the model.
+
 ## Install
 
 In this repository (editable, for development):
 ```sh
-uv pip install -e "packages/agents[design]"
+uv pip install -e "packages/agents[design,codegen]"
 ```
 From another project, pinned to a release tag:
 ```sh
-pip install "inlumen-agents[design] @ git+https://github.com/DATAPACT/inLUMEN@<tag>#subdirectory=packages/agents"
+pip install "inlumen-agents[design,codegen] @ git+https://github.com/DATAPACT/inLUMEN@<tag>#subdirectory=packages/agents"
 ```
 
 ## Tests
 ```sh
-cd packages/agents && uv run --extra design --extra dev pytest
+cd packages/agents && uv run --extra design --extra codegen --extra dev pytest
 ```

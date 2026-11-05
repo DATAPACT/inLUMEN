@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import main
-from app.schemas import PipelineGenerationRun, PipelineGenerationRunStep
+from inlumen.codegen.schemas import PipelineGenerationRun, PipelineGenerationRunStep
 
 
 @pytest.fixture(autouse=True)
@@ -362,7 +362,7 @@ def test_restart_does_not_invent_worker_completion_time(monkeypatch):
 
 
 def test_legacy_job_does_not_derive_duration_from_updated_at():
-    from app.schemas import PipelineGenerationJobResponse
+    from inlumen.codegen.schemas import PipelineGenerationJobResponse
     job = PipelineGenerationJobResponse.model_validate({
         "run_id": "legacy", "status": "valid",
         "created_at": "2026-09-14T10:00:00Z", "updated_at": "2026-09-14T11:00:00Z",

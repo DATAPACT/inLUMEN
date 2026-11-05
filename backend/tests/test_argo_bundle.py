@@ -1,6 +1,5 @@
 """The Argo export is a self-contained bundle that runs outside inLUMEN."""
 
-import importlib.util
 import io
 import json
 import os
@@ -379,14 +378,7 @@ class ArgoBundleLayoutTest(unittest.TestCase):
         self.assertIn("ACCELERATOR=gpu", by_path["README.md"])
 
     def test_resource_profiles_match_local_runs(self):
-        path = Path(__file__).resolve().parents[2] / "codegen" / "app" / "resource_policy.py"
-        if not path.is_file():
-            self.skipTest("codegen sources are not available")
-        spec = importlib.util.spec_from_file_location("codegen_resource_policy", path)
-        policy = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = policy  # dataclasses look their module up here
-        self.addCleanup(sys.modules.pop, spec.name, None)
-        spec.loader.exec_module(policy)
+        from inlumen.codegen import resource_policy as policy
 
         self.assertEqual(
             {name: {"cpu": item.cpu, "memory_bytes": item.memory_bytes} for name, item in policy.RESOURCE_PROFILES.items()},

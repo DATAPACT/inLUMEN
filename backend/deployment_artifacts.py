@@ -13,7 +13,7 @@ from packaging.utils import InvalidWheelFilename, parse_wheel_filename
 import argo_bundle
 from inlumen.contracts.artifact_runtime import ArtifactContractError, CONTRACT_ID, assign_output_ports, validate_connection_contract, validate_declaration
 from artifact_content import decode_artifact_content, verify_artifact_integrity
-from artifact_contract import ArtifactBinding, artifact_bindings, classify_artifact
+from inlumen.contracts.artifact_contract import ArtifactBinding, artifact_bindings, classify_artifact
 from inlumen.contracts.connector_catalog import connector_definition
 from filesystem_runtime import filesystem_shell_component_source
 from inlumen.contracts.node_parameters import normalize_secret_param_keys

@@ -278,12 +278,8 @@ class CodegenServiceClientTest(unittest.TestCase):
 
     def test_repair_options_match_live_codegen_schema(self):
         # Validate against the receiving service, not a copied numeric assertion.
-        import importlib.util
-        schema_path = Path(__file__).resolve().parents[2] / "codegen" / "app" / "schemas.py"
-        spec = importlib.util.spec_from_file_location("codegen_contract_schema", schema_path)
-        schema = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = schema
-        spec.loader.exec_module(schema)
+        from inlumen.codegen import schemas as schema
+
         graph = {"nodes": [{"id": "1", "data": {"type": "source", "label": "Input"}}], "edges": []}
         for supplied, expected in [(None, 6), (0, 0), (4, 4), (7, 6), (999, 6), (-1, 0), ("bad", 6)]:
             with self.subTest(supplied=supplied):

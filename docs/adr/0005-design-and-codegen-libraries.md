@@ -121,13 +121,32 @@ What stops that today:
      `GenerationBudget` limits keep working.
 
 6. **Codegen entry point.**
-   - `generate_pipeline_script_bundles(request, …)` keeps its signature and
-     schemas, and gains `model`, `sandbox` and `events` arguments.
-   - `Sandbox` is a protocol around the Docker validation calls. `DockerSandbox`
-     (today's `sandbox.py`) is the default. `NoSandbox` skips execution checks,
-     as `docker_validation_enabled()` does today.
-   - The FastAPI app, job store, MinIO artifact store, leases and security stay
-     in the codegen service, which becomes a thin wrapper around the library.
+   - The generation core moves to `inlumen.codegen` (extra `codegen`):
+     generator, model calls, pipeline compiler, sandbox, schemas, task
+     profiles, trusted adapters, validation, model plans, resource profiles.
+     `generate_pipeline_script_bundles(request, …)` keeps its signature and
+     schemas, so the service calls it unchanged.
+   - The model, sandbox and event sink are chosen per run through context
+     variables (`use_model`, `use_sandbox`, `use_events`), not new arguments
+     threaded through the generator's internal calls:
+     - `ModelClient` answers one system + user prompt. Every request still
+       goes through `llm.generate_json`, which keeps the budget, usage and
+       JSON parsing; `HttpModelClient` (today's OpenAI-compatible call) is the
+       default.
+     - `DockerSandbox` (the default when `CODEGEN_DOCKER_VALIDATION_ENABLED` is
+       set) and `NoSandbox` select whether execution checks run, and where
+       their workspaces live. They are a switch rather than a protocol around
+       the Docker calls: there is no second execution backend yet, and the
+       Docker code stays one implementation.
+   - `inlumen.codegen.context` builds the generator's input from a canvas
+     graph. File storage is injected (`bucket_for`, `sample`): the backend
+     reads MinIO, a library caller a local folder (`directory_sampler`).
+   - `inlumen.codegen.run.generate(graph, model=…, sandbox=…, files=…)` is the
+     entry point for other programs. It turns the deterministic fallback off
+     unless asked, so a result measures the model.
+   - The FastAPI app, job store, MinIO artifact store, leases, step cache,
+     deployment validation and security stay in the codegen service, which
+     becomes a thin wrapper around the library.
    - Output stays Task packages. Turning them into a ServiceCraft submission
      (Dagster `definitions.py` with ServiceCraft's asset names) is the bench's job,
      because those names come from ServiceCraft's contract.

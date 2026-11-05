@@ -4,18 +4,11 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
+from inlumen.contracts import package_version  # noqa: F401  (re-exported)
 from inlumen.contracts.node_definitions import NodeDefinitionRegistry
 from inlumen.contracts.plugins import StaticPluginSource
-
-
-def package_version() -> str:
-    try:
-        return version("inlumen-agents")
-    except PackageNotFoundError:  # running from a source checkout
-        return "0+unknown"
 
 
 @dataclass(frozen=True)
