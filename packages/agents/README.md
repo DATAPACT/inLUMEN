@@ -1,8 +1,8 @@
 # inlumen-agents
 
 inLUMEN's pipeline design and code generation agents as one Python package, used
-by the inLUMEN backend, the codegen service and `inlumen-bench`. See
-[ADR 0005](../../docs/adr/0005-design-and-codegen-libraries.md).
+by the inLUMEN backend, the codegen service and `inlumen-bench`. The design
+rationale is in inLUMEN's ADR 0005 (`docs/adr/0005-design-and-codegen-libraries.md`).
 
 | Module | Contents | Status |
 | --- | --- | --- |
@@ -60,13 +60,16 @@ max_tokens=…)` returning `inlumen.codegen.model.ModelReply` can be the model.
 
 ## Install
 
-In this repository (editable, for development):
+From PyPI (pre-releases need an exact version or `--pre`):
+```sh
+pip install "inlumen-agents[design,codegen]==1.0.0b6.dev0"
+```
+Extras: `design` for `inlumen.design`, `codegen` for `inlumen.codegen`;
+`inlumen.contracts` needs neither.
+
+In the inLUMEN repository (editable, for development):
 ```sh
 uv pip install -e "packages/agents[design,codegen]"
-```
-From another project, pinned to a release tag:
-```sh
-pip install "inlumen-agents[design,codegen] @ git+https://github.com/DATAPACT/inLUMEN@<tag>#subdirectory=packages/agents"
 ```
 
 ## Tests

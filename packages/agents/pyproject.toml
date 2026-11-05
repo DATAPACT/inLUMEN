@@ -5,6 +5,16 @@ version = "1.0.0b6.dev0"
 description = "inLUMEN's pipeline design and code generation agents, as a library."
 readme = "README.md"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["inlumen", "data pipelines", "code generation", "llm agents", "dagster"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Code Generators",
+]
 requires-python = ">=3.11"
 dependencies = [
   "jsonschema>=4.23,<5",
