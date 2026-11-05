@@ -2409,7 +2409,8 @@ def table_inputs(inputs: list[FileDescriptor]) -> list[FileDescriptor]:
     found = []
     for file in inputs:
         for candidate in [file, *(
-            FileDescriptor.model_validate(member)
+            # A bundle member comes from the step that published the bundle.
+            FileDescriptor.model_validate({"source_node": file.source_node, **member})
             for member in file.members
             if isinstance(member, dict) and member.get("filename")
         )]:
@@ -2435,6 +2436,24 @@ def typed_table_outputs(
     return data_passthrough_outputs(name, label, inputs, collection=port_type.many)
 
 
+def unique_member_filenames(tables: list[FileDescriptor]) -> list[str]:
+    """One distinct file name per table for a bundle; repeats get their source step's prefix."""
+    used: set[str] = set()
+    names = []
+    for table in tables:
+        path = Path(table.filename)
+        candidate = path.name
+        if candidate in used:
+            prefix = sanitize_fragment(table.source_node).replace("-", "_").lower()
+            candidate = f"{prefix}_{path.name}" if table.source_node else candidate
+        stem, suffix, number = Path(candidate).stem, Path(candidate).suffix, 2
+        while candidate in used:
+            candidate, number = f"{stem}_{number}{suffix}", number + 1
+        used.add(candidate)
+        names.append(candidate)
+    return names
+
+
 def data_passthrough_outputs(
     name: str,
     label: str,
@@ -2453,17 +2472,18 @@ def data_passthrough_outputs(
         return []
     if collection is False:
         tables = [max(tables, key=lambda table: len(table.columns))]
+    filenames = unique_member_filenames(tables)
     members = [
         ExpectedArtifact(
-            name=Path(table.filename).stem,
+            name=Path(filename).stem,
             kind="table",
             format=table.format or "csv",
-            filename=Path(table.filename).name,
+            filename=filename,
             columns=table.columns,
             semantic_role="prepared_dataset",
             description=f"{Path(table.filename).name} as processed by {label}.",
         )
-        for table in tables
+        for table, filename in zip(tables, filenames)
     ]
     if len(members) == 1 and not with_report and not collection:
         member = members[0]

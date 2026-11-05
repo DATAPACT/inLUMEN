@@ -147,6 +147,17 @@ class DeploymentAgentsTest(unittest.TestCase):
             self.assertEqual(["patients.csv"], [p.name for p in (published / "patients").iterdir()])
             self.assertEqual(["Visit Log.json"], [p.name for p in (published / "visit_log").iterdir()])
 
+
+    def test_multi_file_bundle_matches_codegen_name_and_kinds(self):
+        from deployment_agents import _multi_file_source_bundle
+
+        bundle = _multi_file_source_bundle(
+            {"flow_id": "1", "label": "!!"},
+            [{"filename": "prices.csv"}, {"filename": "notes.txt"}],
+        )
+        self.assertEqual(("node", "node_files"), (bundle["name"], bundle["filename"]))
+        self.assertEqual(["table", "text"], [member["kind"] for member in bundle["members"]])
+
     def test_custom_source_with_several_files_publishes_one_directory_bundle(self):
         artifact, _ = _managed_adapter_runtime(
             {

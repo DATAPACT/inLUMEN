@@ -453,9 +453,11 @@ def write_generated_files(workspace: Path, artifact: GeneratedArtifact) -> None:
 def validation_workspace(flow_id: str):
     root = Path(os.getenv(VALIDATION_WORKDIR_ENV, DEFAULT_VALIDATION_WORKDIR))
     root.mkdir(parents=True, exist_ok=True)
+    # A step id can hold characters that are not valid in a file name (e.g. "/").
+    prefix = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(flow_id)).strip(".-") or "step"
     try:
         return tempfile.TemporaryDirectory(
-            prefix=f"inlumen-codegen-{flow_id}-",
+            prefix=f"inlumen-codegen-{prefix}-",
             dir=str(root),
         )
     except FileNotFoundError as exc:

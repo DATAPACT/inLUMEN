@@ -1150,15 +1150,19 @@ def _multi_file_source_bundle(step: dict[str, Any], source_files: list[dict[str,
     matches the input the generated downstream Task was built against.
     """
     label = str(step.get("label") or step.get("flow_id") or "")
-    name = re.sub(r"[^A-Za-z0-9_.-]+", "-", label).strip(".-").replace("-", "_").lower() or "output"
+    # codegen: sanitize_fragment(label) ("node" when empty), snake case, else "output".
+    fragment = re.sub(r"[^A-Za-z0-9_.-]+", "-", label).strip(".-") or "node"
+    name = fragment.replace("-", "_").lower() or "output"
     members = []
     for item in source_files:
         filename = str(item["filename"])
-        file_format = str(item.get("format") or Path(filename).suffix.lstrip(".")) or None
+        # codegen classifies each file by name when the record carries no kind.
+        classified = classify_artifact(filename)
+        file_format = str(item.get("format") or classified.get("format") or Path(filename).suffix.lstrip(".")) or None
         members.append({
             "name": Path(filename).stem,
             "filename": filename,
-            "kind": str(item.get("kind") or "binary"),
+            "kind": str(item.get("kind") or classified.get("kind") or "binary"),
             "format": file_format,
             "representation": "file",
         })
