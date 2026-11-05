@@ -28,6 +28,9 @@ describe("mapScopes", () => {
     expect(codes([link("map", "item", "a", "input"), link("a", "output", "collect", "item"), link("a", "output", "dest", "data")]))
       .toContain("map-scope-leak");
     expect(codes([link("a", "output", "collect", "item")], { collect: "Collect" })).toEqual(["collect-without-map"]);
+    expect(codes([link("map", "item", "a", "input"), link("a", "output", "collect", "item"),
+      link("map", "item", "archive", "input"), link("archive", "output", "dest", "data")]))
+      .toEqual(["map-branch-without-collect"]);
     expect(codes([link("map", "item", "map2", "items"), link("map2", "item", "collect", "item")],
       { map: "Parallel Map", map2: "Parallel Map", collect: "Collect" })).toContain("nested-map");
   });

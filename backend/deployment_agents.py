@@ -1505,6 +1505,18 @@ def _plugin_adapter_runtime(
     }
 
 
+def _collected_item(scope, edges, by_id) -> dict[str, Any]:
+    """What one item of the Collect holds: the per-item output wired into it."""
+    for source, source_port, target, _ in edges:
+        if target != scope.collect or source not in by_id or not by_id[source][0].get("map_scope"):
+            continue  # The Map itself (no per-item step) declares no item.
+        outputs = by_id[source][0].get("data_contract", {}).get("outputs") or []
+        wired = [item for item in outputs if item.get("port") == source_port] if len(outputs) > 1 else outputs
+        if wired:
+            return wired[0].get("item") or {}
+    return {}
+
+
 def _lift_map_scopes(
     steps: list[dict[str, Any]],
     pipeline_graph: Optional[dict],
@@ -1544,13 +1556,8 @@ def _lift_map_scopes(
                 lift_step(*by_id[flow_id], scope, settings)
             except ValueError as exc:
                 errors.append(str(exc))
-        last = [
-            source for source, _, target, _ in edges
-            if target == scope.collect and source in by_id
-        ]
-        if scope.collect in by_id and last:
-            inner = (by_id[last[0]][0].get("map_scope") and by_id[last[0]][0]["data_contract"]["outputs"][0].get("item")) or {}
-            set_collect_item(*by_id[scope.collect], inner)
+        if scope.collect in by_id:
+            set_collect_item(*by_id[scope.collect], _collected_item(scope, edges, by_id))
     return errors
 
 

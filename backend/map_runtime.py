@@ -119,6 +119,16 @@ def _entrypoint_filename(dockerfile: dict) -> str:
     return "main.py"
 
 
+def _max_concurrency(scope: MapScope, settings: dict) -> int:
+    value = settings.get("max_concurrency") or 1
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"Parallel Map {scope.map}: max concurrency must be a whole number, got {value!r}."
+        ) from None
+
+
 def lift_step(runtime_artifact: dict, dockerfile: dict, scope: MapScope, settings: dict) -> None:
     """Wrap a per-item step so its engine runs it once per item of the collection."""
     inner = copy.deepcopy(runtime_artifact.get("data_contract") or {})
@@ -134,7 +144,7 @@ def lift_step(runtime_artifact: dict, dockerfile: dict, scope: MapScope, setting
         "collect": scope.collect,
         "entrypoint": entry,
         "inner_contract": inner,
-        "max_concurrency": max(1, int(settings.get("max_concurrency") or 1)),
+        "max_concurrency": _max_concurrency(scope, settings),
         "failure_policy": "continue" if settings.get("failure_policy") == "continue" else "stop",
     }
     _replace_file(runtime_artifact.setdefault("files", []), ITEM_RUNNER_FILENAME,
@@ -351,7 +361,7 @@ def _run_item(key, outer_inputs, outer_outputs, inner, parameters, work_root, ou
         outer = _match(declaration, outer_inputs)
         artifact = _item_artifact(outer["path"], key, outer.get("item"))
         # Keep the item's own name: per-item code often uses it as identity.
-        relative = str(Path(str(declaration["filename"])).parent / artifact.name).lstrip("./") or artifact.name
+        relative = str(Path(str(declaration["filename"])).parent / artifact.name).lstrip("/")
         target = input_dir / relative
         _copy(artifact, target)
         inner_inputs.append({
@@ -383,8 +393,15 @@ def _run_item(key, outer_inputs, outer_outputs, inner, parameters, work_root, ou
     actual = json.loads(receipt.read_text(encoding="utf-8")).get("outputs") if receipt.is_file() else None
     validated = validate_result(output_dir, inner.get("outputs", []), actual, producer=f"{SPEC['flow_id']}[{key}]")
     for result in validated:
-        outer = (outer_outputs[0] if len(outer_outputs) == 1
-                 else next(item for item in outer_outputs if item.get("port") == result.get("port")))
+        if len(outer_outputs) == 1:
+            outer = outer_outputs[0]
+        else:
+            outer = next((item for item in outer_outputs if item.get("port") == result.get("port")), None)
+            if outer is None:
+                raise RuntimeError(
+                    f"Output {result.get('filename')!r} is on port {result.get('port')!r}, "
+                    "which none of the step's collection outputs declares"
+                )
         _copy(result["path"], out_root / outer["filename"] / key / Path(str(result["filename"])).name)
 
 
