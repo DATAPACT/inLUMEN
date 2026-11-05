@@ -1,4 +1,5 @@
 import pytest
+from pathlib import Path
 import ast
 import asyncio
 import base64
@@ -2041,6 +2042,187 @@ def test_plan_rejects_several_outputs_without_ports() -> None:
     })
     with pytest.raises(ValueError, match="must name the output port"):
         build_pipeline_generation_plan(request)
+
+
+def test_source_with_separate_files_feeds_each_branch_its_own_file() -> None:
+    nodes = [
+        {"flow_id": "1", "label": "Clinic Data", "type": "source",
+         "parameters": {"files_as": "separate"},
+         "ports": {"inputs": [], "outputs": [
+             {"id": "patients", "name": "patients", "type": "table"},
+             {"id": "visits", "name": "visits", "type": "table"}]},
+         "files": [
+             {"filename": "patients.csv", "kind": "table", "format": "csv", "columns": ["id", "age"]},
+             {"filename": "visits.csv", "kind": "table", "format": "csv", "columns": ["id", "date"]},
+         ]},
+        {"flow_id": "2", "label": "Clean Patients", "type": "task"},
+        {"flow_id": "3", "label": "Clean Visits", "type": "task"},
+        {"flow_id": "4", "label": "Join Patients and Visits", "type": "task",
+         "ports": {"inputs": [{"id": "left", "name": "left"}, {"id": "right", "name": "right"}],
+                   "outputs": [{"id": "output", "name": "output", "type": "table"}]}},
+        {"flow_id": "5", "label": "Final Output", "type": "destination"},
+    ]
+    edges = [
+        {"source": "1", "source_port": "patients", "target": "2", "target_port": "input"},
+        {"source": "1", "source_port": "visits", "target": "3", "target_port": "input"},
+        {"source": "2", "source_port": "output", "target": "4", "target_port": "left"},
+        {"source": "3", "source_port": "output", "target": "4", "target_port": "right"},
+        {"source": "4", "source_port": "output", "target": "5", "target_port": "data"},
+    ]
+    request = GeneratePipelineScriptsRequest.model_validate(
+        {"context": {"pipeline": {"name": "Clinic"}, "graph": {"nodes": nodes, "edges": edges}}}
+    )
+    plan, _contexts = build_pipeline_generation_plan(request)
+    by_id = {node["flow_id"]: node for node in plan["nodes"]}
+
+    assert [(item["port"], item["filename"]) for item in by_id["1"]["outputs"]] == [
+        ("patients", "patients.csv"), ("visits", "visits.csv"),
+    ]
+    assert [item["source_port"] for item in by_id["2"]["inputs"]] == ["patients"]
+    assert [item["source_port"] for item in by_id["3"]["inputs"]] == ["visits"]
+    assert sorted(item["target_port"] for item in by_id["4"]["inputs"]) == ["left", "right"]
+    # The join's typed `table` output is one table, not a bundle of its inputs.
+    assert [(item["kind"], item["representation"]) for item in by_id["4"]["outputs"]] == [("table", "file")]
+
+
+def test_typed_collection_output_keeps_a_bundle_even_for_one_table() -> None:
+    node = NodeDescriptor.model_validate({
+        "flow_id": "2", "label": "Enrich", "type": "task",
+        "ports": {"inputs": [{"id": "input", "name": "input"}],
+                  "outputs": [{"id": "output", "name": "output", "type": "table[]"}]},
+    })
+    inputs = [FileDescriptor(filename="1/a.csv", kind="table", format="csv", columns=["x"])]
+
+    outputs = expected_outputs_for_node(node, ["3"], inputs)
+
+    assert len(outputs) == 1 and outputs[0].representation == "directory"
+    assert [member["filename"] for member in outputs[0].members] == ["a.csv"]
+
+
+def _timed_source_plan(names: list[str]) -> tuple[dict, str]:
+    nodes, functions = [], []
+    for name in names:
+        nodes.append({
+            "flow_id": name, "function_name": f"node_{name}", "parents": [],
+            "input_filenames": [f"{name}.csv"], "descriptor": {"type": "source"},
+            "outputs": [{"name": name, "filename": f"{name}.json", "kind": "json", "format": "json"}],
+        })
+        functions.append(
+            f"def node_{name}(inputs, output_dir, context):\n"
+            "    started = time.time()\n"
+            "    time.sleep(0.6)\n"
+            f"    output = Path(output_dir) / '{name}.json'\n"
+            "    output.write_text(json.dumps({'started': started, 'ended': time.time()}), encoding='utf-8')\n"
+            f"    return [{{'name': '{name}', 'path': str(output)}}]\n"
+        )
+    source = "import json\nimport time\nfrom pathlib import Path\n\n" + "\n\n".join(functions)
+    return {"schema_version": "inlumen.pipeline-plan@2", "pipeline": {}, "nodes": nodes, "edges": []}, source
+
+
+@pytest.mark.parametrize("limit, overlap", [("4", True), ("1", False)])
+def test_compiled_pipeline_runs_independent_branches_concurrently(
+    tmp_path, monkeypatch, limit, overlap
+) -> None:
+    plan, source = _timed_source_plan(["customers", "orders"])
+    program = compose_pipeline_program(source, plan)
+    input_dir, output_dir = tmp_path / "inputs", tmp_path / "outputs"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    entries = []
+    for name in ("customers", "orders"):
+        path = input_dir / f"{name}.csv"
+        path.write_text("id\n1\n", encoding="utf-8")
+        entries.append({"filename": path.name, "path": str(path), "kind": "table", "format": "csv"})
+    manifest = input_dir / "input_manifest.json"
+    manifest.write_text(json.dumps({"inputs": entries}), encoding="utf-8")
+    script = tmp_path / "pipeline.py"
+    script.write_text(program, encoding="utf-8")
+    monkeypatch.setenv("INLUMEN_INPUT_MANIFEST", str(manifest))
+    monkeypatch.setenv("INLUMEN_OUTPUT_DIR", str(output_dir))
+    monkeypatch.setenv("INLUMEN_OUTPUT_MANIFEST", str(output_dir / "output_manifest.json"))
+    monkeypatch.setenv("INLUMEN_MAX_PARALLEL_STEPS", limit)
+
+    runpy.run_path(str(script), run_name="__main__")
+
+    spans = [
+        json.loads((output_dir / "nodes" / name / f"{name}.json").read_text(encoding="utf-8"))
+        for name in ("customers", "orders")
+    ]
+    overlapped = max(span["started"] for span in spans) < min(span["ended"] for span in spans)
+    assert overlapped is overlap
+    final = json.loads((output_dir / "output_manifest.json").read_text(encoding="utf-8"))
+    assert sorted(item["source_node"] for item in final["outputs"]) == ["customers", "orders"]
+
+
+def _invoice_map_request():
+    nodes = [
+        {"flow_id": "1", "label": "Invoice PDFs", "type": "source",
+         "files": [{"filename": "inv_a.pdf", "kind": "document", "format": "pdf"},
+                   {"filename": "inv_b.pdf", "kind": "document", "format": "pdf"}]},
+        {"flow_id": "2", "label": "Each Invoice", "type": "flow", "template": "Parallel Map",
+         "ports": {"inputs": [{"id": "items"}], "outputs": [{"id": "item"}]},
+         "parameters": {"max_concurrency": 2, "failure_policy": "continue"}},
+        {"flow_id": "3", "label": "Extract Invoice Fields", "type": "task"},
+        {"flow_id": "4", "label": "Collect Invoices", "type": "flow", "template": "Collect",
+         "ports": {"inputs": [{"id": "item"}], "outputs": [{"id": "items"}]}},
+        {"flow_id": "5", "label": "Aggregate Invoices", "type": "task"},
+        {"flow_id": "6", "label": "Invoices CSV", "type": "destination"},
+    ]
+    edges = [
+        {"source": "1", "source_port": "data", "target": "2", "target_port": "items"},
+        {"source": "2", "source_port": "item", "target": "3", "target_port": "input"},
+        {"source": "3", "source_port": "output", "target": "4", "target_port": "item"},
+        {"source": "4", "source_port": "items", "target": "5", "target_port": "input"},
+        {"source": "5", "source_port": "output", "target": "6", "target_port": "data"},
+    ]
+    return GeneratePipelineScriptsRequest.model_validate(
+        {"context": {"pipeline": {"name": "Invoices"}, "graph": {"nodes": nodes, "edges": edges}}}
+    )
+
+
+def test_map_steps_are_planned_for_one_item_and_collect_declares_the_item() -> None:
+    plan, contexts = build_pipeline_generation_plan(_invoice_map_request())
+    by_id = {node["flow_id"]: node for node in plan["nodes"]}
+
+    (item,) = by_id["2"]["outputs"]
+    assert (item["port"], item["filename"], item["kind"], item["format"]) == ("item", "inv_a.pdf", "document", "pdf")
+    # The per-item step is generated against a single document, not the bundle.
+    (body_input,) = contexts["3"].available_inputs
+    assert (body_input.kind, body_input.representation) == ("document", "file")
+    (collected,) = by_id["4"]["outputs"]
+    assert collected["representation"] == "directory" and collected["port"] == "items"
+    assert collected["item"]["filename"] == Path(by_id["3"]["outputs"][0]["filename"]).name
+    (after_collect,) = contexts["5"].available_inputs
+    assert after_collect.item == collected["item"]
+
+
+def test_map_and_collect_run_as_compiler_owned_functions(tmp_path, monkeypatch) -> None:
+    plan, _ = build_pipeline_generation_plan(_invoice_map_request())
+    normalized = normalize_pipeline_payload(deterministic_pipeline_payload(plan), plan)
+    program = compose_pipeline_program(normalized["pipeline_py"], plan)
+    input_dir, output_dir = tmp_path / "inputs", tmp_path / "outputs"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    entries = []
+    for name in ("inv_a.pdf", "inv_b.pdf"):
+        path = input_dir / name
+        path.write_bytes(b"%PDF-1.4 " + name.encode())
+        entries.append({"filename": name, "path": str(path), "kind": "document", "format": "pdf"})
+    manifest = input_dir / "input_manifest.json"
+    manifest.write_text(json.dumps({"inputs": entries}), encoding="utf-8")
+    script = tmp_path / "pipeline.py"
+    script.write_text(program, encoding="utf-8")
+    monkeypatch.setenv("INLUMEN_INPUT_MANIFEST", str(manifest))
+    monkeypatch.setenv("INLUMEN_OUTPUT_DIR", str(output_dir))
+    monkeypatch.setenv("INLUMEN_OUTPUT_MANIFEST", str(output_dir / "output_manifest.json"))
+
+    runpy.run_path(str(script), run_name="__main__")
+
+    item = output_dir / "nodes" / "2" / "inv_a.pdf"
+    assert item.read_bytes().startswith(b"%PDF")
+    collected = output_dir / "nodes" / "4" / "collect_invoices_items"
+    assert json.loads((collected / "_items.json").read_text())["items"][0]["key"] == "item-1"
+    assert len(list((collected / "item-1").iterdir())) == 1
 
 
 def test_tables_with_the_same_name_stay_distinct_in_a_bundle() -> None:

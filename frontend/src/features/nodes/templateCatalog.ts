@@ -164,13 +164,20 @@ export const COMPONENT_TEMPLATE_CATALOG: Record<StepType, ComponentTemplate[]> =
         requiredParameters: ["max_concurrency"],
         defaultParameters: { max_concurrency: 4, failure_policy: "stop" },
       },
+      {
+        id: "flow.collect",
+        value: "Collect",
+        label: "Collect",
+        description: "Close a Parallel Map: gather every per-item result into one collection for the steps after it.",
+        ports: taskPorts("item", "any", "items", "any[]"),
+      },
     ]),
     ...categorized("Legacy", [
       {
         id: "flow.generic",
         value: "Flow",
         label: "Generic flow (choose a behavior)",
-        description: "Compatibility template for older projects; select Condition or Parallel Map before using it.",
+        description: "Compatibility template for older projects; select Condition, Parallel Map, or Collect before using it.",
       },
     ]),
   ],

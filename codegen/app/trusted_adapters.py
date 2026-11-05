@@ -33,7 +33,12 @@ def apply_trusted_adapters(source: str, plan: dict[str, Any]) -> str:
             if isinstance(node.get("descriptor"), dict)
             else {}
         )
-        if is_input_node_kind(str(descriptor.get("type") or "")):
+        flow_template = " ".join(str(descriptor.get("template") or "").lower().split())
+        if str(descriptor.get("type") or "") == "flow" and flow_template == "parallel map":
+            replacement_source = parallel_map_function_source(node)
+        elif str(descriptor.get("type") or "") == "flow" and flow_template == "collect":
+            replacement_source = collect_function_source(node)
+        elif is_input_node_kind(str(descriptor.get("type") or "")):
             replacement_source = input_boundary_function_source(node)
         elif is_output_node_kind(str(descriptor.get("type") or "")):
             replacement_source = output_boundary_function_source(node)
@@ -68,6 +73,78 @@ def apply_trusted_adapters(source: str, plan: dict[str, Any]) -> str:
     tree.body = _remove_unused_imports(body)
     ast.fix_missing_locations(tree)
     return ast.unparse(tree).strip() + "\n"
+
+
+def parallel_map_function_source(node: dict[str, Any]) -> str:
+    """Compiler-owned Parallel Map for pipeline checks: one representative item.
+
+    The deployed runtime splits the whole collection and runs the per-item
+    steps once per item; generated code is checked against one item.
+    """
+    output = dict((node.get("outputs") or [{}])[0])
+    function_name = str(node["function_name"])
+    return textwrap.dedent(
+        f"""
+        def {function_name}(inputs, output_dir, context):
+            import shutil
+            from pathlib import Path
+            declared = {output!r}
+            if not inputs:
+                raise RuntimeError("Parallel Map received no collection")
+            source = Path(inputs[0]["path"])
+            if source.is_dir():
+                children = sorted(
+                    path for path in source.iterdir()
+                    if path.name not in {{"_items.json", ".gitkeep"}}
+                )
+                if not children:
+                    raise RuntimeError("Parallel Map received an empty collection")
+                source = children[0]
+                if source.is_dir():
+                    # A Collect output: one subfolder per item.
+                    entries = [path for path in source.iterdir() if path.name != ".gitkeep"]
+                    if len(entries) != 1:
+                        raise RuntimeError("Each collected item must hold exactly one artifact")
+                    source = entries[0]
+            target = Path(output_dir) / declared["filename"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if source.is_dir():
+                shutil.copytree(source, target)
+            else:
+                shutil.copy2(source, target)
+            return [{{"name": declared["name"], "path": str(target)}}]
+        """
+    ).strip()
+
+
+def collect_function_source(node: dict[str, Any]) -> str:
+    """Compiler-owned Collect for pipeline checks: wraps the item into a collection."""
+    output = dict((node.get("outputs") or [{}])[0])
+    function_name = str(node["function_name"])
+    return textwrap.dedent(
+        f"""
+        def {function_name}(inputs, output_dir, context):
+            import json
+            import shutil
+            from pathlib import Path
+            declared = {output!r}
+            if len(inputs) != 1:
+                raise RuntimeError("Collect gathers exactly one per-item result")
+            source = Path(inputs[0]["path"])
+            root = Path(output_dir) / declared["filename"]
+            target = root / "item-1" / declared["item"]["filename"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if source.is_dir():
+                shutil.copytree(source, target)
+            else:
+                shutil.copy2(source, target)
+            (root / "_items.json").write_text(
+                json.dumps({{"items": [{{"key": "item-1", "status": "succeeded"}}]}}),
+                encoding="utf-8",
+            )
+            return [{{"name": declared["name"], "path": str(root)}}]
+        """
+    ).strip()
 
 
 def input_boundary_function_source(node: dict[str, Any]) -> str:

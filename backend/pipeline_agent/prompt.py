@@ -67,7 +67,7 @@ COMPONENT MODEL
 
 GRAPH MUTATION RULES
 - create_step without after_flow_id appends only when there is one unambiguous
-  topological tail. Create new graphs from ingress to terminal delivery. For a
+  topological tail; a Source is the exception and always starts a new branch. Create new graphs from ingress to terminal delivery. For a
   branch, call create_step with after_flow_id and the exact source_port; this
   atomically creates and connects the branch target even when another branch
   already ends in a Destination. Do not call connect_steps again for the same
@@ -88,13 +88,42 @@ GRAPH MUTATION RULES
   then use allow_fan_out:true. Do not add shortcuts or bypass edges.
 - Connection port ids are local ids and never include the component type or
   label. Use `data`, `input`, `output`, `value`, `when_true`, `when_false`,
-  `items`, or `item` as appropriate--never `source.data`, `task.input`,
+  `items`, `item`, or a joining Task's named inputs as appropriate--never `source.data`, `task.input`,
   `task.output`, `destination.data`, or `Condition.when_true`. Omit a port when
   the relevant side has exactly one port and connect_steps will infer it.
 - disconnect_steps removes one exact edge identified by source, target, and both
   ports. delete_step safely reconnects only a simple one-in/one-out chain; repair
   branch or merge topology explicitly with connect_steps.
 - delete_all_steps is only for an explicit clear/reset/remove-all request.
+
+SEVERAL INPUTS, PARALLEL BRANCHES AND JOINS
+- Each input with its own role (customers.csv and orders.csv, a table and an
+  image folder) is its own Source. Create every Source with create_step and no
+  after_flow_id; a Source never follows another step and never feeds a Source.
+- Each Source starts an independent branch: create its first processing step
+  with after_flow_id set to that Source. Independent branches run in parallel;
+  never chain one branch's steps after the other's.
+- Branches meet at a joining Task that declares one named input per branch,
+  e.g. create_step {"type":"task","inputs":["customers","orders"],
+  "after_flow_id":<customers branch tail>,"target_port":"customers"}, then
+  connect_steps from the other branch tail with target_port "orders". Never put
+  two parallel branches on one input port, and never use allow_fan_out to make
+  one Source stand in for data it does not hold.
+- Many files of the same kind (daily CSVs, a folder of images) are one Source
+  whose items a Parallel Map processes; do not draw one branch per file.
+  Process the whole collection in one Task instead when the request says to
+  combine or handle all files together.
+- Before reporting, compare overview with your summary: every Source, branch
+  and join you describe must exist exactly as described.
+
+Canonical join example: for "clean customers.csv and orders.csv in parallel,
+then merge on customer_id into customer_orders.csv": create Customers CSV
+(Source) and Orders CSV (Source), each without after_flow_id; create Deduplicate
+Customers after Customers CSV and Filter Invalid Orders after Orders CSV; create
+Merge Customers and Orders after Deduplicate Customers with inputs
+["customers","orders"] and target_port "customers"; connect Filter Invalid
+Orders to it with target_port "orders"; append the Customer Orders CSV
+Destination after the merge.
 
 FLOW BEHAVIOR
 - Flow is executable control logic, never a decorative label. Never leave the
@@ -108,6 +137,13 @@ FLOW BEHAVIOR
 - Parallel Map uses items -> item. Capture the intended parallel behavior in its
   description; do not choose concurrency or failure-policy parameters. The Flow
   owns iteration, so never duplicate a task once per item.
+- Every Parallel Map is closed by a Collect Flow (create_step type flow,
+  template "Collect"; ports item -> items). The steps between the Map and its
+  Collect run once per item and are described for a single item; the Collect
+  gathers their results into one collection. Steps that need all items
+  (aggregate, merge, summarize, save one file) come after the Collect, never
+  inside the map. Per-item steps take input only from the Map or other per-item
+  steps and feed only per-item steps or the Collect. Do not nest maps.
 - When repairing a legacy Flow, use configure_flow_step with the required
   Condition expression, then make all requested branches explicit.
 
@@ -119,9 +155,13 @@ with source_port `when_false`. Use connect_steps only for later merges or repair
 between steps that already exist. Connect the final result to Delivery.
 Complaint has exactly one outgoing edge.
 
-Canonical parallel example: Upload -> Parallel Map -> Resize Image -> Export,
-using source_port `data` to target_port `items`, then source_port `item` to
-target_port `input`, and source_port `output` to target_port `data`.
+Canonical parallel example: Upload -> Parallel Map -> Resize Image -> Collect
+Images -> Export, using source_port `data` to target_port `items`, source_port
+`item` to target_port `input`, source_port `output` to target_port `item` (the
+Collect), and source_port `items` to target_port `data`. For "extract fields
+from each invoice, then combine into one table": Invoice PDFs -> Parallel Map ->
+Extract Text -> Extract Invoice Fields -> Collect Invoices -> Combine Into Table
+-> Invoices CSV.
 
 REUSABLE PIPELINES
 - Saved reusable pipelines cannot be edited or versioned. Save a new named item

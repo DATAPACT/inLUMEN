@@ -35,6 +35,15 @@ import { FilePreviewDialog, PreviewType } from '@/components/properties/FilePrev
 import { TaskOutputsEditor } from '@/components/properties/TaskOutputsEditor';
 import { OUTPUT_ARTIFACTS_PARAMETER, type OutputArtifactDeclaration } from '@/features/nodes/outputArtifacts';
 import { NodeRunOutputs } from '@/components/runs/NodeRunOutputs';
+import {
+  FILES_AS_COLLECTION,
+  FILES_AS_PARAMETER,
+  FILES_AS_SEPARATE,
+  dataFilenames,
+  filePortIds,
+  filesAs,
+  type FilesAs,
+} from '@/features/flow/portTypes';
 import { ChatbotConfig } from '@/services/chatbotService';
 import {
   normalizeType,
@@ -222,6 +231,22 @@ interface PropertiesPanelProps {
   className?: string;
 }
 
+
+/** Output ports of a Source that publishes each data file on its own port. */
+const separateSourcePorts = (files: unknown): NodePorts => {
+  const names = dataFilenames(files);
+  return {
+    inputs: [],
+    outputs: filePortIds(names).map((id, index) => ({
+      id,
+      name: id,
+      type: "any",
+      required: false,
+      description: `File ${names[index]}.`,
+    })),
+  };
+};
+
 export function PropertiesPanel({
   selectedNode,
   onNodeUpdate,
@@ -389,7 +414,14 @@ export function PropertiesPanel({
       : {};
     next.secret_params = normalizeSecretParamKeys(next.secret_params, next.param);
     next.param = withoutSensitiveParameterValues(next.param, next.secret_params);
-    next.ports = normalizeNodePorts(next.ports, nodeType);
+    if (nodeType === "source" && filesAs(next.param) === FILES_AS_SEPARATE) {
+      // One output per data file: ports follow the attached files.
+      const sourcePorts = separateSourcePorts(next.files);
+      next.ports = sourcePorts;
+      setPorts(sourcePorts);
+    } else {
+      next.ports = normalizeNodePorts(next.ports, nodeType);
+    }
 
     // 1) update local reactflow node
     locallyProducedNodeDataRef.current.add(next);
@@ -574,7 +606,7 @@ export function PropertiesPanel({
         .filter((field) => field.secret)
         .map((field) => field.name),
     ])).filter((key) => key in nextParam);
-    const replaceGenericFlowLabel = nodeType === "flow" && ["Flow", "Condition", "Parallel Map"].includes(label);
+    const replaceGenericFlowLabel = nodeType === "flow" && ["Flow", "Condition", "Parallel Map", "Collect"].includes(label);
     const nextLabel = replaceGenericFlowLabel ? (template?.label || templateLabel) : label;
     if (options.replaceParameters) {
       // Stored credentials are keyed by node + name. Never let a credential
@@ -1331,12 +1363,57 @@ export function PropertiesPanel({
     </InspectorSection>
   );
 
+  const sourceFilesAs = filesAs(param);
+  const changeSourceFilesAs = (mode: FilesAs) => {
+    if (mode === sourceFilesAs) return;
+    const next = { ...param };
+    if (mode === FILES_AS_SEPARATE) next[FILES_AS_PARAMETER] = FILES_AS_SEPARATE;
+    else delete next[FILES_AS_PARAMETER];
+    const nextPorts = mode === FILES_AS_SEPARATE
+      ? separateSourcePorts(files)
+      : normalizeNodePorts(undefined, "source");
+    setParam(next);
+    setPorts(nextPorts);
+    pushNodeUpdate({ param: next, ports: nextPorts });
+    if ((connectedPorts.outputs || []).length > 0) {
+      toast.warning("Reconnect this Source", {
+        description: "Its outputs changed. Connections from outputs that no longer exist are flagged until you reconnect them.",
+      });
+    }
+  };
+
   const renderInputFilesSection = () => (
     <InspectorSection
       title="Input Files"
       description="Upload the files this Source provides to the pipeline. These files are used when the pipeline runs."
     >
       {renderFileArea("data", indexedDataFiles, dataFileInputRef)}
+      {(indexedDataFiles.length > 1 || sourceFilesAs === FILES_AS_SEPARATE) && (
+        <div className="space-y-2" role="radiogroup" aria-label="How this Source publishes its files">
+          <Label className="text-xs">Publish the files as</Label>
+          <div className="grid grid-cols-2 gap-2">
+            {([
+              [FILES_AS_COLLECTION, "One collection", "Files of the same kind (e.g. daily CSVs). One output; a Parallel Map can process each file."],
+              [FILES_AS_SEPARATE, "One output per file", "Files with different roles (e.g. patients + visits). Each file gets its own output and branch."],
+            ] as const).map(([mode, title, hint]) => (
+              <button
+                key={mode}
+                type="button"
+                role="radio"
+                aria-checked={sourceFilesAs === mode}
+                onClick={() => changeSourceFilesAs(mode)}
+                className={cn(
+                  "rounded-md border p-2 text-left text-xs transition-colors",
+                  sourceFilesAs === mode ? "border-primary bg-primary/10" : "border-border hover:bg-muted/50",
+                )}
+              >
+                <div className="font-medium">{title}</div>
+                <div className="mt-0.5 text-muted-foreground">{hint}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </InspectorSection>
   );
 
@@ -1547,7 +1624,7 @@ export function PropertiesPanel({
                 {currentTemplate === "Parallel Map" && (
                   <div className="space-y-3">
                     <div className="rounded-md border border-purple-500/25 bg-purple-500/10 p-3 text-xs text-muted-foreground">
-                      The <strong className="text-foreground">items</strong> input must be an array. The downstream branch connected to <strong className="text-foreground">item</strong> is scheduled once for each array item.
+                      The <strong className="text-foreground">items</strong> input is a collection (a folder of files or a Collect result). Every step between <strong className="text-foreground">item</strong> and the next <strong className="text-foreground">Collect</strong> runs once per item; write those steps for a single item.
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       <div className="space-y-2">
@@ -1580,9 +1657,15 @@ export function PropertiesPanel({
                   </div>
                 )}
 
+                {currentTemplate === "Collect" && (
+                  <div className="rounded-md border border-purple-500/25 bg-purple-500/10 p-3 text-xs text-muted-foreground">
+                    Closes the Parallel Map before it. The <strong className="text-foreground">items</strong> output is one folder with a subfolder per item and an <code className="rounded bg-muted px-1 py-0.5">_items.json</code> index; failed items are listed there and left out.
+                  </div>
+                )}
+
                 {currentTemplate === "Flow" && (
                   <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
-                    This compatibility template has no behavior. Select Condition or Parallel Map above.
+                    This compatibility template has no behavior. Select Condition, Parallel Map, or Collect above.
                   </div>
                 )}
               </InspectorSection>

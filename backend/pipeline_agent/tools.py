@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Any
 
 from connector_catalog import require_supported_connector
@@ -334,9 +335,9 @@ def build_pipeline_editor_tools(
                 "the high-level pipeline has been designed."
             )
         if step_type == "flow":
-            if resolved_template_label not in {"Condition", "Parallel Map"}:
+            if resolved_template_label not in {"Condition", "Parallel Map", "Collect"}:
                 raise ValueError(
-                    "Flow template must be Condition or Parallel Map; generic Flow has no behavior."
+                    "Flow template must be Condition, Parallel Map, or Collect; generic Flow has no behavior."
                 )
         props_lines = [
             f"type:       '{step_type}'",
@@ -414,11 +415,15 @@ def build_pipeline_editor_tools(
         normalized_template = raw_template.lower()
         if normalized_template == "parallel map":
             return "Parallel Map"
+        if normalized_template in {"collect", "gather"}:
+            return "Collect"
         if normalized_template == "condition":
             return "Condition"
         if raw_template and normalized_template != "flow":
             return raw_template
         behavior_hint = f"{label or ''} {description or ''}".lower()
+        if behavior_hint.strip().startswith(("collect", "gather")):
+            return "Collect"
         if "parallel" in behavior_hint or "for each" in behavior_hint:
             return "Parallel Map"
         return "Condition"
@@ -632,6 +637,20 @@ def build_pipeline_editor_tools(
             "output_ids": output_ids,
         }
 
+    def _named_input_ports(value: Any, step_type: str) -> list[str]:
+        if value in (None, "", []):
+            return []
+        if step_type != "task":
+            raise ValueError("Only a Task declares named inputs; it joins branches.")
+        if not isinstance(value, list) or len(value) < 2:
+            raise ValueError("A joining Task declares at least two named inputs, one per branch.")
+        names = [str(item or "").strip().lower() for item in value]
+        if any(not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", name) for name in names):
+            raise ValueError("Input names are short identifiers such as customers or orders.")
+        if len(set(names)) != len(names):
+            raise ValueError("Each named input must be distinct.")
+        return names
+
     async def create_step(params: str) -> str:
         """Creates a STEP and connects it after an explicit or unambiguous tail.
 
@@ -641,8 +660,10 @@ def build_pipeline_editor_tools(
           "label": "step label",
           "description": "step description",
           "template": "optional high-level semantic for Task or Flow only, or an installed plugin template (plugin:<id>) for a step of the plugin's type",
-          "after_flow_id": "optional explicit predecessor flow_id",
+          "after_flow_id": "optional explicit predecessor flow_id (never for a Source)",
           "source_port": "required when the explicit predecessor has multiple outputs",
+          "target_port": "optional input of the new step the predecessor feeds",
+          "inputs": ["optional named input ports for a Task that joins branches"],
           "allow_fan_out": false,
           "reusable_pipeline_name": "required for Subpipeline unless uid is supplied",
           "reusable_pipeline_uid": "optional saved reusable pipeline uid"
@@ -651,6 +672,12 @@ def build_pipeline_editor_tools(
         implementation metadata. Source and Destination use the default managed
         boundary unless an installed plugin template is given; other connector
         selection is an advanced user configuration.
+        A Source never follows another step: create every Source without
+        after_flow_id and it starts its own branch, even when the graph already
+        has steps. Use one Source per input file with a different role.
+        A Task that joins several branches declares one named input per branch
+        ("inputs": ["customers", "orders"]); each input receives exactly one
+        connection. Pass target_port to choose which input after_flow_id feeds.
         Without after_flow_id, the graph must have exactly one topological tail.
         Use after_flow_id plus source_port to create every explicit branch target,
         including a second terminal Destination from Condition.when_false. A Flow
@@ -706,14 +733,50 @@ def build_pipeline_editor_tools(
                     f"primary_input_port: '{primary_input}'",
                     f"primary_output_port: '{primary_output}'",
                 ])
+            named_inputs = _named_input_ports(data.get("inputs"), step_type)
+            if named_inputs:
+                named_ports = normalize_node_ports(
+                    {
+                        "inputs": [
+                            {"id": port, "name": port, "type": "any", "required": True,
+                             "description": f"{port} branch joined by this step."}
+                            for port in named_inputs
+                        ],
+                        "outputs": None,
+                    },
+                    step_type,
+                )
+                props_lines = [
+                    line for line in props_lines
+                    if not line.startswith(("ports_json:", "primary_input_port:"))
+                ]
+                props_lines.extend([
+                    "ports_json: '" + _cypher_string(json.dumps(
+                        named_ports, ensure_ascii=False, sort_keys=True
+                    )) + "'",
+                    f"primary_input_port: '{_cypher_string(named_inputs[0])}'",
+                ])
             props_str = ",\n            ".join(props_lines)
-            target_port = (
-                resolved_subpipeline["input_ids"][0]
+            available_inputs = (
+                resolved_subpipeline["input_ids"]
                 if resolved_subpipeline
-                else default_input_port_id(step_type, resolved_template)
-            ).replace("\\", "\\\\").replace("'", "\\'")
+                else named_inputs or [default_input_port_id(step_type, resolved_template)]
+            )
+            requested_target_port = str(data.get("target_port") or "").strip()
+            if requested_target_port and requested_target_port not in available_inputs:
+                raise ValueError(
+                    f"create_step target_port {requested_target_port!r} is not one of the "
+                    f"new step's inputs {available_inputs}"
+                )
+            target_port = (requested_target_port or available_inputs[0]).replace("\\", "\\\\").replace("'", "\\'")
             raw_after_flow_id = data.get("after_flow_id")
             after_flow_id = str(raw_after_flow_id or "").strip()
+            if step_type == "source" and after_flow_id:
+                raise ValueError(
+                    "A Source has no inputs, so it cannot follow another step. Create "
+                    "it without after_flow_id: every Source starts its own branch, and "
+                    "branches meet at a Task with one named input per branch."
+                )
             allow_fan_out = data.get("allow_fan_out") is True
             resolved_source_port = ""
             if after_flow_id:
@@ -821,6 +884,62 @@ def build_pipeline_editor_tools(
                 pipeline_updated_at: toString(p.updated_at){subpipeline_return}
                 }} AS step;
                 """
+            elif step_type == "source":
+                # Every Source is an independent root: parallel inputs are
+                # stacked vertically and never chained to an existing tail.
+                query = f"""
+            OPTIONAL MATCH (candidate:PIPELINE {{status:'design'}})
+            OPTIONAL MATCH (candidate)-[:HAS_STEP]->(candidateStep:STEP)
+            WITH candidate, count(candidateStep) AS step_count
+            ORDER BY step_count DESC, candidate.updated_at DESC
+            WITH collect(candidate)[0] AS candidate
+            CALL {{
+              WITH candidate
+              WITH candidate WHERE candidate IS NULL
+              CREATE (p:PIPELINE {{
+                uid:        randomUUID(),
+                name:       '',
+                label:      '',
+                description:'',
+                version:    '1.0',
+                created_at: datetime(),
+                updated_at: datetime(),
+                status:     'design'
+              }})
+              RETURN p
+
+              UNION
+
+              WITH candidate
+              WITH candidate WHERE candidate IS NOT NULL
+              RETURN candidate AS p
+            }}
+            SET p.updated_at = datetime()
+            WITH p
+            OPTIONAL MATCH (p)-[:HAS_STEP]->(sAll:STEP)
+            WHERE sAll.flow_id IS NOT NULL AND toString(sAll.flow_id) =~ '^[0-9]+$'
+            WITH p, coalesce(max(toInteger(sAll.flow_id)), 0) + 1 AS nextFlowId
+            OPTIONAL MATCH (p)-[:HAS_STEP]->(existingSource:STEP {{type:'source'}})
+            WITH p, nextFlowId, count(existingSource) AS sourceCount
+            CREATE (s:STEP {{
+            uid: randomUUID(),
+            {props_str},
+            flow_id: toString(nextFlowId),
+            x: 0.0,
+            y: toFloat(sourceCount) * 220.0
+            }})
+            MERGE (p)-[:HAS_STEP]->(s)
+            RETURN {{
+            flow_id: s.flow_id,
+            uid: s.uid,
+            type: s.type,
+            label: s.label,
+            description: s.description,
+            x: s.x,
+            y: s.y,
+            pipeline_updated_at: toString(p.updated_at){subpipeline_return}
+            }} AS step;
+            """
             else:
                 query = f"""
             OPTIONAL MATCH (candidate:PIPELINE {{status:'design'}})
@@ -886,6 +1005,7 @@ def build_pipeline_editor_tools(
                     WHEN prev.type = 'subpipeline' THEN coalesce(prev.primary_output_port, 'output')
                     WHEN prev.type = 'flow' AND toLower(coalesce(prev.template_label, '')) = 'condition' THEN 'when_true'
                     WHEN prev.type = 'flow' AND toLower(coalesce(prev.template_label, '')) = 'parallel map' THEN 'item'
+                    WHEN prev.type = 'flow' AND toLower(coalesce(prev.template_label, '')) = 'collect' THEN 'items'
                     ELSE 'output'
                 END,
                 flow.target_port = '{target_port}'
@@ -928,7 +1048,8 @@ def build_pipeline_editor_tools(
         Port ids never include a component-type prefix. Standard exact ids are:
         Source output `data`; Task input `input` and output `output`; Destination
         input `data`; Condition input `value` and outputs `when_true`/`when_false`;
-        Parallel Map input `items` and output `item`. When a side exposes exactly
+        Parallel Map input `items` and output `item`; Collect input `item` and
+        output `items`. When a side exposes exactly
         one port, its port field may be omitted and will be inferred.
         Subpipeline handles are the public port ids returned by create_step.
         For compatibility, type-prefixed aliases such as task.output are
@@ -1147,8 +1268,8 @@ def build_pipeline_editor_tools(
             ):
                 raise ValueError("configure_flow_step requires a valid flow_id")
             behavior = str(data.get("behavior") or "").strip()
-            if behavior not in {"Condition", "Parallel Map"}:
-                raise ValueError("Flow behavior must be Condition or Parallel Map")
+            if behavior not in {"Condition", "Parallel Map", "Collect"}:
+                raise ValueError("Flow behavior must be Condition, Parallel Map, or Collect")
             if data.get("parameters"):
                 raise ValueError(
                     "Pipeline design does not accept Flow runtime parameters; "
@@ -1171,7 +1292,7 @@ def build_pipeline_editor_tools(
             serialized_ports = ports_json_for_template(None, "flow", behavior)
             escaped_ports = serialized_ports.replace("\\", "\\\\").replace("'", "\\'")
             input_port = default_input_port_id("flow", behavior)
-            default_output_port = "when_true" if behavior == "Condition" else "item"
+            default_output_port = {"Condition": "when_true", "Collect": "items"}.get(behavior, "item")
             query = f"""
             MATCH (p:PIPELINE {{status:'design'}})-[:HAS_STEP]->(flowStep:STEP {{flow_id:'{flow_id}'}})
             WHERE flowStep.type = 'flow'

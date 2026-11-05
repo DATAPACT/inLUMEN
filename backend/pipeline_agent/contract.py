@@ -74,6 +74,7 @@ def default_input_port_expression(variable: str) -> str:
         f"coalesce({variable}.primary_input_port, CASE "
         f"WHEN {variable}.type = 'flow' AND toLower(coalesce({variable}.template_label, '')) = 'condition' THEN 'value' "
         f"WHEN {variable}.type = 'flow' AND toLower(coalesce({variable}.template_label, '')) = 'parallel map' THEN 'items' "
+        f"WHEN {variable}.type = 'flow' AND toLower(coalesce({variable}.template_label, '')) = 'collect' THEN 'item' "
         f"WHEN {variable}.type = 'destination' THEN 'data' "
         "ELSE 'input' END)"
     )
@@ -86,5 +87,6 @@ def default_output_port_expression(variable: str) -> str:
         f"WHEN {variable}.type = 'source' THEN 'data' "
         f"WHEN {variable}.type = 'flow' AND toLower(coalesce({variable}.template_label, '')) = 'condition' THEN 'when_true' "
         f"WHEN {variable}.type = 'flow' AND toLower(coalesce({variable}.template_label, '')) = 'parallel map' THEN 'item' "
+        f"WHEN {variable}.type = 'flow' AND toLower(coalesce({variable}.template_label, '')) = 'collect' THEN 'items' "
         "ELSE 'output' END)"
     )

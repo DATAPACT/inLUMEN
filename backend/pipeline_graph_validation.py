@@ -15,6 +15,8 @@ from plugins import (
 )
 from plugins.manifest import resolve_operation
 from subpipeline_reference import SUBPIPELINE_DEPTH_ERROR, reusable_pipeline_nesting_error, subpipeline_reference
+from map_scope import map_scopes
+from port_types import check_connection, effective_port_type, infer_output_types
 from step_types import normalize_step_type
 
 
@@ -134,11 +136,78 @@ def _issue(
 
 
 def _port_types_compatible(source: object, target: object) -> bool:
-    left = str(source or "").strip().lower()
-    right = str(target or "").strip().lower()
-    wildcard = {"", "any", "unknown", "*"}
-    return left in wildcard or right in wildcard or left == right
+    issue = check_connection(source, target)
+    return issue is None or issue.severity != "error"
 
+
+def _condition_branches(
+    edge: tuple[str, str, str, str, str],
+    connections: list[tuple[str, str, str, str, str]],
+    node_by_id: dict[str, dict[str, Any]],
+) -> dict[str, set[str]]:
+    """Condition outputs each path into this connection passes through."""
+    branches: dict[str, set[str]] = defaultdict(set)
+    pending, seen = [edge], set()
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        _, source, source_port, _, _ = current
+        if str(node_by_id.get(source, {}).get("template_label") or "").strip().lower() == "condition":
+            branches[source].add(source_port)
+        pending.extend(item for item in connections if item[3] == source)
+    return branches
+
+
+def _mutually_exclusive(
+    left: dict[str, set[str]], right: dict[str, set[str]]
+) -> bool:
+    return any(
+        len(left[condition]) == 1 and len(right[condition]) == 1
+        and left[condition] != right[condition]
+        for condition in left.keys() & right.keys()
+    )
+
+
+def _shared_input_port_issues(
+    connections: list[tuple[str, str, str, str, str]],
+    node_by_id: dict[str, dict[str, Any]],
+) -> list[dict[str, str]]:
+    """One producer per input port: a join declares one named input per branch.
+
+    Alternative Condition branches may rejoin on one port, since only one of
+    them delivers data in a run.
+    """
+    by_port: dict[tuple[str, str], list[tuple[str, str, str, str, str]]] = defaultdict(list)
+    for connection in connections:
+        by_port[(connection[3], connection[4])].append(connection)
+    issues = []
+    for (target, target_port), producers in by_port.items():
+        if len(producers) < 2:
+            continue
+        branches = [_condition_branches(item, connections, node_by_id) for item in producers]
+        if all(
+            _mutually_exclusive(branches[i], branches[j])
+            for i in range(len(producers))
+            for j in range(i + 1, len(producers))
+        ):
+            continue
+        labels = ", ".join(
+            repr(str(node_by_id.get(item[1], {}).get("label") or item[1])) for item in producers
+        )
+        issues.append(_issue(
+            "ports",
+            "shared-input-port",
+            f"Input {target_port!r} receives {len(producers)} parallel branches ({labels}). "
+            "Give this step one named input per branch so each branch has its own port.",
+            node_id=target,
+            edge_id=producers[-1][0],
+        ))
+    return issues
+
+
+FLOW_BEHAVIORS = {"Condition", "Parallel Map", "Collect"}
 
 FLOW_EXPRESSION_PATTERN = re.compile(
     r'^value(?:(?:\.[A-Za-z_][A-Za-z0-9_]*)|(?:\[(?:\d+|"[^"]+"|\'[^\']+\')\]))*'
@@ -189,11 +258,11 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
 
         if kind == "flow":
             parameters = _parameters(data)
-            if template_label not in {"Condition", "Parallel Map"}:
+            if template_label not in FLOW_BEHAVIORS:
                 issues.append(_issue(
                     "configuration",
                     "missing-flow-behavior",
-                    "Choose a Flow behavior: Condition or Parallel Map.",
+                    "Choose a Flow behavior: Condition, Parallel Map, or Collect.",
                     node_id=node_id,
                 ))
             elif template_label == "Condition":
@@ -391,6 +460,15 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
             "A runnable pipeline requires a terminal destination.",
         ))
 
+    inferred_outputs = {
+        node_id: infer_output_types(
+            kinds[node_id],
+            node_by_id[node_id],
+            [str(port.get("id") or "") for port in ports_by_node[node_id]["outputs"]],
+        )
+        for node_id in node_by_id
+    }
+    port_connections: list[tuple[str, str, str, str, str]] = []
     incoming: dict[str, set[str]] = defaultdict(set)
     outgoing: dict[str, set[str]] = defaultdict(set)
     seen_connections: set[tuple[str, str, str, str]] = set()
@@ -484,14 +562,42 @@ def validate_pipeline_graph(graph: Any, *, _nested_depth: int = 0) -> dict[str, 
                 edge_id=edge_id,
             ))
             continue
-        if not _port_types_compatible(source_port.get("type"), target_port.get("type")):
+        port_connections.append((edge_id, source, source_port_id, target, target_port_id))
+        port_issue = check_connection(
+            effective_port_type(
+                source_port.get("type"),
+                inferred_outputs[source].get(source_port_id),
+            ),
+            target_port.get("type"),
+        )
+        if port_issue is not None:
             issues.append(_issue(
                 "ports",
-                "incompatible-port-types",
-                f"Port types are incompatible: {source_port.get('type')} -> {target_port.get('type')}.",
+                # Kind mismatches keep the established code; graded warnings
+                # (cardinality, opaque bundles) carry their own.
+                "incompatible-port-types"
+                if port_issue.code == "incompatible-port-kinds"
+                else port_issue.code,
+                port_issue.message,
                 node_id=target,
                 edge_id=edge_id,
+                severity=port_issue.severity,
             ))
+
+    issues.extend(_shared_input_port_issues(port_connections, node_by_id))
+    _, scope_issues = map_scopes(
+        {
+            node_id: str(data.get("template_label") or "")
+            for node_id, data in node_by_id.items()
+            if kinds[node_id] == "flow"
+        },
+        [(source, source_port, target, target_port)
+         for _, source, source_port, target, target_port in port_connections],
+        {node_id: str(data.get("label") or "") for node_id, data in node_by_id.items()},
+    )
+    issues.extend(
+        _issue("graph", item.code, item.message, node_id=item.node_id) for item in scope_issues
+    )
 
     for node_id, ports in ports_by_node.items():
         for port in ports["inputs"]:

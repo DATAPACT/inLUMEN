@@ -53,6 +53,26 @@ FLOW_TEMPLATE_PORTS = {
             },
         ],
     },
+    "collect": {
+        "inputs": [
+            {
+                "id": "item",
+                "name": "item",
+                "type": "any",
+                "required": True,
+                "description": "One per-item result of the Parallel Map this Collect closes.",
+            }
+        ],
+        "outputs": [
+            {
+                "id": "items",
+                "name": "items",
+                "type": "any[]",
+                "required": True,
+                "description": "Every per-item result, gathered into one collection.",
+            }
+        ],
+    },
     "parallel map": {
         "inputs": [
             {

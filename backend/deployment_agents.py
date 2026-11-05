@@ -15,6 +15,7 @@ from attachment_validation import attachment_input_errors
 from artifact_content import encode_artifact_bytes, is_text_artifact
 from artifact_contract import classify_artifact
 from artifact_runtime import ArtifactContractError
+from port_types import FILES_AS_SEPARATE, file_port_ids, files_as, kind_for_filename
 from task_artifacts import task_data_contract
 from task_package_contract import validate_package
 from async_runtime import run_async
@@ -24,11 +25,21 @@ from deployment_artifacts import (
     _argo_name,
     _sanitize_fragment,
     build_argo_workflow_yaml,
+    extract_pipeline_edges,
     extract_pipeline_steps,
     select_runtime_steps,
     validate_dockerfile_artifacts,
 )
 from generators.registry import GeneratorRegistry
+from map_runtime import (
+    collect_output,
+    collect_source,
+    lift_step,
+    map_items_output,
+    map_split_source,
+    set_collect_item,
+)
+from map_scope import is_collect, is_map, map_scopes
 from minio_gateway import read_minio_object, read_minio_object_bytes
 from model_plans import (
     infer_implementation_plan_from_python_source,
@@ -151,6 +162,16 @@ async def generate_dockerfiles_with_agent(
             codegen_dockerfiles.append(dockerfile)
             continue
 
+        # Parallel Map and Collect are platform-owned: never a generated or
+        # uploaded runtime, so stale artifacts cannot replace the item runtime.
+        if _is_control_flow_step(step) and (
+            is_map(step.get("template")) or is_collect(step.get("template"))
+        ):
+            runtime_artifact, dockerfile = _control_flow_runtime(step)
+            codegen_runtime_artifacts.append(runtime_artifact)
+            codegen_dockerfiles.append(dockerfile)
+            continue
+
         codegen_artifact = (
             _codegen_artifact_from_persisted_files(step)
             if require_attached_runtime
@@ -218,6 +239,15 @@ async def generate_dockerfiles_with_agent(
     if artifact_errors:
         raise DeploymentArtifactValidationError(
             "Persisted codegen runtime artifact validation failed",
+            artifact_errors,
+        )
+
+    artifact_errors.extend(_lift_map_scopes(
+        steps, pipeline_graph, codegen_runtime_artifacts, codegen_dockerfiles,
+    ))
+    if artifact_errors:
+        raise DeploymentArtifactValidationError(
+            "Parallel Map runtime preparation failed",
             artifact_errors,
         )
 
@@ -1247,7 +1277,20 @@ def _managed_adapter_runtime(
             main_content = _managed_adapter_main_source_v2(adapter_spec)
         else:
             source_files = [item for item in step.get("files", []) if item.get("role") != "code" and item.get("filename") not in {"main.py", "requirements.txt", "node-manifest.json", "validation-report.json"}]
-            if len(source_files) > 1:
+            if len(source_files) > 1 and files_as(adapter_parameters) == FILES_AS_SEPARATE:
+                # One output port per file (ids match the canvas and codegen),
+                # so each downstream branch receives only its own file.
+                data_outputs = [
+                    {
+                        "name": Path(item["filename"]).stem,
+                        "port": port,
+                        "filename": item["filename"],
+                        "kind": kind_for_filename(item["filename"]),
+                        "format": Path(item["filename"]).suffix.lstrip("."),
+                    }
+                    for item, port in zip(source_files, file_port_ids(item["filename"] for item in source_files))
+                ]
+            elif len(source_files) > 1:
                 # Same bundle codegen declares for a multi-file Source, so the
                 # generated downstream Tasks receive the directory they expect.
                 declared = _multi_file_source_bundle(step, source_files)
@@ -1462,6 +1505,62 @@ def _plugin_adapter_runtime(
     }
 
 
+def _collected_item(scope, edges, by_id) -> dict[str, Any]:
+    """What one item of the Collect holds: the per-item output wired into it."""
+    for source, source_port, target, _ in edges:
+        if target != scope.collect or source not in by_id or not by_id[source][0].get("map_scope"):
+            continue  # The Map itself (no per-item step) declares no item.
+        outputs = by_id[source][0].get("data_contract", {}).get("outputs") or []
+        wired = [item for item in outputs if item.get("port") == source_port] if len(outputs) > 1 else outputs
+        if wired:
+            return wired[0].get("item") or {}
+    return {}
+
+
+def _lift_map_scopes(
+    steps: list[dict[str, Any]],
+    pipeline_graph: Optional[dict],
+    runtime_artifacts: list[dict[str, Any]],
+    dockerfiles: list[dict[str, Any]],
+) -> list[str]:
+    """Run every step inside a Parallel Map once per item (see map_runtime)."""
+    templates = {
+        str(step.get("flow_id")): str(step.get("template") or "")
+        for step in steps
+        if _is_control_flow_step(step)
+    }
+    if not any(is_map(template) for template in templates.values()):
+        return []
+    edges = [
+        (edge["source"], edge["source_port"], edge["target"], edge["target_port"])
+        for edge in extract_pipeline_edges(pipeline_graph)
+    ]
+    scopes, issues = map_scopes(templates, edges, {
+        str(step.get("flow_id")): str(step.get("label") or "") for step in steps
+    })
+    if issues:
+        return [item.message for item in issues]
+    by_id = {
+        str(artifact.get("flow_id")): (artifact, dockerfile)
+        for artifact, dockerfile in zip(runtime_artifacts, dockerfiles)
+    }
+    steps_by_id = {str(step.get("flow_id")): step for step in steps}
+    errors = []
+    for scope in scopes:
+        settings = steps_by_id[scope.map].get("param") if isinstance(steps_by_id[scope.map].get("param"), dict) else {}
+        for flow_id in scope.body:
+            if flow_id not in by_id:
+                errors.append(f"Node {flow_id} runs once per item but has no runtime package.")
+                continue
+            try:
+                lift_step(*by_id[flow_id], scope, settings)
+            except ValueError as exc:
+                errors.append(str(exc))
+        if scope.collect in by_id:
+            set_collect_item(*by_id[scope.collect], _collected_item(scope, edges, by_id))
+    return errors
+
+
 def _control_flow_main_source(flow_spec: dict[str, Any]) -> str:
     """Return the self-contained runtime for an engine-neutral Flow node."""
     embedded_spec = json.dumps(flow_spec, sort_keys=True)
@@ -1526,9 +1625,17 @@ def _control_flow_runtime(
         if isinstance(step.get("param"), dict)
         else {},
     }
-    main_content = _control_flow_main_source(flow_spec)
     ports = step.get("ports") if isinstance(step.get("ports"), dict) else {}
     output_artifact = (step.get("implementation") or {}).get("output_artifact") or (step.get("param") or {}).get("output_artifact")
+    if is_map(flow_spec["template"]):
+        main_content = map_split_source()
+        output_artifact = map_items_output()
+    elif is_collect(flow_spec["template"]):
+        # The item declaration is filled in once the per-item steps are lifted.
+        output_artifact = collect_output(flow_spec["label"] or flow_id)
+        main_content = collect_source(output_artifact)
+    else:
+        main_content = _control_flow_main_source(flow_spec)
     node_manifest = {
         "schema_version": "inlumen.node-manifest@1",
         "flow_id": flow_id,

@@ -333,6 +333,25 @@ class PipelineGraphValidationTest(unittest.TestCase):
                     "failure_policy": "continue",
                 }),
                 node(3, "task", "Resize Image", GENERATED_CODE),
+                flow_node(5, "Collect", {}),
+                node(4, "destination", "Export"),
+            ],
+            "edges": [
+                edge(1, 2, "data", "items"),
+                edge(2, 3, "item", "input"),
+                edge(3, 5, "output", "item"),
+                edge(5, 4, "items", "data"),
+            ],
+        }
+
+        self.assertTrue(validate_pipeline_graph(graph)["valid"])
+
+    def test_parallel_map_without_collect_is_rejected(self):
+        graph = {
+            "nodes": [
+                node(1, "source", "Image Upload"),
+                flow_node(2, "Parallel Map", {"max_concurrency": 4, "failure_policy": "continue"}),
+                node(3, "task", "Resize Image", GENERATED_CODE),
                 node(4, "destination", "Export"),
             ],
             "edges": [
@@ -342,7 +361,8 @@ class PipelineGraphValidationTest(unittest.TestCase):
             ],
         }
 
-        self.assertTrue(validate_pipeline_graph(graph)["valid"])
+        codes = [issue["code"] for issue in validate_pipeline_graph(graph)["issues"]]
+        self.assertIn("map-without-collect", codes)
 
     def test_generic_flow_is_rejected_by_backend_guardrail(self):
         graph = {
@@ -723,6 +743,77 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertEqual("synced", sync["status"])
         self.assertTrue(sync["guardrail_passed"])
 
+    CUSTOMER_ORDERS_REQUEST = (
+        "Create a data pipeline that takes two input CSV files, `customers.csv` and "
+        "`orders.csv`, and processes them in parallel. For the customers file, remove "
+        "duplicate customers based on `customer_id`. For the orders file, remove orders "
+        "with invalid amounts (less than or equal to zero). Once both tasks are "
+        "completed, merge the results using `customer_id` and save the final dataset "
+        "as `customer_orders.csv`."
+    )
+
+    def _customer_orders_graph(self, merge_ports, edges):
+        merge = node(5, "task", "Merge Customers and Orders", GENERATED_CODE)
+        if merge_ports:
+            merge["data"]["ports"] = {
+                "inputs": [{"id": port} for port in merge_ports],
+                "outputs": [{"id": "output"}],
+            }
+        return {
+            "nodes": [
+                node(1, "source", "Customers CSV"),
+                node(2, "source", "Orders CSV"),
+                node(3, "task", "Deduplicate Customers", GENERATED_CODE),
+                node(4, "task", "Filter Invalid Orders", GENERATED_CODE),
+                merge,
+                node(6, "destination", "Customer Orders CSV"),
+            ],
+            "edges": edges,
+        }
+
+    def test_customer_orders_join_with_named_inputs_passes(self):
+        after = self._customer_orders_graph(["customers", "orders"], [
+            edge(1, 3, "data", "input"),
+            edge(2, 4, "data", "input"),
+            edge(3, 5, "output", "customers"),
+            edge(4, 5, "output", "orders"),
+            edge(5, 6, "output", "data"),
+        ])
+
+        sync = _build_graph_sync_guardrail({"nodes": [], "edges": []}, after, self.CUSTOMER_ORDERS_REQUEST)
+
+        self.assertTrue(sync["guardrail_passed"], sync)
+
+    def test_customer_orders_join_on_one_port_is_sent_back_for_repair(self):
+        after = self._customer_orders_graph(None, [
+            edge(1, 3, "data", "input"),
+            edge(2, 4, "data", "input"),
+            edge(3, 5, "output", "input"),
+            edge(4, 5, "output", "input"),
+            edge(5, 6, "output", "data"),
+        ])
+
+        sync = _build_graph_sync_guardrail({"nodes": [], "edges": []}, after, self.CUSTOMER_ORDERS_REQUEST)
+
+        self.assertFalse(sync["guardrail_passed"])
+        self.assertIn("named input", json.dumps(sync))
+
+    def test_two_sources_count_as_requested_parallel_branches(self):
+        after = self._customer_orders_graph(["customers", "orders"], [
+            edge(1, 3, "data", "input"),
+            edge(2, 4, "data", "input"),
+            edge(3, 5, "output", "customers"),
+            edge(4, 5, "output", "orders"),
+            edge(5, 6, "output", "data"),
+        ])
+
+        sync = _build_graph_sync_guardrail(
+            {"nodes": [], "edges": []}, after,
+            "Create two branches, one per input file, and merge them.",
+        )
+
+        self.assertTrue(sync["guardrail_passed"], sync)
+
     def test_guardrail_does_not_treat_branch_advice_as_a_mutation_contract(self):
         graph = {
             "nodes": [
@@ -841,10 +932,13 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("value.is_valid == true", system_message)
         self.assertIn("Complaint has exactly one outgoing edge", system_message)
         self.assertIn("owns iteration", system_message)
+        self.assertIn("Every Parallel Map is closed by a Collect", system_message)
         self.assertIn("another distinct saved PIPELINE", system_message)
         self.assertIn("Conversation Understanding", system_message)
         self.assertIn("create_step pins the reference", system_message)
         self.assertIn("authoritative five structural boxes", system_message)
+        self.assertIn("a Source never follows another step", system_message)
+        self.assertIn('"inputs":["customers","orders"]', system_message)
         list_components = next(
             tool
             for tool in assistant_agent.call_args.kwargs["tools"]

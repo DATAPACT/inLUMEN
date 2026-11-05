@@ -78,6 +78,8 @@ STEP_TYPE_ALIASES = {
     "parallel": "flow",
     "parallel_map": "flow",
     "parallel-map": "flow",
+    "collect": "flow",
+    "gather": "flow",
     "merge": "flow",
     "retry": "flow",
     "wait": "flow",
