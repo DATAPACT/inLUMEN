@@ -15,8 +15,8 @@ from plugins import (
 )
 from plugins.manifest import resolve_operation
 from subpipeline_reference import SUBPIPELINE_DEPTH_ERROR, reusable_pipeline_nesting_error, subpipeline_reference
-from map_scope import map_scopes
-from port_types import check_connection, effective_port_type, infer_output_types
+from inlumen.contracts.map_scope import map_scopes
+from inlumen.contracts.port_types import check_connection, effective_port_type, infer_output_types
 from step_types import normalize_step_type
 
 

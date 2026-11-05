@@ -11,10 +11,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .artifact_runtime import ArtifactContractError, assign_output_ports, validate_declaration
-from .map_scope import is_collect, is_map
-from .port_types import FILES_AS_SEPARATE, file_port_ids, files_as, parse_port_type
-from .task_package_contract import public_manifest, validate_package
+from inlumen.contracts.artifact_runtime import ArtifactContractError, assign_output_ports, validate_declaration
+from inlumen.contracts.map_scope import is_collect, is_map
+from inlumen.contracts.port_types import FILES_AS_SEPARATE, file_port_ids, files_as, parse_port_type
+from inlumen.contracts.task_package_contract import public_manifest, validate_package
 from .generation_budget import budgeted
 from .llm import (
     LLMGenerationError,

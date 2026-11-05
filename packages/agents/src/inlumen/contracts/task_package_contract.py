@@ -10,10 +10,7 @@ from jsonschema import Draft202012Validator
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import parse_wheel_filename
 
-try:
-    from .artifact_runtime import CONTRACT_ID, ArtifactContractError, validate_declaration
-except ImportError:
-    from artifact_runtime import CONTRACT_ID, ArtifactContractError, validate_declaration
+from .artifact_runtime import CONTRACT_ID, ArtifactContractError, validate_declaration
 
 TASK_METADATA_FILENAME = 'inlumen.task.json'
 # This data file also generates the public schema, documentation and browser help.

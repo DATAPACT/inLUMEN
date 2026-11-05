@@ -28,9 +28,26 @@ jobs:
         run: |
           python -m pip install uv==0.11.32
           uv pip install --system --require-hashes -r backend/requirements.lock
+          uv pip install --system --no-deps -e packages/agents
           uv pip install --system pytest==9.1.1
       - name: Run backend tests
         run: python scripts/run_tests.py --component backend
+
+  agents:
+    name: Agents library
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install the agents library
+        run: |
+          python -m pip install uv==0.11.32
+          uv venv packages/agents/.venv --python 3.11
+          uv pip install --python packages/agents/.venv -e "packages/agents[dev]"
+      - name: Run agents library tests
+        run: python scripts/run_tests.py --component agents
 
   codegen:
     name: Code generation service
@@ -160,6 +177,7 @@ jobs:
         run: |
           python -m pip install uv==0.11.32
           uv pip install --system --require-hashes -r backend/requirements.lock
+          uv pip install --system --no-deps -e packages/agents
       # MinIO's old public images are no longer reliably pullable. Build the
       # source-only release using its declared toolchain and an immutable commit.
       # The binary is cached by that commit, so it is only compiled once.

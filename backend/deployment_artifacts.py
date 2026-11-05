@@ -11,7 +11,7 @@ from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import InvalidWheelFilename, parse_wheel_filename
 
 import argo_bundle
-from artifact_runtime import ArtifactContractError, CONTRACT_ID, assign_output_ports, validate_connection_contract, validate_declaration
+from inlumen.contracts.artifact_runtime import ArtifactContractError, CONTRACT_ID, assign_output_ports, validate_connection_contract, validate_declaration
 from artifact_content import decode_artifact_content, verify_artifact_integrity
 from artifact_contract import ArtifactBinding, artifact_bindings, classify_artifact
 from connector_catalog import connector_definition
@@ -23,6 +23,7 @@ from runtime_environment import discover_runtime_environment, merge_runtime_envi
 from step_types import normalize_step_type
 from subpipeline_reference import reusable_pipeline_nesting_error
 from workspace_storage import node_bucket_name
+from inlumen.contracts import artifact_runtime_source
 
 try:
     import yaml
@@ -78,7 +79,7 @@ _RESERVED_PARAMETER_ENVIRONMENT_NAMES = {
     "PIPELINE_PARAMS_JSON",
 }
 
-_ARGO_PORT_RUNNER = Path(__file__).with_name('artifact_runtime.py').read_text() + '\n' + r'''import json
+_ARGO_PORT_RUNNER = artifact_runtime_source() + '\n' + r'''import json
 import os
 import shutil
 import subprocess
@@ -3110,7 +3111,7 @@ def _dagster_requirements_content(install_requires: Sequence[str]) -> str:
 
 
 def _parse_requirements_for_dagster_project(content: str, package_files=None) -> List[str]:
-    from task_package_contract import resolve_requirements
+    from inlumen.contracts.task_package_contract import resolve_requirements
     try:
         return resolve_requirements({**(package_files or {}), "requirements.txt": content})
     except ArtifactContractError as exc:
@@ -3125,7 +3126,7 @@ def _package_dependencies(payload, flow_id):
 
 def _pipeline_constraints(payload, steps):
     from artifact_content import decode_artifact_content
-    from task_package_contract import resolve_requirements
+    from inlumen.contracts.task_package_contract import resolve_requirements
     constraints = []
     for step in steps:
         files = {item["filename"]: decode_artifact_content(item) for item in _deployment_files_for_step(payload, step["flow_id"])}

@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from port_types import (  # noqa: E402
+from inlumen.contracts.port_types import (  # noqa: E402
     SPEC,
     artifact_port_type,
     check_connection,

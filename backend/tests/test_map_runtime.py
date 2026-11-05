@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from artifact_runtime import (  # noqa: E402
+from inlumen.contracts.artifact_runtime import (  # noqa: E402
     assign_output_ports,
     prepare_node_environment,
     publish_port_artifacts,

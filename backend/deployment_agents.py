@@ -14,10 +14,10 @@ from pydantic import BaseModel, Field
 from attachment_validation import attachment_input_errors
 from artifact_content import encode_artifact_bytes, is_text_artifact
 from artifact_contract import classify_artifact
-from artifact_runtime import ArtifactContractError
-from port_types import FILES_AS_SEPARATE, file_port_ids, files_as, kind_for_filename
+from inlumen.contracts.artifact_runtime import ArtifactContractError
+from inlumen.contracts.port_types import FILES_AS_SEPARATE, file_port_ids, files_as, kind_for_filename
 from task_artifacts import task_data_contract
-from task_package_contract import validate_package
+from inlumen.contracts.task_package_contract import validate_package
 from async_runtime import run_async
 from deployment_artifacts import (
     DeploymentArtifactValidationError,
@@ -39,7 +39,7 @@ from map_runtime import (
     map_split_source,
     set_collect_item,
 )
-from map_scope import is_collect, is_map, map_scopes
+from inlumen.contracts.map_scope import is_collect, is_map, map_scopes
 from minio_gateway import read_minio_object, read_minio_object_bytes
 from model_plans import (
     infer_implementation_plan_from_python_source,

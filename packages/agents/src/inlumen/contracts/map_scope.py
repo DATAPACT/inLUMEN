@@ -14,8 +14,7 @@ Rules (v1):
 - body steps feed only body steps or the scope's Collect;
 - scopes do not nest, and a Collect closes exactly one Map.
 
-Canonical copy: shared/map_scope.py (synced by scripts/sync_shared.py); the
-browser mirror is frontend/src/features/flow/mapScope.ts.
+Part of the inlumen-agents package (inlumen.contracts); the browser mirror is frontend/src/features/flow/mapScope.ts.
 """
 from __future__ import annotations
 

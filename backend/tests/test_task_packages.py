@@ -7,8 +7,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from artifact_runtime import ArtifactContractError
-from task_package_contract import EXAMPLE, AUTHORING_GUIDE, public_manifest, resolve_requirements, task_data_contract, validate_package
+from inlumen.contracts.artifact_runtime import ArtifactContractError
+from inlumen.contracts.task_package_contract import EXAMPLE, AUTHORING_GUIDE, public_manifest, resolve_requirements, task_data_contract, validate_package
 from task_packages import inspect_packages, read_packages
 
 FIXTURES = Path(__file__).parent / 'fixtures/task-packages'
@@ -198,7 +198,7 @@ def test_original_json_stages_keep_anonymized_text_through_export_runner(tmp_pat
 
 def test_published_schema_fixtures_and_structured_errors():
     from jsonschema import Draft202012Validator
-    from task_package_contract import TASK_SCHEMA
+    from inlumen.contracts.task_package_contract import TASK_SCHEMA
     root=Path(__file__).resolve().parents[2]
     fixtures=json.loads((root/'contracts/task-package-v1/fixtures.json').read_text())
     validator=Draft202012Validator(TASK_SCHEMA)

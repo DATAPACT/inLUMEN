@@ -58,6 +58,15 @@ def checks_for(component: str) -> list[Check]:
             Check("frontend type check", (npm, "run", "typecheck"), ROOT / "frontend"),
             Check("frontend production build", (npm, "run", "build"), ROOT / "frontend"),
         ]
+    if component == "agents":
+        agents_root = ROOT / "packages" / "agents"
+        return [
+            Check(
+                "agents library tests",
+                (project_python(agents_root), "-m", "pytest", "tests", "-q"),
+                agents_root,
+            )
+        ]
     if component == "codegen":
         codegen_root = ROOT / "codegen"
         return [
@@ -119,7 +128,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--component",
         action="append",
-        choices=("backend", "codegen", "runner", "frontend", "compose"),
+        choices=("agents", "backend", "codegen", "runner", "frontend", "compose"),
         help="Run only this component. Repeat the option to select more than one.",
     )
     return parser.parse_args()
@@ -128,6 +137,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     components = args.component or [
+        "agents",
         "backend",
         "codegen",
         "runner",

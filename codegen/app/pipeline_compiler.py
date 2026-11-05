@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .schemas import ValidationReport
+from inlumen.contracts import artifact_runtime_source
 
 ALLOWED_TOP_LEVEL = (
     ast.Import,
@@ -522,7 +523,7 @@ def deterministic_pipeline_source(plan: dict[str, Any]) -> str:
 
 
 def _artifact_runtime_source() -> str:
-    return Path(__file__).with_name("artifact_runtime.py").read_text(encoding="utf-8")
+    return artifact_runtime_source()
 
 
 def _node_runtime_adapter(function_name: str) -> str:

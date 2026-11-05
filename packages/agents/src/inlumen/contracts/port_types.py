@@ -13,7 +13,8 @@ mismatch is an error, a cardinality mismatch or an uncheckable bundle is a
 warning. The rules live in ``port_types.json`` so the browser applies the
 same ones (frontend/src/features/flow/portTypes.ts).
 
-Canonical copy: shared/port_types.py (synced by scripts/sync_shared.py).
+Part of the inlumen-agents package (inlumen.contracts); the backend and
+codegen install it.
 """
 from __future__ import annotations
 

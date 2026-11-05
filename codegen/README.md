@@ -71,5 +71,13 @@ From the repository root, the codegen service starts with:
 docker compose up --build codegen backend frontend
 ```
 
+The image needs inLUMEN's agents library (`packages/agents`) as an extra build
+context named `agents`; Compose passes it. To build without Compose, run from
+the repository root:
+
+```bash
+docker build --build-context agents=packages/agents codegen
+```
+
 For horizontal scaling, replace the embedded SQLite store with a shared queue
 and database, and run validation in dedicated workers or cluster jobs.

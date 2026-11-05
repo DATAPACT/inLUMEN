@@ -1,0 +1,30 @@
+[project]
+name = "inlumen-agents"
+# Versioned with inLUMEN releases (v1.0.0-beta.6 -> 1.0.0b6), see docs/adr/0005.
+version = "1.0.0b6.dev0"
+description = "inLUMEN's pipeline design and code generation agents, as a library."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dependencies = [
+  "jsonschema>=4.23,<5",
+  "packaging>=24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"inlumen.contracts" = ["*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

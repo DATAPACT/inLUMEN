@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Standalone FastAPI service for InLumen node code generation."
 requires-python = ">=3.11"
 dependencies = [
+  "inlumen-agents",
   "jsonschema>=4.23,<5",
   "minio==7.1.17",
   "docker>=7.1.0",
@@ -23,6 +24,10 @@ dev = [
   "ruff>=0.6.0",
 ]
 
+# The agents library lives in this repository (docs/adr/0005).
+[tool.uv.sources]
+inlumen-agents = { path = "../packages/agents", editable = true }
+
 [tool.ruff]
 line-length = 88
 target-version = "py311"
@@ -34,5 +39,5 @@ testpaths = ["tests"]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools.package-data]
-app = ["task_package_spec.json"]
+[tool.setuptools.packages.find]
+include = ["app*"]

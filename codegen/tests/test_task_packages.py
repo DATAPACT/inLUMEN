@@ -3,7 +3,7 @@ import pytest
 from pydantic import ValidationError
 from app.generator import files_from_payload
 from app.schemas import GenerateNodeScriptRequest
-from app.task_package_contract import validate_package, task_data_contract
+from inlumen.contracts.task_package_contract import validate_package, task_data_contract
 
 
 def test_generated_task_contains_public_portable_manifest():

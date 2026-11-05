@@ -23,7 +23,8 @@ import re
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from map_scope import MapScope
+from inlumen.contracts.map_scope import MapScope
+from inlumen.contracts import artifact_runtime_source
 
 CONTRACT_ID = "inlumen.generic-node@2"
 ITEM_RUNNER_FILENAME = "inlumen_item_runner.py"
@@ -34,7 +35,7 @@ ITEM_FIELDS = ("name", "filename", "kind", "format", "representation", "schema",
 
 
 def _artifact_runtime_source() -> str:
-    return Path(__file__).with_name("artifact_runtime.py").read_text(encoding="utf-8")
+    return artifact_runtime_source()
 
 
 def collection_name(label: object, fallback: str = "collected") -> str:

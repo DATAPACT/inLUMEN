@@ -1,7 +1,7 @@
 /**
  * Port types derived from artifact contracts — browser mirror of
- * shared/port_types.py. Both apply the rules in portTypes.generated.json
- * (synced from shared/port_types.json) and are tested against its cases.
+ * inlumen.contracts.port_types (packages/agents/src/inlumen/contracts/port_types.py). Both apply the rules
+ * in portTypes.generated.json (synced from port_types.json there) and are tested against its cases.
  *
  * A port type is a kind, optionally followed by [] for a collection:
  * table, table[], json, any, any[]. "bundle" (mixed members) and "directory"

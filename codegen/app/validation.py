@@ -5,8 +5,8 @@ import json
 import re
 import sys
 
-from .task_package_contract import validate_package
-from .artifact_runtime import ArtifactContractError
+from inlumen.contracts.task_package_contract import validate_package
+from inlumen.contracts.artifact_runtime import ArtifactContractError
 
 from .schemas import GeneratedFile, RuntimeConstraints, ValidationReport
 

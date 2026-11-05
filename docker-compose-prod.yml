@@ -83,6 +83,8 @@ services:
   migrate:
     build:
       context: ./backend
+      additional_contexts:
+        agents: ./packages/agents
     image: ${INLUMEN_BACKEND_IMAGE:-inlumen-backend:local}
     pull_policy: ${INLUMEN_APP_PULL_POLICY:-build}
     restart: "no"
@@ -146,6 +148,8 @@ services:
     logging: *app-logging
     build:
       context: ./codegen
+      additional_contexts:
+        agents: ./packages/agents
     image: ${INLUMEN_CODEGEN_IMAGE:-inlumen-codegen-service:local}
     pull_policy: ${INLUMEN_APP_PULL_POLICY:-build}
     restart: unless-stopped
@@ -205,6 +209,8 @@ services:
     logging: *app-logging
     build:
       context: ./backend
+      additional_contexts:
+        agents: ./packages/agents
     image: ${INLUMEN_BACKEND_IMAGE:-inlumen-backend:local}
     pull_policy: ${INLUMEN_APP_PULL_POLICY:-build}
     restart: unless-stopped

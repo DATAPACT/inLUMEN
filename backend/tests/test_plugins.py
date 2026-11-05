@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(ROOT / "examples" / "plugins"))
 
 import plugins  # noqa: E402
-from artifact_runtime import validate_result  # noqa: E402
+from inlumen.contracts.artifact_runtime import validate_result  # noqa: E402
 from connector_catalog import (  # noqa: E402
     connector_definition,
     missing_connector_parameters,

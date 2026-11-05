@@ -26,7 +26,7 @@ from docker.errors import DockerException, ImageNotFound
 from packaging.requirements import InvalidRequirement, Requirement
 from requests.exceptions import ReadTimeout
 
-from .artifact_runtime import ArtifactContractError, CONTRACT_ID, atomic_json, validate_artifact, validate_result
+from inlumen.contracts.artifact_runtime import ArtifactContractError, CONTRACT_ID, atomic_json, validate_artifact, validate_result
 from .resource_policy import RESOURCE_PROFILES
 from .schemas import (
     ExpectedArtifact,

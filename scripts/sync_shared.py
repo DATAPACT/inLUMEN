@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Generate standalone service copies and browser contracts from canonical sources."""
+"""Generate service copies and browser contracts from canonical sources.
+
+The agents' contracts live in the inlumen-agents package
+(packages/agents/src/inlumen/contracts) and are installed, not copied; only
+the browser copies and the public contract files are generated from them.
+"""
 import argparse
 import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 COPIES = {
-    'shared/task_package_spec.json': ['backend/task_package_spec.json', 'codegen/app/task_package_spec.json', 'frontend/src/features/flow/taskPackageGuide.generated.json'],
-    'shared/task_package_contract.py': ['backend/task_package_contract.py', 'codegen/app/task_package_contract.py'],
-    'shared/artifact_runtime.py': ['backend/artifact_runtime.py', 'codegen/app/artifact_runtime.py'],
+    'packages/agents/src/inlumen/contracts/task_package_spec.json': ['frontend/src/features/flow/taskPackageGuide.generated.json'],
     'shared/run_artifact_names.py': ['backend/run_artifact_names.py', 'codegen/app/run_artifact_names.py'],
     'shared/request_diagnostics.py': ['runner/app/request_diagnostics.py', 'codegen/app/request_diagnostics.py'],
-    'shared/map_scope.py': ['backend/map_scope.py', 'codegen/app/map_scope.py'],
-    'shared/port_types.py': ['backend/port_types.py', 'codegen/app/port_types.py'],
-    'shared/port_types.json': ['backend/port_types.json', 'codegen/app/port_types.json', 'frontend/src/features/flow/portTypes.generated.json'],
+    'packages/agents/src/inlumen/contracts/port_types.json': ['frontend/src/features/flow/portTypes.generated.json'],
     'shared/leases.py': ['runner/app/leases.py', 'codegen/app/leases.py'],
     'backend/node_definitions/manifests/core.json': ['frontend/src/features/nodes/registry/core.generated.json'],
     'backend/plugins/plugin-manifest.schema.json': ['contracts/plugin-manifest-v1/schema.json'],
@@ -35,7 +36,7 @@ def main():
                 if not args.check:
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_bytes(expected)
-    spec = json.loads((ROOT / 'shared/task_package_spec.json').read_text())
+    spec = json.loads((ROOT / 'packages/agents/src/inlumen/contracts/task_package_spec.json').read_text())
     generated = {
         'contracts/task-package-v1/schema.json': json.dumps(spec['schema'], indent=2) + '\n',
         'contracts/task-package-v1/example.json': json.dumps(spec['example'], indent=2) + '\n',

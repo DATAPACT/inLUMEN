@@ -17,9 +17,9 @@ from flask import Flask, Response, g, jsonify, make_response, request, stream_wi
 from minio.error import S3Error
 
 from artifact_contract import classify_artifact
-from artifact_runtime import ArtifactContractError
+from inlumen.contracts.artifact_runtime import ArtifactContractError
 from task_artifacts import TASK_METADATA_FILENAME, parse_task_metadata
-from task_package_contract import AUTHORING_GUIDE, EXAMPLE, TASK_SCHEMA, public_manifest, validate_package
+from inlumen.contracts.task_package_contract import AUTHORING_GUIDE, EXAMPLE, TASK_SCHEMA, public_manifest, validate_package
 from task_packages import inspect_packages, task_package_folder, MAX_ARCHIVE, PLATFORM_FILES
 from application_llm import (
     APPLICATION_LLM_ID,
@@ -3159,7 +3159,7 @@ def download_task_packages():
 @require_auth
 def task_package_template():
     import zipfile
-    from task_package_contract import TASK_SCHEMA
+    from inlumen.contracts.task_package_contract import TASK_SCHEMA
     buffer = BytesIO()
     source = """import json, os
 from pathlib import Path

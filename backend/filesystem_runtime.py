@@ -18,6 +18,8 @@ import tempfile
 from pathlib import Path
 from typing import Iterable
 
+from inlumen.contracts import artifact_runtime_source
+
 
 PIPELINE_INPUT_DIR = "PIPELINE_INPUT_DIR"
 PIPELINE_OUTPUT_DIR = "PIPELINE_OUTPUT_DIR"
@@ -350,7 +352,7 @@ def filesystem_shell_component_source() -> str:
     the small runtime implementation is emitted as source rather than imported
     from this module.
     """
-    return Path(__file__).with_name('artifact_runtime.py').read_text() + '\n' + r'''import hashlib
+    return artifact_runtime_source() + '\n' + r'''import hashlib
 import json
 import mimetypes
 import os

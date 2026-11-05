@@ -94,6 +94,8 @@ services:
   backend:
     build:
       context: ./backend
+      additional_contexts:
+        agents: ./packages/agents
     container_name: inlumen_backend
     hostname: inlumen-backend
     restart: unless-stopped
@@ -113,6 +115,7 @@ services:
       - "${INLUMEN_API_PORT:-5000}:${INLUMEN_API_PORT:-5000}"
     volumes:
       - ./backend:/usr/inlumen
+      - ./packages/agents/src:/opt/inlumen-agents/src
     environment:
       PYTHONUNBUFFERED: "1"
       FRONTEND_PORT: ${FRONTEND_PORT:-8080}
@@ -205,6 +208,8 @@ services:
   codegen:
     build:
       context: ./codegen
+      additional_contexts:
+        agents: ./packages/agents
     image: inlumen-codegen-service:local
     pull_policy: build
     container_name: inlumen_codegen
@@ -219,6 +224,7 @@ services:
         condition: service_started
     volumes:
       - ./codegen/app:/app/app
+      - ./packages/agents/src:/packages/agents/src
       - codegen_state:/app/state
       - /var/run/docker.sock:/var/run/docker.sock
       - ${CODEGEN_VALIDATION_HOST_WORKDIR:-/tmp/inlumen-codegen-workspaces}:${CODEGEN_VALIDATION_WORKDIR:-/tmp/inlumen-codegen-workspaces}
