@@ -74,6 +74,13 @@ export const mapScopes = (
     }
     const body = reachable.filter((node) => reachesCollect.has(node));
     const members = new Set(body);
+    reachable.filter((node) => !reachesCollect.has(node)).forEach((node) => {
+      // A branch leaving a per-item step is a map-scope-leak (below); one leaving the Map itself is reported here.
+      if ((incoming.get(node) || []).some((edge) => edge.source === mapId)) {
+        issues.push({ code: "map-branch-without-collect", nodeId: node,
+          message: `${name(node)} receives per-item data from ${name(mapId)} but never reaches ${name(collectId)}, so it would not run once per item. Route it into ${name(collectId)}, or connect it after ${name(collectId)}.` });
+      }
+    });
     body.forEach((node) => {
       (incoming.get(node) || []).forEach((edge) => {
         if (edge.source !== mapId && !members.has(edge.source)) issues.push({ code: "map-side-input", nodeId: node,

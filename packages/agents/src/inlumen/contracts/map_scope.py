@@ -12,6 +12,7 @@ Rules (v1):
 - every Parallel Map reaches exactly one Collect, and every body path ends there;
 - a body step receives data only from the Map or from other body steps;
 - body steps feed only body steps or the scope's Collect;
+- every branch leaving the Map reaches its Collect;
 - scopes do not nest, and a Collect closes exactly one Map.
 
 Part of the inlumen-agents package (inlumen.contracts); the browser mirror is frontend/src/features/flow/mapScope.ts.
@@ -130,8 +131,20 @@ def map_scopes(
                 continue
             reaches_collect.add(node)
             pending.extend(edge.source for edge in incoming.get(node, []))
+        dropped = [node for node in body if node not in reaches_collect]
         body = [node for node in body if node in reaches_collect]
         members = set(body)
+        for node in dropped:
+            # A branch leaving a per-item step is a map-scope-leak (below); one
+            # leaving the Map itself is reported here.
+            if any(edge.source == map_id for edge in incoming.get(node, [])):
+                issues.append(ScopeIssue(
+                    "map-branch-without-collect",
+                    f"{name(node)} receives per-item data from {name(map_id)} but never reaches "
+                    f"{name(collect_id)}, so it would not run once per item. Route it into "
+                    f"{name(collect_id)}, or connect it after {name(collect_id)}.",
+                    node,
+                ))
         for node in body:
             for edge in incoming.get(node, []):
                 if edge.source != map_id and edge.source not in members:

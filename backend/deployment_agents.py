@@ -1150,15 +1150,19 @@ def _multi_file_source_bundle(step: dict[str, Any], source_files: list[dict[str,
     matches the input the generated downstream Task was built against.
     """
     label = str(step.get("label") or step.get("flow_id") or "")
-    name = re.sub(r"[^A-Za-z0-9_.-]+", "-", label).strip(".-").replace("-", "_").lower() or "output"
+    # codegen: sanitize_fragment(label) ("node" when empty), snake case, else "output".
+    fragment = re.sub(r"[^A-Za-z0-9_.-]+", "-", label).strip(".-") or "node"
+    name = fragment.replace("-", "_").lower() or "output"
     members = []
     for item in source_files:
         filename = str(item["filename"])
-        file_format = str(item.get("format") or Path(filename).suffix.lstrip(".")) or None
+        # codegen classifies each file by name when the record carries no kind.
+        classified = classify_artifact(filename)
+        file_format = str(item.get("format") or classified.get("format") or Path(filename).suffix.lstrip(".")) or None
         members.append({
             "name": Path(filename).stem,
             "filename": filename,
-            "kind": str(item.get("kind") or "binary"),
+            "kind": str(item.get("kind") or classified.get("kind") or "binary"),
             "format": file_format,
             "representation": "file",
         })
@@ -1501,6 +1505,18 @@ def _plugin_adapter_runtime(
     }
 
 
+def _collected_item(scope, edges, by_id) -> dict[str, Any]:
+    """What one item of the Collect holds: the per-item output wired into it."""
+    for source, source_port, target, _ in edges:
+        if target != scope.collect or source not in by_id or not by_id[source][0].get("map_scope"):
+            continue  # The Map itself (no per-item step) declares no item.
+        outputs = by_id[source][0].get("data_contract", {}).get("outputs") or []
+        wired = [item for item in outputs if item.get("port") == source_port] if len(outputs) > 1 else outputs
+        if wired:
+            return wired[0].get("item") or {}
+    return {}
+
+
 def _lift_map_scopes(
     steps: list[dict[str, Any]],
     pipeline_graph: Optional[dict],
@@ -1540,13 +1556,8 @@ def _lift_map_scopes(
                 lift_step(*by_id[flow_id], scope, settings)
             except ValueError as exc:
                 errors.append(str(exc))
-        last = [
-            source for source, _, target, _ in edges
-            if target == scope.collect and source in by_id
-        ]
-        if scope.collect in by_id and last:
-            inner = (by_id[last[0]][0].get("map_scope") and by_id[last[0]][0]["data_contract"]["outputs"][0].get("item")) or {}
-            set_collect_item(*by_id[scope.collect], inner)
+        if scope.collect in by_id:
+            set_collect_item(*by_id[scope.collect], _collected_item(scope, edges, by_id))
     return errors
 
 

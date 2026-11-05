@@ -38,6 +38,11 @@ class MapScopeTest(unittest.TestCase):
             ("a", "output", "dest", "data"),
         ]))
         self.assertEqual(["collect-without-map"], codes([("a", "output", "collect", "item")], {"collect": "Collect"}))
+        # A branch leaving the Map that never reaches the Collect would not run per item.
+        self.assertEqual(["map-branch-without-collect"], codes([
+            ("map", "item", "a", "input"), ("a", "output", "collect", "item"),
+            ("map", "item", "archive", "input"), ("archive", "output", "dest", "data"),
+        ]))
         self.assertIn("nested-map", codes([
             ("map", "item", "map2", "items"), ("map2", "item", "collect", "item"),
         ], {"map": "Parallel Map", "map2": "Parallel Map", "collect": "Collect"}))

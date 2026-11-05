@@ -2223,3 +2223,24 @@ def test_map_and_collect_run_as_compiler_owned_functions(tmp_path, monkeypatch) 
     collected = output_dir / "nodes" / "4" / "collect_invoices_items"
     assert json.loads((collected / "_items.json").read_text())["items"][0]["key"] == "item-1"
     assert len(list((collected / "item-1").iterdir())) == 1
+
+
+def test_tables_with_the_same_name_stay_distinct_in_a_bundle() -> None:
+    from inlumen.codegen.generator import data_passthrough_outputs
+
+    inputs = [
+        FileDescriptor(filename="data.csv", kind="table", format="csv", source_node="sales"),
+        FileDescriptor(filename="data.csv", kind="table", format="csv", source_node="stock"),
+    ]
+    (bundle,) = data_passthrough_outputs("joined", "Join", inputs)
+    assert [member["filename"] for member in bundle.members] == ["data.csv", "stock_data.csv"]
+
+
+def test_validation_workspace_accepts_any_step_id(tmp_path, monkeypatch) -> None:
+    from pathlib import Path
+
+    from inlumen.codegen.sandbox import validation_workspace
+
+    monkeypatch.setenv("CODEGEN_VALIDATION_WORKDIR", str(tmp_path))
+    with validation_workspace("etl/clean") as workspace:
+        assert Path(workspace).parent == tmp_path

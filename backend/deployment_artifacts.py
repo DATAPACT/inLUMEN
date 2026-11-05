@@ -4048,8 +4048,11 @@ def _dagster_run_source() -> str:
     python -m inlumen_dagster_project.run
 
 INLUMEN_MAX_PARALLEL_STEPS caps how many nodes run at once (default: CPU count).
+The multiprocess executor needs a Dagster instance on disk: DAGSTER_HOME when
+set (as in this bundle's compose file), otherwise a temporary one for this run.
 \"\"\"
 import os
+import tempfile
 
 import dagster as dg
 
@@ -4063,6 +4066,8 @@ def run_job_definition():
 
 def main() -> int:
     limit = max(1, int(os.environ.get("INLUMEN_MAX_PARALLEL_STEPS") or os.cpu_count() or 1))
+    if not os.environ.get("DAGSTER_HOME"):
+        os.environ["DAGSTER_HOME"] = tempfile.mkdtemp(prefix="inlumen-dagster-home-")
     with dg.DagsterInstance.get() as instance:
         result = dg.execute_job(
             dg.reconstructable(run_job_definition),

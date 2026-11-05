@@ -174,5 +174,46 @@ class MapRuntimeTest(unittest.TestCase):
         self.assertEqual(extract["data_contract"], manifest["data_contract"])
 
 
+    def test_collect_holds_the_output_wired_into_it(self):
+        steps = [
+            {"flow_id": "2", "type": "flow", "template": "Parallel Map", "label": "Each Invoice", "param": {},
+             "ports": {"inputs": [{"id": "items"}], "outputs": [{"id": "item"}]}},
+            {"flow_id": "3", "type": "task", "label": "Extract Fields",
+             "ports": {"inputs": [{"id": "input"}], "outputs": [{"id": "output"}, {"id": "log"}]}},
+            {"flow_id": "4", "type": "flow", "template": "Collect", "label": "Collect Logs",
+             "ports": {"inputs": [{"id": "item"}], "outputs": [{"id": "items"}]}},
+        ]
+        extract, extract_docker = extract_runtime()
+        extract["data_contract"]["outputs"].append(
+            {"name": "log", "filename": "log.txt", "representation": "file", "kind": "text", "port": "log"})
+        graph = {"edges": [
+            {"source": "2", "sourceHandle": "item", "target": "3", "targetHandle": "input"},
+            {"source": "3", "sourceHandle": "log", "target": "4", "targetHandle": "item"},
+        ]}
+        pairs = [_control_flow_runtime(steps[0]), (extract, extract_docker), _control_flow_runtime(steps[2])]
+        artifacts, dockerfiles = [pair[0] for pair in pairs], [pair[1] for pair in pairs]
+        self.assertEqual([], _lift_map_scopes(steps, graph, artifacts, dockerfiles))
+        (collected,) = artifacts[2]["data_contract"]["outputs"]
+        self.assertEqual("log.txt", collected["item"]["filename"])
+
+    def test_max_concurrency_must_be_a_number(self):
+        steps = [
+            {"flow_id": "2", "type": "flow", "template": "Parallel Map", "label": "Each Invoice",
+             "param": {"max_concurrency": "auto"},
+             "ports": {"inputs": [{"id": "items"}], "outputs": [{"id": "item"}]}},
+            {"flow_id": "3", "type": "task", "label": "Extract Fields",
+             "ports": {"inputs": [{"id": "input"}], "outputs": [{"id": "output"}]}},
+            {"flow_id": "4", "type": "flow", "template": "Collect", "label": "Collect Invoices",
+             "ports": {"inputs": [{"id": "item"}], "outputs": [{"id": "items"}]}},
+        ]
+        graph = {"edges": [
+            {"source": "2", "sourceHandle": "item", "target": "3", "targetHandle": "input"},
+            {"source": "3", "sourceHandle": "output", "target": "4", "targetHandle": "item"},
+        ]}
+        pairs = [_control_flow_runtime(steps[0]), extract_runtime(), _control_flow_runtime(steps[2])]
+        errors = _lift_map_scopes(steps, graph, [p[0] for p in pairs], [p[1] for p in pairs])
+        self.assertEqual(["Parallel Map 2: max concurrency must be a whole number, got 'auto'."], errors)
+
+
 if __name__ == "__main__":
     unittest.main()

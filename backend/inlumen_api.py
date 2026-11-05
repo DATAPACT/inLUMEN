@@ -1619,6 +1619,9 @@ def _build_pipeline_codegen_payload(
         or payload.get("user_instruction")
         or ""
     ).strip()
+    if not high_level_prompt and "additional_instructions" not in payload:
+        # Older clients send the pipeline request as user_instruction only.
+        high_level_prompt, additional_instructions = additional_instructions, ""
     if additional_instructions == high_level_prompt:
         additional_instructions = ""
     user_instruction = PIPELINE_RUNTIME_ATTACHMENT_INSTRUCTION
