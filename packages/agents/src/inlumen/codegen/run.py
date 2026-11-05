@@ -49,6 +49,16 @@ __all__ = [
 ]
 
 
+# What the inLUMEN app asks for (backend `_build_pipeline_codegen_payload`): run the
+# whole pipeline on sample inputs when a sandbox is available. The deterministic
+# fallback stays off, so a result measures the model.
+APP_DEFAULTS: dict[str, Any] = {
+    "allow_deterministic_fallback": False,
+    "validation_mode": "pipeline_sample",
+    "include_sample_data": True,
+}
+
+
 def http_model(
     model: str,
     *,
@@ -144,7 +154,7 @@ async def generate(
     if isinstance(options, GenerationOptions):
         resolved_options = options.model_copy()
     else:
-        resolved_options = GenerationOptions(**{"allow_deterministic_fallback": False, **(options or {})})
+        resolved_options = GenerationOptions(**{**APP_DEFAULTS, **(options or {})})
     if instruction:
         resolved_options.user_instruction = instruction
     resolved_options.persist = False
