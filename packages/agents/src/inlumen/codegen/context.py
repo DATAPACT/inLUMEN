@@ -160,10 +160,13 @@ def directory_sampler(
     files are described by name only, as when storage is unavailable.
     """
     base = Path(root)
+    # Bucket names are lowercase; step folders keep the step id's case.
+    folders = {path.name.lower(): path for path in base.iterdir() if path.is_dir()} if base.is_dir() else {}
 
     def sample(bucket: str, filename: str, entry: dict[str, Any]) -> dict[str, Any]:
-        flow_id = bucket.removeprefix("files-step-id-")
-        for candidate in (base / flow_id / filename, base / filename):
+        folder = folders.get(bucket.removeprefix("files-step-id-"))
+        candidates = ([folder / filename] if folder is not None else []) + [base / filename]
+        for candidate in candidates:
             if candidate.is_file():
                 return sample_from_bytes(candidate.read_bytes(), entry, binary_max_bytes=binary_max_bytes)
         return {}

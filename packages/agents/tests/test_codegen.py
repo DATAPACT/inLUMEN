@@ -125,3 +125,39 @@ def test_the_sandbox_is_chosen_per_run(monkeypatch):
     monkeypatch.delenv("CODEGEN_DOCKER_VALIDATION_ENABLED")
     with use_sandbox(DockerSandbox()):
         assert docker_validation_enabled()
+
+
+def test_options_objects_keep_the_app_defaults(monkeypatch):
+    import inlumen.codegen.run as run_module
+    from inlumen.codegen.schemas import GenerationOptions
+
+    seen = []
+    real = run_module.generate_pipeline_script_bundles
+
+    async def capture(request, **kwargs):
+        seen.append(request.options)
+        return await real(request, **kwargs)
+
+    monkeypatch.setattr(run_module, "generate_pipeline_script_bundles", capture)
+    monkeypatch.setenv("CODEGEN_ALLOW_DETERMINISTIC_FALLBACK", "true")
+    asyncio.run(generate(_graph(), model=Scripted(_valid), options=GenerationOptions(repair_attempts=3)))
+    options = seen[0]
+    assert options.repair_attempts == 3
+    assert options.validation_mode == "pipeline_sample" and options.allow_deterministic_fallback is False
+
+
+def test_an_http_model_without_a_key_fails_clearly():
+    from inlumen.codegen.llm import LLMGenerationError
+    from inlumen.codegen.run import http_model
+
+    with pytest.raises(LLMGenerationError, match="API key is missing"):
+        asyncio.run(generate(_graph(), model=http_model("m", base_url="http://127.0.0.1:9/v1", api_key="")))
+
+
+def test_step_folders_are_found_whatever_their_case(tmp_path):
+    (tmp_path / "LoadOrders").mkdir()
+    (tmp_path / "LoadOrders" / "orders.csv").write_text("id\n1\n", encoding="utf-8")
+    graph = {"nodes": [{"id": "LoadOrders", "data": {"type": "source", "label": "Orders", "files": ["orders.csv"]}}],
+             "edges": []}
+    entry = pipeline_context(graph, sample=directory_sampler(tmp_path))["graph"]["nodes"][0]["files"][0]
+    assert entry["columns"] == ["id"]

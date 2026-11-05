@@ -145,16 +145,22 @@ async def generate(
     ``LLMConfig``. ``sandbox`` defaults to :class:`NoSandbox`; pass
     :class:`DockerSandbox` to execute the pipeline on sample inputs.
     ``files`` is a folder holding attached files (``<folder>/<flow_id>/<name>``
-    or ``<folder>/<name>``) or a sampler. Unlike the service, the deterministic
-    fallback is off unless ``options`` turns it on, so results measure the model.
+    or ``<folder>/<name>``) or a sampler. ``runtime`` overrides the runtime
+    constraints, e.g. ``{"allowed_packages": [...], "network_allowed": False}``
+    for a fixed target environment.
+
+    ``options`` default to what the inLUMEN app sends (:data:`APP_DEFAULTS`:
+    sample-run validation, no deterministic fallback, so results measure the
+    model); fields set in ``options`` take precedence.
     """
     sampler = directory_sampler(files) if isinstance(files, (str, Path)) else files
     context = pipeline_context(dict(graph), sample=sampler)
     context["runtime_constraints"].update(runtime or {})
-    if isinstance(options, GenerationOptions):
-        resolved_options = options.model_copy()
-    else:
-        resolved_options = GenerationOptions(**{**APP_DEFAULTS, **(options or {})})
+    # Fields a caller set explicitly win over the app's defaults, whether
+    # `options` is a dict or a GenerationOptions.
+    explicit = (options.model_dump(exclude_unset=True) if isinstance(options, GenerationOptions)
+                else dict(options or {}))
+    resolved_options = GenerationOptions(**{**APP_DEFAULTS, **explicit})
     if instruction:
         resolved_options.user_instruction = instruction
     resolved_options.persist = False

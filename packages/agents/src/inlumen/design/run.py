@@ -12,13 +12,14 @@
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
 from autogen_core.models import ChatCompletionClient, CreateResult, ModelInfo
 
+from inlumen.contracts.events import EventSink, model_request_event  # noqa: F401  (EventSink re-exported)
 from inlumen.contracts.plugins import use_plugin_source
 from inlumen.contracts.project_ir import project_document
 
@@ -27,15 +28,13 @@ from .memory_store import InMemoryGraphStore
 from .team import build_design_team
 from .turn import run_design_turn
 
-# Receives one dict per model request; see RecordingModelClient.
-EventSink = Callable[[dict[str, Any]], None]
 
 
 class RecordingModelClient(ChatCompletionClient):
     """Wraps a model client and reports every request to an event sink.
 
-    Each event is ``{"type": "model_request", "purpose", "prompt_tokens",
-    "completion_tokens", "latency_s", "finish_reason", "error"}``.
+    Each event is :func:`inlumen.contracts.events.model_request_event`'s
+    dict; the cost is None (autogen clients do not report one).
     """
 
     def __init__(self, inner: ChatCompletionClient, sink: EventSink, *, purpose: str = "design"):
@@ -43,17 +42,24 @@ class RecordingModelClient(ChatCompletionClient):
         self._sink = sink
         self.purpose = purpose
 
-    def _emit(self, started: float, result: CreateResult | None, error: BaseException | None) -> None:
+    @property
+    def model_name(self) -> str:
+        create_args = getattr(self._inner, "_create_args", None)
+        return str(create_args.get("model") or "") if isinstance(create_args, dict) else ""
+
+    def _emit(self, started: float, result: CreateResult | None, error: BaseException | str | None) -> None:
         usage = result.usage if result is not None else None
-        self._sink({
-            "type": "model_request",
-            "purpose": self.purpose,
-            "prompt_tokens": getattr(usage, "prompt_tokens", 0),
-            "completion_tokens": getattr(usage, "completion_tokens", 0),
-            "latency_s": round(time.monotonic() - started, 3),
-            "finish_reason": getattr(result, "finish_reason", None),
-            "error": f"{type(error).__name__}: {error}" if error else None,
-        })
+        if isinstance(error, BaseException):
+            error = f"{type(error).__name__}: {error}"
+        self._sink(model_request_event(
+            purpose=self.purpose,
+            model=self.model_name,
+            prompt_tokens=getattr(usage, "prompt_tokens", None),
+            completion_tokens=getattr(usage, "completion_tokens", None),
+            latency_s=time.monotonic() - started,
+            finish_reason=getattr(result, "finish_reason", None),
+            error=error,
+        ))
 
     async def create(self, messages: Sequence[Any], **kwargs: Any) -> CreateResult:
         started = time.monotonic()
@@ -73,6 +79,10 @@ class RecordingModelClient(ChatCompletionClient):
                 if isinstance(chunk, CreateResult):
                     result = chunk
                 yield chunk
+        except GeneratorExit:
+            # The consumer stopped reading: a success if the final result arrived.
+            self._emit(started, result, None if result is not None else "stream closed before the result")
+            raise
         except BaseException as exc:
             self._emit(started, None, exc)
             raise
@@ -201,7 +211,9 @@ async def design(
             visible_before_graph=before,
         )
         accepted = bool(turn.sync.get("guardrail_passed"))
-        if not accepted and turn.sync.get("status") == "invalid":
+        if not accepted:
+            # Whatever the reason (invalid, or unverifiable), a rejected design
+            # is not kept: the result is the starting graph.
             await store.restore_graph(before)
         final_graph = turn.graph if accepted and isinstance(turn.graph, dict) else store.graph()
         project = project_document(final_graph, name=name, description=request)

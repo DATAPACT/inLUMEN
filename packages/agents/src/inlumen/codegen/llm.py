@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
+from inlumen.contracts.events import model_request_event
 from .generation_budget import CURRENT_BUDGET
 from .model import CURRENT_EVENTS, CURRENT_MODEL, ModelClient, ModelReply
 
@@ -190,6 +191,15 @@ class HttpModelClient:
         )
 
 
+def _check_endpoint(config: LLMConfig | None) -> None:
+    if config is None or not config.model.strip():
+        raise LLMGenerationError("Code-generation model is not configured.")
+    if not config.base_url.strip():
+        raise LLMGenerationError("Code-generation provider base URL is not configured.")
+    if not config.api_key.strip():
+        raise LLMGenerationError("Code-generation provider API key is missing.")
+
+
 async def generate_json(
     config: LLMConfig | None,
     *,
@@ -206,13 +216,10 @@ async def generate_json(
     """
     client = CURRENT_MODEL.get()
     if client is None:
-        if config is None or not config.model.strip():
-            raise LLMGenerationError("Code-generation model is not configured.")
-        if not config.base_url.strip():
-            raise LLMGenerationError("Code-generation provider base URL is not configured.")
-        if not config.api_key.strip():
-            raise LLMGenerationError("Code-generation provider API key is missing.")
+        _check_endpoint(config)
         client = HttpModelClient(config)
+    elif isinstance(client, HttpModelClient):
+        _check_endpoint(client.config)
 
     budget = CURRENT_BUDGET.get()
     if budget is not None: budget.reserve()
@@ -248,17 +255,16 @@ def _request_event(
     error: BaseException | None,
 ) -> dict[str, Any]:
     usage = (reply.usage if reply is not None else None) or {}
-    return {
-        "type": "model_request",
-        "purpose": "codegen",
-        "model": getattr(client, "name", ""),
-        "prompt_tokens": _optional_nonnegative_number(usage.get("prompt_tokens"), int) or 0,
-        "completion_tokens": _optional_nonnegative_number(usage.get("completion_tokens"), int) or 0,
-        "cost_usd": _optional_nonnegative_number(usage.get("cost"), float),
-        "latency_s": round(time.monotonic() - started, 3),
-        "finish_reason": reply.finish_reason if reply is not None else None,
-        "error": f"{type(error).__name__}: {error}" if error else None,
-    }
+    return model_request_event(
+        purpose="codegen",
+        model=getattr(client, "name", ""),
+        prompt_tokens=_optional_nonnegative_number(usage.get("prompt_tokens"), int),
+        completion_tokens=_optional_nonnegative_number(usage.get("completion_tokens"), int),
+        cost_usd=_optional_nonnegative_number(usage.get("cost"), float),
+        latency_s=time.monotonic() - started,
+        finish_reason=reply.finish_reason if reply is not None else None,
+        error=f"{type(error).__name__}: {error}" if error else None,
+    )
 
 
 NODE_SYSTEM_PROMPT = """You are the inLumen production code-generation engine.

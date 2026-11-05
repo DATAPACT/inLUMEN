@@ -137,3 +137,23 @@ def test_a_catalog_scopes_its_plugins_to_the_design_run():
     assert installed_plugin_manifest(manifest["id"]) is None
     assert json.loads(asyncio.run(tools["list_pipeline_components"]("{}")))["plugins"] == []
     assert catalog.fingerprint() != Catalog.default().fingerprint()
+
+
+def test_a_stream_read_to_its_result_is_not_a_failure():
+    from inlumen.design.run import RecordingModelClient
+
+    final = CreateResult(finish_reason="stop", content="ok", cached=False,
+                         usage=RequestUsage(prompt_tokens=3, completion_tokens=1))
+    events = []
+    client = RecordingModelClient(_scripted(final), events.append)
+
+    async def read_until_result():
+        stream = client.create_stream([])
+        async for chunk in stream:
+            if isinstance(chunk, CreateResult):
+                break
+        await stream.aclose()
+
+    asyncio.run(read_until_result())
+    assert len(events) == 1 and events[0]["error"] is None and events[0]["prompt_tokens"] == 3
+    assert set(events[0]) >= {"model", "cost_usd", "latency_s"}

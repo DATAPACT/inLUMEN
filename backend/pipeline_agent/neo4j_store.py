@@ -9,6 +9,9 @@ import json
 from typing import Any
 
 from graph_client import fetch_pipeline_graph, run_neo4j_query, sync_backend_to_canvas_graph
+# Importing the backend's plugins package registers its plugin store as the
+# plugin source, so the agent's plugin lookups see installed plugins.
+import plugins  # noqa: F401
 from inlumen.design.contract import default_input_port_expression, default_output_port_expression
 from inlumen.design.store import (
     FlowConfiguration,

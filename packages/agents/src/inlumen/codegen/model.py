@@ -8,14 +8,13 @@ per request with :func:`use_events`.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-# Receives one dict per model request (same shape as inlumen.design.run).
-EventSink = Callable[[dict[str, Any]], None]
+from inlumen.contracts.events import EventSink  # noqa: F401  (re-exported)
 
 
 @dataclass
