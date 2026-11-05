@@ -25,7 +25,7 @@ from deployment_artifacts import (
     build_deployment_bundle_files,
     extract_pipeline_steps,
 )
-from model_plans import FASTER_WHISPER_PLAN
+from inlumen.contracts.model_plans import FASTER_WHISPER_PLAN
 
 
 def dockerfile_content():

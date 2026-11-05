@@ -41,7 +41,7 @@ from map_runtime import (
 )
 from inlumen.contracts.map_scope import is_collect, is_map, map_scopes
 from minio_gateway import read_minio_object, read_minio_object_bytes
-from model_plans import (
+from inlumen.contracts.model_plans import (
     infer_implementation_plan_from_python_source,
     unresolved_model_plan_errors_from_python_source,
 )

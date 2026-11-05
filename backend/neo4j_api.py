@@ -19,23 +19,20 @@ from urllib.parse import quote
 from runtime_config import add_cors_headers, get_neo4j_settings
 from inlumen.contracts.step_types import normalize_step_type
 from inlumen.contracts.node_ports import (
-    default_input_port_id,
-    default_output_port_id,
     normalize_node_ports,
     ports_json,
 )
 from inlumen.contracts.node_parameters import (
-    normalize_secret_param_keys,
     secret_params_json,
     without_secret_param_values,
 )
 from minio_access import create_bucket, list_objects, read_object_bytes, remove_object, upload_object
-from model_plans import resolve_implementation_plan
-from node_definitions.instance import (
-    definition_data_from_properties,
+from inlumen.contracts.model_plans import resolve_implementation_plan
+from inlumen.contracts.node_definitions.instance import (
     definition_properties_from_data,
     normalize_definition_properties,
 )
+from inlumen.contracts.graph_records import flow_edges, reusable_graph, step_node
 from inlumen.contracts.pipeline_graph_validation import validate_pipeline_graph
 from plugins import with_plugin_secret_keys
 from inlumen.contracts.subpipeline_reference import (
@@ -2228,7 +2225,7 @@ def _reusable_pipeline_records(session, pipeline_uid=None, legacy_version_uid=No
 
 
 def _reusable_graph(record):
-    return hydrate_reusable_file_references(normalize_reusable_pipeline_graph(json.loads(record['graph_json'] or '{}')))
+    return reusable_graph(record)
 
 
 def _reusable_response(record, graph):
@@ -3325,133 +3322,24 @@ def neo4j_get_graph():
             step_rows = record["step_rows"] or []
             flows = record["flows"] or []
 
+            def resolve_reusable(pipeline_uid, legacy_version_uid):
+                records = _reusable_pipeline_records(session, pipeline_uid, legacy_version_uid)
+                return records[0] if records else None
+
             nodes = []
             for row in step_rows:
                 s = row.get("step") if row else None
                 if s is None:
                     continue
-
-                props = dict(s.items())
-                flow_id = props.get("flow_id")
-                if flow_id is None:
-                    continue
-
-                node_id = str(flow_id)
-
-                # position
-                try:
-                    x = float(props.get("x", 0) or 0)
-                except Exception:
-                    x = 0.0
-                try:
-                    y = float(props.get("y", 0) or 0)
-                except Exception:
-                    y = 0.0
-
-                step_kind = normalize_step_type(props.get("type"), default="task")
-
-                files_for_step = row.get("files") or []
-                # filenames list (simple)
-                filenames = [
-                    f.get("filename")
-                    for f in files_for_step
-                    if isinstance(f, dict) and f.get("filename")
-                ]
-
-                data = {
-                    "label": props.get("label", ""),
-                    "description": props.get("description", ""),
-                    "type": step_kind,
-                    "template_label": props.get("template_label", ""),
-                    "ports": normalize_node_ports(props.get("ports_json"), step_kind),
-
-                    # add files so polling doesn't wipe them
-                    "files": filenames,
-
-                    # optional richer info (bucket + added_at)
-                    "file_buckets": files_for_step,
-                }
-
-                if step_kind == "destination" and "content" in props:
-                    data["content"] = props.get("content") or ""
-                if "has_files" in props:
-                    data["has_files"] = props.get("has_files")
-                if "endpoint" in props:
-                    data["endpoint"] = props.get("endpoint")
-                if "database" in props:
-                    data["database"] = props.get("database")
-                if "param_json" in props:
-                    param_json = props.get("param_json")
-                    data["param_json"] = param_json
-                    try:
-                        parsed_param = json.loads(param_json) if isinstance(param_json, str) else {}
-                    except Exception:
-                        parsed_param = {}
-                    data["param"] = parsed_param if isinstance(parsed_param, dict) else {}
-                    data["secret_params"] = normalize_secret_param_keys(
-                        props.get("secret_params_json"),
-                        data["param"],
-                    )
-                data.update(definition_data_from_properties(props))
-                if step_kind == "subpipeline" and isinstance(data.get("subpipeline"), dict):
-                    subpipeline = dict(data["subpipeline"])
-                    reference = subpipeline.get("reference")
-                    reference = reference if isinstance(reference, dict) else {}
-                    referenced_pipeline_uid = str(reference.get("pipeline_uid") or "").strip()
-                    if referenced_pipeline_uid:
-                        records = _reusable_pipeline_records(session, referenced_pipeline_uid, reference.get("version_uid") or None)
-                        subpipeline.pop("resolution_error", None)
-                        subpipeline.pop("resolved_graph", None)
-                        if records:
-                            referenced = records[0]
-                            resolved_graph = _reusable_graph(referenced)
-                            subpipeline["reference"] = {**reference, "pipeline_uid": referenced_pipeline_uid, "pipeline_name": referenced['pipeline_name'] or ''}
-                            subpipeline["interface"] = derive_subpipeline_interface(resolved_graph)
-                            nesting_error = reusable_pipeline_nesting_error(resolved_graph)
-                            if nesting_error:
-                                subpipeline["resolution_error"] = nesting_error
-                            else:
-                                subpipeline["resolved_graph"] = resolved_graph
-                        else:
-                            subpipeline["resolution_error"] = "Referenced reusable pipeline was not found."
-                    data["subpipeline"] = subpipeline
-
-                nodes.append({
-                    "id": node_id,
-                    "type": "custom",
-                    "position": {"x": x, "y": y},
-                    "data": data,
-                })
-
-            edges = []
-            node_connection_profiles_by_id = {
-                node["id"]: (
-                    node["data"]["type"],
-                    node["data"].get("template_label") or "",
+                node = step_node(
+                    dict(s.items()),
+                    row.get("files") or [],
+                    resolve_reusable=resolve_reusable,
                 )
-                for node in nodes
-            }
-            for f in flows:
-                src = f.get("source") if isinstance(f, dict) else None
-                tgt = f.get("target") if isinstance(f, dict) else None
-                if src is None or tgt is None:
-                    continue
-                src = str(src)
-                tgt = str(tgt)
-                source_profile = node_connection_profiles_by_id.get(src, ("task", ""))
-                target_profile = node_connection_profiles_by_id.get(tgt, ("task", ""))
-                source_port = f.get("source_port") or default_output_port_id(*source_profile)
-                target_port = f.get("target_port") or default_input_port_id(*target_profile)
-                edges.append({
-                    "id": (
-                        f"reactflow__edge-{src}-{source_port or 'default'}-"
-                        f"{tgt}-{target_port or 'default'}"
-                    ),
-                    "source": src,
-                    "target": tgt,
-                    "sourceHandle": source_port or None,
-                    "targetHandle": target_port or None,
-                })
+                if node is not None:
+                    nodes.append(node)
+
+            edges = flow_edges(flows, nodes)
 
             return jsonify({
                 "updated_at": updated_at,

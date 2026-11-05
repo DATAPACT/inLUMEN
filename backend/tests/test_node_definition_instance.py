@@ -6,12 +6,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from node_definitions.instance import (  # noqa: E402
+from inlumen.contracts.node_definitions.instance import (  # noqa: E402
     definition_data_from_properties,
     definition_properties_from_data,
     normalize_definition_properties,
 )
-from node_definitions.artifacts import configuration_hash  # noqa: E402
+from inlumen.contracts.node_definitions.artifacts import configuration_hash  # noqa: E402
 
 
 class NodeDefinitionInstanceTest(unittest.TestCase):

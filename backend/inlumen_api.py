@@ -57,7 +57,7 @@ from generators.routes import create_generator_blueprint
 from graph_client import dispatch_graph_request
 from local_api_client import LocalApiResponse
 from node_definitions import create_node_definitions_blueprint
-from node_definitions.artifacts import (
+from inlumen.contracts.node_definitions.artifacts import (
     configuration_definition_id,
     configuration_hash,
     implementation_plan_from_data,

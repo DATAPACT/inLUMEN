@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import neo4j_api  # noqa: E402
-from model_plans import (  # noqa: E402
+from inlumen.contracts.model_plans import (  # noqa: E402
     FASTER_WHISPER_PLAN,
     infer_implementation_plan_from_python_source,
     resolve_implementation_plan,

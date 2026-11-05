@@ -3,14 +3,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from inlumen.contracts.subpipeline_reference import persisted_subpipeline_definition
+from ..subpipeline_reference import persisted_subpipeline_definition
 
 from .artifacts import (
     configuration_definition_id,
     configuration_hash,
     implementation_plan_from_data,
 )
-from model_plans import resolve_implementation_plan
+from ..model_plans import resolve_implementation_plan
 
 
 VALID_CONFIGURATION_STATUSES = {"unconfigured", "valid", "invalid"}

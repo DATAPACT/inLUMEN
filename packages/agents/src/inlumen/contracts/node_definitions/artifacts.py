@@ -4,7 +4,7 @@ import hashlib
 import json
 from typing import Any
 
-from model_plans import resolve_implementation_plan
+from ..model_plans import resolve_implementation_plan
 
 
 def implementation_plan_from_data(data: Any) -> dict[str, Any]:

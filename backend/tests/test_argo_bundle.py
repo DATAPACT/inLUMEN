@@ -24,7 +24,7 @@ from deployment_artifacts import (
     build_deployment_bundle_files,
     deployment_bundle_zip,
 )
-from model_plans import FASTER_WHISPER_PLAN
+from inlumen.contracts.model_plans import FASTER_WHISPER_PLAN
 from test_codegen_deployment_artifacts import (
     CodegenDeploymentArtifactsTest,
     codegen_payload,
