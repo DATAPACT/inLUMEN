@@ -161,3 +161,12 @@ def test_step_folders_are_found_whatever_their_case(tmp_path):
              "edges": []}
     entry = pipeline_context(graph, sample=directory_sampler(tmp_path))["graph"]["nodes"][0]["files"][0]
     assert entry["columns"] == ["id"]
+
+
+def test_generation_refuses_an_interpreter_that_breaks_3_11_code(monkeypatch):
+    import inlumen.codegen.run as run_module
+
+    assert run_module.unparse_is_portable()  # this test interpreter is fine
+    monkeypatch.setattr(run_module, "unparse_is_portable", lambda: False)
+    with pytest.raises(RuntimeError, match="Python 3.11 runtime cannot parse"):
+        asyncio.run(generate(_graph(), model=Scripted(_valid)))

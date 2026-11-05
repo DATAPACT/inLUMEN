@@ -19,6 +19,7 @@ codegen service. The service adds jobs, storage and authentication around it.
 """
 from __future__ import annotations
 
+import sys
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,6 +58,18 @@ APP_DEFAULTS: dict[str, Any] = {
     "validation_mode": "pipeline_sample",
     "include_sample_data": True,
 }
+
+
+def unparse_is_portable() -> bool:
+    """Whether this interpreter's ``ast.unparse`` writes code Python 3.11 can parse.
+
+    The compiler rebuilds generated code with ``ast.unparse``. Some Python 3.12
+    releases render nested quotes in f-strings with the PEP 701 syntax, which
+    the 3.11 runtime the code targets rejects.
+    """
+    import ast
+
+    return ast.unparse(ast.parse("f\"{d['k']}\"")) == "f\"{d['k']}\""
 
 
 def http_model(
@@ -153,6 +166,11 @@ async def generate(
     sample-run validation, no deterministic fallback, so results measure the
     model); fields set in ``options`` take precedence.
     """
+    if not unparse_is_portable():
+        raise RuntimeError(
+            f"Python {sys.version.split()[0]} writes f-strings that the generated code's "
+            "Python 3.11 runtime cannot parse; use Python 3.11 or a newer 3.12 (3.12.12 works)."
+        )
     sampler = directory_sampler(files) if isinstance(files, (str, Path)) else files
     context = pipeline_context(dict(graph), sample=sampler)
     context["runtime_constraints"].update(runtime or {})
