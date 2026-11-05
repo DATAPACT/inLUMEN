@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Canonical port-type rules. A port type is a kind, optionally followed by [] for a collection of that kind (e.g. table, table[], any[]). Python (shared/port_types.py) and TypeScript (frontend/src/features/flow/portTypes.ts) both implement these rules and are tested against the cases below.",
+  "description": "Canonical port-type rules. A port type is a kind, optionally followed by [] for a collection of that kind (e.g. table, table[], any[]). Python (inlumen.contracts.port_types in packages/agents) and TypeScript (frontend/src/features/flow/portTypes.ts) both implement these rules and are tested against the cases below.",
   "wildcards": [
     "",
     "any",

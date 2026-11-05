@@ -6,8 +6,8 @@ import time
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.pipeline_compiler import _fallback_helpers
-from app.schemas import PipelineGenerationRun, PipelineGenerationRunStep
+from inlumen.codegen.pipeline_compiler import _fallback_helpers
+from inlumen.codegen.schemas import PipelineGenerationRun, PipelineGenerationRunStep
 
 
 def sample_payload() -> dict:

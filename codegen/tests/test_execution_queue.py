@@ -5,7 +5,7 @@ import uuid
 import httpx
 
 from app import main
-from app.resource_policy import ResourceAdmissionController
+from inlumen.codegen.resource_policy import ResourceAdmissionController
 from test_deployment_validation_api import minimal_bundle_files
 
 

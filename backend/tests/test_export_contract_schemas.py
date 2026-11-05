@@ -10,7 +10,7 @@ CONTRACT_V2_ROOT = REPOSITORY_ROOT / "contracts" / "v2"
 CONTRACT_V3_ROOT = REPOSITORY_ROOT / "contracts" / "v3"
 sys.path.insert(0, str(BACKEND_ROOT))
 
-from artifact_contract import CANONICAL_ARTIFACT_KINDS  # noqa: E402
+from inlumen.contracts.artifact_contract import CANONICAL_ARTIFACT_KINDS  # noqa: E402
 
 
 class ExportContractSchemaTest(unittest.TestCase):

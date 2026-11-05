@@ -1,5 +1,5 @@
 from app.job_store import PipelineJobStore
-from app.schemas import GeneratePipelineScriptsRequest
+from inlumen.codegen.schemas import GeneratePipelineScriptsRequest
 
 
 def request_payload() -> dict:

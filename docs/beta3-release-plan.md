@@ -209,7 +209,7 @@ Reproduce with explicitly typed matching ports (the probe used `Text`) through
 `/neo4j_reusable_pipelines`, `/neo4j_reusable_pipeline_version`,
 `/neo4j_sync_graph`, `/neo4j_attach_reusable_pipeline_version`, and
 `/neo4j_get_graph`. The unresolved inner graph matters because the codegen
-[subpipeline task profile](../codegen/app/task_profiles.py) expects the pinned
+[subpipeline task profile](../packages/agents/src/inlumen/codegen/task_profiles.py) expects the pinned
 graph in `node.subpipeline.resolved_graph`. This probe establishes missing
 runtime context; it does not claim a measured generated-pipeline failure.
 

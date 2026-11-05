@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from artifact_runtime import ArtifactContractError, CONTRACT_ID, validate_result
+from inlumen.contracts.artifact_runtime import ArtifactContractError, CONTRACT_ID, validate_result
 from async_runtime import run_async
 from deployment_agents import generate_dockerfiles_with_agent
 from deployment_artifacts import _ARGO_PORT_RUNNER, _parse_requirements_for_dagster_project, build_deployment_bundle_files

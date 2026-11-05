@@ -4,7 +4,7 @@ from flask import Blueprint, jsonify, make_response, request
 
 from auth_middleware import require_auth
 
-from .registry import NodeDefinitionRegistry, get_node_definition_registry
+from inlumen.contracts.node_definitions.registry import NodeDefinitionRegistry, get_node_definition_registry
 
 
 def create_node_definitions_blueprint(

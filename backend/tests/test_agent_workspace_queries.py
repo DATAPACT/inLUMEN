@@ -18,7 +18,7 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
             captured.append(query)
             return json.dumps([{"step": {"flow_id": "1"}}])
 
-        with patch("pipeline_agent.tools.run_neo4j_query", side_effect=run_query):
+        with patch("pipeline_agent.neo4j_store.run_neo4j_query", side_effect=run_query):
             create_step = next(tool for tool in build_pipeline_editor_tools() if tool.__name__ == "create_step")
             asyncio.run(create_step(json.dumps({"type": "source", "label": "Audio upload"})))
         self.assertTrue(captured)
@@ -41,7 +41,7 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
             return json.dumps([{"step": {"flow_id": "3"}}])
 
         tools = {tool.__name__: tool for tool in build_pipeline_editor_tools()}
-        with patch("pipeline_agent.tools.run_neo4j_query", side_effect=run_query):
+        with patch("pipeline_agent.neo4j_store.run_neo4j_query", side_effect=run_query):
             asyncio.run(tools["create_step"](json.dumps({
                 "type": "destination", "label": "Results", "after_flow_id": "2",
             })))
@@ -50,7 +50,7 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
 
     def test_source_cannot_follow_another_step(self):
         tools = {tool.__name__: tool for tool in build_pipeline_editor_tools()}
-        with patch("pipeline_agent.tools.run_neo4j_query", AsyncMock()) as run_query:
+        with patch("pipeline_agent.neo4j_store.run_neo4j_query", AsyncMock()) as run_query:
             with self.assertRaisesRegex(RuntimeError, "starts its own branch"):
                 asyncio.run(tools["create_step"](json.dumps({
                     "type": "source", "label": "Orders CSV", "after_flow_id": "1",
@@ -71,7 +71,7 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
             return json.dumps([{"step": {"flow_id": "5"}}])
 
         tools = {tool.__name__: tool for tool in build_pipeline_editor_tools()}
-        with patch("pipeline_agent.tools.run_neo4j_query", side_effect=run_query):
+        with patch("pipeline_agent.neo4j_store.run_neo4j_query", side_effect=run_query):
             asyncio.run(tools["create_step"](json.dumps({
                 "type": "task", "label": "Merge Datasets", "after_flow_id": "3",
                 "inputs": ["customers", "orders"], "target_port": "customers",
@@ -100,7 +100,7 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
             return json.dumps([{"step": {"flow_id": "5"}}])
 
         tools = {tool.__name__: tool for tool in build_pipeline_editor_tools()}
-        with patch("pipeline_agent.tools.run_neo4j_query", side_effect=run_query):
+        with patch("pipeline_agent.neo4j_store.run_neo4j_query", side_effect=run_query):
             asyncio.run(tools["create_step"](json.dumps({
                 "type": "flow", "label": "Collect Invoices", "template": "Collect", "after_flow_id": "4",
             })))
@@ -116,16 +116,16 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
             preview_mode=True,
         )
         list_reusable = next(tool for tool in tools if tool.__name__ == "list_reusable_pipelines")
-        with patch("pipeline_agent.tools.run_neo4j_query", run_query):
+        with patch("pipeline_agent.neo4j_store.run_neo4j_query", run_query):
             asyncio.run(list_reusable("{}"))
             self.assertEqual("list_reusable_pipelines", run_query.await_args.args[1])
             self.assertIsNone(run_query.await_args.kwargs["workspace_id"])
 
             run_query.reset_mock()
             create_reusable = next(tool for tool in tools if tool.__name__ == "create_reusable_pipeline")
-            with patch("pipeline_agent.tools.validate_pipeline_graph", return_value={"valid": True}), \
-                 patch("pipeline_agent.tools.derive_subpipeline_interface", return_value={"inputs": [{}], "outputs": [{}]}), \
-                 patch("pipeline_agent.tools.public_ports_for_interface", return_value={"inputs": [{}], "outputs": [{}]}):
+            with patch("inlumen.design.tools.validate_pipeline_graph", return_value={"valid": True}), \
+                 patch("inlumen.design.tools.derive_subpipeline_interface", return_value={"inputs": [{}], "outputs": [{}]}), \
+                 patch("inlumen.design.tools.public_ports_for_interface", return_value={"inputs": [{}], "outputs": [{}]}):
                 with self.assertRaisesRegex(RuntimeError, "cannot be included in a graph preview"):
                     asyncio.run(create_reusable(json.dumps({
                         "name": "Preview reusable",
@@ -151,7 +151,7 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
                         _validate_workspace_cypher(query)
                         return json.dumps(tx.run(_scope_cypher(query, workspace)).data(), default=str)
 
-                    with patch("pipeline_agent.tools.run_neo4j_query", side_effect=run_query):
+                    with patch("pipeline_agent.neo4j_store.run_neo4j_query", side_effect=run_query):
                         for owner in ("alice", "bob"):
                             workspace = f"regression-{owner}-{uuid.uuid4()}"
                             created_workspaces.append(workspace)

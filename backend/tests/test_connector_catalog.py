@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from connector_catalog import missing_connector_parameters, require_supported_connector
+from inlumen.contracts.connector_catalog import missing_connector_parameters, require_supported_connector
 
 
 class ConnectorCatalogTest(unittest.TestCase):

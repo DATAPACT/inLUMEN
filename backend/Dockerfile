@@ -12,6 +12,13 @@ COPY ./requirements.lock ./requirements.lock
 # and avoid reinstalling dependencies if only the code changes.
 RUN --mount=type=cache,target=/root/.cache/uv uv pip install --system --require-hashes -r requirements.lock
 
+# inLUMEN's agents library (packages/agents), passed as the `agents` build
+# context by docker-compose. Only its source is copied, not local virtualenvs.
+# Its dependencies are pinned in requirements.lock, hence --no-deps.
+COPY --from=agents pyproject.toml README.md /opt/inlumen-agents/
+COPY --from=agents src /opt/inlumen-agents/src
+RUN --mount=type=cache,target=/root/.cache/uv uv pip install --system --no-deps -e /opt/inlumen-agents
+
 # Copy all files to the working directory in the container
 COPY . ./
 

@@ -19,7 +19,7 @@ from flask import Blueprint, jsonify, make_response, request
 from auth_middleware import current_principal, is_application_admin, require_auth
 
 from . import store
-from .manifest import PluginManifestError, plugin_summary, validate_plugin_manifest
+from inlumen.contracts.plugin_manifest import PluginManifestError, plugin_summary, validate_plugin_manifest
 
 
 def _error(status: int, message: str, **extra):

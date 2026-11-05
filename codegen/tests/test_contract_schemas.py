@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import get_args
 
-from app.schemas import ArtifactKind
+from inlumen.codegen.schemas import ArtifactKind
 
 
 def test_codegen_artifact_kind_matches_published_contract() -> None:

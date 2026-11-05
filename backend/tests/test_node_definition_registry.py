@@ -10,9 +10,9 @@ from flask import Flask
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from node_definitions.registry import NodeDefinitionRegistry  # noqa: E402
+from inlumen.contracts.node_definitions.registry import NodeDefinitionRegistry  # noqa: E402
 from node_definitions.routes import create_node_definitions_blueprint  # noqa: E402
-from node_definitions.schema import NodeDefinitionValidationError  # noqa: E402
+from inlumen.contracts.node_definitions.schema import NodeDefinitionValidationError  # noqa: E402
 
 
 class NodeDefinitionRegistryTest(unittest.TestCase):

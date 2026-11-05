@@ -33,7 +33,7 @@ from graph_client import (
 )
 from llm_config import llm_config_from_payload, log_llm_selection
 from node_secrets import runtime_secret_environment
-from pipeline_agent.context import _clean_client_graph
+from inlumen.design.context import _clean_client_graph
 from pipeline_agent.cancellation import (
     request_pipeline_turn_cancel,
     run_cancellable_pipeline_turn,

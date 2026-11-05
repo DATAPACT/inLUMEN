@@ -10,7 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / "backend"), str(ROOT / "codegen")]
-from artifact_runtime import (
+from inlumen.contracts.artifact_runtime import (
     ArtifactContractError,
     CONTRACT_ID,
     assign_output_ports,
@@ -19,7 +19,7 @@ from artifact_runtime import (
     validate_result,
 )
 from deployment_artifacts import _ARGO_PORT_RUNNER
-from app.pipeline_compiler import compile_pipeline_nodes
+from inlumen.codegen.pipeline_compiler import compile_pipeline_nodes
 
 
 def artifact(name="transcript", filename="transcript.json", **extra):
@@ -236,7 +236,7 @@ def test_old_argo_runner_contract_remains_supported(tmp_path):
 
 
 def test_known_schema_conflict_is_rejected_before_execution():
-    from artifact_runtime import validate_connection_contract
+    from inlumen.contracts.artifact_runtime import validate_connection_contract
 
     expected = artifact()
     incompatible = artifact()
@@ -285,8 +285,7 @@ def test_retry_cannot_reuse_previous_attempt_output(tmp_path):
 
 
 def test_publication_rollback_keeps_complete_previous_artifact(tmp_path, monkeypatch):
-    import artifact_runtime
-
+    from inlumen.contracts import artifact_runtime
     staging, destination = tmp_path / "staging", tmp_path / "published"
     write_json(staging, artifact(), {"transcript": "new"})
     write_json(destination, artifact(), {"transcript": "old"})
@@ -306,8 +305,7 @@ def test_publication_rollback_keeps_complete_previous_artifact(tmp_path, monkeyp
 
 
 def test_publication_across_filesystems_stages_on_target_mount(tmp_path, monkeypatch):
-    import artifact_runtime
-
+    from inlumen.contracts import artifact_runtime
     staging, destination = tmp_path / "work", tmp_path / "outputs" / "published"
     write_json(staging, artifact(), {"transcript": "complete"})
     original_stat = Path.stat
@@ -331,7 +329,7 @@ def test_publication_across_filesystems_stages_on_target_mount(tmp_path, monkeyp
 
 
 def test_component_loader_numeric_ids_are_normalized_to_strings(tmp_path):
-    from artifact_runtime import prepare_node_environment
+    from inlumen.contracts.artifact_runtime import prepare_node_environment
 
     spec = artifact()
     source = tmp_path / "source"

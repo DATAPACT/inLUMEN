@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pipeline_agent.contract import (  # noqa: E402
+from inlumen.design.contract import (  # noqa: E402
     default_input_port_expression,
     default_output_port_expression,
     normalize_agent_implementation,

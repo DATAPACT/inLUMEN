@@ -1,5 +1,6 @@
 /**
- * Parallel Map scopes — browser mirror of shared/map_scope.py.
+ * Parallel Map scopes — browser mirror of inlumen.contracts.map_scope
+ * (packages/agents/src/inlumen/contracts/map_scope.py).
  *
  * A Parallel Map opens a scope and a Collect closes it; every step between
  * them runs once per item. Both implementations are tested against the same

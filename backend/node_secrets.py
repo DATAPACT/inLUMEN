@@ -11,7 +11,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import create_engine, text
 
 from auth_middleware import current_workspace_id
-from node_parameters import normalize_secret_param_keys
+from inlumen.contracts.node_parameters import normalize_secret_param_keys
 
 
 _PARAMETER_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")

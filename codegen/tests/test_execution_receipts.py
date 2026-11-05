@@ -2,7 +2,7 @@ import pytest
 from app.execution_store import ExecutionStore
 from app.job_store import PipelineJobStore
 from app.main import scoped_execution_id
-from app.generation_budget import GenerationBudget
+from inlumen.codegen.generation_budget import GenerationBudget
 
 
 def test_receipts_survive_restart_reject_conflicts_and_redact_secrets(tmp_path):

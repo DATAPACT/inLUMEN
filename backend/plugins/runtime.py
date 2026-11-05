@@ -5,9 +5,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from node_parameters import is_sensitive_parameter_name, normalize_secret_param_keys
+from inlumen.contracts.node_parameters import is_sensitive_parameter_name, normalize_secret_param_keys
 
-from .manifest import (
+from inlumen.contracts.plugin_manifest import (
     DEFAULT_OUTPUT_MODE,
     OUTPUT_MODE_ENRICH,
     OUTPUT_MODES,

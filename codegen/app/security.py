@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextvars import ContextVar
 import hmac
 import os
 from pathlib import Path
@@ -11,7 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
 
-EXECUTION_WORKSPACE: ContextVar[str] = ContextVar("execution_workspace", default="local-workspace")
+from inlumen.codegen.workspace import EXECUTION_WORKSPACE
 
 SERVICE_API_KEY_ENV = "CODEGEN_SERVICE_API_KEY"
 SERVICE_API_KEY_FILE_ENV = "CODEGEN_SERVICE_API_KEY_FILE"

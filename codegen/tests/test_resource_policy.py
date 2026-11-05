@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import pytest
 
-from app.resource_policy import (
+from inlumen.codegen.resource_policy import (
     GIB,
     RESOURCE_ADMISSION,
     RESOURCE_PROFILES,

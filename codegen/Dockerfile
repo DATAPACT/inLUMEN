@@ -7,6 +7,10 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 WORKDIR /app
 
+# inLUMEN's agents library (packages/agents), passed as the `agents` build
+# context by docker-compose. Only its source is copied, not local virtualenvs.
+COPY --from=agents pyproject.toml README.md /packages/agents/
+COPY --from=agents src /packages/agents/src
 COPY pyproject.toml uv.lock README.md /app/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project

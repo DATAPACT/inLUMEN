@@ -53,6 +53,7 @@ The test signs isolated test identities and deletes only its UUID workspace data
 ```sh
 docker run --rm \
   -v "$PWD/codegen/app:/app/app:ro" \
+  -v "$PWD/packages/agents/src:/packages/agents/src:ro" \
   -v "$PWD/codegen/tests:/repo/codegen/tests:ro" \
   -v "$PWD/contracts:/repo/contracts:ro" \
   -v /tmp/inlumen-regression-input.json:/fixture.json:ro \
@@ -120,6 +121,7 @@ docker run --rm \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v /tmp/inlumen-permission-tests:/tmp/inlumen-permission-tests \
   -v "$PWD/codegen/app:/app/app:ro" \
+  -v "$PWD/packages/agents/src:/packages/agents/src:ro" \
   -v "$PWD/codegen/tests:/repo/codegen/tests:ro" \
   -v "$PWD/contracts:/repo/contracts:ro" \
   -e PYTHONPATH=/app -e RUN_DAGSTER_PERMISSION_INTEGRATION=1 \

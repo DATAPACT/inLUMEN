@@ -24,7 +24,7 @@ from typing import Any
 
 from sqlalchemy import create_engine, text
 
-from .manifest import PluginManifestError, validate_plugin_manifest
+from inlumen.contracts.plugin_manifest import PluginManifestError, validate_plugin_manifest
 
 LOGGER = logging.getLogger(__name__)
 BUILTIN_SOURCE = "built-in"

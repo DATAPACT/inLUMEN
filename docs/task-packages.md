@@ -6,7 +6,7 @@ A Task is a directory containing `main.py` and `inlumen.task.json`. The minimal 
 {"version": 1, "output": {"type": "file", "path": "result.json"}}
 ```
 
-The versioned schema and examples live in `contracts/task-package-v1`. `shared/task_package_spec.json` generates the browser help, published schema, and service copies through `python3 scripts/sync_shared.py`. `shared/task_package_contract.py` is the shared validator and normalizer. Run `python3 scripts/sync_shared.py --check` in CI.
+The versioned schema and examples live in `contracts/task-package-v1`. `packages/agents/src/inlumen/contracts/task_package_spec.json` generates the browser help and the published schema through `python3 scripts/sync_shared.py`. `inlumen.contracts.task_package_contract` (in the `inlumen-agents` package, `packages/agents/src/inlumen/contracts/task_package_contract.py`) is the shared validator and normalizer; the backend and codegen install the package. Run `python3 scripts/sync_shared.py --check` in CI.
 
 Output paths are exact paths relative to `PIPELINE_OUTPUT_DIR`. A directory bundle is one artifact. Optional input requirements identify a consumer port, not a producer ID or filesystem directory. The runtime supplies the graph connection identities and stages each bound artifact in `PIPELINE_INPUT_DIR`. `INLUMEN_INPUT_MANIFEST` identifies those artifacts; `PIPELINE_WORK_DIR` is for temporary files. A JSON output without a content schema is syntax-checked, with structural validation explicitly reported as unavailable.
 

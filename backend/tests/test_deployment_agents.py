@@ -105,7 +105,7 @@ class DeploymentAgentsTest(unittest.TestCase):
         self.assertFalse(by_name["API_ENDPOINT"]["required"])
 
     def test_source_with_separate_files_publishes_one_port_per_file(self):
-        from artifact_runtime import assign_output_ports, publish_port_artifacts, validate_result
+        from inlumen.contracts.artifact_runtime import assign_output_ports, publish_port_artifacts, validate_result
 
         artifact, _ = _managed_adapter_runtime(
             {

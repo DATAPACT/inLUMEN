@@ -1,7 +1,7 @@
 import unittest
 
-from pipeline_graph_validation import validate_pipeline_graph
-from subpipeline_reference import (
+from inlumen.contracts.pipeline_graph_validation import validate_pipeline_graph
+from inlumen.contracts.subpipeline_reference import (
     derive_subpipeline_interface,
     hydrate_reusable_file_references,
     missing_explicit_port_contracts,

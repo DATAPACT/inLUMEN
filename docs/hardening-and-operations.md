@@ -153,12 +153,21 @@ npm audit --audit-level=moderate
 ```
 
 Use Python 3.11 with backend `requirements.lock`, frozen `uv.lock` environments
-for codegen/runner, and Node 22.12+ for frontend checks. Backend tests use pytest;
+for codegen/runner, and Node 22.12+ for frontend checks.
+The backend environment also needs the agents library:
+`uv pip install --python backend/.venv --no-deps -e packages/agents` (codegen's
+`uv.lock` installs it from the same folder). Backend tests use pytest;
 the runner prefers the backend's managed virtualenv when present, otherwise its
 invoking interpreter. Install test dependencies into the selected environment.
-To update shared code, edit
-`shared/leases.py`, `shared/request_diagnostics.py`, or the backend core node
-manifest, then run `python scripts/sync_shared.py`. CI checks generated copies.
+The pipeline graph model (port types, Parallel Map scopes, the artifact
+runtime, the Task package contract, node ports and definitions, graph
+validation) and the design agent live in the `inlumen-agents` package
+(`packages/agents/src/inlumen`); the backend and codegen install it,
+so edits there need no sync, except that changes to `port_types.json` or
+`task_package_spec.json` regenerate browser copies. To update other shared code,
+edit `shared/leases.py`, `shared/request_diagnostics.py`,
+`shared/run_artifact_names.py`, or the backend core node manifest, then run
+`python scripts/sync_shared.py`. CI checks generated copies.
 
 Real Neo4j tests require an explicitly disposable database:
 

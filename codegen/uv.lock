@@ -338,6 +338,28 @@ wheels = [
 ]
 
 [[package]]
+name = "inlumen-agents"
+version = "1.0.0b6.dev0"
+source = { editable = "../packages/agents" }
+dependencies = [
+    { name = "jsonschema" },
+    { name = "packaging" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "autogen-agentchat", marker = "extra == 'design'", specifier = ">=0.7.5,<0.8" },
+    { name = "autogen-ext", extras = ["openai"], marker = "extra == 'design'", specifier = ">=0.7.5,<0.8" },
+    { name = "docker", marker = "extra == 'codegen'", specifier = ">=7.1.0" },
+    { name = "httpx", marker = "extra == 'codegen'", specifier = ">=0.27.0" },
+    { name = "jsonschema", specifier = ">=4.23,<5" },
+    { name = "packaging", specifier = ">=24.0" },
+    { name = "pydantic", marker = "extra == 'codegen'", specifier = ">=2.7.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
+]
+provides-extras = ["design", "codegen", "dev"]
+
+[[package]]
 name = "inlumen-codegen-service"
 version = "0.1.0"
 source = { editable = "." }
@@ -345,6 +367,7 @@ dependencies = [
     { name = "docker" },
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "inlumen-agents" },
     { name = "jsonschema" },
     { name = "minio" },
     { name = "packaging" },
@@ -366,6 +389,7 @@ requires-dist = [
     { name = "docker", specifier = ">=7.1.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.27.0" },
+    { name = "inlumen-agents", editable = "../packages/agents" },
     { name = "jsonschema", specifier = ">=4.23,<5" },
     { name = "minio", specifier = "==7.1.17" },
     { name = "packaging", specifier = ">=24.0" },

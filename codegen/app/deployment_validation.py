@@ -6,7 +6,7 @@ import hashlib
 
 from .run_artifact_store import RunArtifactStore
 from .step_cache import CacheMode, StepCache, StepCachePlan, plan_step_cache
-from .security import EXECUTION_WORKSPACE
+from inlumen.codegen.workspace import EXECUTION_WORKSPACE
 import json
 import mimetypes
 import os
@@ -26,7 +26,7 @@ import docker
 from docker.errors import DockerException, ImageNotFound
 from requests.exceptions import ReadTimeout
 
-from .resource_policy import (
+from inlumen.codegen.resource_policy import (
     RESOURCE_ADMISSION,
     host_allocatable_resources,
     profile_allocation,

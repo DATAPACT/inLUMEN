@@ -15,18 +15,33 @@ from graph_client import (
     sync_backend_to_canvas_graph,
 )
 from llm_config import LLMConfig
-from pipeline_agent.context import (
-    _assistant_message_from_result,
-    _build_agent_task,
-    _graph_counts,
-    _safe_assistant_message,
-    is_read_only_pipeline_request,
-)
-from pipeline_agent.guardrails import (
-    _build_graph_sync_guardrail,
-    _guardrail_repair_task,
-)
+from inlumen.design.context import _graph_counts, _safe_assistant_message
+from inlumen.design.turn import run_design_turn
 from pipeline_agent.team import build_pipeline_editing_team
+
+
+class _TurnGraph:
+    """The turn's view of the persisted graph: the live workspace or a preview."""
+
+    def __init__(self, *, authorization, preview_workspace_id, active_version_uid, active_version_name):
+        self.authorization = authorization
+        self.preview_workspace_id = preview_workspace_id
+        self.active_version_uid = active_version_uid
+        self.active_version_name = active_version_name
+
+    async def get_graph(self) -> dict:
+        return await fetch_pipeline_graph(
+            authorization=self.authorization,
+            **({"workspace_id": self.preview_workspace_id} if self.preview_workspace_id else {}),
+        )
+
+    async def restore_graph(self, graph: dict) -> None:
+        await sync_backend_to_canvas_graph(
+            graph,
+            self.active_version_uid,
+            self.active_version_name,
+            authorization=self.authorization,
+        )
 
 
 @dataclass(frozen=True)
@@ -132,85 +147,23 @@ async def _run_pipeline_editor_turn(
     if team_state:
         await team.load_state(team_state)
 
-    result = await team.run(
-        task=_build_agent_task(user_message, canvas_graph, agent_backend_graph)
-    )
-    assistant_message = _assistant_message_from_result(result)
-    try:
-        after_graph = await fetch_pipeline_graph(
+    turn = await run_design_turn(
+        user_message=user_message,
+        team=team,
+        graph=_TurnGraph(
             authorization=authorization,
-            **({"workspace_id": preview_workspace_id} if preview_workspace_id else {}),
-        )
-        after_error = None
-    except Exception as exc:
-        after_graph, after_error = None, str(exc)
-    sync = _build_graph_sync_guardrail(
-        visible_before_graph,
-        after_graph,
-        user_message,
-        after_error,
+            preview_workspace_id=preview_workspace_id,
+            active_version_uid=active_version_uid,
+            active_version_name=active_version_name,
+        ),
+        canvas_graph=canvas_graph,
+        agent_graph=agent_backend_graph,
+        visible_before_graph=visible_before_graph,
+        # Preview workspaces can simply be discarded; direct turns restore the
+        # visible graph before any active-version save occurs below.
+        restore_read_only_changes=preview_workspace_id is None,
     )
-
-    # Informational requests must never turn model paraphrasing or an accidental
-    # tool write into a real edit or a Review AI proposal. Preview workspaces can
-    # simply be discarded; direct turns restore the visible graph before any
-    # active-version save occurs below.
-    if is_read_only_pipeline_request(user_message) and sync.get("graph_changed"):
-        if preview_workspace_id is None:
-            if not isinstance(visible_before_graph, dict):
-                raise RuntimeError("No pre-turn graph snapshot is available for a read-only request.")
-            try:
-                await sync_backend_to_canvas_graph(
-                    visible_before_graph,
-                    active_version_uid,
-                    active_version_name,
-                    authorization=authorization,
-                )
-                after_graph = deepcopy(visible_before_graph)
-                after_error = None
-            except Exception as exc:
-                after_error = str(exc)
-        else:
-            after_graph = deepcopy(visible_before_graph)
-            after_error = None
-        sync = _build_graph_sync_guardrail(
-            visible_before_graph,
-            after_graph,
-            user_message,
-            after_error,
-        )
-
-    if (
-        not sync["guardrail_passed"]
-        and sync.get("status") == "invalid"
-        and not after_error
-    ):
-        repair_result = await team.run(
-            task=_guardrail_repair_task(
-                user_message,
-                canvas_graph,
-                after_graph,
-                sync.get("validation_errors"),
-            )
-        )
-        repair_message = _assistant_message_from_result(repair_result)
-        if repair_message:
-            assistant_message = repair_message
-        try:
-            after_graph = await fetch_pipeline_graph(
-                authorization=authorization,
-                **({"workspace_id": preview_workspace_id} if preview_workspace_id else {}),
-            )
-            repaired_error = None
-        except Exception as exc:
-            after_graph, repaired_error = None, str(exc)
-        sync = _build_graph_sync_guardrail(
-            visible_before_graph,
-            after_graph,
-            user_message,
-            repaired_error,
-            repaired=True,
-        )
+    assistant_message, after_graph, sync = turn.assistant_message, turn.graph, turn.sync
 
     if not sync["guardrail_passed"] and sync.get("status") == "invalid":
         failure_messages = list(sync.get("validation_errors") or [])

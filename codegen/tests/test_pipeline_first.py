@@ -12,7 +12,7 @@ from typing import ClassVar
 
 from fastapi.testclient import TestClient
 
-from app.generator import (
+from inlumen.codegen.generator import (
     build_pipeline_generation_plan,
     deterministic_pipeline_payload,
     evaluate_pipeline_draft,
@@ -23,16 +23,16 @@ from app.generator import (
     normalize_requirements,
 )
 from app.main import app
-from app.llm import NODE_SYSTEM_PROMPT, PIPELINE_SYSTEM_PROMPT
-from app.multimodal import build_multimodal_user_content
-from app.pipeline_compiler import (
+from inlumen.codegen.llm import NODE_SYSTEM_PROMPT, PIPELINE_SYSTEM_PROMPT
+from inlumen.codegen.multimodal import build_multimodal_user_content
+from inlumen.codegen.pipeline_compiler import (
     compile_pipeline_nodes,
     compose_pipeline_program,
     function_name_for_flow_id,
     isolate_pipeline_nodes,
     validate_pipeline_source,
 )
-from app.schemas import (
+from inlumen.codegen.schemas import (
     ExpectedArtifact,
     FileDescriptor,
     FileSample,
@@ -40,12 +40,12 @@ from app.schemas import (
     NodeDescriptor,
     ValidationReport,
 )
-from app.task_profiles import (
+from inlumen.codegen.task_profiles import (
     classify_node_task,
     source_semantic_errors,
     task_profile_payload,
 )
-from app.trusted_adapters import (
+from inlumen.codegen.trusted_adapters import (
     apply_trusted_adapters,
     faster_whisper_function_source,
     input_boundary_function_source,
@@ -171,7 +171,7 @@ def test_targeted_generation_forwards_llm_config(monkeypatch) -> None:
         seen_models.append(config.model)
         return fallback_script_payload(request)
 
-    monkeypatch.setattr("app.generator.generate_node_payload", generate_from_config)
+    monkeypatch.setattr("inlumen.codegen.generator.generate_node_payload", generate_from_config)
 
     targeted = asyncio.run(
         generate_pipeline_script_bundles(
@@ -1802,11 +1802,11 @@ def test_pipeline_sample_uses_one_whole_pipeline_sandbox(monkeypatch) -> None:
         raise AssertionError("per-node Docker validation must not run")
 
     monkeypatch.setattr(
-        "app.generator.validate_pipeline_program_with_docker",
+        "inlumen.codegen.generator.validate_pipeline_program_with_docker",
         pipeline_sandbox,
     )
     monkeypatch.setattr(
-        "app.generator.validate_node_with_docker",
+        "inlumen.codegen.generator.validate_node_with_docker",
         node_sandbox,
     )
     payload = pipeline_payload()
@@ -1845,11 +1845,11 @@ def test_reviewed_model_download_is_deferred_by_default(
         )
 
     monkeypatch.setattr(
-        "app.generator.validate_pipeline_dependencies_with_docker",
+        "inlumen.codegen.generator.validate_pipeline_dependencies_with_docker",
         dependency_sandbox,
     )
     monkeypatch.setattr(
-        "app.generator.validate_pipeline_program_with_docker",
+        "inlumen.codegen.generator.validate_pipeline_program_with_docker",
         pipeline_sandbox,
     )
     payload = reviewed_audio_pipeline_payload()
@@ -2226,7 +2226,7 @@ def test_map_and_collect_run_as_compiler_owned_functions(tmp_path, monkeypatch) 
 
 
 def test_tables_with_the_same_name_stay_distinct_in_a_bundle() -> None:
-    from app.generator import data_passthrough_outputs
+    from inlumen.codegen.generator import data_passthrough_outputs
 
     inputs = [
         FileDescriptor(filename="data.csv", kind="table", format="csv", source_node="sales"),
@@ -2239,7 +2239,7 @@ def test_tables_with_the_same_name_stay_distinct_in_a_bundle() -> None:
 def test_validation_workspace_accepts_any_step_id(tmp_path, monkeypatch) -> None:
     from pathlib import Path
 
-    from app.sandbox import validation_workspace
+    from inlumen.codegen.sandbox import validation_workspace
 
     monkeypatch.setenv("CODEGEN_VALIDATION_WORKDIR", str(tmp_path))
     with validation_workspace("etl/clean") as workspace:

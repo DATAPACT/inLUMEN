@@ -230,7 +230,7 @@ if __name__ == "__main__":
 
 def test_external_prompt_contains_authoritative_schema_exact_folders_and_model_contract():
     import json
-    from task_package_contract import TASK_SCHEMA
+    from inlumen.contracts.task_package_contract import TASK_SCHEMA
     graph = {'nodes': [
         {'id': 'source', 'data': {'type': 'source', 'label': 'Audio'}},
         {'id': '2', 'data': {'type': 'task', 'label': 'Transcribe'}},

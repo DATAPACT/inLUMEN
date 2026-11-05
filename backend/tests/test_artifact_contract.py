@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from artifact_contract import artifact_bindings, classify_artifact, normalize_port_id
+from inlumen.contracts.artifact_contract import artifact_bindings, classify_artifact, normalize_port_id
 
 
 class ArtifactContractTest(unittest.TestCase):

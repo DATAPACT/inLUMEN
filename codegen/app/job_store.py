@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 
 from .leases import durable_write
 
-from .schemas import GeneratePipelineScriptsRequest
+from inlumen.codegen.schemas import GeneratePipelineScriptsRequest
 
 LOCAL_WORKSPACE_ID = "local-workspace"
 

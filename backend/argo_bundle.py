@@ -36,7 +36,7 @@ def workflow_path(*, models_baked: bool = False, gpu: bool = False) -> str:
     return f"argo/workflow{suffix}.yaml" if suffix else WORKFLOW_PATH
 
 
-# The same profiles as codegen/app/resource_policy.py, which sizes local runs;
+# The same profiles as packages/agents/src/inlumen/codegen/resource_policy.py, which sizes local runs;
 # test_argo_bundle checks that the two stay in sync. The backend image does not
 # ship the codegen package, hence the copy.
 GIB = 1024**3
@@ -70,7 +70,7 @@ def select_resource_profile(
     model_resource_classes: Iterable[str],
     requirements: Iterable[str],
 ) -> str:
-    """Name the profile codegen/app/resource_policy.py would pick for a step."""
+    """Name the profile packages/agents/src/inlumen/codegen/resource_policy.py would pick for a step."""
     classes = [str(item or "").strip().lower() for item in model_resource_classes]
     if classes and (set(classes) & _ML_RESOURCE_CLASSES or "" in classes):
         return "ml_cpu"

@@ -216,7 +216,7 @@ class PipelineAgentServiceTest(unittest.TestCase):
     @patch("pipeline_agent.service.save_active_pipeline_version", new_callable=AsyncMock)
     @patch("pipeline_agent.service.fetch_pipeline_graph", new_callable=AsyncMock)
     @patch("pipeline_agent.service.sync_backend_to_canvas_graph", new_callable=AsyncMock)
-    @patch("pipeline_agent.service._build_graph_sync_guardrail")
+    @patch("inlumen.design.turn._build_graph_sync_guardrail")
     @patch("pipeline_agent.service.build_pipeline_editing_team")
     def test_preview_turn_uses_and_cleans_an_isolated_workspace_without_persisting_live_graph(
         self,

@@ -1,13 +1,13 @@
 import base64
 import json
 
-from app.sandbox import (
+from inlumen.codegen.sandbox import (
     persist_descriptors_for_handoff,
     sample_rows_for_descriptor,
     validate_output_shape,
     write_sample_inputs,
 )
-from app.schemas import ExpectedArtifact, FileDescriptor, FileSample
+from inlumen.codegen.schemas import ExpectedArtifact, FileDescriptor, FileSample
 
 
 def test_write_sample_inputs_preserves_existing_inherited_file(tmp_path) -> None:

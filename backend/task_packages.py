@@ -8,8 +8,8 @@ import zipfile
 from pathlib import PurePosixPath
 from urllib.parse import quote, unquote
 
-from artifact_runtime import ArtifactContractError, validate_connection_contract
-from task_package_contract import safe_path, validate_package, resolve_requirements
+from inlumen.contracts.artifact_runtime import ArtifactContractError, validate_connection_contract
+from inlumen.contracts.task_package_contract import safe_path, validate_package, resolve_requirements
 
 MAX_ARCHIVE = 50 * 1024 * 1024
 MAX_EXPANDED = 200 * 1024 * 1024

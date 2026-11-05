@@ -18,14 +18,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(ROOT / "examples" / "plugins"))
 
 import plugins  # noqa: E402
-from artifact_runtime import validate_result  # noqa: E402
-from connector_catalog import (  # noqa: E402
+import inlumen.contracts.plugins as plugin_lookup  # noqa: E402
+from inlumen.contracts.artifact_runtime import validate_result  # noqa: E402
+from inlumen.contracts.connector_catalog import (  # noqa: E402
     connector_definition,
     missing_connector_parameters,
     require_supported_connector,
 )
-from node_ports import ports_for_template  # noqa: E402
-from pipeline_graph_validation import validate_pipeline_graph  # noqa: E402
+from inlumen.contracts.node_ports import ports_for_template  # noqa: E402
+from inlumen.contracts.pipeline_graph_validation import validate_pipeline_graph  # noqa: E402
 from plugins import (  # noqa: E402
     PluginManifestError,
     PluginNotInstalled,
@@ -34,7 +35,7 @@ from plugins import (  # noqa: E402
     validate_plugin_manifest,
     with_plugin_secret_keys,
 )
-from plugins.manifest import default_parameters, required_parameter_names  # noqa: E402
+from inlumen.contracts.plugin_manifest import default_parameters, required_parameter_names  # noqa: E402
 from plugins.runtime import plugin_data_contract, plugin_main_source, plugin_runtime_spec  # noqa: E402
 
 EXAMPLE_PATH = ROOT / "examples" / "plugins" / "text-anonymizer.plugin.json"
@@ -50,7 +51,7 @@ def example_manifest(**overrides):
 @contextmanager
 def installed(*manifests):
     registry = {m["id"]: validate_plugin_manifest(m) for m in manifests}
-    with patch.object(plugins, "installed_plugin_manifest", side_effect=registry.get):
+    with patch.object(plugin_lookup, "installed_plugin_manifest", side_effect=registry.get):
         yield registry
 
 
@@ -761,7 +762,7 @@ class PluginAgentToolsTest(unittest.TestCase):
             self.assertIn("api_key", guidance["configured_after_design"])
 
             run_query = AsyncMock(return_value="[]")
-            with patch("pipeline_agent.tools.run_neo4j_query", run_query):
+            with patch("pipeline_agent.neo4j_store.run_neo4j_query", run_query):
                 try:
                     asyncio.run(tools["create_step"](json.dumps({
                         "type": "task", "label": "Anonymize", "description": "Remove PII",
