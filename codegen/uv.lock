@@ -339,7 +339,7 @@ wheels = [
 
 [[package]]
 name = "inlumen-agents"
-version = "1.0.0b6.dev0"
+version = "1.0.0b6.dev1"
 source = { editable = "../packages/agents" }
 dependencies = [
     { name = "jsonschema" },
