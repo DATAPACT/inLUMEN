@@ -16,6 +16,7 @@ from inlumen.codegen.sandbox import (  # noqa: E402
     DockerSandbox,
     NoSandbox,
     docker_validation_enabled,
+    thread_limit_environment,
     use_sandbox,
 )
 
@@ -170,3 +171,12 @@ def test_generation_refuses_an_interpreter_that_breaks_3_11_code(monkeypatch):
     monkeypatch.setattr(run_module, "unparse_is_portable", lambda: False)
     with pytest.raises(RuntimeError, match="Python 3.11 runtime cannot parse"):
         asyncio.run(generate(_graph(), model=Scripted(_valid)))
+
+
+def test_sandbox_caps_numeric_thread_pools_at_its_cpus():
+    # numpy's OpenBLAS sizes its pool from the host's CPUs (64 threads on a 72-CPU host),
+    # which exceeds the sandbox's process limit unless capped.
+    env = thread_limit_environment(2)
+    assert env["OPENBLAS_NUM_THREADS"] == "2"
+    assert env["OMP_NUM_THREADS"] == env["MKL_NUM_THREADS"] == env["NUMEXPR_NUM_THREADS"] == "2"
+    assert thread_limit_environment(0.5)["OPENBLAS_NUM_THREADS"] == "1"
