@@ -53,6 +53,26 @@ _SANDBOX_LOCK = threading.RLock()
 _STANDARD_SANDBOX_PROFILE = RESOURCE_PROFILES["standard"]
 
 
+def thread_limit_environment(cpus: float) -> dict[str, str]:
+    """Caps the thread pools of numeric libraries at the sandbox's CPU count.
+
+    OpenBLAS, OpenMP, MKL and numexpr size their pools from the host's CPUs, not the
+    container's CPU quota. On a large host (72 CPUs) numpy then starts 64 threads per
+    process, which exceeds the sandbox's process limit and kills the pipeline before
+    its code runs ("pthread_create failed")."""
+    threads = str(max(1, int(cpus)))
+    return {
+        name: threads
+        for name in (
+            "OPENBLAS_NUM_THREADS",
+            "OMP_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
+        )
+    }
+
+
 class SandboxUnavailable(RuntimeError):
     pass
 
@@ -875,6 +895,7 @@ def validate_pipeline_program_with_docker(
                     ),
                     "INLUMEN_CONTEXT_PATH": "/inlumen/context.json",
                     "PYTHONDONTWRITEBYTECODE": "1",
+                    **thread_limit_environment(_STANDARD_SANDBOX_PROFILE.cpu),
                 },
                 "volumes": {
                     str(pipeline_path): {
@@ -1237,6 +1258,7 @@ def run_docker_validation(
             "INLUMEN_OUTPUT_MANIFEST": "/inlumen/runtime/outputs.json",
             "PIPELINE_WORK_DIR": "/inlumen/runtime",
             "INLUMEN_CONTEXT_PATH": "/inlumen/context.json",
+            **thread_limit_environment(1),
         }
         if runtime_parameters:
             runtime_environment["PIPELINE_PARAMS_JSON"] = json.dumps(
