@@ -18,6 +18,7 @@ def implementation_plan_from_data(data: Any) -> dict[str, Any]:
             implementation,
             label=str(data.get("label") or ""),
             description=str(data.get("description") or ""),
+            ports=data.get("ports"),
         )
 
     parameters = data.get("param")
@@ -39,6 +40,7 @@ def implementation_plan_from_data(data: Any) -> dict[str, Any]:
                 model_plan,
                 label=str(data.get("label") or ""),
                 description=str(data.get("description") or ""),
+                ports=data.get("ports"),
             )
     return {}
 

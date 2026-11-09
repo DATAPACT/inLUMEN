@@ -209,12 +209,14 @@ def step_properties(flow_id: str, raw_node: dict[str, Any], data: dict[str, Any]
             data["implementation"],
             label=str(data.get("label") or ""),
             description=str(data.get("description") or ""),
+            ports=data.get("ports"),
         )
     elif isinstance(param_obj.get("model_plan"), dict):
         param_obj["model_plan"] = resolve_implementation_plan(
             param_obj["model_plan"],
             label=str(data.get("label") or ""),
             description=str(data.get("description") or ""),
+            ports=data.get("ports"),
         )
     # Parameters are inspector metadata for every structural node kind.
     secret_param_keys = with_plugin_secret_keys(

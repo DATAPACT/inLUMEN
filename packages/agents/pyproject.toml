@@ -1,7 +1,7 @@
 [project]
 name = "inlumen-agents"
 # Versioned with inLUMEN releases (v1.0.0-beta.6 -> 1.0.0b6), see docs/adr/0005.
-version = "1.0.0b6.dev2"
+version = "1.0.0b6.dev3"
 description = "inLUMEN's pipeline design and code generation agents, as a library."
 readme = "README.md"
 license = "Apache-2.0"
