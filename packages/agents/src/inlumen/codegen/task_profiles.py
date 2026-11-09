@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from inlumen.contracts.declared_outputs import declares_model_output
+
 from .model_plans import (
     is_asr_task_text,
     model_plan_requires_exact_model,
@@ -167,12 +169,10 @@ def implementation_plan_for_node(
                 break
     return resolve_implementation_plan(
         plan,
-        label=(
-            "Model Training"
-            if classify_node_task(node, inputs or []) == "model_training"
-            else node.label
-        ),
+        label=node.label,
         description=node.description,
+        ports=node.ports,
+        trains_model=classify_node_task(node, inputs or []) == "model_training",
     )
 
 
@@ -196,13 +196,19 @@ def classify_node_task(
                 break
     if is_input_node_kind(node.type):
         return "ingestion"
+    # Declared outputs decide whether a node trains a model: one that declares a
+    # model output does, one that declares only other outputs does not, whatever
+    # its wording. Only a node that declares nothing is judged by its words below.
+    trains_model = declares_model_output(node.implementation, node.ports)
+    if trains_model:
+        return "model_training"
     if any(token in text for token in ("report", "result compilation")):
         return "report"
     if any(token in text for token in ("alert", "notify", "notification", "warning")):
         return "alerting"
     if raw_plan.get("execution_profile") == "classical_ml":
-        return "model_training"
-    if any(
+        return "model_training"  # an explicit model plan
+    if trains_model is None and any(
         token in text
         for token in (
             "train model",
@@ -224,7 +230,8 @@ def classify_node_task(
     if is_asr_task_text(text):
         return "speech_to_text"
     if (
-        ("table" in kinds or formats & {"csv", "tsv", "parquet"})
+        trains_model is None
+        and ("table" in kinds or formats & {"csv", "tsv", "parquet"})
         and any(
             token in text
             for token in (

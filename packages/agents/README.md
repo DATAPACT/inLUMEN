@@ -62,7 +62,7 @@ max_tokens=…)` returning `inlumen.codegen.model.ModelReply` can be the model.
 
 From PyPI (pre-releases need an exact version or `--pre`):
 ```sh
-pip install "inlumen-agents[design,codegen]==1.0.0b6.dev2"
+pip install "inlumen-agents[design,codegen]==1.0.0b6.dev3"
 ```
 Extras: `design` for `inlumen.design`, `codegen` for `inlumen.codegen`;
 `inlumen.contracts` needs neither.

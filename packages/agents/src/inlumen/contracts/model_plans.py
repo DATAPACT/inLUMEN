@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 from typing import Any
 
+from .declared_outputs import declares_model_output, with_declared_outputs
+
 IMPLEMENTATION_PLAN_SCHEMA = "inlumen.implementation-plan@1"
 QUALITY_POLICY_SCHEMA = "inlumen.quality-policy@1"
 MODEL_ARTIFACT_POLICY_SCHEMA = "inlumen.model-artifact-policy@1"
@@ -718,6 +720,29 @@ def resolve_implementation_plan(
     *,
     label: str = "",
     description: str = "",
+    ports: Any = None,
+    trains_model: bool | None = None,
+) -> dict[str, Any]:
+    """Resolve a node's implementation plan, keeping its declared output contract.
+
+    Whether the node trains a model follows from its declared outputs (an
+    artifact or output port of kind model) when it declares any; `trains_model`
+    states it outright. Only a node that declares nothing is judged by its words.
+    """
+    candidate = dict(plan) if isinstance(plan, dict) else {}
+    if trains_model is None:
+        trains_model = declares_model_output(candidate, ports)
+    resolved = _resolve_plan(candidate, label=label, description=description,
+                             trains_model=trains_model)
+    return with_declared_outputs(resolved, candidate)
+
+
+def _resolve_plan(
+    plan: Any,
+    *,
+    label: str = "",
+    description: str = "",
+    trains_model: bool | None = None,
 ) -> dict[str, Any]:
     """Resolve recognized model tasks without rejecting unknown modalities."""
     candidate = dict(plan) if isinstance(plan, dict) else {}
@@ -734,7 +759,7 @@ def resolve_implementation_plan(
             candidate.get("model_id"),
         )
     ).lower()
-    if _is_classical_training_task(node_text):
+    if (_is_classical_training_task(node_text) if trains_model is None else trains_model):
         if _explicit_heavy_model_request(node_text):
             return _proposed_custom_plan(candidate)
         return _resolve_classical_ml_plan(candidate)

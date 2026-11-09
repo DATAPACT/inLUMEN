@@ -9,9 +9,10 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 from inlumen.contracts.artifact_runtime import ArtifactContractError, assign_output_ports, validate_declaration
+from inlumen.contracts.declared_outputs import typed_output_ports
 from inlumen.contracts.map_scope import is_collect, is_map
 from inlumen.contracts.port_types import FILES_AS_SEPARATE, file_port_ids, files_as, parse_port_type
 from inlumen.contracts.task_package_contract import public_manifest, validate_package
@@ -42,6 +43,7 @@ from .sandbox import (
     validation_workspace,
 )
 from .schemas import (
+    ArtifactKind,
     DataContract,
     EdgeDataContract,
     ExpectedArtifact,
@@ -1812,6 +1814,37 @@ def _declared_output_artifacts(node) -> list[ExpectedArtifact] | None:
     return None
 
 
+# Default file extension for an output port of a given type, when its name has none.
+PORT_TYPE_EXTENSIONS = {"table": "csv", "json": "json", "text": "txt", "model": "pickle",
+                        "image": "png", "audio": "wav", "video": "mp4", "document": "pdf"}
+
+
+def _port_output_artifacts(node) -> list[ExpectedArtifact]:
+    """One artifact per typed output port, for a node with several typed ports and
+    no declared artifacts: each port carries its own artifact, never one bundle."""
+    ports = typed_output_ports(node.ports)
+    if len(ports) < 2:
+        return []
+    artifacts = []
+    for port in ports:
+        port_type = parse_port_type(port.get("type"))
+        name = str(port.get("name") or port["id"])
+        common = {"port": str(port["id"]), "description": str(port.get("description") or "")}
+        if port_type.many:  # a collection: one directory holding the items
+            artifacts.append(ExpectedArtifact(
+                name=sanitize_fragment(str(port["id"])).replace("-", "_").lower(), kind="directory",
+                representation="directory", filename=str(port["id"]), **common))
+            continue
+        kind = port_type.kind if port_type.kind in get_args(ArtifactKind) else "binary"
+        suffix = Path(name).suffix.lstrip(".")
+        fmt = str(port.get("format") or suffix or PORT_TYPE_EXTENSIONS.get(kind, "bin"))
+        filename = name if suffix else f"{port['id']}.{fmt}"
+        artifacts.append(ExpectedArtifact(
+            name=sanitize_fragment(Path(filename).stem).replace("-", "_").lower() or str(port["id"]),
+            kind=kind, format=fmt, filename=filename, schema=port.get("schema") or {}, **common))
+    return artifacts
+
+
 def expected_outputs_for_node(
     node,
     child_ids: list[str],
@@ -1871,6 +1904,9 @@ def expected_outputs_for_node(
     declared = _declared_output_artifacts(node)
     if declared:
         return declared
+    by_port = _port_output_artifacts(node)
+    if by_port:
+        return by_port
     typed = typed_table_outputs(node, name, label, inputs)
     if typed:
         return typed
