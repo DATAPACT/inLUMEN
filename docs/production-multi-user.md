@@ -242,6 +242,35 @@ Infrastructure images continue to use their configured registry images.
 For deployment from prebuilt registry images, configure the `INLUMEN_*_IMAGE`
 overrides and set `INLUMEN_APP_PULL_POLICY=always`.
 
+The `Container images` workflow (`.github/workflows/container-images.yml`)
+publishes these images to GHCR after the Test suite passes for a push to
+`main`. Each image is tagged with the full commit SHA and with `main`:
+
+| Compose setting | Image |
+|---|---|
+| `INLUMEN_BACKEND_IMAGE` (also used by `migrate`) | `ghcr.io/datapact/inlumen-backend` |
+| `INLUMEN_CODEGEN_IMAGE` | `ghcr.io/datapact/inlumen-codegen-service` |
+| `INLUMEN_RUNNER_IMAGE` | `ghcr.io/datapact/inlumen-runner-service` |
+| `INLUMEN_FRONTEND_IMAGE` | `ghcr.io/datapact/inlumen-frontend` |
+
+Deploy a specific commit tag rather than `main`, so that a restart cannot
+silently change versions and a rollback is a change of tag. On pull requests
+that change Dockerfiles or dependency locks, the workflow only checks that the
+images build.
+
+The frontend bundle contains its public URL and Keycloak settings, fixed at
+build time. The workflow reads them from the repository variables
+`INLUMEN_PUBLIC_URL`, `VITE_KEYCLOAK_URL`, `VITE_KEYCLOAK_REALM`,
+`VITE_KEYCLOAK_CLIENT_ID` and `VITE_REVIEW_AI_CHANGES_DEFAULT`, and refuses to
+publish without the first two. The published frontend image therefore serves
+one deployment; another deployment with different values must build its own
+frontend image. These values are not secrets, since every browser receives
+them.
+
+New GHCR packages may start as private. A host can pull private images only
+after `docker login ghcr.io` with a token that has `read:packages`; making the
+packages public removes that step.
+
 Application containers have configurable memory/PID limits and bounded logs
 (three 20 MB files per service). The frontend health check verifies Nginx's
 `/healthz` endpoint; backend readiness remains a separate check. These limits
