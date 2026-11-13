@@ -370,9 +370,11 @@ def test_codegen_rejects_parseable_artifact_from_incomplete_response(
 
 
 @pytest.mark.parametrize("provider", ["openrouter", "custom"])
-def test_custom_responses_endpoint_and_cost_budget(monkeypatch, provider):
+@pytest.mark.parametrize("status", ["completed", "incomplete"])
+def test_custom_responses_endpoint_and_cost_budget(monkeypatch, provider, status):
     import httpx
     from inlumen.codegen.generation_budget import CURRENT_BUDGET, GenerationBudget
+    from inlumen.codegen.llm import LLMGenerationError
     from inlumen.codegen.model import CURRENT_EVENTS
 
     endpoint = "https://model.test/compatible/responses"
@@ -381,8 +383,8 @@ def test_custom_responses_endpoint_and_cost_budget(monkeypatch, provider):
     async def post(self, url, **kwargs):
         requests.append(url)
         payload = {
-            "status": "completed",
-            "usage": {"cost": 0.5},
+            "status": status,
+            "usage": {"cost": 0.5, "output_tokens": 24},
             "output": [
                 {"type": "message", "content": [{"type": "output_text", "text": "{}"}]}
             ],
@@ -412,7 +414,14 @@ def test_custom_responses_endpoint_and_cost_budget(monkeypatch, provider):
                 )
             )
 
-        assert generate() == {}
+        if status == "incomplete":
+            with pytest.raises(LLMGenerationError) as caught:
+                generate()
+            assert caught.value.code == "incomplete_response"
+            assert "incomplete" in events[0]["error"]
+        else:
+            assert generate() == {}
+        assert usage[0].completion_tokens == events[0]["completion_tokens"] == 24
         expected = 0.5 if provider == "openrouter" else None
         assert usage[0].cost_usd == events[0]["cost_usd"] == expected
         assert budget.reported_cost_usd == (expected or 0)
@@ -420,6 +429,7 @@ def test_custom_responses_endpoint_and_cost_budget(monkeypatch, provider):
             with pytest.raises(ValueError, match="budget exhausted"):
                 generate()
         assert requests == [endpoint]
+        assert len(events) == len(usage) == 1
     finally:
         CURRENT_BUDGET.reset(budget_token)
         CURRENT_EVENTS.reset(event_token)

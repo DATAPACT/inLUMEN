@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 from inlumen.llm_requests import (
     ProviderRequestError, endpoint_url, request_policy, responses_request,
-    responses_result,
+    responses_result, responses_usage,
 )
 from inlumen.contracts.events import model_request_event
 from .generation_budget import CURRENT_BUDGET
@@ -27,11 +27,12 @@ from .schemas import (
 class LLMGenerationError(RuntimeError):
     """Raised when the configured coding model cannot return a JSON artifact."""
 
-    def __init__(self, message: str, *, status_code: int = 422, code=None, param=None):
+    def __init__(self, message: str, *, status_code: int = 422, code=None, param=None, usage=None):
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.param = param
+        self.usage = usage
 
 
 UsageCallback = Callable[[GenerationUsage], Awaitable[None] | None]
@@ -201,22 +202,25 @@ class HttpModelClient:
                 "Coding model returned an unsupported chat-completions response."
             )
         if policy.api_format == "responses":
+            include_cost = _is_openrouter(config.provider)
             try:
                 content, calls, usage, finish = responses_result(
-                    response_payload, secrets=(config.api_key,)
+                    response_payload, secrets=(config.api_key,), include_cost=include_cost
                 )
             except ProviderRequestError as exc:
+                usage = None
+                if isinstance(response_payload.get("usage"), dict):
+                    usage = responses_usage(response_payload, include_cost=include_cost)
                 raise LLMGenerationError(
                     str(exc),
                     status_code=exc.status_code,
                     code=exc.code,
                     param=exc.param,
+                    usage=usage,
                 ) from exc
-            if _is_openrouter(config.provider) and "cost" in (response_payload.get("usage") or {}):
-                usage["cost"] = response_payload["usage"]["cost"]
             if calls or not content:
                 raise LLMGenerationError(
-                    "Coding model returned no text artifact.", status_code=502
+                    "Coding model returned no text artifact.", status_code=502, usage=usage
                 )
             return ModelReply(
                 content=content, usage=usage, finish_reason=finish, raw=response_payload
@@ -284,28 +288,38 @@ async def generate_json(
             max_tokens=config.max_output_tokens if config is not None else 16384,
         )
     except BaseException as exc:
+        raw_usage = exc.usage if isinstance(exc, LLMGenerationError) else None
+        if raw_usage is not None:
+            await _record_usage(raw_usage, usage_callback)
         if events is not None:
-            events(_request_event(client, started, None, exc))
+            events(_request_event(client, started, raw_usage, error=exc))
         raise
     if events is not None:
-        events(_request_event(client, started, reply, None))
-    usage = _usage_from_response({"usage": reply.usage}, include_usd_cost=True)
+        events(_request_event(client, started, reply.usage, finish_reason=reply.finish_reason))
+    await _record_usage(reply.usage, usage_callback)
+    return _json_from_model_content(reply.content)
+
+
+async def _record_usage(raw_usage: dict | None, callback: UsageCallback | None) -> None:
+    usage = _usage_from_response({"usage": raw_usage}, include_usd_cost=True)
+    budget = CURRENT_BUDGET.get()
     if budget is not None:
         budget.reported_cost_usd += usage.cost_usd or 0
-    if usage_callback is not None:
-        callback_result = usage_callback(usage.model_copy())
+    if callback is not None:
+        callback_result = callback(usage)
         if inspect.isawaitable(callback_result):
             await callback_result
-    return _json_from_model_content(reply.content)
 
 
 def _request_event(
     client: ModelClient,
     started: float,
-    reply: ModelReply | None,
-    error: BaseException | None,
+    raw_usage: dict | None,
+    *,
+    finish_reason: str | None = None,
+    error: BaseException | None = None,
 ) -> dict[str, Any]:
-    usage = (reply.usage if reply is not None else None) or {}
+    usage = raw_usage or {}
     return model_request_event(
         purpose="codegen",
         model=getattr(client, "name", ""),
@@ -313,7 +327,7 @@ def _request_event(
         completion_tokens=_optional_nonnegative_number(usage.get("completion_tokens"), int),
         cost_usd=_optional_nonnegative_number(usage.get("cost"), float),
         latency_s=time.monotonic() - started,
-        finish_reason=reply.finish_reason if reply is not None else None,
+        finish_reason=finish_reason,
         error=f"{type(error).__name__}: {error}" if error else None,
     )
 

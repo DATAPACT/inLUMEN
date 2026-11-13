@@ -129,6 +129,12 @@ class OpenAIResponsesClient(ProviderAwareChatClient):
             messages, tools, tool_choice, json_output, extra_create_args or {}
         )
         args = dict(params.create_args)
+        # Responses returns usage with the final result, including for create_stream.
+        stream_options = args.pop("stream_options", None) or {}
+        if set(stream_options) - {"include_usage"}:
+            raise ValueError(
+                "Only include_usage is supported in Responses stream_options."
+            )
         fmt = args.pop("response_format", None)
         if params.response_format is not None:
             fmt = {
@@ -202,5 +208,17 @@ class OpenAIResponsesClient(ProviderAwareChatClient):
             cached=False,
         )
 
-    async def create_stream(self, messages, **kwargs):
-        yield await self.create(messages, **kwargs)
+    async def create_stream(
+        self, messages, *, include_usage=None, extra_create_args=None, **kwargs
+    ):
+        overrides = extra_create_args or {}
+        options = (
+            overrides.get("stream_options", self._create_args.get("stream_options"))
+            or {}
+        )
+        if (
+            include_usage is not None
+            and options.get("include_usage", include_usage) != include_usage
+        ):
+            raise ValueError("include_usage and stream_options.include_usage disagree.")
+        yield await self.create(messages, extra_create_args=overrides, **kwargs)

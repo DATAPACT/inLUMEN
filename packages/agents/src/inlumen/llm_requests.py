@@ -253,7 +253,21 @@ def responses_request(
     return result
 
 
-def responses_result(payload: dict, *, secrets=()) -> tuple[str, list[dict], dict, str]:
+def responses_usage(payload: dict, *, include_cost: bool = False) -> dict:
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        usage = {}
+    counts = {
+        "prompt_tokens": usage.get("input_tokens", 0),
+        "completion_tokens": usage.get("output_tokens", 0),
+        "total_tokens": usage.get("total_tokens", 0),
+    }
+    if include_cost and "cost" in usage:
+        counts["cost"] = usage["cost"]
+    return counts
+
+
+def responses_result(payload: dict, *, secrets=(), include_cost: bool = False) -> tuple[str, list[dict], dict, str]:
     if payload.get("status") == "failed" or payload.get("error"):
         raise ProviderRequestError.from_body(502, payload, secrets=secrets)
     output = payload.get("output") or []
@@ -288,14 +302,8 @@ def responses_result(payload: dict, *, secrets=()) -> tuple[str, list[dict], dic
                     text.append(part["text"])
                 elif part.get("type") == "refusal":
                     text.append(part["refusal"])
-    usage = payload.get("usage") or {}
-    normalized = {
-        "prompt_tokens": usage.get("input_tokens", 0),
-        "completion_tokens": usage.get("output_tokens", 0),
-        "total_tokens": usage.get("total_tokens", 0),
-    }
     finish = "function_calls" if calls else "stop"
-    return "".join(text), calls, normalized, finish
+    return "".join(text), calls, responses_usage(payload, include_cost=include_cost), finish
 
 
 def redact_message(message: str, secrets=()) -> str:

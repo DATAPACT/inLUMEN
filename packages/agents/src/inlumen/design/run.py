@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from copy import deepcopy
@@ -136,6 +137,8 @@ def openai_model_client(
         "structured_output": False,
         **(model_info or {}),
     }
+    if base_url is None:
+        base_url = os.environ.get("OPENAI_BASE_URL")
     policy = request_policy(
         model,
         base_url or "https://api.openai.com/v1",

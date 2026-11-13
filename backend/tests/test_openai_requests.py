@@ -715,3 +715,81 @@ def test_saved_team_replays_encrypted_tool_turn_with_fresh_client():
         i for i, item in enumerate(items) if item.get("encrypted_content") == "opaque"
     )
     assert items[replay + 1]["call_id"] == items[replay + 2]["call_id"] == "call"
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_design_factory_custom_endpoint_precedence(monkeypatch, explicit):
+    from inlumen.design.run import openai_model_client
+    from inlumen.llm_requests import ProviderRequestError
+
+    endpoint = "https://custom.test/compatible/v1"
+    monkeypatch.setenv(
+        "OPENAI_BASE_URL", "https://api.openai.com/v1" if explicit else endpoint
+    )
+    paths = []
+
+    def respond(request):
+        paths.append(str(request.url))
+        return httpx.Response(400, json={"error": {"message": "captured"}})
+
+    async def run():
+        client = openai_model_client(
+            "gpt-5.2-codex",
+            base_url=endpoint if explicit else None,
+            api_key="test",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        )
+        try:
+            with pytest.raises(ProviderRequestError, match="captured"):
+                await client.create([UserMessage(content="test", source="user")])
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+    assert paths == [endpoint + "/chat/completions"]
+
+
+@pytest.mark.parametrize(
+    "flag,option", [(True, None), (None, True), (True, True), (False, True)]
+)
+def test_responses_stream_usage_options(flag, option):
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "r",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-6.1-sol",
+                "status": "completed",
+                "output": [],
+                "usage": {"input_tokens": 3, "output_tokens": 5, "total_tokens": 8},
+            },
+        )
+
+    async def run():
+        client = client_with_transport(config("gpt-6.1-sol"), respond)
+        extra = {} if option is None else {"stream_options": {"include_usage": option}}
+        messages = [UserMessage(content="test", source="user")]
+        try:
+            stream = client.create_stream(
+                messages, include_usage=flag, extra_create_args=extra
+            )
+            if flag is False and option is True:
+                with pytest.raises(ValueError, match="include_usage"):
+                    await anext(stream)
+                assert requests == []
+            else:
+                (result,) = [item async for item in stream]
+                assert (
+                    result.usage.prompt_tokens == 3
+                    and result.usage.completion_tokens == 5
+                )
+                assert len(requests) == 1 and "stream_options" not in requests[0]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
