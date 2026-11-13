@@ -2,8 +2,9 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
 from autogen_core.models import ChatCompletionClient
-from autogen_ext.models.openai import OpenAIChatCompletionClient
 from application_llm import application_llm_request_config
+from inlumen.llm_requests import request_policy
+from inlumen.llm_autogen import OpenAIResponsesClient, ProviderAwareChatClient as OpenAIChatCompletionClient
 
 # OpenAI-compatible LLM providers. The app no longer starts or depends on a
 # local Ollama daemon; cloud and on-prem endpoints are selected by base URL.
@@ -39,6 +40,10 @@ class LLMConfig:
     api_key: str = field(repr=False)
     model_family: str = "unknown"
     max_tokens: Optional[int] = None
+    api_format: str = "auto"
+    reasoning_effort: Optional[str] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
     openrouter_provider_only: tuple[str, ...] = ()
     supports_vision: bool = False
     supports_function_calling: bool = True
@@ -100,9 +105,7 @@ def _raw_config_value(raw: Mapping[str, Any], *keys: str) -> Any:
 def resolve_llm_config(raw_config: Optional[Mapping[str, Any]] = None) -> LLMConfig:
     raw = application_llm_request_config(raw_config or {})
     provider = _normalize_provider(
-        raw.get("provider")
-        or raw.get("llm_provider")
-        or raw.get("providerName")
+        raw.get("provider") or raw.get("llm_provider") or raw.get("providerName")
     )
     model = str(raw.get("model") or "").strip()
     if provider == "openrouter":
@@ -113,15 +116,27 @@ def resolve_llm_config(raw_config: Optional[Mapping[str, Any]] = None) -> LLMCon
         # Import lazily: this module is also used by non-request tooling, while
         # credential resolution is meaningful only inside the gateway request.
         from llm_credential_store import get_llm_credential
-        api_key = get_llm_credential(
-            str(raw.get("credential_id") or raw.get("config_id") or "")
-        ) or ""
+
+        api_key = (
+            get_llm_credential(
+                str(raw.get("credential_id") or raw.get("config_id") or "")
+            )
+            or ""
+        )
     model_family = (
         str(raw.get("model_family") or raw.get("modelFamily") or "").strip()
         or DEFAULT_LLM_MODEL_FAMILY
     )
     max_tokens = _positive_int_config(
-        _raw_config_value(raw, "max_tokens", "maxTokens"),
+        _raw_config_value(
+            raw,
+            "max_completion_tokens",
+            "maxCompletionTokens",
+            "max_output_tokens",
+            "maxOutputTokens",
+            "max_tokens",
+            "maxTokens",
+        ),
         None,
     )
     openrouter_provider_only = _string_tuple_config(
@@ -138,14 +153,30 @@ def resolve_llm_config(raw_config: Optional[Mapping[str, Any]] = None) -> LLMCon
     if not model:
         raise ValueError("LLM model is required.")
     if not base_url:
-        raise ValueError("LLM base URL is required. Configure it in the UI LLM settings.")
+        raise ValueError(
+            "LLM base URL is required. Configure it in the UI LLM settings."
+        )
     if not api_key:
         raise ValueError(
             f"LLM API key is required for provider '{provider}'. "
             "Save it in the UI LLM settings before using this configuration."
         )
 
+    api_format = str(_raw_config_value(raw, "api_format", "apiFormat") or "auto")
+    reasoning_effort = _raw_config_value(raw, "reasoning_effort", "reasoningEffort")
+    request_policy(
+        model,
+        base_url,
+        provider=provider,
+        api_format=api_format,
+        reasoning_effort=reasoning_effort,
+        tools=True,
+    )
     return LLMConfig(
+        api_format=api_format,
+        reasoning_effort=reasoning_effort,
+        temperature=raw.get("temperature"),
+        top_p=raw.get("top_p"),
         provider=provider,
         model=model,
         base_url=base_url,
@@ -153,14 +184,22 @@ def resolve_llm_config(raw_config: Optional[Mapping[str, Any]] = None) -> LLMCon
         model_family=model_family,
         max_tokens=max_tokens,
         openrouter_provider_only=openrouter_provider_only,
-        supports_vision=_bool_config(_raw_config_value(raw, "supports_vision", "supportsVision"), False),
+        supports_vision=_bool_config(
+            _raw_config_value(raw, "supports_vision", "supportsVision"), False
+        ),
         supports_function_calling=_bool_config(
-            _raw_config_value(raw, "supports_function_calling", "supportsFunctionCalling"),
+            _raw_config_value(
+                raw, "supports_function_calling", "supportsFunctionCalling"
+            ),
             True,
         ),
-        supports_json_output=_bool_config(_raw_config_value(raw, "supports_json_output", "supportsJsonOutput"), True),
+        supports_json_output=_bool_config(
+            _raw_config_value(raw, "supports_json_output", "supportsJsonOutput"), True
+        ),
         supports_structured_output=_bool_config(
-            _raw_config_value(raw, "supports_structured_output", "supportsStructuredOutput"),
+            _raw_config_value(
+                raw, "supports_structured_output", "supportsStructuredOutput"
+            ),
             True,
         ),
     )
@@ -195,8 +234,19 @@ def select_model_client(
         "base_url": resolved_config.base_url,
         "model_info": model_info(resolved_config),
     }
-    if resolved_config.max_tokens is not None:
-        kwargs["max_tokens"] = resolved_config.max_tokens
+    policy = request_policy(
+        resolved_config.model,
+        resolved_config.base_url,
+        provider=resolved_config.provider,
+        api_format=resolved_config.api_format,
+        reasoning_effort=resolved_config.reasoning_effort,
+        tools=True,
+    )
+    kwargs["provider"] = resolved_config.provider
+    for key in ("max_tokens", "temperature", "top_p", "reasoning_effort"):
+        value = getattr(resolved_config, key)
+        if value is not None:
+            kwargs[key] = value
     if parallel_tool_calls is not None:
         kwargs["parallel_tool_calls"] = parallel_tool_calls
     if resolved_config.provider == "openrouter":
@@ -211,6 +261,8 @@ def select_model_client(
                     "only": list(resolved_config.openrouter_provider_only),
                 },
             }
+    if policy.api_format == "responses":
+        return OpenAIResponsesClient(**kwargs)
     return OpenAIChatCompletionClient(**kwargs)
 
 

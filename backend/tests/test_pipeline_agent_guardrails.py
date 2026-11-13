@@ -895,7 +895,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
             for message in sync["validation_errors"]
         ))
 
-    @patch("inlumen.design.team.RoundRobinGroupChat")
+    @patch("inlumen.design.team.ProviderAwareGroupChat")
     @patch("inlumen.design.team.AssistantAgent")
     @patch("pipeline_agent.team.select_model_client")
     def test_pipeline_tools_are_configured_for_serial_calls(
@@ -954,7 +954,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
             for component in component_catalog["components"]
         ))
 
-    @patch("inlumen.design.team.RoundRobinGroupChat")
+    @patch("inlumen.design.team.ProviderAwareGroupChat")
     @patch("inlumen.design.team.AssistantAgent")
     @patch("pipeline_agent.team.select_model_client")
     @patch("pipeline_agent.neo4j_store.run_neo4j_query", new_callable=AsyncMock)
@@ -989,7 +989,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertNotIn("implementation", query)
         self.assertNotIn("param_json", query)
 
-    @patch("inlumen.design.team.RoundRobinGroupChat")
+    @patch("inlumen.design.team.ProviderAwareGroupChat")
     @patch("inlumen.design.team.AssistantAgent")
     @patch("pipeline_agent.team.select_model_client")
     @patch("pipeline_agent.neo4j_store.run_neo4j_query", new_callable=AsyncMock)
@@ -1027,7 +1027,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("param_json: '{}'", query)
         self.assertNotIn("template_label:'File'", query)
 
-    @patch("inlumen.design.team.RoundRobinGroupChat")
+    @patch("inlumen.design.team.ProviderAwareGroupChat")
     @patch("inlumen.design.team.AssistantAgent")
     @patch("pipeline_agent.team.select_model_client")
     @patch("pipeline_agent.neo4j_store.run_neo4j_query", new_callable=AsyncMock)
@@ -1096,7 +1096,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("referenced_version_uid: 'version-2'", create_query)
         self.assertIn("version-2", result)
 
-    @patch("inlumen.design.team.RoundRobinGroupChat")
+    @patch("inlumen.design.team.ProviderAwareGroupChat")
     @patch("inlumen.design.team.AssistantAgent")
     @patch("pipeline_agent.team.select_model_client")
     @patch("pipeline_agent.neo4j_store.run_neo4j_query", new_callable=AsyncMock)
@@ -1141,7 +1141,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertNotIn("failure_policy", query)
         self.assertIn("flow.target_port = 'items'", query)
 
-    @patch("inlumen.design.team.RoundRobinGroupChat")
+    @patch("inlumen.design.team.ProviderAwareGroupChat")
     @patch("inlumen.design.team.AssistantAgent")
     @patch("pipeline_agent.team.select_model_client")
     @patch("pipeline_agent.neo4j_store.run_neo4j_query", new_callable=AsyncMock)
@@ -1210,7 +1210,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("flow.target_port = 'data'", query)
         self.assertIn("THEN prevY + 180.0", query)
 
-    @patch("inlumen.design.team.RoundRobinGroupChat")
+    @patch("inlumen.design.team.ProviderAwareGroupChat")
     @patch("inlumen.design.team.AssistantAgent")
     @patch("pipeline_agent.team.select_model_client")
     @patch("pipeline_agent.neo4j_store.run_neo4j_query", new_callable=AsyncMock)
@@ -1256,7 +1256,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("param_json: '{}'", query)
         self.assertEqual("insert_between_steps", run_query.await_args.args[1])
 
-    @patch("inlumen.design.team.RoundRobinGroupChat")
+    @patch("inlumen.design.team.ProviderAwareGroupChat")
     @patch("inlumen.design.team.AssistantAgent")
     @patch("pipeline_agent.team.select_model_client")
     @patch("pipeline_agent.neo4j_store.run_neo4j_query", new_callable=AsyncMock)
@@ -1295,7 +1295,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         _validate_workspace_cypher(query)
         self.assertEqual("delete_step", run_query.await_args.args[1])
 
-    @patch("inlumen.design.team.RoundRobinGroupChat")
+    @patch("inlumen.design.team.ProviderAwareGroupChat")
     @patch("inlumen.design.team.AssistantAgent")
     @patch("pipeline_agent.team.select_model_client")
     @patch("pipeline_agent.neo4j_store.run_neo4j_query", new_callable=AsyncMock)
@@ -1363,7 +1363,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertEqual("connect_steps", run_query.await_args.args[1])
         self.assertEqual("resolve_connection_ports", run_query.await_args_list[0].args[1])
 
-    @patch("inlumen.design.team.RoundRobinGroupChat")
+    @patch("inlumen.design.team.ProviderAwareGroupChat")
     @patch("inlumen.design.team.AssistantAgent")
     @patch("pipeline_agent.team.select_model_client")
     @patch("pipeline_agent.neo4j_store.run_neo4j_query", new_callable=AsyncMock)
@@ -1424,7 +1424,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertNotIn("source.data", mutation_query)
         self.assertNotIn("task.input", mutation_query)
 
-    @patch("inlumen.design.team.RoundRobinGroupChat")
+    @patch("inlumen.design.team.ProviderAwareGroupChat")
     @patch("inlumen.design.team.AssistantAgent")
     @patch("pipeline_agent.team.select_model_client")
     @patch("pipeline_agent.neo4j_store.run_neo4j_query", new_callable=AsyncMock)
@@ -1484,7 +1484,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertEqual(1, run_query.await_count)
         self.assertEqual("resolve_connection_ports", run_query.await_args.args[1])
 
-    @patch("inlumen.design.team.RoundRobinGroupChat")
+    @patch("inlumen.design.team.ProviderAwareGroupChat")
     @patch("inlumen.design.team.AssistantAgent")
     @patch("pipeline_agent.team.select_model_client")
     @patch("pipeline_agent.neo4j_store.run_neo4j_query", new_callable=AsyncMock)
@@ -1541,7 +1541,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("flow.source_port = 'output'", mutation_query)
         self.assertIn("flow.target_port = 'data'", mutation_query)
 
-    @patch("inlumen.design.team.RoundRobinGroupChat")
+    @patch("inlumen.design.team.ProviderAwareGroupChat")
     @patch("inlumen.design.team.AssistantAgent")
     @patch("pipeline_agent.team.select_model_client")
     @patch("pipeline_agent.neo4j_store.run_neo4j_query", new_callable=AsyncMock)
@@ -1581,7 +1581,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("DELETE connection", query)
         self.assertEqual("disconnect_steps", run_query.await_args.args[1])
 
-    @patch("inlumen.design.team.RoundRobinGroupChat")
+    @patch("inlumen.design.team.ProviderAwareGroupChat")
     @patch("inlumen.design.team.AssistantAgent")
     @patch("pipeline_agent.team.select_model_client")
     @patch("pipeline_agent.neo4j_store.run_neo4j_query", new_callable=AsyncMock)
@@ -1625,7 +1625,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertIn("THEN 'configured'", query)
         self.assertEqual("configure_flow_step", run_query.await_args.args[1])
 
-    @patch("inlumen.design.team.RoundRobinGroupChat")
+    @patch("inlumen.design.team.ProviderAwareGroupChat")
     @patch("inlumen.design.team.AssistantAgent")
     @patch("pipeline_agent.team.select_model_client")
     @patch("pipeline_agent.neo4j_store.run_neo4j_query", new_callable=AsyncMock)
@@ -1698,7 +1698,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertEqual("inspect_subpipeline_contract", run_query.await_args_list[1].args[1])
         self.assertEqual("configure_subpipeline_step", run_query.await_args.args[1])
 
-    @patch("inlumen.design.team.RoundRobinGroupChat")
+    @patch("inlumen.design.team.ProviderAwareGroupChat")
     @patch("inlumen.design.team.AssistantAgent")
     @patch("pipeline_agent.team.select_model_client")
     @patch("pipeline_agent.neo4j_store.run_neo4j_query", new_callable=AsyncMock)

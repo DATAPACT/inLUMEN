@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from copy import deepcopy
@@ -125,7 +126,8 @@ def openai_model_client(
     ``model_info`` defaults to a tool-calling model of unknown family. Parallel
     tool calls are off: the agent's graph edits must run one at a time.
     """
-    from autogen_ext.models.openai import OpenAIChatCompletionClient
+    from inlumen.llm_autogen import OpenAIResponsesClient, ProviderAwareChatClient as OpenAIChatCompletionClient
+    from inlumen.llm_requests import request_policy
 
     info = {
         "vision": False,
@@ -135,7 +137,23 @@ def openai_model_client(
         "structured_output": False,
         **(model_info or {}),
     }
-    return OpenAIChatCompletionClient(
+    if base_url is None:
+        base_url = os.environ.get("OPENAI_BASE_URL")
+    policy = request_policy(
+        model,
+        base_url or "https://api.openai.com/v1",
+        api_format=kwargs.pop("api_format", "auto"),
+        reasoning_effort=kwargs.get("reasoning_effort"),
+        tools=True,
+    )
+    if "max_output_tokens" in kwargs:
+        kwargs["max_completion_tokens"] = kwargs.pop("max_output_tokens")
+    client_class = (
+        OpenAIResponsesClient
+        if policy.api_format == "responses"
+        else OpenAIChatCompletionClient
+    )
+    return client_class(
         model=model,
         base_url=base_url,
         api_key=api_key or "not-needed",
