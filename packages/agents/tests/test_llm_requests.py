@@ -251,3 +251,10 @@ def test_reasoning_only_exhaustion_is_an_error_not_an_empty_reply():
                 "output": [],
             }
         )
+
+
+@pytest.mark.parametrize("source", ["/chat/completions", "/responses"])
+def test_complete_endpoint_preserves_custom_prefix(source):
+    base = "https://model.test/compatible"
+    assert endpoint_url(base + source, "chat_completions") == base + "/chat/completions"
+    assert endpoint_url(base + source, "responses") == base + "/responses"

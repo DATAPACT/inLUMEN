@@ -367,3 +367,86 @@ def test_codegen_rejects_parseable_artifact_from_incomplete_response(
     assert caught.value.code == "incomplete_response"
     assert reason in str(caught.value)
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "custom"])
+def test_custom_responses_endpoint_and_cost_budget(monkeypatch, provider):
+    import httpx
+    from inlumen.codegen.generation_budget import CURRENT_BUDGET, GenerationBudget
+    from inlumen.codegen.model import CURRENT_EVENTS
+
+    endpoint = "https://model.test/compatible/responses"
+    requests, events, usage = [], [], []
+
+    async def post(self, url, **kwargs):
+        requests.append(url)
+        payload = {
+            "status": "completed",
+            "usage": {"cost": 0.5},
+            "output": [
+                {"type": "message", "content": [{"type": "output_text", "text": "{}"}]}
+            ],
+        }
+        return httpx.Response(200, json=payload, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr("httpx.AsyncClient.post", post)
+    config = LLMConfig(
+        provider=provider,
+        base_url=endpoint,
+        api_format="responses",
+        model="sample",
+        api_key="test",
+    )
+    budget = GenerationBudget(5, 0.25)
+    budget_token = CURRENT_BUDGET.set(budget)
+    event_token = CURRENT_EVENTS.set(events.append)
+    try:
+
+        def generate():
+            return asyncio.run(
+                generate_json(
+                    config,
+                    system_prompt="JSON",
+                    user_prompt="test",
+                    usage_callback=usage.append,
+                )
+            )
+
+        assert generate() == {}
+        expected = 0.5 if provider == "openrouter" else None
+        assert usage[0].cost_usd == events[0]["cost_usd"] == expected
+        assert budget.reported_cost_usd == (expected or 0)
+        if provider == "openrouter":
+            with pytest.raises(ValueError, match="budget exhausted"):
+                generate()
+        assert requests == [endpoint]
+    finally:
+        CURRENT_BUDGET.reset(budget_token)
+        CURRENT_EVENTS.reset(event_token)
+
+
+def test_failed_responses_redact_all_diagnostic_fields(monkeypatch):
+    import httpx
+    from inlumen.codegen.llm import LLMGenerationError
+
+    secret = "synthetic-test-credential"
+
+    async def post(self, url, **kwargs):
+        error = dict.fromkeys(("message", "code", "param"), secret)
+        return httpx.Response(
+            200,
+            json={"status": "failed", "error": error},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("httpx.AsyncClient.post", post)
+    config = LLMConfig(
+        provider="custom",
+        base_url="https://model.test/v1",
+        api_format="responses",
+        model="sample",
+        api_key=secret,
+    )
+    with pytest.raises(LLMGenerationError) as caught:
+        asyncio.run(generate_json(config, system_prompt="JSON", user_prompt="test"))
+    assert str(caught.value) == caught.value.code == caught.value.param == "[redacted]"

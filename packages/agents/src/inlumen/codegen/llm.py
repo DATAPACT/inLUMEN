@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 from inlumen.llm_requests import (
     ProviderRequestError, endpoint_url, request_policy, responses_request,
-    responses_result, redact_message,
+    responses_result,
 )
 from inlumen.contracts.events import model_request_event
 from .generation_budget import CURRENT_BUDGET
@@ -202,14 +202,18 @@ class HttpModelClient:
             )
         if policy.api_format == "responses":
             try:
-                content, calls, usage, finish = responses_result(response_payload)
+                content, calls, usage, finish = responses_result(
+                    response_payload, secrets=(config.api_key,)
+                )
             except ProviderRequestError as exc:
                 raise LLMGenerationError(
-                    redact_message(str(exc), (config.api_key,)),
+                    str(exc),
                     status_code=exc.status_code,
                     code=exc.code,
                     param=exc.param,
                 ) from exc
+            if _is_openrouter(config.provider) and "cost" in (response_payload.get("usage") or {}):
+                usage["cost"] = response_payload["usage"]["cost"]
             if calls or not content:
                 raise LLMGenerationError(
                     "Coding model returned no text artifact.", status_code=502

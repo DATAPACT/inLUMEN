@@ -8,7 +8,9 @@ disabled. Streaming callers receive one complete result.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from functools import wraps
+from hashlib import sha256
 
 from autogen_core import FunctionCall
 from autogen_core.models import CreateResult, RequestUsage
@@ -40,6 +42,43 @@ def _preserve_provider_error(method):
 
 
 class ProviderAwareChatClient(OpenAIChatCompletionClient):
+    _api_format = "chat_completions"
+
+    def __init__(self, *, provider="custom", **kwargs):
+        self._provider = provider
+        super().__init__(**kwargs)
+
+    def _process_create_args(
+        self, messages, tools, tool_choice, json_output, extra_create_args
+    ):
+        # AutoGen validates per-call options against the Chat Completions schema.
+        # Resolve token aliases before validation and apply policy after its merge.
+        overrides = dict(extra_create_args)
+        token_fields = ("max_output_tokens", "max_completion_tokens", "max_tokens")
+        limits = [overrides.pop(key) for key in token_fields if key in overrides]
+        params = super()._process_create_args(
+            messages, tools, tool_choice, json_output, overrides
+        )
+        args = params.create_args
+        default_limit = args.pop("max_completion_tokens", args.pop("max_tokens", None))
+        limit = limits[0] if limits else default_limit
+        policy = request_policy(
+            args["model"],
+            str(self._client.base_url),
+            provider=self._provider,
+            api_format=self._api_format,
+            reasoning_effort=args.pop("reasoning_effort", None),
+            tools=bool(tools),
+        )
+        args.update(
+            policy.parameters(
+                limit,
+                temperature=args.pop("temperature", None),
+                top_p=args.pop("top_p", None),
+            )
+        )
+        return params
+
     @_preserve_provider_error
     async def create(self, *args, **kwargs):
         return await super().create(*args, **kwargs)
@@ -57,10 +96,23 @@ class ProviderAwareChatClient(OpenAIChatCompletionClient):
 
 
 class OpenAIResponsesClient(ProviderAwareChatClient):
-    def __init__(self, *, request_policy, **kwargs):
+    _api_format = "responses"
+
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self._request_policy = request_policy
+        # Bind encrypted replay to the model and endpoint that produced it.
+        identity = f"{self._client.base_url} {self._create_args['model']}"
+        self._replay_scope = sha256(identity.encode()).hexdigest()
         self._response_replay = {}
+
+    def save_replay(self):
+        return {"scope": self._replay_scope, "calls": deepcopy(self._response_replay)}
+
+    def load_replay(self, state):
+        calls = (
+            state.get("calls", {}) if state.get("scope") == self._replay_scope else {}
+        )
+        self._response_replay = deepcopy(calls)
 
     @_preserve_provider_error
     async def create(
@@ -93,22 +145,9 @@ class OpenAIResponsesClient(ProviderAwareChatClient):
             response_format=fmt,
             replay=self._response_replay,
         )
-        limit = args.pop("max_completion_tokens", args.pop("max_tokens", None))
-        effort = args.pop("reasoning_effort", self._request_policy.effort)
-        policy = request_policy(
-            args["model"],
-            str(self._client.base_url),
-            api_format="responses",
-            reasoning_effort=effort,
-            tools=bool(tools),
-        )
-        request.update(
-            policy.parameters(
-                limit,
-                temperature=args.pop("temperature", None),
-                top_p=args.pop("top_p", None),
-            )
-        )
+        for key in ("reasoning", "temperature", "top_p", "max_output_tokens"):
+            if key in args:
+                request[key] = args.pop(key)
         for key in ("model", "parallel_tool_calls", "seed", "user", "service_tier"):
             if key in args:
                 # Responses has no seed parameter.
@@ -135,7 +174,9 @@ class OpenAIResponsesClient(ProviderAwareChatClient):
         if cancellation_token is not None:
             cancellation_token.link_future(future)
         raw = (await future).model_dump(exclude_none=True)
-        text, calls, counts, finish = responses_result(raw)
+        text, calls, counts, finish = responses_result(
+            raw, secrets=(self._client.api_key,)
+        )
         if calls:
             self._response_replay[calls[0]["call_id"]] = raw["output"]
         usage = RequestUsage(

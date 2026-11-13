@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import inlumen_api
@@ -565,3 +567,57 @@ class CodegenServiceClientTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_codegen_validation_lists_preserve_safe_fields():
+    from io import BytesIO
+    from urllib.error import HTTPError
+
+    detail = [
+        {
+            "loc": ["body", "llm_config"],
+            "type": "value_error",
+            "msg": "Unsupported reasoning_effort test-key",
+            "input": {"model": "private input"},
+        }
+    ]
+    upstream = HTTPError(
+        "https://codegen.test",
+        422,
+        "",
+        {},
+        BytesIO(json.dumps({"detail": detail}).encode()),
+    )
+    with patch("inlumen_api.urlopen", side_effect=upstream):
+        from inlumen.llm_requests import ProviderRequestError
+
+        with pytest.raises(ProviderRequestError) as caught:
+            inlumen_api._post_codegen_request({"llm_config": {"api_key": "test-key"}})
+    assert caught.value.status_code == 422
+    assert (
+        str(caught.value) == "body.llm_config: Unsupported reasoning_effort [redacted]"
+    )
+
+
+def test_run_lookup_and_resume_preserve_upstream_status():
+    from inlumen.llm_requests import ProviderRequestError
+
+    client = inlumen_api.app.test_client()
+    url = "/api/pipeline/generation-runs/source"
+    for method, path, helper, status in [
+        ("GET", url, "_get_codegen_pipeline_run_request", 404),
+        ("POST", url + "/resume", "_post_codegen_pipeline_run_resume_request", 409),
+    ]:
+        with (
+            patch.object(inlumen_api.CODEGEN_RUN_STORE, "get", return_value={}),
+            patch.object(
+                inlumen_api,
+                helper,
+                side_effect=ProviderRequestError(
+                    status, "Run unavailable", code="run_state"
+                ),
+            ),
+        ):
+            response = client.open(path, method=method, json={})
+        assert response.status_code == status
+        assert response.json["details"]["code"] == "run_state"

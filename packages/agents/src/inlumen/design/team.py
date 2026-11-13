@@ -20,6 +20,24 @@ PREVIEW_MODE_MESSAGE = (
 
 
 class ProviderAwareGroupChat(RoundRobinGroupChat):
+    def __init__(self, *args, model_client=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        from inlumen.llm_autogen import OpenAIResponsesClient
+        self._responses_client = model_client if isinstance(model_client, OpenAIResponsesClient) else None
+
+    async def save_state(self):
+        state = dict(await super().save_state())
+        if self._responses_client is not None:
+            state["responses_replay"] = self._responses_client.save_replay()
+        return state
+
+    async def load_state(self, state):
+        state = dict(state)
+        replay = state.pop("responses_replay", {})
+        await super().load_state(state)
+        if self._responses_client is not None:
+            self._responses_client.load_replay(replay)
+
     async def run_stream(self, **kwargs):
         from inlumen.llm_requests import provider_error_scope
         with provider_error_scope():
@@ -53,4 +71,4 @@ def build_design_team(
         max_tool_iterations=max_tool_iterations,
         reflect_on_tool_use=True,
     )
-    return ProviderAwareGroupChat([editor], max_turns=1)
+    return ProviderAwareGroupChat([editor], max_turns=1, model_client=model_client)

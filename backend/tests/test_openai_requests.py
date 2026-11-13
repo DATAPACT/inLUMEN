@@ -556,3 +556,162 @@ def test_unfinished_responses_never_execute_agent_tools(response_status, call_st
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("effort", [None, "none"])
+def test_chat_overrides_are_normalized_on_the_wire(stream, effort):
+    from inlumen.llm_requests import ProviderRequestError
+
+    captured = []
+
+    def respond(request):
+        captured.append(json.loads(request.content))
+        return httpx.Response(400, json={"error": {"message": "captured"}})
+
+    async def run():
+        client = client_with_transport(config("gpt-5.5", top_p=0.7), respond)
+        overrides = {"max_tokens": 1024, "temperature": 0.2}
+        if effort is not None:
+            overrides["reasoning_effort"] = effort
+        messages = [UserMessage(content="test", source="user")]
+        try:
+            with pytest.raises(ProviderRequestError, match="captured"):
+                if stream:
+                    async for _ in client.create_stream(
+                        messages, extra_create_args=overrides
+                    ):
+                        pass
+                else:
+                    await client.create(messages, extra_create_args=overrides)
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+    (body,) = captured
+    assert body["max_completion_tokens"] == 1024
+    assert "max_tokens" not in body
+    assert body.get("temperature") == (0.2 if effort == "none" else None)
+    assert body.get("top_p") == (0.7 if effort == "none" else None)
+
+
+def test_design_factory_serializes_native_limit_and_redacts_failed_response():
+    from inlumen.design.run import openai_model_client
+    from inlumen.llm_requests import ProviderRequestError
+
+    def respond(request):
+        assert json.loads(request.content)["max_output_tokens"] == 1024
+        return httpx.Response(
+            200,
+            json={
+                "id": "r",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-6.1-sol",
+                "status": "failed",
+                "output": [],
+                "error": dict.fromkeys(("code", "param", "message"), "test-credential"),
+            },
+        )
+
+    async def run():
+        client = openai_model_client(
+            "gpt-6.1-sol",
+            api_key="test-credential",
+            max_output_tokens=1024,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        )
+        try:
+            with pytest.raises(ProviderRequestError) as caught:
+                await client.create([UserMessage(content="test", source="user")])
+            assert (
+                str(caught.value)
+                == caught.value.code
+                == caught.value.param
+                == "[redacted]"
+            )
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_saved_team_replays_encrypted_tool_turn_with_fresh_client():
+    from autogen_agentchat.agents import AssistantAgent
+    from inlumen.design.team import ProviderAwareGroupChat
+
+    requests = []
+
+    def inspect_graph() -> str:
+        return "ok"
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        output = (
+            [
+                {
+                    "type": "reasoning",
+                    "id": "rs",
+                    "summary": [],
+                    "encrypted_content": "opaque",
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc",
+                    "call_id": "call",
+                    "name": "inspect_graph",
+                    "arguments": "{}",
+                    "status": "completed",
+                },
+            ]
+            if len(requests) == 1
+            else [
+                {
+                    "type": "message",
+                    "id": "msg",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [
+                        {"type": "output_text", "text": "done", "annotations": []}
+                    ],
+                }
+            ]
+        )
+        return httpx.Response(
+            200,
+            json={
+                "id": "r",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-6.1-sol",
+                "status": "completed",
+                "output": output,
+            },
+        )
+
+    async def run():
+        saved = None
+        for task in ("Inspect", "Continue"):
+            client = client_with_transport(config("gpt-6.1-sol"), respond)
+            agent = AssistantAgent(
+                "editor",
+                model_client=client,
+                tools=[inspect_graph],
+                reflect_on_tool_use=True,
+            )
+            team = ProviderAwareGroupChat([agent], max_turns=1, model_client=client)
+            try:
+                if saved is not None:
+                    await team.load_state(saved)
+                await team.run(task=task)
+                saved = json.loads(json.dumps(await team.save_state()))
+            finally:
+                await client.close()
+
+    asyncio.run(run())
+    assert len(requests) == 3
+    items = requests[-1]["input"]
+    replay = next(
+        i for i, item in enumerate(items) if item.get("encrypted_content") == "opaque"
+    )
+    assert items[replay + 1]["call_id"] == items[replay + 2]["call_id"] == "call"

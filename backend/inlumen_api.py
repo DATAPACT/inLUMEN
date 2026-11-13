@@ -743,7 +743,16 @@ def _build_codegen_context(
     }
 
 
-def _codegen_http_error(exc: HTTPError, payload: dict[str, Any]):
+def _codegen_route_error(exc: Exception, message: str):
+    from inlumen.llm_requests import provider_error
+
+    error = provider_error(exc)
+    if error is None:
+        return _json_error(502, message, str(exc))
+    return _json_error(error.status_code, str(error), {"code": error.code, "param": error.param})
+
+
+def _codegen_http_error(exc: HTTPError, http_request: Request):
     from inlumen.llm_requests import ProviderRequestError
 
     try:
@@ -755,12 +764,19 @@ def _codegen_http_error(exc: HTTPError, payload: dict[str, Any]):
         body = {"message": detail}
     elif isinstance(detail, dict):
         body = detail
+    elif isinstance(detail, list):
+        messages = []
+        for item in detail:
+            if isinstance(item, dict) and isinstance(item.get("msg"), str):
+                location = ".".join(str(part) for part in item.get("loc", ()))
+                messages.append(f"{location}: {item['msg']}" if location else item["msg"])
+        body = {"message": "; ".join(messages), "code": "validation_error"}
     return ProviderRequestError.from_body(
         exc.code,
         body,
         secrets=(
-            _codegen_llm_api_key(payload),
-            os.getenv("INLUMEN_CODEGEN_SERVICE_API_KEY", ""),
+            http_request.get_header("X-llm-api-key", ""),
+            http_request.get_header("Authorization", "").removeprefix("Bearer "),
         ),
     )
 
@@ -777,7 +793,7 @@ def _post_codegen_request(payload: dict[str, Any]) -> dict[str, Any]:
         with urlopen(http_request, timeout=CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS) as response:
             response_payload = response.read().decode("utf-8")
     except HTTPError as exc:
-        raise _codegen_http_error(exc, payload) from exc
+        raise _codegen_http_error(exc, http_request) from exc
     except URLError as exc:
         raise RuntimeError(f"Codegen service unavailable at {CODEGEN_SERVICE_URL}: {exc}") from exc
     parsed = json.loads(response_payload)
@@ -801,7 +817,7 @@ def _post_codegen_pipeline_request(payload: dict[str, Any]) -> dict[str, Any]:
         ) as response:
             response_payload = response.read().decode("utf-8")
     except HTTPError as exc:
-        raise _codegen_http_error(exc, payload) from exc
+        raise _codegen_http_error(exc, http_request) from exc
     except URLError as exc:
         raise RuntimeError(f"Codegen service unavailable at {CODEGEN_SERVICE_URL}: {exc}") from exc
     parsed = json.loads(response_payload)
@@ -822,7 +838,7 @@ def _post_codegen_pipeline_run_request(payload: dict[str, Any]) -> dict[str, Any
         with urlopen(http_request, timeout=CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS) as response:
             response_payload = response.read().decode("utf-8")
     except HTTPError as exc:
-        raise _codegen_http_error(exc, payload) from exc
+        raise _codegen_http_error(exc, http_request) from exc
     except URLError as exc:
         raise RuntimeError(f"Codegen service unavailable at {CODEGEN_SERVICE_URL}: {exc}") from exc
     parsed = json.loads(response_payload)
@@ -846,7 +862,7 @@ def _post_codegen_pipeline_run_resume_request(
         with urlopen(http_request, timeout=CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS) as response:
             response_payload = response.read().decode("utf-8")
     except HTTPError as exc:
-        raise _codegen_http_error(exc, payload) from exc
+        raise _codegen_http_error(exc, http_request) from exc
     except URLError as exc:
         raise RuntimeError(f"Codegen service unavailable at {CODEGEN_SERVICE_URL}: {exc}") from exc
     parsed = json.loads(response_payload)
@@ -865,7 +881,7 @@ def _get_codegen_pipeline_run_request(run_id: str) -> dict[str, Any]:
         with urlopen(http_request, timeout=CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS) as response:
             response_payload = response.read().decode("utf-8")
     except HTTPError as exc:
-        raise _codegen_http_error(exc, {}) from exc
+        raise _codegen_http_error(exc, http_request) from exc
     except URLError as exc:
         raise RuntimeError(f"Codegen service unavailable at {CODEGEN_SERVICE_URL}: {exc}") from exc
     parsed = json.loads(response_payload)
@@ -2815,11 +2831,7 @@ def node_generate_script(node_id: str):
             }
         ), 200
     except Exception as exc:
-        from inlumen.llm_requests import provider_error
-        error = provider_error(exc)
-        if error is not None:
-            return _json_error(error.status_code, str(error), {"code": error.code, "param": error.param})
-        return _json_error(502, "script generation failed", str(exc))
+        return _codegen_route_error(exc, "script generation failed")
 
 
 @app.route("/api/pipeline/generate-scripts", methods=["POST", "OPTIONS"])
@@ -2865,11 +2877,7 @@ def pipeline_generate_scripts():
             )
         return jsonify(response_payload), 200
     except Exception as exc:
-        from inlumen.llm_requests import provider_error
-        error = provider_error(exc)
-        if error is not None:
-            return _json_error(error.status_code, str(error), {"code": error.code, "param": error.param})
-        return _json_error(502, "pipeline script generation failed", str(exc))
+        return _codegen_route_error(exc, "pipeline script generation failed")
 
 
 @app.route(
@@ -2893,11 +2901,7 @@ def pipeline_generation_preflight():
         preflight = _pipeline_codegen_preflight(graph, _request_json())
         return jsonify(preflight), 200
     except Exception as exc:
-        from inlumen.llm_requests import provider_error
-        error = provider_error(exc)
-        if error is not None:
-            return _json_error(error.status_code, str(error), {"code": error.code, "param": error.param})
-        return _json_error(502, "pipeline generation preflight failed", str(exc))
+        return _codegen_route_error(exc, "pipeline generation preflight failed")
 
 
 @app.route("/api/pipeline/task-packages/<action>", methods=["POST", "OPTIONS"])
@@ -3137,11 +3141,7 @@ def pipeline_generation_runs():
             }
         ), 202
     except Exception as exc:
-        from inlumen.llm_requests import provider_error
-        error = provider_error(exc)
-        if error is not None:
-            return _json_error(error.status_code, str(error), {"code": error.code, "param": error.param})
-        return _json_error(502, "pipeline script generation failed", str(exc))
+        return _codegen_route_error(exc, "pipeline script generation failed")
 
 
 @app.route("/api/pipeline/generation-runs/<run_id>/resume", methods=["POST", "OPTIONS"])
@@ -3215,7 +3215,7 @@ def pipeline_generation_run_resume(run_id: str):
             }
         ), 202
     except Exception as exc:
-        return _json_error(502, "pipeline generation run resume failed", str(exc))
+        return _codegen_route_error(exc, "pipeline generation run resume failed")
 
 
 @app.route(
@@ -3368,7 +3368,7 @@ def pipeline_generation_run(run_id: str):
         CODEGEN_RUN_STORE.put(local_run)
         return jsonify(response_payload), 200
     except Exception as exc:
-        return _json_error(502, "pipeline generation run lookup failed", str(exc))
+        return _codegen_route_error(exc, "pipeline generation run lookup failed")
 
 
 def _file_mutation_precondition():

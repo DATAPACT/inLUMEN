@@ -173,13 +173,14 @@ def request_policy(
 
 def endpoint_url(base_url: str, api_format: str) -> str:
     url = base_url.strip().rstrip("/")
+    path = "/responses" if api_format == "responses" else "/chat/completions"
     for suffix in ("/chat/completions", "/responses"):
         if url.endswith(suffix):
-            url = url[: -len(suffix)]
-            break
+            return url.removesuffix(suffix) + path
     if not url.endswith("/v1"):
         url += "/v1"
-    return url + ("/responses" if api_format == "responses" else "/chat/completions")
+    return url + path
+
 
 
 def responses_request(
@@ -252,9 +253,9 @@ def responses_request(
     return result
 
 
-def responses_result(payload: dict) -> tuple[str, list[dict], dict, str]:
+def responses_result(payload: dict, *, secrets=()) -> tuple[str, list[dict], dict, str]:
     if payload.get("status") == "failed" or payload.get("error"):
-        raise ProviderRequestError.from_body(502, payload)
+        raise ProviderRequestError.from_body(502, payload, secrets=secrets)
     output = payload.get("output") or []
     status = payload.get("status")
     unfinished_item = any(
@@ -273,7 +274,7 @@ def responses_result(payload: dict) -> tuple[str, list[dict], dict, str]:
             message += " Increase the output token limit before retrying."
         raise ProviderRequestError(
             502,
-            message,
+            redact_message(message, secrets),
             code="incomplete_response",
             param="max_output_tokens" if reason == "max_output_tokens" else None,
         )
@@ -346,8 +347,8 @@ def provider_error(exc: BaseException, *, secrets=()) -> ProviderRequestError | 
             return ProviderRequestError(
                 exc.status_code,
                 redact_message(str(exc), secrets),
-                code=exc.code,
-                param=exc.param,
+                code=redact_message(exc.code, secrets) if exc.code else None,
+                param=redact_message(exc.param, secrets) if exc.param else None,
             )
         # Avoid depending on the OpenAI SDK in the standalone codegen package.
         if (

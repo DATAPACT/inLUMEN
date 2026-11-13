@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
 from autogen_core.models import ChatCompletionClient
@@ -242,16 +242,11 @@ def select_model_client(
         reasoning_effort=resolved_config.reasoning_effort,
         tools=True,
     )
-    # AutoGen accepts chat-shaped constructor arguments; the Responses adapter
-    # translates them at the request boundary.
-    chat_policy = replace(policy, api_format="chat_completions")
-    kwargs.update(
-        chat_policy.parameters(
-            resolved_config.max_tokens,
-            temperature=resolved_config.temperature,
-            top_p=resolved_config.top_p,
-        )
-    )
+    kwargs["provider"] = resolved_config.provider
+    for key in ("max_tokens", "temperature", "top_p", "reasoning_effort"):
+        value = getattr(resolved_config, key)
+        if value is not None:
+            kwargs[key] = value
     if parallel_tool_calls is not None:
         kwargs["parallel_tool_calls"] = parallel_tool_calls
     if resolved_config.provider == "openrouter":
@@ -267,7 +262,7 @@ def select_model_client(
                 },
             }
     if policy.api_format == "responses":
-        return OpenAIResponsesClient(request_policy=policy, **kwargs)
+        return OpenAIResponsesClient(**kwargs)
     return OpenAIChatCompletionClient(**kwargs)
 
 
