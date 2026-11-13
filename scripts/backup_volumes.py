@@ -20,8 +20,13 @@ def command(*args):
 
 
 def digest(path):
+    # Reads in chunks rather than hashlib.file_digest (Python 3.11+), so the
+    # script also runs with the host's Python 3.10 on Ubuntu 22.04.
+    sha = hashlib.sha256()
     with path.open('rb') as handle:
-        return hashlib.file_digest(handle, 'sha256').hexdigest()
+        for chunk in iter(lambda: handle.read(1 << 20), b''):
+            sha.update(chunk)
+    return sha.hexdigest()
 
 
 def verify(directory):
