@@ -122,6 +122,11 @@ class OpenAIResponsesClient(ProviderAwareChatClient):
                 if isinstance(choice, dict)
                 else choice
             )
+        # SDK transport options also apply to Responses. In particular,
+        # OpenRouter's provider routing lives in extra_body.
+        for key in ("extra_body", "timeout"):
+            if key in args:
+                request[key] = args.pop(key)
         if args:
             raise ValueError(
                 f"Unsupported Responses API parameters: {', '.join(sorted(args))}"

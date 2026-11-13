@@ -156,7 +156,7 @@ class ConversationApiTests(unittest.TestCase):
         self.store.engine.dispose()
 
     def test_provider_failure_preserves_status_and_redacted_diagnostic_on_replay(self):
-        import httpx
+        import httpx2 as httpx
         from openai import BadRequestError
 
         error = BadRequestError(

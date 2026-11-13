@@ -88,7 +88,14 @@ def request_policy(
 ) -> RequestPolicy:
     if api_format not in {"auto", "chat_completions", "responses"}:
         raise ValueError("api_format must be auto, chat_completions, or responses.")
-    direct = urlsplit(base_url).hostname == "api.openai.com" or provider == "openai"
+    hostname = urlsplit(base_url).hostname or ""
+    # Regional OpenAI endpoints (for example eu.api.openai.com) have the same
+    # request capabilities. Match the domain boundary, not a loose substring.
+    direct = (
+        hostname == "api.openai.com"
+        or hostname.endswith(".api.openai.com")
+        or provider == "openai"
+    )
     name = model.lower()
     reasoning = direct and bool(re.match(r"^(gpt-[56](?:[.\-]|$)|o[134](?:-|$))", name))
     gpt6 = direct and name.startswith("gpt-6")

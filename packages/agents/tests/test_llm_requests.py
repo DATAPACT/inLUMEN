@@ -135,3 +135,40 @@ def test_responses_maps_images_and_json_schema():
     ]
     assert body["text"]["format"]["name"] == "result"
     assert "json_schema" not in body["text"]["format"]
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["api.openai.com", "eu.api.openai.com", "us.api.openai.com", "au.api.openai.com"],
+)
+@pytest.mark.parametrize(
+    "model,api_format,token_field",
+    [
+        ("gpt-5.5", "chat_completions", "max_completion_tokens"),
+        ("gpt-6.1-sol", "responses", "max_output_tokens"),
+    ],
+)
+def test_regional_openai_capabilities(host, model, api_format, token_field):
+    # The UI sends custom for direct OpenAI configurations.
+    policy = request_policy(model, f"https://{host}/v1", provider="custom", tools=True)
+    assert policy.api_format == api_format
+    assert policy.parameters(8192, temperature=0.1, top_p=0.9) == {token_field: 8192}
+    with pytest.raises(ValueError, match="does not support"):
+        request_policy(model, f"https://{host}/v1", reasoning_effort="minimal")
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "api.openai.com.example.test",
+        "eu.api.openai.com.example.test",
+        "other-api.openai.com",
+    ],
+)
+def test_similarly_named_custom_hosts_keep_compatible_defaults(host):
+    policy = request_policy("gpt-6.1-sol", f"https://{host}/v1", tools=True)
+    assert policy.api_format == "chat_completions"
+    assert policy.parameters(1024, temperature=0.1) == {
+        "max_tokens": 1024,
+        "temperature": 0.1,
+    }

@@ -148,7 +148,10 @@ def test_node_endpoint_uses_ai_payload_without_generating_dockerfile(
         ("gpt-5.2-codex", "responses"),
     ],
 )
-def test_openai_codegen_request_and_usage(monkeypatch, model, api_format):
+@pytest.mark.parametrize(
+    "host", ["api.openai.com", "eu.api.openai.com", "us.api.openai.com"]
+)
+def test_openai_codegen_request_and_usage(monkeypatch, model, api_format, host):
     import httpx
 
     captured = []
@@ -180,7 +183,7 @@ def test_openai_codegen_request_and_usage(monkeypatch, model, api_format):
     config = LLMConfig(
         provider="custom",
         model=model,
-        base_url="https://api.openai.com/v1",
+        base_url=f"https://{host}/v1",
         api_key="test-secret",
         max_output_tokens=8192,
         top_p=0.9,
@@ -195,6 +198,7 @@ def test_openai_codegen_request_and_usage(monkeypatch, model, api_format):
     )
     assert "main_py" in result
     url, body = captured[0]
+    assert url.startswith(f"https://{host}/v1/")
     assert url.endswith(
         "/responses" if api_format == "responses" else "/chat/completions"
     )

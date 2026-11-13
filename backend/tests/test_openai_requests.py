@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-import httpx
+import httpx2 as httpx
 import pytest
 from autogen_core import FunctionCall
 from autogen_core.models import (
@@ -36,6 +36,7 @@ def client_with_transport(configuration, respond, **kwargs):
     from unittest.mock import patch
 
     sdk = AsyncOpenAI(
+        base_url=configuration.base_url,
         api_key="test-secret",
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
     )
@@ -47,23 +48,27 @@ def client_with_transport(configuration, respond, **kwargs):
 
 
 def config(model, **kwargs):
-    return resolve_llm_config(
-        dict(
-            provider="custom",
-            base_url="https://api.openai.com/v1",
-            api_key="test-secret",
-            model=model,
-            max_tokens=8192,
-            **kwargs,
-        )
-    )
+    defaults = {
+        "provider": "custom",
+        "base_url": "https://api.openai.com/v1",
+        "api_key": "test-secret",
+        "model": model,
+        "max_tokens": 8192,
+    }
+    defaults.update(kwargs)
+    return resolve_llm_config(defaults)
 
 
 @pytest.mark.parametrize("model", ["gpt-4o", "gpt-5.5", "gpt-5.5-2026-04-23", "o3"])
-def test_chat_serialization(model):
+@pytest.mark.parametrize(
+    "host", ["api.openai.com", "eu.api.openai.com", "us.api.openai.com"]
+)
+def test_chat_serialization(model, host):
     captured = []
 
     def respond(request):
+        assert request.url.host == host
+        assert request.url.path == "/v1/chat/completions"
         captured.append(json.loads(request.content))
         return httpx.Response(
             200,
@@ -89,7 +94,8 @@ def test_chat_serialization(model):
 
     async def run():
         client = client_with_transport(
-            config(model, temperature=0.2, top_p=0.9), respond
+            config(model, base_url=f"https://{host}/v1", temperature=0.2, top_p=0.9),
+            respond,
         )
         try:
             result = await client.create([UserMessage(content="hello", source="user")])
@@ -117,10 +123,14 @@ def test_chat_serialization(model):
         "gpt-5.2-codex",
     ],
 )
-def test_responses_tool_roundtrip(model):
+@pytest.mark.parametrize(
+    "host", ["api.openai.com", "eu.api.openai.com", "us.api.openai.com"]
+)
+def test_responses_tool_roundtrip(model, host):
     captured = []
 
     def respond(request):
+        assert request.url.host == host
         assert request.url.path == "/v1/responses"
         body = json.loads(request.content)
         captured.append(body)
@@ -169,7 +179,13 @@ def test_responses_tool_roundtrip(model):
 
     async def run():
         client = client_with_transport(
-            config(model, reasoning_effort="low", temperature=0.1, top_p=0.9),
+            config(
+                model,
+                base_url=f"https://{host}/v1",
+                reasoning_effort="low",
+                temperature=0.1,
+                top_p=0.9,
+            ),
             respond,
             parallel_tool_calls=False,
         )
@@ -394,3 +410,65 @@ def test_responses_request_honors_cancellation():
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("provider_only", [[], ["openai"]])
+def test_openrouter_responses_preserves_provider_routing_and_timeout(provider_only):
+    captured = []
+
+    def respond(request):
+        assert request.url.host == "openrouter.ai"
+        assert request.url.path == "/api/v1/responses"
+        assert request.extensions["timeout"]["read"] == 10.0
+        captured.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_routing",
+                "object": "response",
+                "created_at": 1,
+                "model": "openai/gpt-6.1-sol",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "id": "msg_routing",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [
+                            {"type": "output_text", "text": "done", "annotations": []}
+                        ],
+                    }
+                ],
+                "usage": {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7},
+            },
+        )
+
+    async def run():
+        client = client_with_transport(
+            config(
+                "openai/gpt-6.1-sol",
+                provider="openrouter",
+                base_url="https://openrouter.ai/api/v1",
+                api_format="responses",
+                openrouter_provider_only=provider_only,
+            ),
+            respond,
+        )
+        try:
+            result = await client.create(
+                [UserMessage(content="hello", source="user")],
+                extra_create_args={"timeout": 10.0},
+            )
+            assert result.content == "done"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+    body = captured[0]
+    assert body["model"] == "openai/gpt-6.1-sol"
+    assert body["max_output_tokens"] == 8192
+    if provider_only:
+        assert body["provider"] == {"only": provider_only}
+    else:
+        assert "provider" not in body
