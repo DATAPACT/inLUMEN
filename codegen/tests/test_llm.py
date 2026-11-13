@@ -314,3 +314,56 @@ def test_codegen_rejects_unsupported_specialized_effort_before_model_call(
             api_key="test-secret",
             reasoning_effort=effort,
         )
+
+
+@pytest.mark.parametrize("reason", ["max_output_tokens", "content_filter"])
+def test_codegen_rejects_parseable_artifact_from_incomplete_response(
+    monkeypatch, reason
+):
+    import httpx
+    from inlumen.codegen.llm import LLMGenerationError
+
+    requests = []
+    reported = []
+
+    async def post(self, url, **kwargs):
+        requests.append(url)
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", url),
+            json={
+                "status": "incomplete",
+                "incomplete_details": {"reason": reason},
+                "output": [
+                    {
+                        "type": "message",
+                        "status": "incomplete",
+                        "content": [
+                            {"type": "output_text", "text": '{"main_py":"print(1)"}'}
+                        ],
+                    }
+                ],
+                "usage": {"input_tokens": 5, "output_tokens": 10, "total_tokens": 15},
+            },
+        )
+
+    monkeypatch.setattr("inlumen.codegen.llm.httpx.AsyncClient.post", post)
+    config = LLMConfig(
+        provider="custom",
+        model="gpt-6.1-sol",
+        base_url="https://api.openai.com/v1",
+        api_key="test-secret",
+    )
+    with pytest.raises(LLMGenerationError) as caught:
+        asyncio.run(
+            generate_json(
+                config,
+                system_prompt="Return JSON",
+                user_prompt="code",
+                usage_callback=reported.append,
+            )
+        )
+    assert caught.value.status_code == 502
+    assert caught.value.code == "incomplete_response"
+    assert reason in str(caught.value)
+    assert len(requests) == 1

@@ -204,3 +204,50 @@ def test_specialized_model_effort_limits(model, allowed, effort, host):
         assert "reasoning" not in params
     else:
         assert params["reasoning"] == {"effort": effort}
+
+
+@pytest.mark.parametrize(
+    "status,item_status,reason",
+    [
+        ("incomplete", "incomplete", "max_output_tokens"),
+        ("incomplete", "completed", "max_output_tokens"),
+        ("incomplete", "completed", "content_filter"),
+        ("completed", "incomplete", None),
+        ("completed", "in_progress", None),
+        ("in_progress", "in_progress", None),
+        ("cancelled", "completed", None),
+        ("queued", "completed", None),
+    ],
+)
+@pytest.mark.parametrize("kind", ["function_call", "message"])
+def test_unfinished_responses_cannot_be_accepted(status, item_status, reason, kind):
+    from inlumen.llm_requests import ProviderRequestError, responses_result
+
+    item = {"type": kind, "status": item_status}
+    if kind == "function_call":
+        item.update(call_id="call_test", name="change", arguments='{"value":1}')
+    else:
+        item["content"] = [{"type": "output_text", "text": '{"main_py":"print(1)"}'}]
+    payload = {"status": status, "output": [item]}
+    if reason:
+        payload["incomplete_details"] = {"reason": reason}
+    with pytest.raises(ProviderRequestError) as caught:
+        responses_result(payload)
+    assert caught.value.status_code == 502
+    assert caught.value.code == "incomplete_response"
+    assert (
+        reason or ("unfinished_output" if item_status != "completed" else status)
+    ) in str(caught.value)
+
+
+def test_reasoning_only_exhaustion_is_an_error_not_an_empty_reply():
+    from inlumen.llm_requests import ProviderRequestError, responses_result
+
+    with pytest.raises(ProviderRequestError, match="max_output_tokens"):
+        responses_result(
+            {
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "output": [],
+            }
+        )

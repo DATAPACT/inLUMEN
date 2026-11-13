@@ -255,8 +255,30 @@ def responses_request(
 def responses_result(payload: dict) -> tuple[str, list[dict], dict, str]:
     if payload.get("status") == "failed" or payload.get("error"):
         raise ProviderRequestError.from_body(502, payload)
+    output = payload.get("output") or []
+    status = payload.get("status")
+    unfinished_item = any(
+        item.get("status") in {"incomplete", "in_progress"} for item in output
+    )
+    # A parseable argument object or artifact can still belong to an unfinished
+    # response. AutoGen executes tool-call content without checking finish_reason,
+    # so reject it here, before either caller can accept or dispatch any output.
+    if status not in {None, "completed"} or unfinished_item:
+        details = payload.get("incomplete_details") or {}
+        reason = details.get("reason") or (
+            "unfinished_output" if unfinished_item else status
+        )
+        message = f"Model response is incomplete ({reason}). No unfinished output was accepted."
+        if reason == "max_output_tokens":
+            message += " Increase the output token limit before retrying."
+        raise ProviderRequestError(
+            502,
+            message,
+            code="incomplete_response",
+            param="max_output_tokens" if reason == "max_output_tokens" else None,
+        )
     text, calls = [], []
-    for item in payload.get("output", []):
+    for item in output:
         if item.get("type") == "function_call":
             calls.append(item)
         elif item.get("type") == "message":
@@ -271,13 +293,7 @@ def responses_result(payload: dict) -> tuple[str, list[dict], dict, str]:
         "completion_tokens": usage.get("output_tokens", 0),
         "total_tokens": usage.get("total_tokens", 0),
     }
-    finish = (
-        "length"
-        if payload.get("status") == "incomplete"
-        else "function_calls"
-        if calls
-        else "stop"
-    )
+    finish = "function_calls" if calls else "stop"
     return "".join(text), calls, normalized, finish
 
 

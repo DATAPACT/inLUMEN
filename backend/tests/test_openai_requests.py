@@ -479,3 +479,80 @@ def test_openrouter_responses_preserves_provider_routing_and_timeout(provider_on
         assert body["provider"] == {"only": provider_only}
     else:
         assert "provider" not in body
+
+
+@pytest.mark.parametrize(
+    "response_status,call_status",
+    [
+        ("incomplete", "incomplete"),
+        ("incomplete", "completed"),
+        ("completed", "incomplete"),
+        ("completed", "in_progress"),
+    ],
+)
+def test_unfinished_responses_never_execute_agent_tools(response_status, call_status):
+    from autogen_agentchat.agents import AssistantAgent
+    from inlumen.design.team import ProviderAwareGroupChat
+    from inlumen.llm_requests import ProviderRequestError
+
+    executions = []
+    requests = []
+
+    def change(value: int) -> str:
+        """Change a pipeline value."""
+        executions.append(value)
+        return "changed"
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_unfinished",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-6.1-sol",
+                "status": response_status,
+                "incomplete_details": {"reason": "max_output_tokens"}
+                if response_status == "incomplete"
+                else None,
+                "output": [
+                    {
+                        "type": "function_call",
+                        "id": "fc_test",
+                        "call_id": "call_test",
+                        "name": "change",
+                        "arguments": '{"value":1}',
+                        "status": call_status,
+                    }
+                ],
+                "usage": {"input_tokens": 5, "output_tokens": 10, "total_tokens": 15},
+            },
+        )
+
+    async def run():
+        client = client_with_transport(
+            config("gpt-6.1-sol"), respond, parallel_tool_calls=False
+        )
+        agent = AssistantAgent(
+            "editor", model_client=client, tools=[change], reflect_on_tool_use=True
+        )
+        team = ProviderAwareGroupChat([agent], max_turns=1)
+        try:
+            with pytest.raises(ProviderRequestError) as caught:
+                await team.run(task="Change a pipeline value")
+            assert caught.value.status_code == 502
+            assert caught.value.code == "incomplete_response"
+            expected_reason = (
+                "max_output_tokens"
+                if response_status == "incomplete"
+                else "unfinished_output"
+            )
+            assert expected_reason in str(caught.value)
+            assert executions == []
+            assert client._response_replay == {}
+            assert len(requests) == 1
+        finally:
+            await client.close()
+
+    asyncio.run(run())
