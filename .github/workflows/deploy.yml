@@ -1,0 +1,79 @@
+name: Deploy
+
+# Deploys published images to the production VM with scripts/deploy_vm.sh.
+#
+# - Starts after Container images publishes a commit from main. The job waits
+#   for approval in the `production` environment before it touches the VM.
+# - A manual run deploys any commit on main whose images were published,
+#   which is also how to roll back to an earlier commit.
+#
+# The job runs on the self-hosted runner installed on the VM (label
+# `inlumen-vm`). It needs the repository variables INLUMEN_VM_CHECKOUT (the
+# VM checkout path) and INLUMEN_PUBLIC_URL.
+on:
+  workflow_run:
+    workflows: ["Container images"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Full 40-character commit SHA on main to deploy
+        required: true
+      skip_backup:
+        description: Skip the volume backup (shorter downtime, no restore point)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Never cancel a deploy halfway; queue the next one instead.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to VM
+    # Container images publishes only for passing pushes to main (event
+    # workflow_run) and manual runs on main (workflow_dispatch).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       contains(fromJSON('["workflow_run", "workflow_dispatch"]'), github.event.workflow_run.event))
+    runs-on: [self-hosted, linux, inlumen-vm]
+    environment:
+      name: production
+      url: ${{ vars.INLUMEN_PUBLIC_URL }}
+    timeout-minutes: 60
+    env:
+      COMMIT: ${{ github.event.inputs.commit || github.event.workflow_run.head_sha }}
+      INLUMEN_DEPLOY_DIR: ${{ vars.INLUMEN_VM_CHECKOUT }}
+      INLUMEN_HEALTH_URL: ${{ vars.INLUMEN_PUBLIC_URL }}/healthz
+      INLUMEN_SKIP_BACKUP: ${{ github.event.inputs.skip_backup == 'true' }}
+    steps:
+      - name: Check the commit is on main
+        run: |
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::commit must be a full 40-character SHA"; exit 1; }
+          [ -n "$INLUMEN_DEPLOY_DIR" ] || { echo "::error::Set the INLUMEN_VM_CHECKOUT repository variable"; exit 1; }
+          git -C "$INLUMEN_DEPLOY_DIR" fetch --quiet origin main
+          git -C "$INLUMEN_DEPLOY_DIR" merge-base --is-ancestor "$COMMIT" origin/main \
+            || { echo "::error::$COMMIT is not on main"; exit 1; }
+
+      # Run the deploy script as it is in the commit being deployed, not as it
+      # is in the VM's current checkout.
+      - name: Deploy
+        run: |
+          script="$RUNNER_TEMP/deploy_vm.sh"
+          git -C "$INLUMEN_DEPLOY_DIR" show "$COMMIT:scripts/deploy_vm.sh" > "$script"
+          bash "$script" "$COMMIT"
+
+      - name: Summary
+        if: always()
+        run: |
+          # Record names start with a UTC timestamp, so the last one sorts last.
+          latest=$(find "$INLUMEN_DEPLOY_DIR/state/deployments" -name '*.json' 2>/dev/null | sort | tail -1)
+          if [ -n "$latest" ]; then
+            { echo '```json'; cat "$latest"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi

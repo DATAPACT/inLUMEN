@@ -85,3 +85,8 @@ frontend/test-results/
 frontend/playwright-report/
 frontend/loadtest/*.local.json
 frontend/loadtest/results/
+
+# Written on the deployment host by scripts/deploy_vm.sh
+.env.deploy
+.env.deploy.next
+.deploy.lock

@@ -292,6 +292,41 @@ execution budget; measure chat/provider capacity separately. For an 8-vCPU/30-Gi
 host these defaults leave capacity for application services; adjust the budgets
 for other hosts and workloads. See [the VM load-test guide](vm-load-test.md).
 
+### Automated deploys
+
+The `Deploy` workflow (`.github/workflows/deploy.yml`) starts after
+`Container images` publishes a commit from `main`. It waits for approval in
+the `production` GitHub environment, then runs `scripts/deploy_vm.sh` on a
+self-hosted runner on the VM (label `inlumen-vm`). The script:
+
+1. Pulls the commit's images while the current version keeps running.
+2. Backs up the project's volumes with `scripts/backup_volumes.py`, together
+   with a copy of `.env.production`. inLUMEN is stopped during the backup.
+   The newest three backups are kept in `~/backups/inlumen`.
+3. Checks out the commit and starts it. Compose runs `migrate` first.
+4. Waits until backend, codegen, runner and frontend are healthy, run the
+   expected images, and the public `/healthz` answers.
+5. If any of this fails, checks out the previous commit with its previous
+   images and starts it again.
+
+The rollback restores code and images, not data. If a migration ran before
+the failure, restore the database from that deploy's backup with
+`scripts/backup_volumes.py restore`.
+
+The chosen images are written to `.env.deploy` beside `.env.production`;
+Compose must read both, in that order, for manual commands to use the same
+images. Each deploy is recorded in `state/deployments/`.
+
+To redeploy or roll back to an earlier commit, run the `Deploy` workflow
+manually with that commit's full SHA; its images must already be published.
+The `skip_backup` input shortens downtime but leaves no restore point.
+
+The workflow needs the repository variables `INLUMEN_VM_CHECKOUT` (the VM
+checkout path) and `INLUMEN_PUBLIC_URL`. Because the repository is public,
+only workflows that cannot be started from forks may use the `inlumen-vm`
+runner, and pull requests from outside contributors must require approval
+before their workflows run.
+
 ### Routing more applications through the shared connector
 
 In the VM's separate `cloudflare/docker-compose.yml`, the connector's `default`
