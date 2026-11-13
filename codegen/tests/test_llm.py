@@ -287,3 +287,30 @@ def test_codegen_endpoint_preserves_provider_status(monkeypatch, route, target):
     assert "Model not available" in response.json()["detail"]["message"]
     assert response.json()["detail"]["code"] == "model_not_available"
     assert response.json()["detail"]["param"] == "model"
+
+
+@pytest.mark.parametrize(
+    "model,effort",
+    [
+        ("gpt-5.5-pro", "none"),
+        ("gpt-5.5-pro", "low"),
+        ("gpt-5.5-pro-2026-04-23", "low"),
+        ("gpt-5.2-codex", "none"),
+        ("gpt-5.2-codex", "minimal"),
+    ],
+)
+def test_codegen_rejects_unsupported_specialized_effort_before_model_call(
+    monkeypatch, model, effort
+):
+    def unexpected_client(**kwargs):
+        pytest.fail("Invalid configuration must not create a provider client")
+
+    monkeypatch.setattr("inlumen.codegen.llm.httpx.AsyncClient", unexpected_client)
+    with pytest.raises(ValueError, match=f"does not support reasoning_effort={effort}"):
+        LLMConfig(
+            provider="custom",
+            model=model,
+            base_url="https://api.openai.com/v1",
+            api_key="test-secret",
+            reasoning_effort=effort,
+        )

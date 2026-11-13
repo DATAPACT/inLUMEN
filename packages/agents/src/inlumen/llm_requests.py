@@ -143,7 +143,15 @@ def request_policy(
                 f"Model {model} does not support reasoning_effort=minimal; use low or higher."
             )
         allowed = None
-        if direct and name.startswith("gpt-5.5"):
+        # Check specialized variants before their broader families. A dated
+        # snapshot keeps its model's effort limits; model availability is still
+        # validated by the provider.
+        model_name = re.sub(r"-\d{4}-\d{2}-\d{2}$", "", name)
+        if direct and model_name == "gpt-5.5-pro":
+            allowed = {"medium", "high", "xhigh"}
+        elif direct and model_name == "gpt-5.2-codex":
+            allowed = {"low", "medium", "high", "xhigh"}
+        elif direct and name.startswith("gpt-5.5"):
             allowed = {"none", "low", "medium", "high", "xhigh"}
         elif direct and re.match(
             r"^gpt-5(?:-(?:mini|nano))?(?:-20\d\d-\d\d-\d\d)?$", name

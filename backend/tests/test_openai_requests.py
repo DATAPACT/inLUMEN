@@ -251,6 +251,13 @@ def test_responses_tool_roundtrip(model, host):
         ({"model": "gpt-6-luna", "reasoning_effort": "minimal"}, "does not support"),
         ({"model": "gpt-4o", "reasoning_effort": "low"}, "does not support"),
         ({"model": "gpt-5.5", "api_format": "invalid"}, "api_format"),
+        ({"model": "gpt-5.5-pro", "reasoning_effort": "none"}, "does not support"),
+        (
+            {"model": "gpt-5.5-pro-2026-04-23", "reasoning_effort": "low"},
+            "does not support",
+        ),
+        ({"model": "gpt-5.2-codex", "reasoning_effort": "none"}, "does not support"),
+        ({"model": "gpt-5.2-codex", "reasoning_effort": "minimal"}, "does not support"),
     ],
 )
 def test_invalid_config_fails_before_provider_request(kwargs, match):

@@ -172,3 +172,35 @@ def test_similarly_named_custom_hosts_keep_compatible_defaults(host):
         "max_tokens": 1024,
         "temperature": 0.1,
     }
+
+
+@pytest.mark.parametrize(
+    "model,allowed",
+    [
+        ("gpt-5.5-pro", {"medium", "high", "xhigh"}),
+        ("gpt-5.5-pro-2026-04-23", {"medium", "high", "xhigh"}),
+        ("gpt-5.2-codex", {"low", "medium", "high", "xhigh"}),
+        # Synthetic dated ID exercises snapshot matching, not model availability.
+        ("gpt-5.2-codex-2026-01-01", {"low", "medium", "high", "xhigh"}),
+    ],
+)
+@pytest.mark.parametrize(
+    "effort", [None, "none", "minimal", "low", "medium", "high", "xhigh", "max"]
+)
+@pytest.mark.parametrize("host", ["api.openai.com", "eu.api.openai.com"])
+def test_specialized_model_effort_limits(model, allowed, effort, host):
+    if effort is not None and effort not in allowed:
+        with pytest.raises(
+            ValueError, match=f"does not support reasoning_effort={effort}"
+        ):
+            request_policy(model, f"https://{host}/v1", reasoning_effort=effort)
+        return
+    policy = request_policy(model, f"https://{host}/v1", reasoning_effort=effort)
+    assert policy.api_format == "responses"
+    params = policy.parameters(8192, temperature=0.1, top_p=0.9)
+    assert params["max_output_tokens"] == 8192
+    assert "temperature" not in params and "top_p" not in params
+    if effort is None:
+        assert "reasoning" not in params
+    else:
+        assert params["reasoning"] == {"effort": effort}
