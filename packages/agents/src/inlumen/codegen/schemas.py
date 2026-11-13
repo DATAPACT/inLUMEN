@@ -1,7 +1,7 @@
 import os
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 NodeKind = Literal[
     "input",
@@ -50,13 +50,37 @@ class LLMConfig(BaseModel):
     base_url: str
     api_key: str = Field(default="", exclude=True, repr=False)
     timeout_seconds: int = Field(default=180, ge=1, le=900)
-    max_output_tokens: int = Field(default=16384, ge=256, le=32768)
+    max_output_tokens: int = Field(
+        default=16384,
+        ge=256,
+        le=32768,
+        validation_alias=AliasChoices(
+            "max_output_tokens", "max_completion_tokens", "max_tokens"
+        ),
+    )
+    api_format: Literal["auto", "chat_completions", "responses"] = "auto"
+    reasoning_effort: str | None = None
+    temperature: float | None = Field(default=0.1, ge=0, le=2)
+    top_p: float | None = Field(default=None, ge=0, le=1)
     openrouter_provider_only: list[str] = Field(default_factory=list)
     model_family: str = "code"
     supports_function_calling: bool = True
     supports_json_output: bool = True
     supports_structured_output: bool = True
     supports_vision: bool = False
+
+    @model_validator(mode="after")
+    def validate_request_format(self):
+        from inlumen.llm_requests import request_policy
+
+        request_policy(
+            self.model,
+            self.base_url,
+            provider=self.provider,
+            api_format=self.api_format,
+            reasoning_effort=self.reasoning_effort,
+        )
+        return self
 
 
 def is_input_node_kind(value: str) -> bool:

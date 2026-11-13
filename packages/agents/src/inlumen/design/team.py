@@ -19,6 +19,14 @@ PREVIEW_MODE_MESSAGE = (
 )
 
 
+class ProviderAwareGroupChat(RoundRobinGroupChat):
+    async def run_stream(self, **kwargs):
+        from inlumen.llm_requests import provider_error_scope
+        with provider_error_scope():
+            async for item in super().run_stream(**kwargs):
+                yield item
+
+
 def build_design_team(
     model_client: ChatCompletionClient,
     store: GraphStore,
@@ -45,4 +53,4 @@ def build_design_team(
         max_tool_iterations=max_tool_iterations,
         reflect_on_tool_use=True,
     )
-    return RoundRobinGroupChat([editor], max_turns=1)
+    return ProviderAwareGroupChat([editor], max_turns=1)

@@ -26,6 +26,64 @@ class FakeResponse:
 
 
 class CodegenServiceClientTest(unittest.TestCase):
+    def test_codegen_http_error_preserves_status_and_sanitizes_provider_key(self):
+        from io import BytesIO
+        from urllib.error import HTTPError
+        from inlumen.llm_requests import ProviderRequestError
+
+        payload = {"llm_config": {"api_key": "provider-token"}}
+        for name in (
+            "_post_codegen_request",
+            "_post_codegen_pipeline_request",
+            "_post_codegen_pipeline_run_request",
+        ):
+            with self.subTest(name=name):
+                error = HTTPError(
+                    "https://codegen/v1",
+                    429,
+                    "Limit",
+                    {},
+                    BytesIO(
+                        b'{"detail":{"message":"Quota exceeded provider-token","code":"insufficient_quota"}}'
+                    ),
+                )
+                with patch("inlumen_api.urlopen", side_effect=error):
+                    with self.assertRaises(ProviderRequestError) as caught:
+                        getattr(inlumen_api, name)(payload)
+                self.assertEqual(caught.exception.status_code, 429)
+                self.assertEqual(caught.exception.code, "insufficient_quota")
+                self.assertIn("Quota exceeded", str(caught.exception))
+                self.assertNotIn("provider-token", str(caught.exception))
+
+    def test_pipeline_route_preserves_codegen_status(self):
+        from inlumen.llm_requests import ProviderRequestError
+
+        with (
+            patch("inlumen_api._proxy"),
+            patch("inlumen_api._upstream_json", return_value={}),
+            patch(
+                "inlumen_api._build_pipeline_codegen_context",
+                return_value={"graph": {"nodes": [{}]}},
+            ),
+            patch("inlumen_api._build_pipeline_codegen_payload", return_value=({}, {})),
+            patch("inlumen_api._pipeline_codegen_conflict", return_value=None),
+            patch(
+                "inlumen_api._post_codegen_pipeline_request",
+                side_effect=ProviderRequestError(
+                    400,
+                    "Unsupported parameter: max_tokens",
+                    code="unsupported_parameter",
+                    param="max_tokens",
+                ),
+            ),
+        ):
+            response = inlumen_api.app.test_client().post(
+                "/api/pipeline/generate-scripts", json={}
+            )
+        self.assertEqual(response.status_code, 400, response.json)
+        self.assertIn("max_tokens", response.json["error"])
+        self.assertEqual(response.json["details"]["code"], "unsupported_parameter")
+
     @staticmethod
     def headers(request):
         return {name.lower(): value for name, value in request.header_items()}

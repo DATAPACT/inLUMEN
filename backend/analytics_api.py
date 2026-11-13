@@ -667,6 +667,13 @@ def agentic_pipeline_editor():
             "assistant_message": "Stopped before the agent turn started.",
         }, 409, "cancelled")
     except Exception as exc:
+        from inlumen.llm_requests import provider_error
+        error = provider_error(exc, secrets=(getattr(llm_config, "api_key", ""),))
+        if error is not None:
+            return respond({"session_id": session_id, "turn_id": turn_id,
+                            "error": str(error), "code": error.code,
+                            "param": error.param, "upstream_status": error.status_code},
+                           error.status_code, "failed")
         # Internal exception strings may contain provider responses or credentials.
         return respond({"session_id": session_id, "turn_id": turn_id,
                         "error": "The pipeline request failed. Check the saved pipeline before trying again."}, 500, "failed")

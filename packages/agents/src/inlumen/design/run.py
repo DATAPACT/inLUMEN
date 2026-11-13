@@ -14,7 +14,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from autogen_core.models import ChatCompletionClient, CreateResult, ModelInfo
@@ -125,7 +125,8 @@ def openai_model_client(
     ``model_info`` defaults to a tool-calling model of unknown family. Parallel
     tool calls are off: the agent's graph edits must run one at a time.
     """
-    from autogen_ext.models.openai import OpenAIChatCompletionClient
+    from inlumen.llm_autogen import OpenAIResponsesClient, ProviderAwareChatClient as OpenAIChatCompletionClient
+    from inlumen.llm_requests import request_policy
 
     info = {
         "vision": False,
@@ -135,7 +136,30 @@ def openai_model_client(
         "structured_output": False,
         **(model_info or {}),
     }
-    return OpenAIChatCompletionClient(
+    policy = request_policy(
+        model,
+        base_url or "https://api.openai.com/v1",
+        api_format=kwargs.pop("api_format", "auto"),
+        reasoning_effort=kwargs.pop("reasoning_effort", None),
+        tools=True,
+    )
+    limit = kwargs.pop("max_completion_tokens", kwargs.pop("max_tokens", None))
+    chat_policy = replace(policy, api_format="chat_completions")
+    kwargs.update(
+        chat_policy.parameters(
+            limit,
+            temperature=kwargs.pop("temperature", None),
+            top_p=kwargs.pop("top_p", None),
+        )
+    )
+    client_class = (
+        OpenAIResponsesClient
+        if policy.api_format == "responses"
+        else OpenAIChatCompletionClient
+    )
+    if policy.api_format == "responses":
+        kwargs["request_policy"] = policy
+    return client_class(
         model=model,
         base_url=base_url,
         api_key=api_key or "not-needed",

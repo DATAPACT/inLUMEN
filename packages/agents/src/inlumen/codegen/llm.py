@@ -8,6 +8,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
+from inlumen.llm_requests import (
+    ProviderRequestError, endpoint_url, request_policy, responses_request,
+    responses_result, redact_message,
+)
 from inlumen.contracts.events import model_request_event
 from .generation_budget import CURRENT_BUDGET
 from .model import CURRENT_EVENTS, CURRENT_MODEL, ModelClient, ModelReply
@@ -22,6 +26,12 @@ from .schemas import (
 
 class LLMGenerationError(RuntimeError):
     """Raised when the configured coding model cannot return a JSON artifact."""
+
+    def __init__(self, message: str, *, status_code: int = 422, code=None, param=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.param = param
 
 
 UsageCallback = Callable[[GenerationUsage], Awaitable[None] | None]
@@ -68,15 +78,6 @@ def _usage_from_response(
     )
 
 
-def _chat_completions_url(base_url: str) -> str:
-    normalized = base_url.strip().rstrip("/")
-    if normalized.endswith("/chat/completions"):
-        return normalized
-    if normalized.endswith("/v1"):
-        return f"{normalized}/chat/completions"
-    return f"{normalized}/v1/chat/completions"
-
-
 def _json_from_model_content(content: Any) -> dict[str, Any]:
     if isinstance(content, list):
         content = "".join(
@@ -121,21 +122,33 @@ class HttpModelClient:
         max_tokens: int,
     ) -> ModelReply:
         config = self.config
-        body: dict[str, Any] = {
-            "model": config.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.1,
-            # Canonical pipelines can contain several independently compiled node
-            # functions. Give the coding model enough room to finish the JSON
-            # envelope and every function instead of returning a syntactically
-            # truncated module for larger graphs.
-            "max_tokens": max_tokens,
-        }
-        if json_output:
-            body["response_format"] = {"type": "json_object"}
+        try:
+            policy = request_policy(
+                config.model,
+                config.base_url,
+                provider=config.provider,
+                api_format=config.api_format,
+                reasoning_effort=config.reasoning_effort,
+            )
+        except ValueError as exc:
+            raise LLMGenerationError(str(exc), status_code=400) from exc
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        fmt = {"type": "json_object"} if json_output else None
+        body: dict[str, Any] = {"model": config.model}
+        body.update(
+            policy.parameters(
+                max_tokens, temperature=config.temperature, top_p=config.top_p
+            )
+        )
+        if policy.api_format == "responses":
+            body.update(responses_request(messages, response_format=fmt))
+        else:
+            body["messages"] = messages
+            if fmt:
+                body["response_format"] = fmt
         headers = {
             "Authorization": f"Bearer {config.api_key}",
             "Content-Type": "application/json",
@@ -149,18 +162,33 @@ class HttpModelClient:
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
-                    _chat_completions_url(config.base_url),
+                    endpoint_url(config.base_url, policy.api_format),
                     headers=headers,
                     json=body,
                 )
                 response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            detail = exc.response.text[:1000]
+            try:
+                error_body = exc.response.json()
+            except ValueError:
+                error_body = {}
+            error = ProviderRequestError.from_body(
+                exc.response.status_code, error_body, secrets=(config.api_key,)
+            )
             raise LLMGenerationError(
-                f"Coding model request failed ({exc.response.status_code}): {detail}"
+                str(error),
+                status_code=error.status_code,
+                code=error.code,
+                param=error.param,
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise LLMGenerationError(
+                "Coding model request timed out.", status_code=504
             ) from exc
         except httpx.HTTPError as exc:
-            raise LLMGenerationError(f"Coding model request failed: {exc}") from exc
+            raise LLMGenerationError(
+                "Could not connect to the coding model provider.", status_code=502
+            ) from exc
 
         try:
             response_payload = response.json()
@@ -171,6 +199,23 @@ class HttpModelClient:
         if not isinstance(response_payload, dict):
             raise LLMGenerationError(
                 "Coding model returned an unsupported chat-completions response."
+            )
+        if policy.api_format == "responses":
+            try:
+                content, calls, usage, finish = responses_result(response_payload)
+            except ProviderRequestError as exc:
+                raise LLMGenerationError(
+                    redact_message(str(exc), (config.api_key,)),
+                    status_code=exc.status_code,
+                    code=exc.code,
+                    param=exc.param,
+                ) from exc
+            if calls or not content:
+                raise LLMGenerationError(
+                    "Coding model returned no text artifact.", status_code=502
+                )
+            return ModelReply(
+                content=content, usage=usage, finish_reason=finish, raw=response_payload
             )
         try:
             choice = response_payload["choices"][0]
@@ -186,7 +231,9 @@ class HttpModelClient:
         return ModelReply(
             content=content,
             usage=usage if isinstance(usage, dict) else None,
-            finish_reason=choice.get("finish_reason") if isinstance(choice, dict) else None,
+            finish_reason=choice.get("finish_reason")
+            if isinstance(choice, dict)
+            else None,
             raw=response_payload,
         )
 

@@ -500,6 +500,13 @@ def ready() -> dict[str, str]:
     return {"status": "ready"}
 
 
+def _generation_http_error(exc: Exception) -> HTTPException:
+    detail: Any = str(exc)
+    if isinstance(exc, LLMGenerationError) and (exc.code or exc.param):
+        detail = {"message": str(exc), "code": exc.code, "param": exc.param}
+    return HTTPException(status_code=getattr(exc, "status_code", 422), detail=detail)
+
+
 @app.post(
     "/v1/generate/node-script",
     response_model=GenerateNodeScriptResponse,
@@ -526,7 +533,7 @@ async def generate_node_script(
     try:
         return await generate_node_script_bundle(request)
     except LLMGenerationError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise _generation_http_error(exc) from exc
 
 
 @app.post(
@@ -555,7 +562,7 @@ async def generate_pipeline_scripts(
     try:
         return await generate_pipeline_script_bundles(request)
     except (LLMGenerationError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise _generation_http_error(exc) from exc
 
 
 @app.post(

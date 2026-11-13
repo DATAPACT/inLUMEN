@@ -76,3 +76,26 @@ uv pip install -e "packages/agents[design,codegen]"
 ```sh
 cd packages/agents && uv run --extra design --extra codegen --extra dev pytest
 ```
+
+### OpenAI request compatibility
+
+Chat and code generation share model capability handling. For direct OpenAI
+endpoints, GPT-5.5 uses Chat Completions with `max_completion_tokens`; GPT-6 models
+and Codex/Pro models automatically use Responses with `max_output_tokens`.
+The design client translates function calls and results, replays reasoning items
+during tool loops, and disables provider-side response storage. Its streaming
+interface yields one complete result.
+
+Request configuration accepts `api_format` (`auto`, `chat_completions`, or
+`responses`) and `reasoning_effort`. Incompatible known model/format combinations
+are rejected before sending a request. Sampling parameters (`temperature`,
+`top_p`) are omitted for recognized reasoning models unless effort is `none`.
+OpenRouter, Ollama, and custom compatible endpoints retain their existing Chat
+Completions defaults; Responses is available through an explicit format override.
+Unknown model names remain subject to provider validation and account access.
+
+Provider failures retain their HTTP status and useful error message. Credentials
+are redacted; arbitrary internal exceptions still produce a generic chat error.
+The compatibility tests use simulated provider responses and make no paid calls.
+Model rules follow the [OpenAI model guide](https://developers.openai.com/api/docs/guides/latest-model)
+and [GPT-5.5 model reference](https://developers.openai.com/api/docs/models/gpt-5.5).

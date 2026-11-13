@@ -155,6 +155,70 @@ class ConversationApiTests(unittest.TestCase):
         for item in self.patches: item.stop()
         self.store.engine.dispose()
 
+    def test_provider_failure_preserves_status_and_redacted_diagnostic_on_replay(self):
+        import httpx
+        from openai import BadRequestError
+
+        error = BadRequestError(
+            "unsupported",
+            response=httpx.Response(
+                400,
+                request=httpx.Request(
+                    "POST", "https://api.openai.com/v1/chat/completions"
+                ),
+            ),
+            body={
+                "message": "Unsupported max_tokens; key private-secret",
+                "code": "unsupported_parameter",
+                "param": "max_tokens",
+            },
+        )
+        payload = {"turn_id": str(uuid.uuid4()), "user_message": "Create my pipeline"}
+
+        async def editor(**kwargs):
+            raise error
+
+        with (
+            patch(
+                "analytics_api.llm_config_from_payload",
+                return_value=SimpleNamespace(
+                    model="gpt-5.5", provider="custom", api_key="private-secret"
+                ),
+            ),
+            patch("analytics_api.log_llm_selection"),
+            patch(
+                "analytics_api.run_pipeline_editor_turn", side_effect=editor
+            ) as model,
+        ):
+            first = self.client.post("/simple_chat", json=payload)
+            second = self.client.post("/simple_chat", json=payload)
+        self.assertEqual(first.status_code, 400, first.json)
+        self.assertEqual(first.json["code"], "unsupported_parameter")
+        self.assertEqual(first.json["param"], "max_tokens")
+        self.assertIn("Unsupported max_tokens", first.json["error"])
+        self.assertNotIn("private-secret", str(first.json))
+        self.assertEqual(first.json, second.json)
+        self.assertEqual(model.call_count, 1)
+
+    def test_internal_failure_does_not_expose_exception_text(self):
+        async def editor(**kwargs):
+            raise RuntimeError("private internal-secret")
+
+        with (
+            patch(
+                "analytics_api.llm_config_from_payload",
+                return_value=SimpleNamespace(model="test", provider="test"),
+            ),
+            patch("analytics_api.log_llm_selection"),
+            patch("analytics_api.run_pipeline_editor_turn", side_effect=editor),
+        ):
+            response = self.client.post(
+                "/simple_chat",
+                json={"turn_id": str(uuid.uuid4()), "user_message": "Hello"},
+            )
+        self.assertEqual(response.status_code, 500)
+        self.assertNotIn("internal-secret", str(response.json))
+
     def test_post_is_persisted_once_and_receipt_replayed_without_another_model_call(self):
         payload = {"turn_id": str(uuid.uuid4()), "user_message": "Create my pipeline"}
         async def editor(**kwargs):
