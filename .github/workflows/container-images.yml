@@ -1,0 +1,151 @@
+name: Container images
+
+# Builds the four application images used by docker-compose-prod.yml.
+#
+# - After the Test suite passes for a push to main, the images are published
+#   to GHCR, tagged with the full commit SHA and with `main`.
+# - On pull requests that change image inputs, the images are only built, to
+#   check that they still build. Nothing is published.
+# - A manual run on main publishes like a passing push; on any other branch it
+#   only builds.
+#
+# Nothing here deploys. The VM keeps running what it runs until someone (or a
+# later deploy job) points its INLUMEN_*_IMAGE settings at a published tag.
+on:
+  workflow_run:
+    workflows: ["Test suite"]
+    types: [completed]
+    branches: [main]
+  pull_request:
+    paths:
+      - "**/Dockerfile*"
+      - "**/.dockerignore"
+      - backend/requirements.lock
+      - codegen/pyproject.toml
+      - codegen/uv.lock
+      - runner/pyproject.toml
+      - runner/uv.lock
+      - frontend/package-lock.json
+      - frontend/nginx.prod.conf
+      - packages/agents/pyproject.toml
+      - .github/workflows/container-images.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-images-${{ github.event.workflow_run.head_sha || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.image }}
+    # A workflow_run fires for every finished Test suite run, including failed
+    # ones and pull requests. Publish only for a passing push to main.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The migrate service in docker-compose-prod.yml reuses this image.
+          - image: inlumen-backend
+            context: backend
+            file: backend/Dockerfile
+            build-contexts: agents=packages/agents
+          - image: inlumen-codegen-service
+            context: codegen
+            file: codegen/Dockerfile
+            build-contexts: agents=packages/agents
+          - image: inlumen-runner-service
+            context: runner
+            file: runner/Dockerfile
+            build-contexts: ""
+          - image: inlumen-frontend
+            context: frontend
+            file: frontend/Dockerfile.prod
+            build-contexts: ""
+    env:
+      COMMIT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      PUBLISH: >-
+        ${{ github.event_name == 'workflow_run' ||
+            (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.COMMIT_SHA }}
+          persist-credentials: false
+
+      - name: Set image name
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${{ matrix.image }}"
+          echo "IMAGE=${image}" >> "$GITHUB_ENV"
+          if [ "$PUBLISH" = "true" ]; then
+            printf 'TAGS<<EOF\n%s:%s\n%s:main\nEOF\n' "$image" "$COMMIT_SHA" "$image" >> "$GITHUB_ENV"
+          else
+            printf 'TAGS<<EOF\n%s:check\nEOF\n' "$image" >> "$GITHUB_ENV"
+          fi
+
+      # The frontend bakes its public API and Keycloak settings into the
+      # JavaScript bundle at build time. They are not secrets (every browser
+      # receives them), so they come from repository variables.
+      - name: Frontend build settings
+        if: matrix.image == 'inlumen-frontend'
+        env:
+          PUBLIC_URL: ${{ vars.INLUMEN_PUBLIC_URL }}
+          KEYCLOAK_URL: ${{ vars.VITE_KEYCLOAK_URL }}
+          KEYCLOAK_REALM: ${{ vars.VITE_KEYCLOAK_REALM || 'inlumen' }}
+          KEYCLOAK_CLIENT_ID: ${{ vars.VITE_KEYCLOAK_CLIENT_ID || 'inlumen-frontend' }}
+          REVIEW_AI_CHANGES_DEFAULT: ${{ vars.VITE_REVIEW_AI_CHANGES_DEFAULT || 'true' }}
+        run: |
+          if [ "$PUBLISH" = "true" ] && { [ -z "$PUBLIC_URL" ] || [ -z "$KEYCLOAK_URL" ]; }; then
+            echo "::error::Set the INLUMEN_PUBLIC_URL and VITE_KEYCLOAK_URL repository variables before publishing the frontend image."
+            exit 1
+          fi
+          # Build-only runs may lack the variables; placeholders keep the build checkable.
+          {
+            echo "BUILD_ARGS<<EOF"
+            echo "VITE_INLUMEN_API_URL=${PUBLIC_URL:-https://inlumen.invalid}"
+            echo "VITE_AUTH_ENABLED=true"
+            echo "VITE_REVIEW_AI_CHANGES_DEFAULT=${REVIEW_AI_CHANGES_DEFAULT}"
+            echo "VITE_KEYCLOAK_URL=${KEYCLOAK_URL:-https://keycloak.invalid}"
+            echo "VITE_KEYCLOAK_REALM=${KEYCLOAK_REALM}"
+            echo "VITE_KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID}"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build${{ env.PUBLISH == 'true' && ' and publish' || '' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          build-contexts: ${{ matrix.build-contexts }}
+          build-args: ${{ env.BUILD_ARGS }}
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: ${{ env.TAGS }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.COMMIT_SHA }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+
+      - name: Summary
+        if: env.PUBLISH == 'true'
+        run: echo "Published \`${IMAGE}:${COMMIT_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
