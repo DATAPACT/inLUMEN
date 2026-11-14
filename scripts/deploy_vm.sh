@@ -137,8 +137,19 @@ if [ "${INLUMEN_SKIP_BACKUP:-false}" = true ]; then
 else
   BACKUP_DIR="$BACKUP_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-before-${COMMIT:0:12}"
   mkdir -p "$BACKUP_ROOT" && chmod 700 "$BACKUP_ROOT"
+  # Use the backup script from the commit being deployed, like this script:
+  # the current checkout may still have an older, broken version.
+  backup_script=$(mktemp --suffix .py)
+  git show "$COMMIT:scripts/backup_volumes.py" >"$backup_script"
   log "Backing up volumes to $BACKUP_DIR (inLUMEN is stopped meanwhile)"
-  python3 scripts/backup_volumes.py backup "$BACKUP_DIR" --project "$PROJECT"
+  if ! python3 "$backup_script" backup "$BACKUP_DIR" --project "$PROJECT"; then
+    # backup_volumes.py restarts the containers it stopped, so the current
+    # version is running again. Remove the incomplete backup.
+    rm -rf "$BACKUP_DIR" "$backup_script"
+    log "Backup failed; nothing was deployed."
+    exit 1
+  fi
+  rm -f "$backup_script"
   cp .env.production "$BACKUP_DIR/env.production"
   chmod 600 "$BACKUP_DIR/env.production"
   # Keep only the newest backups.
