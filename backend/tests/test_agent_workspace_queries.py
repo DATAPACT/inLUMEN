@@ -15,11 +15,13 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
 
         async def run_query(query, query_type, **kwargs):
             _validate_workspace_cypher(query)
+            if query_type == "overview":  # create_steps reads the graph back at the end
+                return "[]"
             captured.append(query)
             return json.dumps([{"step": {"flow_id": "1"}}])
 
         with patch("pipeline_agent.neo4j_store.run_neo4j_query", side_effect=run_query):
-            create_step = next(tool for tool in build_pipeline_editor_tools() if tool.__name__ == "create_step")
+            create_step = next(tool for tool in build_pipeline_editor_tools() if tool.__name__ == "create_steps")
             asyncio.run(create_step(json.dumps({"type": "source", "label": "Audio upload"})))
         self.assertTrue(captured)
         # A Source is an independent root: it is never chained after a tail.
@@ -42,17 +44,17 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
 
         tools = {tool.__name__: tool for tool in build_pipeline_editor_tools()}
         with patch("pipeline_agent.neo4j_store.run_neo4j_query", side_effect=run_query):
-            asyncio.run(tools["create_step"](json.dumps({
+            asyncio.run(tools["create_steps"](json.dumps({
                 "type": "destination", "label": "Results", "after_flow_id": "2",
             })))
             asyncio.run(tools["delete_all_steps"]("{}"))
-        self.assertEqual(captured, ["resolve_step_predecessor", "create_step", "delete_all_steps"])
+        self.assertEqual(captured, ["resolve_step_predecessor", "create_step", "overview", "delete_all_steps"])
 
     def test_source_cannot_follow_another_step(self):
         tools = {tool.__name__: tool for tool in build_pipeline_editor_tools()}
         with patch("pipeline_agent.neo4j_store.run_neo4j_query", AsyncMock()) as run_query:
             with self.assertRaisesRegex(RuntimeError, "starts its own branch"):
-                asyncio.run(tools["create_step"](json.dumps({
+                asyncio.run(tools["create_steps"](json.dumps({
                     "type": "source", "label": "Orders CSV", "after_flow_id": "1",
                 })))
         run_query.assert_not_awaited()
@@ -62,6 +64,8 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
 
         async def run_query(query, query_type, **kwargs):
             _validate_workspace_cypher(query)
+            if query_type == "overview":  # create_steps reads the graph back at the end
+                return "[]"
             captured.append(query)
             if query_type == "resolve_step_predecessor":
                 return json.dumps([{"predecessor": {
@@ -72,12 +76,12 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
 
         tools = {tool.__name__: tool for tool in build_pipeline_editor_tools()}
         with patch("pipeline_agent.neo4j_store.run_neo4j_query", side_effect=run_query):
-            asyncio.run(tools["create_step"](json.dumps({
+            asyncio.run(tools["create_steps"](json.dumps({
                 "type": "task", "label": "Merge Datasets", "after_flow_id": "3",
                 "inputs": ["customers", "orders"], "target_port": "customers",
             })))
             with self.assertRaisesRegex(RuntimeError, "not one of"):
-                asyncio.run(tools["create_step"](json.dumps({
+                asyncio.run(tools["create_steps"](json.dumps({
                     "type": "task", "label": "Merge", "after_flow_id": "3",
                     "inputs": ["customers", "orders"], "target_port": "input",
                 })))
@@ -91,6 +95,8 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
 
         async def run_query(query, query_type, **kwargs):
             _validate_workspace_cypher(query)
+            if query_type == "overview":  # create_steps reads the graph back at the end
+                return "[]"
             captured.append(query)
             if query_type == "resolve_step_predecessor":
                 return json.dumps([{"predecessor": {
@@ -101,7 +107,7 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
 
         tools = {tool.__name__: tool for tool in build_pipeline_editor_tools()}
         with patch("pipeline_agent.neo4j_store.run_neo4j_query", side_effect=run_query):
-            asyncio.run(tools["create_step"](json.dumps({
+            asyncio.run(tools["create_steps"](json.dumps({
                 "type": "flow", "label": "Collect Invoices", "template": "Collect", "after_flow_id": "4",
             })))
         query = captured[-1]
@@ -155,7 +161,7 @@ class AgentWorkspaceQueryTests(unittest.TestCase):
                         for owner in ("alice", "bob"):
                             workspace = f"regression-{owner}-{uuid.uuid4()}"
                             created_workspaces.append(workspace)
-                            create_step = next(tool for tool in build_pipeline_editor_tools() if tool.__name__ == "create_step")
+                            create_step = next(tool for tool in build_pipeline_editor_tools() if tool.__name__ == "create_steps")
                             for index, (kind, label) in enumerate((("source", "Audio upload"), ("task", "Transcription"), ("task", "Sentiment"), ("destination", "JSON output"))):
                                 await create_step(json.dumps({
                                     "type": kind, "label": f"{owner}: {label}",

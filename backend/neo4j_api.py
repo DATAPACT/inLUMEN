@@ -66,7 +66,7 @@ _WORKSPACE_OWNED_LABELS = (
 
 
 from workspace_queries import (
-    INTERNAL_QUERY_CAPABILITY, parameterize_literals,
+    AGENT_WRITE_QUERY_TYPES, INTERNAL_QUERY_CAPABILITY, parameterize_literals,
     scope_cypher as _scope_cypher, workspace_label as _workspace_label,
 )
 
@@ -1098,6 +1098,7 @@ def _record_provenance_event(
     *,
     version_uid: str | None = None,
     version_name: str | None = None,
+    tool_call_id: str | None = None,
 ) -> None:
     context = _active_pipeline_version(session, version_uid, version_name)
     if isinstance(details, dict):
@@ -1136,11 +1137,13 @@ def _record_provenance_event(
       action: $action,
       summary: $summary,
       details_json: $details_json,
+      tool_call_id: $tool_call_id,
       created_at: datetime()
     })
     MERGE (p)-[:HAS_PROVENANCE]->(event)
     MERGE (v)-[:HAS_PROVENANCE]->(event)
     """, pipeline_uid=context["pipeline_uid"],
+         tool_call_id=tool_call_id or None,
          version_uid=context["version_uid"],
          version_name=context["version_name"],
          main_uid=MAIN_VERSION_UID,
@@ -1149,6 +1152,183 @@ def _record_provenance_event(
          action=str(action or "change"),
          summary=str(summary or "Pipeline graph was modified."),
          details_json=details_json)
+
+
+_CALL_FIELDS = {"tool", "tool_call_id", "status", "error", "arguments"}
+
+
+def _tool_call_summary(tool: str, operations: dict, details: dict | None = None) -> str:
+    """One sentence per fact: what the call wrote, whether it was undone, whether it failed."""
+    details = details or {}
+    parts = ", ".join(f"{count} {name}" for name, count in operations.items())
+    summary = f"Agent called tool '{tool}' once; " + (
+        f"it performed {parts}." if parts else "it made no graph write."
+    )
+    if details.get("rolled_back"):
+        summary += " The call was rejected and the graph was put back as it was."
+    if details.get("status") == "failed":
+        summary += f" The call failed: {_short_text(details.get('error'), 300)}"
+    return summary
+
+
+def _record_agent_tool_call(session, query_type: str, context: dict, results: Any) -> None:
+    """Record an agent graph write as part of the tool call that made it.
+
+    A tool call that performs several writes (create_steps, a connect_steps
+    list) is ONE provenance event: the first write creates it and every later
+    write of the same call is counted on it.
+    """
+    tool = context.get("tool") or str(query_type)
+    tool_call_id = context.get("tool_call_id") or ""
+    if tool_call_id and not results:
+        return  # the write matched nothing, so the tool call did not perform it
+    shared = {key: value for key, value in context.items() if key not in _CALL_FIELDS}
+    existing = None
+    if tool_call_id:
+        existing = session.run("""
+        MATCH (event:PROVENANCE_EVENT {tool_call_id: $tool_call_id})
+        RETURN event.uid AS uid, event.pipeline_uid AS pipeline_uid, event.details_json AS details_json
+        LIMIT 1
+        """, tool_call_id=tool_call_id).single()
+    if existing is None:
+        operations = {str(query_type): 1}
+        details = {**shared, "result": _short_text(results, 2000)}
+        if tool_call_id:
+            details = {"tool": tool, "tool_calls": 1, "operations": operations, **details}
+        else:
+            details = {"query_type": query_type, **details}
+        _record_provenance_event(
+            session,
+            tool,
+            "agent",
+            _tool_call_summary(tool, operations) if tool_call_id
+            else f"Agent executed pipeline operation '{query_type}'.",
+            details,
+            tool_call_id=tool_call_id,
+        )
+        return
+    try:
+        details = json.loads(existing["details_json"] or "{}")
+    except (TypeError, ValueError):
+        details = {}
+    operations = details.get("operations") if isinstance(details.get("operations"), dict) else {}
+    operations[str(query_type)] = int(operations.get(str(query_type)) or 0) + 1
+    details["operations"] = operations
+    details["result"] = _short_text(f"{details.get('result') or ''}\n{results}", 4000)
+    details["graph_snapshot"] = _provenance_graph_snapshot(session, existing["pipeline_uid"])
+    session.run("""
+    MATCH (event:PROVENANCE_EVENT {uid: $uid})
+    SET event.summary = $summary, event.details_json = $details_json
+    """, uid=existing["uid"], summary=_tool_call_summary(tool, operations, details),
+         details_json=_json_details(details))
+
+
+def _mark_agent_tool_call_rolled_back(session, context: dict) -> None:
+    """Say on a tool call's event that the graph was put back afterwards."""
+    tool_call_id = context.get("tool_call_id") or ""
+    existing = session.run("""
+    MATCH (event:PROVENANCE_EVENT {tool_call_id: $tool_call_id})
+    RETURN event.uid AS uid, event.pipeline_uid AS pipeline_uid, event.details_json AS details_json
+    LIMIT 1
+    """, tool_call_id=tool_call_id).single() if tool_call_id else None
+    if existing is None:
+        return
+    try:
+        details = json.loads(existing["details_json"] or "{}")
+    except (TypeError, ValueError):
+        details = {}
+    operations = details.get("operations") if isinstance(details.get("operations"), dict) else {}
+    details["rolled_back"] = True
+    details["graph_snapshot"] = _provenance_graph_snapshot(session, existing["pipeline_uid"])
+    session.run("""
+    MATCH (event:PROVENANCE_EVENT {uid: $uid})
+    SET event.summary = $summary, event.details_json = $details_json
+    """, uid=existing["uid"],
+         summary=_tool_call_summary(context.get("tool") or "tool", operations, details),
+         details_json=_json_details(details))
+
+
+def _record_applied_preview_tool_calls(session, recorded: Any) -> None:
+    """Add the tool calls of an accepted preview turn to the pipeline's history.
+
+    A preview turn runs on a temporary copy of the graph that is deleted when
+    the turn ends, so its calls are kept with the proposal and written here,
+    in order, once the user applies it. A discarded proposal leaves no trace.
+    """
+    if not isinstance(recorded, dict) or not isinstance(recorded.get("calls"), list):
+        return
+    shared = {
+        "user_query": _short_text(recorded.get("user_query"), 2000),
+        "session_id": _short_text(recorded.get("session_id"), 120),
+    }
+    for call in recorded["calls"][:60]:
+        if not isinstance(call, dict):
+            continue
+        tool = _short_text(call.get("tool"), 80) or "tool"
+        operations = {
+            _short_text(name, 80): int(count)
+            for name, count in (call.get("operations") or {}).items()
+            if isinstance(count, int)
+        } if isinstance(call.get("operations"), dict) else {}
+        details = {
+            "tool": tool, "tool_calls": 1, "operations": operations,
+            "status": "failed" if call.get("status") == "failed" else "completed",
+            "arguments": _short_text(call.get("arguments"), 2000),
+            "from_preview": True,
+            **shared,
+        }
+        if call.get("error"):
+            details["error"] = _short_text(call.get("error"), 600)
+        if call.get("rolled_back"):
+            details["rolled_back"] = True
+        _record_provenance_event(
+            session, tool, "agent",
+            _tool_call_summary(tool, operations, details) + " Made in a preview that the user applied.",
+            details,
+        )
+
+
+def _finish_agent_tool_call(session, context: dict) -> None:
+    """Record the outcome of one agent tool call.
+
+    Every call the agent makes is one provenance event, also a call that only
+    read the graph, a call that failed, and a repeat of an earlier call. A call
+    that wrote to the graph already has its event; any other gets one here.
+    """
+    tool = context.get("tool") or "tool"
+    tool_call_id = context.get("tool_call_id") or ""
+    if not tool_call_id:
+        return
+    outcome = {
+        "status": context.get("status") or "completed",
+        "arguments": context.get("arguments") or "",
+    }
+    if context.get("error"):
+        outcome["error"] = context["error"]
+    existing = session.run("""
+    MATCH (event:PROVENANCE_EVENT {tool_call_id: $tool_call_id})
+    RETURN event.uid AS uid, event.pipeline_uid AS pipeline_uid, event.details_json AS details_json
+    LIMIT 1
+    """, tool_call_id=tool_call_id).single()
+    if existing is None:
+        shared = {key: value for key, value in context.items() if key not in _CALL_FIELDS}
+        details = {"tool": tool, "tool_calls": 1, "operations": {}, **outcome, **shared}
+        _record_provenance_event(
+            session, tool, "agent", _tool_call_summary(tool, {}, details), details,
+            tool_call_id=tool_call_id,
+        )
+        return
+    try:
+        details = json.loads(existing["details_json"] or "{}")
+    except (TypeError, ValueError):
+        details = {}
+    details.update(outcome)
+    operations = details.get("operations") if isinstance(details.get("operations"), dict) else {}
+    session.run("""
+    MATCH (event:PROVENANCE_EVENT {uid: $uid})
+    SET event.summary = $summary, event.details_json = $details_json
+    """, uid=existing["uid"], summary=_tool_call_summary(tool, operations, details),
+         details_json=_json_details(details))
 
 
 def _copy_provenance_to_version(session, source_version_uid: str, target_version_uid: str) -> None:
@@ -1189,17 +1369,7 @@ def _event_details(record) -> dict:
 
 
 def _mutation_query_type(query_type: str | None) -> bool:
-    return str(query_type or "") in {
-        "create_pipeline",
-        "create_step",
-        "configure_flow_step",
-        "connect_steps",
-        "disconnect_steps",
-        "insert_initial_step",
-        "insert_between_steps",
-        "delete_step",
-        "delete_all_steps",
-    }
+    return str(query_type or "") in AGENT_WRITE_QUERY_TYPES
 
 
 def _provenance_context_from_payload(data: dict) -> dict:
@@ -1209,6 +1379,11 @@ def _provenance_context_from_payload(data: dict) -> dict:
     return {
         "user_query": _short_text(context.get("user_query"), 2000),
         "session_id": _short_text(context.get("session_id"), 120),
+        "tool": _short_text(context.get("tool"), 80),
+        "tool_call_id": _short_text(context.get("tool_call_id"), 80),
+        "status": _short_text(context.get("status"), 20),
+        "error": _short_text(context.get("error"), 600),
+        "arguments": _short_text(context.get("arguments"), 2000),
     }
 
 
@@ -2964,23 +3139,28 @@ def neo4j_run_query():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     with driver.session() as session:
+        if query_type == "tool_call_rolled_back":
+            # Not a graph query: the agent's tool put the graph back after a failed batch.
+            _mark_agent_tool_call_rolled_back(session, _provenance_context_from_payload(data))
+            return jsonify([])
+        if query_type == "preview_tool_calls_applied":
+            # The user accepted a preview: its tool calls now belong to this pipeline's history.
+            _record_applied_preview_tool_calls(session, data.get("tool_calls"))
+            return jsonify([])
+        if query_type == "tool_call_finished":
+            # Not a graph query either: one agent tool call ended; record how.
+            _finish_agent_tool_call(session, _provenance_context_from_payload(data))
+            return jsonify([])
         query, parameters = parameterize_literals(query)
         session_result = session.run(query, **parameters)
         # We are assuming that the query returns something to jsonify
         results = [record.data() for record in session_result]
         if _mutation_query_type(query_type):
-            provenance_context = _provenance_context_from_payload(data)
-            details = {
-                "query_type": query_type,
-                **provenance_context,
-                "result": _short_text(results, 2000),
-            }
-            _record_provenance_event(
+            _record_agent_tool_call(
                 session,
                 str(query_type),
-                "agent",
-                f"Agent executed pipeline operation '{query_type}'.",
-                details,
+                _provenance_context_from_payload(data),
+                results,
             )
         return jsonify(results)
 

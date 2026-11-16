@@ -17,6 +17,7 @@ from graph_client import (
 from llm_config import LLMConfig
 from inlumen.design.context import _graph_counts, _safe_assistant_message
 from inlumen.design.turn import run_design_turn
+from pipeline_agent.neo4j_store import Neo4jGraphStore
 from pipeline_agent.team import build_pipeline_editing_team
 
 
@@ -136,13 +137,16 @@ async def _run_pipeline_editor_turn(
 
     if isinstance(visible_before_graph, dict) and preview_workspace_id is None:
         cancellation_state["graph"] = deepcopy(visible_before_graph)
-    team = build_pipeline_editing_team(
-        llm_config=llm_config,
+    store = Neo4jGraphStore(
         authorization=authorization,
         provenance_context={"user_query": user_message, "session_id": session_id},
         workspace_id=preview_workspace_id,
         preview_mode=preview_workspace_id is not None,
+        # A tool that puts the graph back must write to the version being edited.
+        active_version_uid=active_version_uid,
+        active_version_name=active_version_name,
     )
+    team = build_pipeline_editing_team(llm_config=llm_config, store=store)
     team_state = load_state_from_disk(session_id)
     if team_state:
         await team.load_state(team_state)
@@ -268,6 +272,13 @@ async def _run_pipeline_editor_turn(
         if sync["guardrail_passed"] and sync.get("graph_changed"):
             sync["status"] = "preview"
             sync["preview_pending"] = True
+            # The preview workspace is deleted after the turn. Its tool calls travel
+            # with the proposal and enter the pipeline's history if it is applied.
+            sync["preview_tool_calls"] = {
+                "user_query": user_message[:2000],
+                "session_id": session_id,
+                "calls": list(store.tool_calls),
+            }
             sync["message"] = "Review the proposed graph. Your saved pipeline is unchanged until you apply it."
         elif sync["guardrail_passed"]:
             sync["message"] = "No graph changes were made. Your saved pipeline is unchanged."

@@ -764,7 +764,7 @@ class PluginAgentToolsTest(unittest.TestCase):
             run_query = AsyncMock(return_value="[]")
             with patch("pipeline_agent.neo4j_store.run_neo4j_query", run_query):
                 try:
-                    asyncio.run(tools["create_step"](json.dumps({
+                    asyncio.run(tools["create_steps"](json.dumps({
                         "type": "task", "label": "Anonymize", "description": "Remove PII",
                         "template": TEMPLATE,
                     })))
@@ -775,7 +775,7 @@ class PluginAgentToolsTest(unittest.TestCase):
             self.assertIn("secret_params_json: '[\"api_key\"]'", query)
             self.assertIn("primary_input_port: 'text'", query)
             with self.assertRaisesRegex(RuntimeError, "task plugin"):
-                asyncio.run(tools["create_step"](json.dumps({
+                asyncio.run(tools["create_steps"](json.dumps({
                     "type": "source", "label": "x", "description": "y", "template": TEMPLATE,
                 })))
 

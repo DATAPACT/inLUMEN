@@ -111,7 +111,7 @@ class GraphTransactionIntegrationTests(unittest.TestCase):
             listed = next(row['reusable_pipeline'] for row in listing if row['reusable_pipeline']['pipeline_uid'] == uid)
             self.assertNotIn('version_uid', listed)
             client.post('/neo4j_sync_graph', json={'graph': {'nodes': [], 'edges': []}})
-            asyncio.run(invoke('create_step', {'type': 'subpipeline', 'label': 'Reusable', 'reusable_pipeline_uid': uid}))
+            asyncio.run(tools['create_steps'](json.dumps({'type': 'subpipeline', 'label': 'Reusable', 'reusable_pipeline_uid': uid})))
             loaded = client.get('/neo4j_get_graph').json
             node = next(node for node in loaded['nodes'] if node['data']['type'] == 'subpipeline')
             self.assertEqual(len(node['data']['subpipeline']['resolved_graph']['nodes']), 2)

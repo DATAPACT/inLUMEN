@@ -286,8 +286,10 @@ class PipelineAgentServiceTest(unittest.TestCase):
             preview_changes=True,
         ))
 
-        stage_workspace_id = build_team.call_args.kwargs["workspace_id"]
+        stage_workspace_id = build_team.call_args.kwargs["store"].workspace_id
         self.assertTrue(stage_workspace_id)
+        # A tool that puts the graph back writes to the version being edited.
+        self.assertEqual("version-7", build_team.call_args.kwargs["store"].active_version_uid)
         self.assertEqual("version-7", result.graph["pipeline"]["active_version_uid"])
         self.assertEqual("Review", result.graph["pipeline"]["version"])
         self.assertEqual("preview", result.sync["status"])
@@ -343,7 +345,7 @@ class PipelineAgentServiceTest(unittest.TestCase):
         self.assertIsNotNone(sync_graph.await_args.kwargs["workspace_id"])
         clear_state.assert_not_called()
         clear_preview.assert_awaited_once_with(
-            build_team.call_args.kwargs["workspace_id"],
+            build_team.call_args.kwargs["store"].workspace_id,
             authorization="Bearer token",
         )
 

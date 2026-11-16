@@ -283,6 +283,17 @@ class ConversationStore:
             revision = self._increment(connection, row["conversation_id"])["revision"]
             connection.execute(text("UPDATE chat_messages SET proposal_status=:proposal,revision=:revision WHERE id=:id"),
                                {"id": message_id, "proposal": proposal_status, "revision": revision})
+            if proposal_status != "applied" or row["proposal_status"] != "pending":
+                return None
+            # First time this proposal is applied: hand back the agent's tool calls
+            # of that preview turn, so they can enter the pipeline's history once.
+            stored = connection.execute(text("""SELECT response_json FROM chat_turns WHERE workspace_id=:workspace_id
+                AND user_id=:user_id AND turn_id=:turn_id"""), {**scope, "turn_id": row["turn_id"]}).scalar()
+            try:
+                calls = json.loads(stored or "{}").get("sync", {}).get("preview_tool_calls")
+            except (TypeError, ValueError, AttributeError):
+                return None
+            return calls if isinstance(calls, dict) else None
 
     @contextmanager
     def clear_guard(self, workspace_id):
