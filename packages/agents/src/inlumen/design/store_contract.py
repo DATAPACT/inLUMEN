@@ -104,7 +104,8 @@ SCENARIOS: dict[str, list[Step]] = {
     ],
     "branching": [
         ("create_steps", {"type": "source", "label": "Orders", "description": "Order table"}),
-        ("create_steps", {"type": "flow", "label": "Valid?", "description": "Route valid orders", "template": "Condition"}),
+        ("create_steps", {"type": "flow", "label": "Valid?", "description": "Route valid orders", "template": "Condition",
+                          "expression": "value.is_valid == true"}),
         ("configure_flow_step", {"flow_id": "2", "behavior": "Condition", "expression": "value.is_valid == true"}),
         ("create_steps", {"type": "task", "label": "Price", "description": "Price valid orders",
                          "after_flow_id": "2", "source_port": "when_true"}),

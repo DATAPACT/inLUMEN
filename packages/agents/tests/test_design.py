@@ -178,7 +178,7 @@ BATCH_STEPS = [
     {"id": "join", "type": "task", "label": "Join", "description": "Join orders to customers",
      "inputs": ["customers", "orders"], "after": "customers"},
     {"id": "check", "type": "flow", "template": "Condition", "label": "Valid?",
-     "description": "Route valid rows", "after": "join"},
+     "description": "Route valid rows", "expression": "value.is_valid == true", "after": "join"},
     {"id": "priced", "type": "destination", "label": "Priced", "description": "Valid rows",
      "after": "check", "source_port": "when_true"},
     {"id": "rejected", "type": "destination", "label": "Rejected", "description": "Invalid rows",
@@ -337,3 +337,56 @@ def test_design_tools_accept_params_as_a_string_an_object_or_the_bare_object():
         # Tools without a payload still run when a model sends nothing or an empty params.
         asyncio.run(tools["list_reusable_pipelines"].run_json({}, CancellationToken()))
         asyncio.run(tools["overview"].run_json({"params": {}}, CancellationToken()))
+
+
+def test_create_steps_requires_a_condition_expression():
+    with pytest.raises(RuntimeError, match='A Condition requires "expression"'):
+        asyncio.run(_tools(InMemoryGraphStore())["create_steps"](json.dumps(
+            {"type": "flow", "template": "Condition", "label": "Valid?", "description": "x"})))
+
+
+def test_create_steps_keeps_the_pipeline_when_one_step_is_sent_without_the_list():
+    store = InMemoryGraphStore()
+    asyncio.run(_tools(store)["create_steps"](json.dumps({
+        "type": "source", "label": "Orders", "description": "x",
+        "pipeline": {"name": "Named", "description": "Reads orders"}})))
+    graph = asyncio.run(store.get_graph())
+    assert graph["pipeline"]["name"] == "Named"
+    assert [node["data"]["label"] for node in graph["nodes"]] == ["Orders"]
+
+
+FAILING_BATCH = [
+    {"id": "orders", "type": "source", "label": "Orders", "description": "x"},
+    {"id": "price", "type": "task", "label": "Price", "description": "x", "after": "orders"},
+    {"id": "out", "type": "destination", "label": "Out", "description": "x", "after": "price"},
+    # A Task may not fan out without allow_fan_out.
+    {"type": "destination", "label": "Again", "description": "x", "after": "price"},
+]
+
+
+def test_a_failed_batch_puts_the_pipeline_name_back_and_reports_the_rollback():
+    store = InMemoryGraphStore()
+    rolled_back = []
+
+    async def tool_call_rolled_back():
+        rolled_back.append(True)
+
+    store.tool_call_rolled_back = tool_call_rolled_back
+    tools = _tools(store)
+    asyncio.run(tools["create_pipeline"](json.dumps({"name": "Original", "description": "First"})))
+    with pytest.raises(RuntimeError, match="Nothing was created") as raised:
+        asyncio.run(tools["create_steps"](json.dumps({
+            "pipeline": {"name": "Renamed", "description": "Second"}, "steps": FAILING_BATCH})))
+    assert "were kept" not in str(raised.value)
+    graph = asyncio.run(store.get_graph())
+    assert (graph["pipeline"]["name"], graph["pipeline"]["description"]) == ("Original", "First")
+    assert graph["nodes"] == []
+    assert rolled_back == [True]
+
+
+def test_a_failed_batch_says_so_when_the_new_pipeline_name_stays():
+    store = InMemoryGraphStore()
+    with pytest.raises(RuntimeError, match='The pipeline name and description from "pipeline" were kept'):
+        asyncio.run(_tools(store)["create_steps"](json.dumps({
+            "pipeline": {"name": "Renamed", "description": "Second"}, "steps": FAILING_BATCH})))
+    assert asyncio.run(store.get_graph())["nodes"] == []

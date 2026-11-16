@@ -142,6 +142,8 @@ async def _run_pipeline_editor_turn(
         provenance_context={"user_query": user_message, "session_id": session_id},
         workspace_id=preview_workspace_id,
         preview_mode=preview_workspace_id is not None,
+        active_version_uid=active_version_uid,
+        active_version_name=active_version_name,
     )
     team_state = load_state_from_disk(session_id)
     if team_state:

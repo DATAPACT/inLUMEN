@@ -1168,6 +1168,8 @@ def _record_agent_tool_call(session, query_type: str, context: dict, results: An
     """
     tool = context.get("tool") or str(query_type)
     tool_call_id = context.get("tool_call_id") or ""
+    if tool_call_id and not results:
+        return  # the write matched nothing, so the tool call did not perform it
     shared = {key: value for key, value in context.items() if key not in {"tool", "tool_call_id"}}
     existing = None
     if tool_call_id:
@@ -1206,6 +1208,34 @@ def _record_agent_tool_call(session, query_type: str, context: dict, results: An
     MATCH (event:PROVENANCE_EVENT {uid: $uid})
     SET event.summary = $summary, event.details_json = $details_json
     """, uid=existing["uid"], summary=_tool_call_summary(tool, operations),
+         details_json=_json_details(details))
+
+
+ROLLED_BACK_NOTE = " The call was rejected and these changes were rolled back."
+
+
+def _mark_agent_tool_call_rolled_back(session, context: dict) -> None:
+    """Say on a tool call's event that the graph was put back afterwards."""
+    tool_call_id = context.get("tool_call_id") or ""
+    existing = session.run("""
+    MATCH (event:PROVENANCE_EVENT {tool_call_id: $tool_call_id})
+    RETURN event.uid AS uid, event.pipeline_uid AS pipeline_uid, event.details_json AS details_json
+    LIMIT 1
+    """, tool_call_id=tool_call_id).single() if tool_call_id else None
+    if existing is None:
+        return
+    try:
+        details = json.loads(existing["details_json"] or "{}")
+    except (TypeError, ValueError):
+        details = {}
+    operations = details.get("operations") if isinstance(details.get("operations"), dict) else {}
+    details["rolled_back"] = True
+    details["graph_snapshot"] = _provenance_graph_snapshot(session, existing["pipeline_uid"])
+    session.run("""
+    MATCH (event:PROVENANCE_EVENT {uid: $uid})
+    SET event.summary = $summary, event.details_json = $details_json
+    """, uid=existing["uid"],
+         summary=_tool_call_summary(context.get("tool") or "tool", operations) + ROLLED_BACK_NOTE,
          details_json=_json_details(details))
 
 
@@ -3024,6 +3054,10 @@ def neo4j_run_query():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     with driver.session() as session:
+        if query_type == "tool_call_rolled_back":
+            # Not a graph query: the agent's tool put the graph back after a failed batch.
+            _mark_agent_tool_call_rolled_back(session, _provenance_context_from_payload(data))
+            return jsonify([])
         query, parameters = parameterize_literals(query)
         session_result = session.run(query, **parameters)
         # We are assuming that the query returns something to jsonify

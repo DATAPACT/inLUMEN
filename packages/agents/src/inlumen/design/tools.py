@@ -109,6 +109,15 @@ def build_pipeline_editor_tools(
             with scope(name):
                 yield
 
+    async def _note_rollback() -> None:
+        """Tell the store that the latest tool call's writes were undone."""
+        note = getattr(store, "tool_call_rolled_back", None)
+        if note is not None:
+            try:
+                await note()
+            except Exception:
+                pass  # the rollback itself succeeded; only its record is missing
+
     async def overview() -> str:
         """Gives a design-only overview of the pipeline and its connections."""
         try:
@@ -530,8 +539,13 @@ def build_pipeline_editor_tools(
             resolved_subpipeline = await _resolve_subpipeline_for_creation(data, raw_label)
             _bind_subpipeline(props, resolved_subpipeline)
         expression = str(data.get("expression") or "").strip()
+        is_condition = step_type == "flow" and props["template_label"] == "Condition"
+        if is_condition and not expression:
+            raise ValueError(
+                'A Condition requires "expression", for example "value.is_valid == true"'
+            )
         if expression:
-            if step_type != "flow" or props["template_label"] != "Condition":
+            if not is_condition:
                 raise ValueError("expression is only for a Flow step with template Condition")
             if not FLOW_EXPRESSION_PATTERN.fullmatch(expression):
                 raise ValueError(
@@ -788,6 +802,7 @@ def build_pipeline_editor_tools(
                             f"the first {index} connections were kept. Call overview "
                             "before continuing."
                         ) from exc
+                    await _note_rollback()
                     raise ValueError(
                         f"{where}. Nothing was connected: the graph was put back as it "
                         "was. Fix that entry and send the whole list again."
@@ -876,7 +891,10 @@ def build_pipeline_editor_tools(
         try:
             data = json.loads(params)
             if isinstance(data, dict) and "steps" not in data and data.get("type"):
-                data = {"steps": [data]}  # one step, sent without the list
+                # One step sent without the list; the call-level fields stay call-level.
+                call_fields = {key: data[key] for key in ("pipeline", "connections") if key in data}
+                step = {key: value for key, value in data.items() if key not in call_fields}
+                data = {"steps": [step], **call_fields}
             raw_steps = data.get("steps") if isinstance(data, dict) else data
             raw_connections = data.get("connections") if isinstance(data, dict) else None
             pipeline = data.get("pipeline") if isinstance(data, dict) else None
@@ -952,11 +970,30 @@ def build_pipeline_editor_tools(
                         raise ValueError(f"{where} requires a valid {end}")
 
             snapshot = None
-            if len(plan) + len(raw_connections) > 1:  # one write is atomic by itself
+            # One write is atomic by itself; a pipeline rename is a second write.
+            if len(plan) + len(raw_connections) > 1 or pipeline is not None:
                 try:
                     snapshot = await store.get_graph()
                 except Exception:
                     snapshot = None
+
+            pipeline_written = False
+
+            async def pipeline_note() -> str:
+                """Put the pipeline's name and description back; say so if that is not possible."""
+                if not pipeline_written:
+                    return ""
+                previous = snapshot.get("pipeline") if isinstance(snapshot, dict) else None
+                name = str((previous or {}).get("name") or "").strip()
+                description = str((previous or {}).get("description") or "").strip()
+                try:
+                    if not name or not description:
+                        # An empty value cannot be written back over the new one.
+                        raise RuntimeError("no earlier name and description")
+                    await store.upsert_pipeline(name, description, "")
+                    return ""
+                except Exception:
+                    return ' The pipeline name and description from "pipeline" were kept.'
 
             flow_ids: dict[str, str] = {}
             created: list[dict[str, Any]] = []
@@ -964,6 +1001,7 @@ def build_pipeline_editor_tools(
             try:
                 with _tool_call("create_steps"):
                     if pipeline is not None:
+                        pipeline_written = True
                         await store.upsert_pipeline(
                             str(pipeline.get("name") or ""),
                             str(pipeline.get("description") or ""),
@@ -1010,7 +1048,10 @@ def build_pipeline_editor_tools(
                         )
             except Exception as exc:
                 if not created:
-                    raise
+                    note = await pipeline_note()
+                    if not note:
+                        raise
+                    raise ValueError(f"{exc}.{note}") from exc
                 kept = ", ".join(
                     f"{step.get('id') or step.get('label')}=flow_id {step.get('flow_id')}"
                     for step in created
@@ -1027,9 +1068,10 @@ def build_pipeline_editor_tools(
                         f"{exc}. The graph could not be put back ({restore_error}); the "
                         f"earlier entries were kept ({kept}). Call overview before continuing."
                     ) from exc
+                await _note_rollback()
                 raise ValueError(
-                    f"{exc}. Nothing was created: the graph was put back as it was. "
-                    "Fix that entry and send the whole list again."
+                    f"{exc}. Nothing was created: the graph was put back as it was."
+                    f"{await pipeline_note()} Fix that entry and send the whole list again."
                 ) from exc
             try:
                 graph_rows: Any = decoded_rows(await store.overview())

@@ -99,16 +99,28 @@ class Neo4jGraphStore:
         self.active_version_uid = active_version_uid
         self.active_version_name = active_version_name
         self._tool_call: dict[str, str] | None = None
+        self._last_tool_call: dict[str, str] | None = None
 
     @contextmanager
     def tool_call(self, name: str):
         """Group the writes made inside one agent tool call into one provenance event."""
         previous = self._tool_call
-        self._tool_call = {"tool": name, "tool_call_id": str(uuid.uuid4())}
+        self._tool_call = self._last_tool_call = {"tool": name, "tool_call_id": str(uuid.uuid4())}
         try:
             yield
         finally:
             self._tool_call = previous
+
+    async def tool_call_rolled_back(self) -> None:
+        """Mark the latest tool call's provenance event: its writes were undone."""
+        if self._last_tool_call:
+            await run_neo4j_query(
+                "RETURN 1",
+                "tool_call_rolled_back",
+                authorization=self.authorization,
+                provenance_context={**(self.provenance_context or {}), **self._last_tool_call},
+                workspace_id=self.workspace_id,
+            )
 
     async def _run(self, query: str, query_type: str) -> Rows:
         """Run a Cypher query against Neo4j and return results."""

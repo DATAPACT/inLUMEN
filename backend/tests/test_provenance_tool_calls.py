@@ -76,5 +76,34 @@ class ProvenanceToolCallTests(unittest.TestCase):
         self.assertEqual(json.loads(session.events[0]["details_json"])["query_type"], "create_step")
 
 
+    def test_a_rolled_back_tool_call_says_so_and_empty_writes_are_not_counted(self):
+        session = _Session()
+        context = {"user_query": "build it", "session_id": "s", "tool": "create_steps", "tool_call_id": "call-2"}
+        neo4j_api._record_agent_tool_call(session, "create_step", context, [{"step": {}}])
+        neo4j_api._record_agent_tool_call(session, "create_step", context, [{"step": {}}])
+        neo4j_api._record_agent_tool_call(session, "create_step", context, [])  # rejected: matched nothing
+        neo4j_api._mark_agent_tool_call_rolled_back(session, context)
+
+        self.assertEqual(len(session.events), 1)
+        event = session.events[0]
+        self.assertEqual(
+            event["summary"],
+            "Agent called tool 'create_steps' once; it performed 2 create_step."
+            " The call was rejected and these changes were rolled back.",
+        )
+        self.assertTrue(json.loads(event["details_json"])["rolled_back"])
+
+    def test_the_agent_store_writes_to_the_version_being_edited(self):
+        from llm_config import LLMConfig
+        from pipeline_agent.team import build_pipeline_editing_team
+
+        config = LLMConfig(provider="openrouter", model="test/model", base_url="https://example.test/v1", api_key="k")
+        with patch("pipeline_agent.team.select_model_client"), \
+                patch("pipeline_agent.team.build_design_team") as build_design_team:
+            build_pipeline_editing_team(config, active_version_uid="v2", active_version_name="Second")
+        store = build_design_team.call_args.args[1]
+        self.assertEqual((store.active_version_uid, store.active_version_name), ("v2", "Second"))
+
+
 if __name__ == "__main__":
     unittest.main()
