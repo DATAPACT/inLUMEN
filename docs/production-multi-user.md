@@ -294,24 +294,24 @@ for other hosts and workloads. See [the VM load-test guide](vm-load-test.md).
 
 ### Automated deploys
 
-The `Deploy` workflow (`.github/workflows/deploy.yml`) starts after
-`Container images` publishes a commit from `main`. It waits for approval in
-the `production` GitHub environment, then runs `scripts/deploy_vm.sh` on a
-self-hosted runner on the VM (label `inlumen-vm`). The script:
+The `Deploy` workflow (`.github/workflows/deploy.yml`) starts automatically
+after `Container images` publishes a commit from `main`; there is no approval
+step. The `production` GitHub environment only accepts `main`. The job runs
+`scripts/deploy_vm.sh` on a self-hosted runner on the VM (label `inlumen-vm`).
+The script:
 
 1. Pulls the commit's images while the current version keeps running.
-2. Backs up the project's volumes with `scripts/backup_volumes.py`, together
-   with a copy of `.env.production`. inLUMEN is stopped during the backup.
-   The newest three backups are kept in `~/backups/inlumen`.
-3. Checks out the commit and starts it. Compose runs `migrate` first.
-4. Waits until backend, codegen, runner and frontend are healthy, run the
+2. Checks out the commit and starts it. Compose runs `migrate` first. Only the
+   application containers restart; Postgres, Neo4j and MinIO keep running.
+3. Waits until backend, codegen, runner and frontend are healthy, run the
    expected images, and the public `/healthz` answers.
-5. If any of this fails, checks out the previous commit with its previous
+4. If any of this fails, checks out the previous commit with its previous
    images and starts it again.
 
-The rollback restores code and images, not data. If a migration ran before
-the failure, restore the database from that deploy's backup with
-`scripts/backup_volumes.py restore`.
+The deploy takes no backup, so that it stays short. The rollback restores code
+and images, not data: if a migration ran before the failure, restore the
+database from the latest weekly backup. Before merging a risky migration, run
+`scripts/backup_vm.sh` by hand.
 
 The chosen images are written to `.env.deploy` beside `.env.production`;
 Compose must read both, in that order, for manual commands to use the same
@@ -319,13 +319,50 @@ images. Each deploy is recorded in `state/deployments/`.
 
 To redeploy or roll back to an earlier commit, run the `Deploy` workflow
 manually with that commit's full SHA; its images must already be published.
-The `skip_backup` input shortens downtime but leaves no restore point.
 
 The workflow needs the repository variables `INLUMEN_VM_CHECKOUT` (the VM
 checkout path) and `INLUMEN_PUBLIC_URL`. Because the repository is public,
 only workflows that cannot be started from forks may use the `inlumen-vm`
 runner, and pull requests from outside contributors must require approval
 before their workflows run.
+
+### Weekly backups
+
+`scripts/backup_vm.sh` makes an incremental, encrypted [restic](https://restic.net)
+snapshot of the Postgres database (`pg_dump`, no downtime), the Neo4j data
+(Neo4j is stopped for the few seconds of the copy), MinIO, the runner
+artifacts and `.env.production`. restic stores only data it has not stored
+before, so weekly runs are small, and every snapshot restores in full. It
+keeps 8 weekly and 6 monthly snapshots. Deploys and backups share a lock, so
+they never run at the same time.
+
+Setup on the VM, once:
+
+```sh
+mkdir -p ~/.config/inlumen-backup
+openssl rand -base64 32 > ~/.config/inlumen-backup/restic-password
+chmod 600 ~/.config/inlumen-backup/restic-password
+# Every Sunday at 03:00 (VM time)
+( crontab -l 2>/dev/null; echo '0 3 * * 0 /home/roby-avo/inLUMEN/scripts/backup_vm.sh >> /home/roby-avo/backups/inlumen-backup.log 2>&1' ) | crontab -
+```
+
+Store a copy of the password outside the VM. Without it the backups cannot be
+read. The repository (`~/backups/inlumen-restic`) is on the same disk as the
+data, so it protects against mistakes and bad migrations, not against losing
+the VM; copy it elsewhere for that (restic also supports S3 and SFTP).
+
+To restore, list the snapshots and restore one into a new directory:
+
+```sh
+R="docker run --rm -i -e RESTIC_REPOSITORY=/repo -e RESTIC_PASSWORD_FILE=/pw \
+  -v $HOME/backups/inlumen-restic:/repo -v $HOME/.config/inlumen-backup/restic-password:/pw:ro \
+  -v $HOME/restore:/restore restic/restic:0.19.1"
+$R snapshots
+$R restore latest --target /restore
+```
+
+`/restore/data/staging/postgres.sql` loads with `psql` into an empty database;
+the other directories are copies of the volumes.
 
 ### Routing more applications through the shared connector
 

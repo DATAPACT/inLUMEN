@@ -6,22 +6,21 @@
 # Run on the deployment host, normally by the Deploy workflow. Steps:
 #   1. Pull that commit's images (nothing is stopped yet; a failed pull
 #      leaves the running deployment untouched).
-#   2. Back up the project's volumes with scripts/backup_volumes.py. This
-#      stops the inLUMEN containers for the length of the backup.
-#   3. Check out the commit, so the Compose file matches the images.
-#   4. Start the services. Compose runs `migrate` before the backend.
-#   5. Wait until backend, codegen, runner and frontend are healthy and run
+#   2. Check out the commit, so the Compose file matches the images.
+#   3. Start the services. Compose runs `migrate` before the backend.
+#   4. Wait until backend, codegen, runner and frontend are healthy and run
 #      the expected images, and until the public URL answers.
-#   6. On any failure in 3-5, put back the previous checkout and image
+#   5. On any failure in 2-4, put back the previous checkout and image
 #      settings and start them again. The database is NOT rolled back: if a
-#      migration ran, restore it from the backup taken in step 2.
+#      migration ran, restore it from the weekly backup
+#      (scripts/backup_vm.sh), or run that backup before a risky deploy.
+#
+# The deploy takes no backup, to keep it short. Only the four application
+# containers restart; the databases keep running.
 #
 # Settings (environment):
 #   INLUMEN_DEPLOY_DIR      checkout with docker-compose-prod.yml and
 #                           .env.production (required)
-#   INLUMEN_BACKUP_DIR      where backups go (default: ~/backups/inlumen)
-#   INLUMEN_BACKUP_KEEP     backups to keep (default: 3)
-#   INLUMEN_SKIP_BACKUP     "true" skips step 2
 #   INLUMEN_IMAGE_REGISTRY  image prefix (default: ghcr.io/datapact)
 #   INLUMEN_HEALTH_URL      public URL to check (optional)
 #   INLUMEN_HEALTH_TIMEOUT  seconds to wait for health (default: 600)
@@ -34,8 +33,6 @@ COMMIT="${1:-}"
 [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "usage: $0 <40-character commit SHA>" >&2; exit 2; }
 
 DIR="${INLUMEN_DEPLOY_DIR:?INLUMEN_DEPLOY_DIR is required}"
-BACKUP_ROOT="${INLUMEN_BACKUP_DIR:-$HOME/backups/inlumen}"
-BACKUP_KEEP="${INLUMEN_BACKUP_KEEP:-3}"
 REGISTRY="${INLUMEN_IMAGE_REGISTRY:-ghcr.io/datapact}"
 HEALTH_TIMEOUT="${INLUMEN_HEALTH_TIMEOUT:-600}"
 PROJECT=inlumen
@@ -44,9 +41,10 @@ SERVICES=(backend codegen runner frontend)
 cd "$DIR"
 [ -f .env.production ] || { echo "$DIR/.env.production is missing" >&2; exit 1; }
 
-# One deploy at a time, whoever starts it.
+# One deploy at a time. The weekly backup (scripts/backup_vm.sh) takes the
+# same lock, so a deploy waits for a running backup instead of colliding.
 exec 9>"$DIR/.deploy.lock"
-flock -n 9 || { echo "Another deploy is running" >&2; exit 1; }
+flock -w 3600 9 || { echo "Another deploy or backup held the lock for an hour" >&2; exit 1; }
 
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
@@ -106,9 +104,9 @@ record() {  # record <result>
   local file
   file="state/deployments/$(date -u +%Y%m%dT%H%M%SZ)-${COMMIT:0:12}.json"
   jq -n --arg commit "$COMMIT" --arg previous "$PREV_HEAD" --arg result "$1" \
-    --arg backup "${BACKUP_DIR:-}" --arg by "${GITHUB_ACTOR:-$USER}" \
+    --arg by "${GITHUB_ACTOR:-$USER}" \
     --arg run "${GITHUB_SERVER_URL:-}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-}" \
-    '{commit: $commit, previous_commit: $previous, result: $result, backup: $backup, by: $by, run: $run}' >"$file"
+    '{commit: $commit, previous_commit: $previous, result: $result, by: $by, run: $run}' >"$file"
   log "Recorded $file"
 }
 
@@ -131,32 +129,6 @@ log "Pulling images for $COMMIT"
 docker compose -p "$PROJECT" --env-file .env.production --env-file "$NEXT_ENV" \
   -f docker-compose-prod.yml pull --quiet migrate "${SERVICES[@]}"
 
-# 2. Back up.
-if [ "${INLUMEN_SKIP_BACKUP:-false}" = true ]; then
-  log "Skipping backup (INLUMEN_SKIP_BACKUP=true)"
-else
-  BACKUP_DIR="$BACKUP_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-before-${COMMIT:0:12}"
-  mkdir -p "$BACKUP_ROOT" && chmod 700 "$BACKUP_ROOT"
-  # Use the backup script from the commit being deployed, like this script:
-  # the current checkout may still have an older, broken version.
-  backup_script=$(mktemp --suffix .py)
-  git show "$COMMIT:scripts/backup_volumes.py" >"$backup_script"
-  log "Backing up volumes to $BACKUP_DIR (inLUMEN is stopped meanwhile)"
-  if ! python3 "$backup_script" backup "$BACKUP_DIR" --project "$PROJECT"; then
-    # backup_volumes.py restarts the containers it stopped, so the current
-    # version is running again. Remove the incomplete backup.
-    rm -rf "$BACKUP_DIR" "$backup_script"
-    log "Backup failed; nothing was deployed."
-    exit 1
-  fi
-  rm -f "$backup_script"
-  cp .env.production "$BACKUP_DIR/env.production"
-  chmod 600 "$BACKUP_DIR/env.production"
-  # Keep only the newest backups.
-  find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -name '*-before-*' | sort -r | tail -n +"$((BACKUP_KEEP + 1))" | xargs -r rm -rf \
-    || log "Could not delete some old backups in $BACKUP_ROOT"
-fi
-
 rollback() {
   trap - ERR
   log "Deploy failed; restoring $PREV_HEAD"
@@ -173,7 +145,7 @@ rollback() {
   exit 1
 }
 
-# 3-5. Switch, start, check.
+# 2-4. Switch, start, check.
 trap rollback ERR
 git -c advice.detachedHead=false checkout --quiet --detach "$COMMIT"
 mv "$NEXT_ENV" .env.deploy
