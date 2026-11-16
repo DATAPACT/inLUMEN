@@ -2,8 +2,8 @@ name: Deploy
 
 # Deploys published images to the production VM with scripts/deploy_vm.sh.
 #
-# - Starts after Container images publishes a commit from main. The job waits
-#   for approval in the `production` environment before it touches the VM.
+# - Starts automatically after Container images publishes a commit from main.
+#   The `production` environment only allows main; it has no approval step.
 # - A manual run deploys any commit on main whose images were published,
 #   which is also how to roll back to an earlier commit.
 #
@@ -20,10 +20,6 @@ on:
       commit:
         description: Full 40-character commit SHA on main to deploy
         required: true
-      skip_backup:
-        description: Skip the volume backup (shorter downtime, no restore point)
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -51,7 +47,6 @@ jobs:
       COMMIT: ${{ github.event.inputs.commit || github.event.workflow_run.head_sha }}
       INLUMEN_DEPLOY_DIR: ${{ vars.INLUMEN_VM_CHECKOUT }}
       INLUMEN_HEALTH_URL: ${{ vars.INLUMEN_PUBLIC_URL }}/healthz
-      INLUMEN_SKIP_BACKUP: ${{ github.event.inputs.skip_backup == 'true' }}
     steps:
       - name: Check the commit is on main
         run: |
