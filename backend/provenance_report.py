@@ -478,7 +478,7 @@ def _event_story(index: int, event: dict[str, Any], styles: dict[str, ParagraphS
         visible_details = [
             f"<b>{_paragraph_text(key)}:</b> {_paragraph_text(_compact_detail(value))}"
             for key, value in details.items()
-            if key not in {"query", "raw_query", "user_query", "graph_snapshot", "result"}
+            if key not in {"query", "raw_query", "user_query", "graph_snapshot", "result", "tool_call_id"}
         ]
         if visible_details:
             story.append(Paragraph("; ".join(visible_details), styles["small"]))
@@ -510,6 +510,10 @@ def build_provenance_pdf(payload: dict[str, Any]) -> bytes:
         ["Pipeline", _safe_text(pipeline.get("name") or pipeline.get("label"), "Current design pipeline")],
         ["Version", f"{_safe_text(version.get('name'), 'Main')} ({_safe_text(version.get('uid'), 'main')})"],
         ["Events recorded", str(len(events))],
+        ["Agent tool calls", str(sum(
+            1 for event in events
+            if isinstance(event, dict) and str(event.get("actor") or "").lower() == "agent"
+        ))],
     ]
     metadata_table = Table(metadata, colWidths=[1.15 * inch, 5.65 * inch])
     metadata_table.setStyle(TableStyle([

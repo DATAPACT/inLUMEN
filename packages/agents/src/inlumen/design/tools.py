@@ -6,6 +6,7 @@ store's result rows are returned to the model as ``repr`` text.
 """
 import json
 import re
+from contextlib import contextmanager
 from typing import Any
 
 from inlumen.contracts.connector_catalog import require_supported_connector
@@ -58,6 +59,39 @@ def _valid_identifier(value: str) -> bool:
     return all(character.isalnum() or character in "_.-" for character in value)
 
 
+def pipeline_palette(node_definitions: NodeDefinitionRegistry | None = None) -> dict[str, Any]:
+    """The enabled structural components and the installed plugins."""
+    try:
+        manifests = installed_plugin_manifests()
+    except Exception:
+        # The plugin registry is optional for design; never block the agent.
+        manifests = []
+    plugins = []
+    for manifest in manifests:
+        summary = plugin_summary(manifest)
+        plugins.append({
+            "template": summary["template"],
+            "type": summary["step_type"],
+            "name": summary["name"],
+            "description": summary["description"],
+            "operations": [operation["id"] for operation in summary["operations"]],
+        })
+    definitions = (node_definitions or get_node_definition_registry()).list()
+    return {
+        "components": [
+            {
+                "definition_id": definition.id,
+                "definition_version": definition.version,
+                "type": definition.base_type,
+                "label": definition.palette.label,
+                "description": definition.palette.description,
+            }
+            for definition in definitions
+        ],
+        "plugins": plugins,
+    }
+
+
 def build_pipeline_editor_tools(
     store: GraphStore,
     *,
@@ -65,30 +99,22 @@ def build_pipeline_editor_tools(
 ) -> list[Any]:
     """Build request-scoped tools that change the design pipeline in ``store``."""
 
+    @contextmanager
+    def _tool_call(name: str):
+        """Tell the store that the writes inside belong to one agent tool call."""
+        scope = getattr(store, "tool_call", None)
+        if scope is None:
+            yield
+        else:
+            with scope(name):
+                yield
+
     async def overview() -> str:
         """Gives a design-only overview of the pipeline and its connections."""
         try:
             return repr(await store.overview())
         except Exception as exc:
             raise RuntimeError(f"overview failed: {exc}") from exc
-
-    def _installed_plugin_summaries() -> list[dict[str, Any]]:
-        try:
-            manifests = installed_plugin_manifests()
-        except Exception:
-            # The plugin registry is optional for design; never block the agent.
-            return []
-        summaries = []
-        for manifest in manifests:
-            summary = plugin_summary(manifest)
-            summaries.append({
-                "template": summary["template"],
-                "type": summary["step_type"],
-                "name": summary["name"],
-                "description": summary["description"],
-                "operations": [operation["id"] for operation in summary["operations"]],
-            })
-        return summaries
 
     async def list_pipeline_components(params: str) -> str:
         """Lists the enabled structural components available in the UI palette.
@@ -102,20 +128,9 @@ def build_pipeline_editor_tools(
         its "template" value.
         """
         _ = json.loads(params) if params else {}
-        definitions = (node_definitions or get_node_definition_registry()).list()
         return json.dumps(
             {
-                "components": [
-                    {
-                        "definition_id": definition.id,
-                        "definition_version": definition.version,
-                        "type": definition.base_type,
-                        "label": definition.palette.label,
-                        "description": definition.palette.description,
-                    }
-                    for definition in definitions
-                ],
-                "plugins": _installed_plugin_summaries(),
+                **pipeline_palette(node_definitions),
                 "rule": (
                     "Use only these structural types. Design labels, descriptions, "
                     "control-flow behavior, and ports. Source and Destination use "
@@ -123,7 +138,7 @@ def build_pipeline_editor_tools(
                     "implementation and parameters are configured after design. "
                     "Only when the user's request clearly matches an installed "
                     "plugin, call get_plugin_instructions and then pass the "
-                    "plugin's template to create_step for a step of the same type."
+                    "plugin's template to create_steps for a step of the same type."
                 ),
             },
             ensure_ascii=False,
@@ -406,7 +421,7 @@ def build_pipeline_editor_tools(
         def optional_id(name: str) -> str:
             value = str(data.get(name) or "").strip()
             if value and not _valid_identifier(value):
-                raise ValueError(f"create_step received an invalid {name}")
+                raise ValueError(f"create_steps received an invalid {name}")
             return value
 
         pipeline_uid = optional_id("reusable_pipeline_uid")
@@ -489,163 +504,211 @@ def build_pipeline_editor_tools(
             raise ValueError("Each named input must be distinct.")
         return names
 
-    async def create_step(params: str) -> str:
-        """Creates a STEP and connects it after an explicit or unambiguous tail.
-
-        params JSON:
-        {
-          "type": "source|task|destination|flow|subpipeline",
-          "label": "step label",
-          "description": "step description",
-          "template": "optional high-level semantic for Task or Flow only, or an installed plugin template (plugin:<id>) for a step of the plugin's type",
-          "after_flow_id": "optional explicit predecessor flow_id (never for a Source)",
-          "source_port": "required when the explicit predecessor has multiple outputs",
-          "target_port": "optional input of the new step the predecessor feeds",
-          "inputs": ["optional named input ports for a Task that joins branches"],
-          "allow_fan_out": false,
-          "reusable_pipeline_name": "required for Subpipeline unless uid is supplied",
-          "reusable_pipeline_uid": "optional saved reusable pipeline uid"
+    async def _prepare_step(data: dict[str, Any], *, has_predecessor: bool, tool: str) -> dict[str, Any]:
+        """Validate one step request and build what the store needs to create it."""
+        step_type = require_agent_step_type(data.get("type"))
+        raw_label = str(data.get("label", ""))
+        raw_description = str(data.get("description", ""))
+        resolved_template = _resolved_template_for_step(
+            step_type,
+            data.get("template"),
+            raw_label,
+            raw_description,
+        )
+        require_supported_connector(step_type, resolved_template)
+        props = _step_props(
+            step_type,
+            raw_label,
+            raw_description,
+            resolved_template,
+            data.get("implementation"),
+            data.get("parameters"),
+            data.get("secret_parameters"),
+        )
+        resolved_subpipeline = None
+        if step_type == "subpipeline":
+            resolved_subpipeline = await _resolve_subpipeline_for_creation(data, raw_label)
+            _bind_subpipeline(props, resolved_subpipeline)
+        expression = str(data.get("expression") or "").strip()
+        if expression:
+            if step_type != "flow" or props["template_label"] != "Condition":
+                raise ValueError("expression is only for a Flow step with template Condition")
+            if not FLOW_EXPRESSION_PATTERN.fullmatch(expression):
+                raise ValueError(
+                    "Condition expressions must compare value or value.field with a literal"
+                )
+            props["param_json"] = json.dumps({"expression": expression}, sort_keys=True)
+            props["configuration_status"] = "configured"
+        named_inputs = _named_input_ports(data.get("inputs"), step_type)
+        if named_inputs:
+            named_ports = normalize_node_ports(
+                {
+                    "inputs": [
+                        {"id": port, "name": port, "type": "any", "required": True,
+                         "description": f"{port} branch joined by this step."}
+                        for port in named_inputs
+                    ],
+                    "outputs": None,
+                },
+                step_type,
+            )
+            props.pop("ports_json", None)
+            props.pop("primary_input_port", None)
+            props["ports_json"] = json.dumps(named_ports, ensure_ascii=False, sort_keys=True)
+            props["primary_input_port"] = named_inputs[0]
+        available_inputs = (
+            resolved_subpipeline["input_ids"]
+            if resolved_subpipeline
+            else named_inputs or [default_input_port_id(step_type, resolved_template)]
+        )
+        requested_target_port = str(data.get("target_port") or "").strip()
+        if requested_target_port and requested_target_port not in available_inputs:
+            raise ValueError(
+                f"{tool} target_port {requested_target_port!r} is not one of the "
+                f"new step's inputs {available_inputs}"
+            )
+        target_port = requested_target_port or available_inputs[0]
+        if step_type == "source" and has_predecessor:
+            raise ValueError(
+                "A Source has no inputs, so it cannot follow another step. Create "
+                "it without a predecessor: every Source starts its own branch, and "
+                "branches meet at a Task with one named input per branch."
+            )
+        binding = (
+            SubpipelineBinding(
+                reference=resolved_subpipeline["reference"],
+                input_ids=resolved_subpipeline["input_ids"],
+                output_ids=resolved_subpipeline["output_ids"],
+            )
+            if resolved_subpipeline
+            else None
+        )
+        return {
+            "step": NewStep(step_type, props, subpipeline=binding),
+            "target_port": target_port,
+            "source_port": data.get("source_port"),
+            "allow_fan_out": data.get("allow_fan_out") is True,
         }
-        Do not provide parameters, credentials, secret names, model choices, or
-        implementation metadata. Source and Destination use the default managed
-        boundary unless an installed plugin template is given; other connector
-        selection is an advanced user configuration.
-        A Source never follows another step: create every Source without
-        after_flow_id and it starts its own branch, even when the graph already
-        has steps. Use one Source per input file with a different role.
-        A Task that joins several branches declares one named input per branch
-        ("inputs": ["customers", "orders"]); each input receives exactly one
-        connection. Pass target_port to choose which input after_flow_id feeds.
-        Without after_flow_id, the graph must have exactly one topological tail.
-        Use after_flow_id plus source_port to create every explicit branch target,
-        including a second terminal Destination from Condition.when_false. A Flow
-        may fan out by design; a non-Flow predecessor requires allow_fan_out:true.
-        Use task descriptions for domain operations and Flow for execution
-        control. Creating a subpipeline
-        atomically resolves and pins a saved reusable pipeline version and returns
-        its exact public input/output ids; an unreferenced placeholder is never
-        created. Never create configuration nodes.
+
+    async def _create_prepared(
+        prepared: dict[str, Any],
+        after_flow_id: str,
+        *,
+        tool: str,
+        known: dict[str, str] | None = None,
+    ) -> str:
+        """Create a prepared step after ``after_flow_id``, or at the graph's tail.
+
+        ``known`` holds predecessor rows already read in this tool call.
         """
-        try:
-            data = json.loads(params)
-            step_type = require_agent_step_type(data.get("type"))
-            raw_label = str(data.get("label", ""))
-            raw_description = str(data.get("description", ""))
-            resolved_template = _resolved_template_for_step(
-                step_type,
-                data.get("template"),
-                raw_label,
-                raw_description,
-            )
-            require_supported_connector(step_type, resolved_template)
-            props = _step_props(
-                step_type,
-                raw_label,
-                raw_description,
-                resolved_template,
-                data.get("implementation"),
-                data.get("parameters"),
-                data.get("secret_parameters"),
-            )
-            resolved_subpipeline = None
-            if step_type == "subpipeline":
-                resolved_subpipeline = await _resolve_subpipeline_for_creation(data, raw_label)
-                _bind_subpipeline(props, resolved_subpipeline)
-            named_inputs = _named_input_ports(data.get("inputs"), step_type)
-            if named_inputs:
-                named_ports = normalize_node_ports(
-                    {
-                        "inputs": [
-                            {"id": port, "name": port, "type": "any", "required": True,
-                             "description": f"{port} branch joined by this step."}
-                            for port in named_inputs
-                        ],
-                        "outputs": None,
-                    },
-                    step_type,
-                )
-                props.pop("ports_json", None)
-                props.pop("primary_input_port", None)
-                props["ports_json"] = json.dumps(named_ports, ensure_ascii=False, sort_keys=True)
-                props["primary_input_port"] = named_inputs[0]
-            available_inputs = (
-                resolved_subpipeline["input_ids"]
-                if resolved_subpipeline
-                else named_inputs or [default_input_port_id(step_type, resolved_template)]
-            )
-            requested_target_port = str(data.get("target_port") or "").strip()
-            if requested_target_port and requested_target_port not in available_inputs:
+        predecessor = None
+        if after_flow_id:
+            if not _valid_identifier(after_flow_id):
+                raise ValueError(f"{tool} received an invalid after_flow_id")
+            found_rows = (known or {}).get(after_flow_id)
+            if found_rows is None:
+                found_rows = await store.find_predecessor(after_flow_id)
+            predecessors = [
+                row.get("predecessor")
+                for row in decoded_rows(found_rows)
+                if isinstance(row.get("predecessor"), dict)
+            ]
+            if not predecessors:
                 raise ValueError(
-                    f"create_step target_port {requested_target_port!r} is not one of the "
-                    f"new step's inputs {available_inputs}"
+                    f"{tool} predecessor does not exist; call overview and use "
+                    "an exact flow_id"
                 )
-            target_port = requested_target_port or available_inputs[0]
-            raw_after_flow_id = data.get("after_flow_id")
-            after_flow_id = str(raw_after_flow_id or "").strip()
-            if step_type == "source" and after_flow_id:
+            found = predecessors[0]
+            predecessor_pipeline_uid = str(found.get("pipeline_uid") or "").strip()
+            if not predecessor_pipeline_uid:
                 raise ValueError(
-                    "A Source has no inputs, so it cannot follow another step. Create "
-                    "it without after_flow_id: every Source starts its own branch, and "
-                    "branches meet at a Task with one named input per branch."
+                    f"{tool} predecessor is not associated with an active "
+                    "design pipeline"
                 )
-            allow_fan_out = data.get("allow_fan_out") is True
-            predecessor = None
-            if after_flow_id:
-                if not _valid_identifier(after_flow_id):
-                    raise ValueError("create_step received an invalid after_flow_id")
-                predecessors = [
-                    row.get("predecessor")
-                    for row in decoded_rows(await store.find_predecessor(after_flow_id))
-                    if isinstance(row.get("predecessor"), dict)
-                ]
-                if not predecessors:
-                    raise ValueError(
-                        "create_step predecessor does not exist; call overview and use "
-                        "an exact flow_id"
-                    )
-                found = predecessors[0]
-                predecessor_pipeline_uid = str(found.get("pipeline_uid") or "").strip()
-                if not predecessor_pipeline_uid:
-                    raise ValueError(
-                        "create_step predecessor is not associated with an active "
-                        "design pipeline"
-                    )
-                predecessor = Predecessor(
-                    pipeline_uid=predecessor_pipeline_uid,
+            predecessor = Predecessor(
+                pipeline_uid=predecessor_pipeline_uid,
+                flow_id=after_flow_id,
+                source_port=_resolve_connection_port(
+                    prepared["source_port"],
+                    _available_connection_ports(found, "outputs"),
                     flow_id=after_flow_id,
-                    source_port=_resolve_connection_port(
-                        data.get("source_port"),
-                        _available_connection_ports(found, "outputs"),
-                        flow_id=after_flow_id,
-                        direction="outputs",
-                        primary_port=found.get("primary_output_port"),
-                    ),
-                    allow_fan_out=allow_fan_out,
-                )
-            binding = (
-                SubpipelineBinding(
-                    reference=resolved_subpipeline["reference"],
-                    input_ids=resolved_subpipeline["input_ids"],
-                    output_ids=resolved_subpipeline["output_ids"],
-                )
-                if resolved_subpipeline
-                else None
+                    direction="outputs",
+                    primary_port=found.get("primary_output_port"),
+                ),
+                allow_fan_out=prepared["allow_fan_out"],
             )
-            result = await store.create_step(
-                NewStep(step_type, props, subpipeline=binding),
-                target_port=target_port,
-                predecessor=predecessor,
+        result = await store.create_step(
+            prepared["step"],
+            target_port=prepared["target_port"],
+            predecessor=predecessor,
+        )
+        if returned_no_rows(result):
+            raise ValueError(
+                "Step creation rejected: the graph has no unambiguous appendable "
+                "tail, the predecessor is terminal, or non-Flow fan-out was not "
+                "authorized. Use after_flow_id and an exact source_port to create "
+                "an explicit branch target."
             )
-            if returned_no_rows(result):
-                raise ValueError(
-                    "Step creation rejected: the graph has no unambiguous appendable "
-                    "tail, the predecessor is terminal, or non-Flow fan-out was not "
-                    "authorized. Use after_flow_id and an exact source_port to create "
-                    "an explicit branch target."
-                )
-            return repr(result)
-        except Exception as exc:
-            raise RuntimeError(f"create_step failed: {exc}") from exc
+        return result
+
+    async def _connect(data: dict[str, Any]) -> str:
+        """Validate and create one port-aware connection."""
+        def required_value(name: str) -> str:
+            value = str(data.get(name) or "").strip()
+            if not value:
+                raise ValueError(f"connect_steps requires {name}")
+            if not _valid_identifier(value):
+                raise ValueError(f"connect_steps received an invalid {name}")
+            return value
+
+        source_flow_id = required_value("source_flow_id")
+        target_flow_id = required_value("target_flow_id")
+        allow_fan_out = data.get("allow_fan_out") is True
+        if source_flow_id == target_flow_id:
+            raise ValueError("connect_steps cannot connect a step to itself")
+
+        context_result = await store.connection_context(source_flow_id, target_flow_id)
+        contexts = [
+            row.get("connection_context")
+            for row in decoded_rows(context_result)
+            if isinstance(row.get("connection_context"), dict)
+        ]
+        if not contexts:
+            raise ValueError(
+                "Connection rejected: source or target step does not exist, or the "
+                "requested direction is invalid. Call overview and use its flow_id values."
+            )
+
+        context = contexts[0]
+        source_context = context.get("source")
+        target_context = context.get("target")
+        if not isinstance(source_context, dict) or not isinstance(target_context, dict):
+            raise ValueError("Connection rejected: step port contracts are unavailable")
+
+        source_port = _resolve_connection_port(
+            data.get("source_port"),
+            _available_connection_ports(source_context, "outputs"),
+            flow_id=source_flow_id,
+            direction="outputs",
+            primary_port=source_context.get("primary_output_port"),
+        )
+        target_port = _resolve_connection_port(
+            data.get("target_port"),
+            _available_connection_ports(target_context, "inputs"),
+            flow_id=target_flow_id,
+            direction="inputs",
+            primary_port=target_context.get("primary_input_port"),
+        )
+        result = await store.connect_steps(
+            source_flow_id, target_flow_id, source_port, target_port, allow_fan_out
+        )
+        if returned_no_rows(result):
+            raise ValueError(
+                "Connection rejected: this non-Flow step already has a different "
+                "downstream target. Remove the shortcut or pass allow_fan_out:true "
+                "only when the user explicitly requested independent consumers."
+            )
+        return result
 
     async def connect_steps(params: str) -> str:
         """Creates or configures a port-aware connection between two existing steps.
@@ -658,6 +721,14 @@ def build_pipeline_editor_tools(
           "target_port": "optional exact input port id",
           "allow_fan_out": false
         }
+        To add several connections, send them all in ONE call instead of one
+        call per connection:
+        {"connections": [
+          {"source_flow_id": "2", "target_flow_id": "5", "target_port": "orders"},
+          {"source_flow_id": "4", "target_flow_id": "6", "source_port": "when_false"}
+        ]}
+        They are applied in list order and the call is all-or-nothing: if one
+        is rejected, the graph is put back as it was and the error names it.
 
         Port ids never include a component-type prefix. Standard exact ids are:
         Source output `data`; Task input `input` and output `output`; Destination
@@ -665,7 +736,7 @@ def build_pipeline_editor_tools(
         Parallel Map input `items` and output `item`; Collect input `item` and
         output `items`. When a side exposes exactly
         one port, its port field may be omitted and will be inferred.
-        Subpipeline handles are the public port ids returned by create_step.
+        Subpipeline handles are the public port ids returned by create_steps.
         For compatibility, type-prefixed aliases such as task.output are
         normalized only when they resolve to a real port, and input/output
         aliases are mapped to the pinned Subpipeline's primary public ports.
@@ -677,65 +748,300 @@ def build_pipeline_editor_tools(
         """
         try:
             data = json.loads(params)
-
-            def required_value(name: str) -> str:
-                value = str(data.get(name) or "").strip()
-                if not value:
-                    raise ValueError(f"connect_steps requires {name}")
-                if not _valid_identifier(value):
-                    raise ValueError(f"connect_steps received an invalid {name}")
-                return value
-
-            source_flow_id = required_value("source_flow_id")
-            target_flow_id = required_value("target_flow_id")
-            allow_fan_out = data.get("allow_fan_out") is True
-            if source_flow_id == target_flow_id:
-                raise ValueError("connect_steps cannot connect a step to itself")
-
-            context_result = await store.connection_context(source_flow_id, target_flow_id)
-            contexts = [
-                row.get("connection_context")
-                for row in decoded_rows(context_result)
-                if isinstance(row.get("connection_context"), dict)
-            ]
-            if not contexts:
-                raise ValueError(
-                    "Connection rejected: source or target step does not exist, or the "
-                    "requested direction is invalid. Call overview and use its flow_id values."
+            batch = data if isinstance(data, list) else data.get("connections")
+            if not isinstance(batch, list):
+                return repr(await _connect(data))
+            if not batch:
+                raise ValueError("connections must be a non-empty list")
+            if len(batch) > 100:
+                raise ValueError("connect_steps accepts at most 100 connections per call")
+            requests = []
+            for index, connection in enumerate(batch):
+                if not isinstance(connection, dict):
+                    raise ValueError(f"connections[{index}] must be an object")
+                request = dict(connection)
+                for end in ("source", "target"):
+                    request.setdefault(f"{end}_flow_id", connection.get(end))
+                requests.append(request)
+            try:
+                snapshot = await store.get_graph()
+            except Exception:
+                snapshot = None
+            connected: list[dict[str, Any]] = []
+            scope = _tool_call("connect_steps")
+            scope.__enter__()
+            for index, request in enumerate(requests):
+                try:
+                    result = await _connect(request)
+                except Exception as exc:
+                    scope.__exit__(None, None, None)
+                    where = f"connections[{index}]: {exc}"
+                    if not index:
+                        raise ValueError(where) from exc
+                    try:
+                        if snapshot is None:
+                            raise RuntimeError("no snapshot was available")
+                        await store.restore_graph(snapshot)
+                    except Exception as restore_error:
+                        raise ValueError(
+                            f"{where}. The graph could not be put back ({restore_error}); "
+                            f"the first {index} connections were kept. Call overview "
+                            "before continuing."
+                        ) from exc
+                    raise ValueError(
+                        f"{where}. Nothing was connected: the graph was put back as it "
+                        "was. Fix that entry and send the whole list again."
+                    ) from exc
+                connected.extend(
+                    row["connection"] for row in decoded_rows(result)
+                    if isinstance(row.get("connection"), dict)
                 )
-
-            context = contexts[0]
-            source_context = context.get("source")
-            target_context = context.get("target")
-            if not isinstance(source_context, dict) or not isinstance(target_context, dict):
-                raise ValueError("Connection rejected: step port contracts are unavailable")
-
-            source_port = _resolve_connection_port(
-                data.get("source_port"),
-                _available_connection_ports(source_context, "outputs"),
-                flow_id=source_flow_id,
-                direction="outputs",
-                primary_port=source_context.get("primary_output_port"),
-            )
-            target_port = _resolve_connection_port(
-                data.get("target_port"),
-                _available_connection_ports(target_context, "inputs"),
-                flow_id=target_flow_id,
-                direction="inputs",
-                primary_port=target_context.get("primary_input_port"),
-            )
-            result = await store.connect_steps(
-                source_flow_id, target_flow_id, source_port, target_port, allow_fan_out
-            )
-            if returned_no_rows(result):
-                raise ValueError(
-                    "Connection rejected: this non-Flow step already has a different "
-                    "downstream target. Remove the shortcut or pass allow_fan_out:true "
-                    "only when the user explicitly requested independent consumers."
-                )
-            return repr(result)
+            scope.__exit__(None, None, None)
+            return json.dumps({"connections": connected}, ensure_ascii=False, sort_keys=True)
         except Exception as exc:
             raise RuntimeError(f"connect_steps failed: {exc}") from exc
+
+    async def create_steps(params: str) -> str:
+        """Creates STEPs (one or many) and their connections in one call.
+
+        This is the only tool that creates steps. Send every step a request
+        needs in ONE call: a whole new pipeline, a new branch, or a single step.
+
+        params JSON:
+        {
+          "pipeline": {"name": "Order pricing", "description": "1-2 sentences"},
+          "steps": [
+            {"id": "orders", "type": "source", "label": "...", "description": "..."},
+            {"id": "check", "type": "flow", "template": "Condition", "label": "...",
+             "description": "...", "expression": "value.is_valid == true", "after": "orders"},
+            {"id": "price", "type": "task", "label": "...", "description": "...",
+             "after": "check", "source_port": "when_true"},
+            {"id": "rejected", "type": "destination", "label": "...", "description": "...",
+             "after": "check", "source_port": "when_false"}
+          ],
+          "connections": [
+            {"source": "orders", "target": "join", "target_port": "orders"}
+          ]
+        }
+        "pipeline" is optional: give it when you design or rebuild a pipeline,
+        to set its name and a fresh description of the complete behavior in the
+        same call. Omit it when you only add steps to an existing design.
+
+        Step fields:
+          "type": "source|task|destination|flow|subpipeline" (required)
+          "label", "description": what the step does
+          "template": for a Flow "Condition", "Parallel Map" or "Collect"; or an
+            installed plugin template (plugin:<id>) for a step of the plugin's type
+          "expression": required for a Condition, e.g. "value.is_valid == true"
+            (compares value or value.field with a literal)
+          "id": a local name for the step in this call (letters first, e.g.
+            "clean_orders"), used by "after" and "connections"
+          "after": the id of an EARLIER step in this list that this step follows
+          "after_flow_id": the flow_id of a step that already exists, instead of
+            "after"
+          "source_port": the predecessor's output; required when it has several
+            (a Condition's when_true / when_false)
+          "target_port": the input of this step the predecessor feeds
+          "inputs": ["customers", "orders"] named inputs of a Task that joins
+            branches; each input receives exactly one connection
+          "allow_fan_out": true only when a non-Flow predecessor must feed a
+            second independent consumer
+          "reusable_pipeline_name" or "reusable_pipeline_uid": required for a
+            Subpipeline; the saved pipeline is pinned and its public port ids
+            are returned
+        A Source never follows another step: give it neither "after" nor
+        "after_flow_id" and it starts its own branch. Any other step with
+        neither is appended to the graph's single tail. Do not provide
+        parameters, credentials, secret names, model choices or implementation
+        metadata, and never create configuration nodes.
+
+        ORDER MATTERS: steps are created in list order and each one is placed
+        on the canvas to the right of its predecessor, so list them from
+        ingress to delivery, every step after the step it follows. List all
+        Sources in top-to-bottom order, a Condition's when_true target before
+        its when_false target, and a joining Task after the branches it joins.
+
+        "connections" is optional and adds the extra edges a single predecessor
+        cannot express: the other inputs of a joining Task, or a branch merging
+        back. "source"/"target" are ids from this call or existing flow_ids;
+        ports and allow_fan_out work as in connect_steps. Do not repeat an edge
+        already created through "after".
+
+        The call is all-or-nothing: if any step or connection is rejected, the
+        graph is put back as it was and the error names the failing entry.
+        Returns each new step's flow_id next to its id, and under "overview"
+        the complete graph after the call (the same rows the overview tool
+        returns), so no separate overview call is needed to verify it.
+        """
+        try:
+            data = json.loads(params)
+            if isinstance(data, dict) and "steps" not in data and data.get("type"):
+                data = {"steps": [data]}  # one step, sent without the list
+            raw_steps = data.get("steps") if isinstance(data, dict) else data
+            raw_connections = data.get("connections") if isinstance(data, dict) else None
+            pipeline = data.get("pipeline") if isinstance(data, dict) else None
+            if pipeline is not None and not (
+                isinstance(pipeline, dict) and str(pipeline.get("name") or "").strip()
+            ):
+                raise ValueError('pipeline must be an object with a "name"')
+            if not isinstance(raw_steps, list) or not raw_steps:
+                raise ValueError("steps must be a non-empty list")
+            if len(raw_steps) > 50:
+                raise ValueError("create_steps accepts at most 50 steps per call")
+            if raw_connections is None:
+                raw_connections = []
+            if not isinstance(raw_connections, list):
+                raise ValueError("connections must be a list")
+
+            # Check the whole request before the first write.
+            aliases: dict[str, int] = {}
+            existing: dict[str, str] = {}  # predecessor rows of steps that already exist
+            plan: list[tuple[str, str, str, dict[str, Any]]] = []
+            for index, item in enumerate(raw_steps):
+                where = f"steps[{index}]"
+                if not isinstance(item, dict):
+                    raise ValueError(f"{where} must be an object")
+                alias = str(item.get("id") or "").strip()
+                if alias:
+                    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}", alias):
+                        raise ValueError(
+                            f"{where} id {alias!r} must start with a letter and use "
+                            "only letters, digits, '_', '.' or '-'"
+                        )
+                    if alias in aliases:
+                        raise ValueError(f"{where} repeats the id {alias!r}")
+                after = str(item.get("after") or "").strip()
+                after_flow_id = str(item.get("after_flow_id") or "").strip()
+                if after and after_flow_id:
+                    raise ValueError(f"{where} gives both after and after_flow_id; use one")
+                if after_flow_id in aliases:
+                    after, after_flow_id = after_flow_id, ""
+                if after and after not in aliases and after.isdigit():
+                    # A flow_id of a step that already exists, given as "after".
+                    after, after_flow_id = "", after
+                if after and after not in aliases:
+                    raise ValueError(
+                        f"{where} after {after!r} is not the id of an earlier step in "
+                        "this list. List every step after the step it follows; use "
+                        "after_flow_id for a step that already exists."
+                    )
+                try:
+                    prepared = await _prepare_step(
+                        item, has_predecessor=bool(after or after_flow_id), tool="create_steps"
+                    )
+                    if after_flow_id:
+                        if _valid_identifier(after_flow_id) and after_flow_id not in existing:
+                            existing[after_flow_id] = await store.find_predecessor(after_flow_id)
+                        if returned_no_rows(existing.get(after_flow_id, "[]")):
+                            raise ValueError(
+                                f"after_flow_id {after_flow_id!r} does not exist; call "
+                                "overview and use an exact flow_id"
+                            )
+                except Exception as exc:
+                    raise ValueError(f"{where} ({item.get('label') or alias}): {exc}") from exc
+                plan.append((alias, after, after_flow_id, prepared))
+                if alias:
+                    aliases[alias] = index
+            for index, connection in enumerate(raw_connections):
+                where = f"connections[{index}]"
+                if not isinstance(connection, dict):
+                    raise ValueError(f"{where} must be an object")
+                for end in ("source", "target"):
+                    ref = str(connection.get(end) or connection.get(f"{end}_flow_id") or "").strip()
+                    if not ref or not _valid_identifier(ref):
+                        raise ValueError(f"{where} requires a valid {end}")
+
+            snapshot = None
+            if len(plan) + len(raw_connections) > 1:  # one write is atomic by itself
+                try:
+                    snapshot = await store.get_graph()
+                except Exception:
+                    snapshot = None
+
+            flow_ids: dict[str, str] = {}
+            created: list[dict[str, Any]] = []
+            connected: list[dict[str, Any]] = []
+            try:
+                with _tool_call("create_steps"):
+                    if pipeline is not None:
+                        await store.upsert_pipeline(
+                            str(pipeline.get("name") or ""),
+                            str(pipeline.get("description") or ""),
+                            str(pipeline.get("version") or ""),
+                        )
+                    for index, (alias, after, after_flow_id, prepared) in enumerate(plan):
+                        try:
+                            result = await _create_prepared(
+                                prepared,
+                                flow_ids[after] if after else after_flow_id,
+                                tool="create_steps",
+                                known=existing,
+                            )
+                            rows = [
+                                row["step"] for row in decoded_rows(result)
+                                if isinstance(row.get("step"), dict)
+                            ]
+                            if not rows:
+                                raise ValueError("the store returned no step")
+                        except Exception as exc:
+                            label = prepared["step"].props.get("label") or alias
+                            raise ValueError(f"steps[{index}] ({label}): {exc}") from exc
+                        if alias:
+                            flow_ids[alias] = str(rows[0].get("flow_id"))
+                        created.append({"id": alias, **rows[0]} if alias else rows[0])
+                    for index, connection in enumerate(raw_connections):
+                        def end(name: str) -> str:
+                            ref = str(connection.get(name) or connection.get(f"{name}_flow_id") or "").strip()
+                            return flow_ids.get(ref, ref)
+
+                        try:
+                            result = await _connect({
+                                "source_flow_id": end("source"),
+                                "target_flow_id": end("target"),
+                                "source_port": connection.get("source_port"),
+                                "target_port": connection.get("target_port"),
+                                "allow_fan_out": connection.get("allow_fan_out"),
+                            })
+                        except Exception as exc:
+                            raise ValueError(f"connections[{index}]: {exc}") from exc
+                        connected.extend(
+                            row["connection"] for row in decoded_rows(result)
+                            if isinstance(row.get("connection"), dict)
+                        )
+            except Exception as exc:
+                if not created:
+                    raise
+                kept = ", ".join(
+                    f"{step.get('id') or step.get('label')}=flow_id {step.get('flow_id')}"
+                    for step in created
+                )
+                if snapshot is None:
+                    raise ValueError(
+                        f"{exc}. The earlier entries were kept ({kept}); do not create "
+                        "them again, continue from these flow_ids."
+                    ) from exc
+                try:
+                    await store.restore_graph(snapshot)
+                except Exception as restore_error:
+                    raise ValueError(
+                        f"{exc}. The graph could not be put back ({restore_error}); the "
+                        f"earlier entries were kept ({kept}). Call overview before continuing."
+                    ) from exc
+                raise ValueError(
+                    f"{exc}. Nothing was created: the graph was put back as it was. "
+                    "Fix that entry and send the whole list again."
+                ) from exc
+            try:
+                graph_rows: Any = decoded_rows(await store.overview())
+            except Exception:
+                graph_rows = "unavailable; call overview"
+            return json.dumps(
+                {"steps": created, "connections": connected, "overview": graph_rows},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"create_steps failed: {exc}") from exc
 
     async def disconnect_steps(params: str) -> str:
         """Deletes one exact port-aware connection between two existing steps.
@@ -1126,7 +1432,7 @@ def build_pipeline_editor_tools(
         list_pipeline_components,
         get_plugin_instructions,
         create_pipeline,
-        create_step,
+        create_steps,
         configure_flow_step,
         list_reusable_pipelines,
         create_reusable_pipeline,

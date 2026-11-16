@@ -1098,6 +1098,7 @@ def _record_provenance_event(
     *,
     version_uid: str | None = None,
     version_name: str | None = None,
+    tool_call_id: str | None = None,
 ) -> None:
     context = _active_pipeline_version(session, version_uid, version_name)
     if isinstance(details, dict):
@@ -1136,11 +1137,13 @@ def _record_provenance_event(
       action: $action,
       summary: $summary,
       details_json: $details_json,
+      tool_call_id: $tool_call_id,
       created_at: datetime()
     })
     MERGE (p)-[:HAS_PROVENANCE]->(event)
     MERGE (v)-[:HAS_PROVENANCE]->(event)
     """, pipeline_uid=context["pipeline_uid"],
+         tool_call_id=tool_call_id or None,
          version_uid=context["version_uid"],
          version_name=context["version_name"],
          main_uid=MAIN_VERSION_UID,
@@ -1149,6 +1152,61 @@ def _record_provenance_event(
          action=str(action or "change"),
          summary=str(summary or "Pipeline graph was modified."),
          details_json=details_json)
+
+
+def _tool_call_summary(tool: str, operations: dict) -> str:
+    parts = ", ".join(f"{count} {name}" for name, count in operations.items())
+    return f"Agent called tool '{tool}' once; it performed {parts}."
+
+
+def _record_agent_tool_call(session, query_type: str, context: dict, results: Any) -> None:
+    """Record an agent graph write as part of the tool call that made it.
+
+    A tool call that performs several writes (create_steps, a connect_steps
+    list) is ONE provenance event: the first write creates it and every later
+    write of the same call is counted on it.
+    """
+    tool = context.get("tool") or str(query_type)
+    tool_call_id = context.get("tool_call_id") or ""
+    shared = {key: value for key, value in context.items() if key not in {"tool", "tool_call_id"}}
+    existing = None
+    if tool_call_id:
+        existing = session.run("""
+        MATCH (event:PROVENANCE_EVENT {tool_call_id: $tool_call_id})
+        RETURN event.uid AS uid, event.pipeline_uid AS pipeline_uid, event.details_json AS details_json
+        LIMIT 1
+        """, tool_call_id=tool_call_id).single()
+    if existing is None:
+        operations = {str(query_type): 1}
+        details = {**shared, "result": _short_text(results, 2000)}
+        if tool_call_id:
+            details = {"tool": tool, "tool_calls": 1, "operations": operations, **details}
+        else:
+            details = {"query_type": query_type, **details}
+        _record_provenance_event(
+            session,
+            tool,
+            "agent",
+            _tool_call_summary(tool, operations) if tool_call_id
+            else f"Agent executed pipeline operation '{query_type}'.",
+            details,
+            tool_call_id=tool_call_id,
+        )
+        return
+    try:
+        details = json.loads(existing["details_json"] or "{}")
+    except (TypeError, ValueError):
+        details = {}
+    operations = details.get("operations") if isinstance(details.get("operations"), dict) else {}
+    operations[str(query_type)] = int(operations.get(str(query_type)) or 0) + 1
+    details["operations"] = operations
+    details["result"] = _short_text(f"{details.get('result') or ''}\n{results}", 4000)
+    details["graph_snapshot"] = _provenance_graph_snapshot(session, existing["pipeline_uid"])
+    session.run("""
+    MATCH (event:PROVENANCE_EVENT {uid: $uid})
+    SET event.summary = $summary, event.details_json = $details_json
+    """, uid=existing["uid"], summary=_tool_call_summary(tool, operations),
+         details_json=_json_details(details))
 
 
 def _copy_provenance_to_version(session, source_version_uid: str, target_version_uid: str) -> None:
@@ -1209,6 +1267,8 @@ def _provenance_context_from_payload(data: dict) -> dict:
     return {
         "user_query": _short_text(context.get("user_query"), 2000),
         "session_id": _short_text(context.get("session_id"), 120),
+        "tool": _short_text(context.get("tool"), 80),
+        "tool_call_id": _short_text(context.get("tool_call_id"), 80),
     }
 
 
@@ -2969,18 +3029,11 @@ def neo4j_run_query():
         # We are assuming that the query returns something to jsonify
         results = [record.data() for record in session_result]
         if _mutation_query_type(query_type):
-            provenance_context = _provenance_context_from_payload(data)
-            details = {
-                "query_type": query_type,
-                **provenance_context,
-                "result": _short_text(results, 2000),
-            }
-            _record_provenance_event(
+            _record_agent_tool_call(
                 session,
                 str(query_type),
-                "agent",
-                f"Agent executed pipeline operation '{query_type}'.",
-                details,
+                _provenance_context_from_payload(data),
+                results,
             )
         return jsonify(results)
 

@@ -928,15 +928,15 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         system_message = assistant_agent.call_args.kwargs["system_message"]
         self.assertIn("never `source.data`", system_message)
         self.assertIn("source_port `when_false`", system_message)
-        self.assertIn("configure its executable expression", system_message)
+        self.assertIn('give its executable "expression"', system_message)
         self.assertIn("value.is_valid == true", system_message)
         self.assertIn("Complaint has exactly one outgoing edge", system_message)
         self.assertIn("owns iteration", system_message)
         self.assertIn("Every Parallel Map is closed by a Collect", system_message)
         self.assertIn("another distinct saved PIPELINE", system_message)
         self.assertIn("Conversation Understanding", system_message)
-        self.assertIn("create_step pins the reference", system_message)
-        self.assertIn("authoritative five structural boxes", system_message)
+        self.assertIn("create_steps pins the reference", system_message)
+        self.assertIn("authoritative structural boxes", system_message)
         self.assertIn("a Source never follows another step", system_message)
         self.assertIn('"inputs":["customers","orders"]', system_message)
         list_components = next(
@@ -1013,7 +1013,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         create_step = next(
             tool
             for tool in assistant_agent.call_args.kwargs["tools"]
-            if tool.__name__ == "create_step"
+            if tool.__name__ == "create_steps"
         )
         asyncio.run(create_step(json.dumps({
             "type": "source",
@@ -1022,7 +1022,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
             "template": "File",
         })))
 
-        query = run_query.await_args.args[0]
+        query = run_query.await_args_list[0].args[0]
         self.assertIn("template_label:'Custom'", query)
         self.assertIn("param_json: '{}'", query)
         self.assertNotIn("template_label:'File'", query)
@@ -1067,7 +1067,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         create_step = next(
             tool
             for tool in assistant_agent.call_args.kwargs["tools"]
-            if tool.__name__ == "create_step"
+            if tool.__name__ == "create_steps"
         )
         result = asyncio.run(create_step(json.dumps({
             "type": "subpipeline",
@@ -1120,7 +1120,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         create_step = next(
             tool
             for tool in assistant_agent.call_args.kwargs["tools"]
-            if tool.__name__ == "create_step"
+            if tool.__name__ == "create_steps"
         )
         asyncio.run(create_step(json.dumps({
             "type": "flow",
@@ -1128,7 +1128,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
             "description": "Process each invoice in the batch independently.",
         })))
 
-        query = run_query.await_args.args[0]
+        query = run_query.await_args_list[0].args[0]
         self.assertIn("template_label:'Parallel Map'", query)
         self.assertIn("definition_id:'core.flow'", query)
         self.assertIn("definition_version:1", query)
@@ -1183,7 +1183,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         create_step = next(
             tool
             for tool in assistant_agent.call_args.kwargs["tools"]
-            if tool.__name__ == "create_step"
+            if tool.__name__ == "create_steps"
         )
         asyncio.run(create_step(json.dumps({
             "type": "destination",

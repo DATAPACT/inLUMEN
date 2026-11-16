@@ -17,6 +17,7 @@ from inlumen.contracts.project_ir import PROJECT_IR_SCHEMA_VERSION  # noqa: E402
 from inlumen.design.catalog import Catalog  # noqa: E402
 from inlumen.design.memory_store import InMemoryGraphStore  # noqa: E402
 from inlumen.design.run import design  # noqa: E402
+from inlumen.contracts.pipeline_graph_validation import validate_pipeline_graph  # noqa: E402
 from inlumen.design.store_contract import SCENARIOS, observe, run_scenario  # noqa: E402
 from inlumen.design.tools import build_pipeline_editor_tools  # noqa: E402
 
@@ -89,9 +90,9 @@ def test_restore_graph_round_trips_the_canvas_graph():
 
 def test_design_builds_a_pipeline_and_exports_project_json():
     model = _scripted(
-        _call("create_step", type="source", label="Orders", description="Order table"),
-        _call("create_step", type="task", label="Price orders", description="Compute order totals"),
-        _call("create_step", type="destination", label="Priced orders", description="CSV with totals"),
+        _call("create_steps", type="source", label="Orders", description="Order table"),
+        _call("create_steps", type="task", label="Price orders", description="Compute order totals"),
+        _call("create_steps", type="destination", label="Priced orders", description="CSV with totals"),
         _reply("I created Orders -> Price orders -> Priced orders."),
     )
     events = []
@@ -112,7 +113,7 @@ def test_design_builds_a_pipeline_and_exports_project_json():
 def test_design_rejects_an_invalid_result_and_keeps_the_starting_graph():
     # A Source with nothing after it is incomplete; the repair round does nothing.
     model = _scripted(
-        _call("create_step", type="source", label="Orders", description="Order table"),
+        _call("create_steps", type="source", label="Orders", description="Order table"),
         _reply("Added a source."),
         _reply("Nothing more to do."),
     )
@@ -157,3 +158,182 @@ def test_a_stream_read_to_its_result_is_not_a_failure():
     asyncio.run(read_until_result())
     assert len(events) == 1 and events[0]["error"] is None and events[0]["prompt_tokens"] == 3
     assert set(events[0]) >= {"model", "cost_usd", "latency_s"}
+
+
+def _tools(store):
+    return {tool.__name__: tool for tool in build_pipeline_editor_tools(store)}
+
+
+def _layout(graph):
+    return {node["data"]["label"]: (node["position"]["x"], node["position"]["y"]) for node in graph["nodes"]}
+
+
+def _edges(graph):
+    return {(e["source"], e["target"], e.get("sourceHandle"), e.get("targetHandle")) for e in graph["edges"]}
+
+
+BATCH_STEPS = [
+    {"id": "customers", "type": "source", "label": "Customers", "description": "Customer table"},
+    {"id": "orders", "type": "source", "label": "Orders", "description": "Order table"},
+    {"id": "join", "type": "task", "label": "Join", "description": "Join orders to customers",
+     "inputs": ["customers", "orders"], "after": "customers"},
+    {"id": "check", "type": "flow", "template": "Condition", "label": "Valid?",
+     "description": "Route valid rows", "after": "join"},
+    {"id": "priced", "type": "destination", "label": "Priced", "description": "Valid rows",
+     "after": "check", "source_port": "when_true"},
+    {"id": "rejected", "type": "destination", "label": "Rejected", "description": "Invalid rows",
+     "after": "check", "source_port": "when_false"},
+]
+
+
+def test_create_steps_places_a_batch_exactly_like_one_call_per_step():
+    batch_store = InMemoryGraphStore()
+    result = json.loads(asyncio.run(_tools(batch_store)["create_steps"](json.dumps({
+        "steps": BATCH_STEPS,
+        "connections": [{"source": "orders", "target": "join", "target_port": "orders"}],
+    }))))
+    assert [(step["id"], step["flow_id"]) for step in result["steps"]] == [
+        ("customers", "1"), ("orders", "2"), ("join", "3"), ("check", "4"), ("priced", "5"), ("rejected", "6")]
+    assert len(result["connections"]) == 1
+
+    serial_store = InMemoryGraphStore()
+    serial = _tools(serial_store)
+    flow_ids = {}
+    for step in BATCH_STEPS:
+        params = {key: value for key, value in step.items() if key not in {"id", "after"}}
+        if "after" in step:
+            params["after_flow_id"] = flow_ids[step["after"]]
+        row = json.loads(asyncio.run(serial["create_steps"](json.dumps(params))))  # one step, no list
+        flow_ids[step["id"]] = row["steps"][0]["flow_id"]
+    asyncio.run(serial["connect_steps"](json.dumps(
+        {"source_flow_id": "2", "target_flow_id": "3", "target_port": "orders"})))
+
+    batch_graph = asyncio.run(batch_store.get_graph())
+    serial_graph = asyncio.run(serial_store.get_graph())
+    assert _layout(batch_graph) == _layout(serial_graph)
+    assert _edges(batch_graph) == _edges(serial_graph)
+    assert _layout(batch_graph) == {
+        "Customers": (0.0, 0.0), "Orders": (0.0, 220.0), "Join": (300.0, 0.0), "Valid?": (600.0, 0.0),
+        "Priced": (900.0, -180.0), "Rejected": (900.0, 180.0)}
+
+
+def test_create_steps_rejects_a_step_listed_before_its_predecessor_without_writing():
+    store = InMemoryGraphStore()
+    with pytest.raises(RuntimeError, match="not the id of an earlier step"):
+        asyncio.run(_tools(store)["create_steps"](json.dumps({"steps": [
+            {"id": "price", "type": "task", "label": "Price", "description": "x", "after": "orders"},
+            {"id": "orders", "type": "source", "label": "Orders", "description": "x"},
+        ]})))
+    assert asyncio.run(store.get_graph())["nodes"] == []
+
+
+def test_create_steps_puts_the_graph_back_when_a_later_entry_is_rejected():
+    store = InMemoryGraphStore()
+    tools = _tools(store)
+    asyncio.run(tools["create_steps"](json.dumps({"type": "source", "label": "Orders", "description": "x"})))
+    before = asyncio.run(store.get_graph())
+    with pytest.raises(RuntimeError, match=r"steps\[2\] \(Again\).*Nothing was created"):
+        asyncio.run(tools["create_steps"](json.dumps({"steps": [
+            {"id": "price", "type": "task", "label": "Price", "description": "x", "after_flow_id": "1"},
+            {"id": "out", "type": "destination", "label": "Out", "description": "x", "after": "price"},
+            # A Task may not fan out without allow_fan_out.
+            {"type": "task", "label": "Again", "description": "x", "after": "price"},
+        ]})))
+    after = asyncio.run(store.get_graph())
+    assert _layout(after) == _layout(before) and _edges(after) == _edges(before)
+
+
+def test_create_steps_accepts_an_existing_flow_id_as_after():
+    store = InMemoryGraphStore()
+    tools = _tools(store)
+    asyncio.run(tools["create_steps"](json.dumps({"type": "source", "label": "Orders", "description": "x"})))
+    result = json.loads(asyncio.run(tools["create_steps"](json.dumps({"steps": [
+        {"id": "price", "type": "task", "label": "Price", "description": "x", "after": "1"},
+        {"type": "destination", "label": "Out", "description": "x", "after": "price"},
+    ]}))))
+    assert [step["flow_id"] for step in result["steps"]] == ["2", "3"]
+    assert _layout(asyncio.run(store.get_graph())) == {
+        "Orders": (0.0, 0.0), "Price": (300.0, 0.0), "Out": (600.0, 0.0)}
+
+
+def _three_unconnected_branches(store):
+    tools = _tools(store)
+    asyncio.run(tools["create_steps"](json.dumps({"steps": [
+        {"id": "a", "type": "source", "label": "A", "description": "x"},
+        {"id": "b", "type": "source", "label": "B", "description": "x"},
+        {"id": "c", "type": "source", "label": "C", "description": "x"},
+        {"id": "join", "type": "task", "label": "Join", "description": "x",
+         "inputs": ["a", "b", "c"], "after": "a"},
+        {"type": "destination", "label": "Out", "description": "x", "after": "join"},
+    ]})))
+    return tools
+
+
+def test_connect_steps_makes_several_connections_in_one_call():
+    store = InMemoryGraphStore()
+    tools = _three_unconnected_branches(store)
+    result = json.loads(asyncio.run(tools["connect_steps"](json.dumps({"connections": [
+        {"source_flow_id": "2", "target_flow_id": "4", "target_port": "b"},
+        {"source": "3", "target": "4", "target_port": "c"},
+    ]}))))
+    assert [(c["source_flow_id"], c["target_port"]) for c in result["connections"]] == [("2", "b"), ("3", "c")]
+    assert {("2", "4", "data", "b"), ("3", "4", "data", "c")} <= _edges(asyncio.run(store.get_graph()))
+
+
+def test_connect_steps_puts_the_graph_back_when_a_later_connection_is_rejected():
+    store = InMemoryGraphStore()
+    tools = _three_unconnected_branches(store)
+    before = _edges(asyncio.run(store.get_graph()))
+    with pytest.raises(RuntimeError, match=r"connections\[1\].*Nothing was connected"):
+        asyncio.run(tools["connect_steps"](json.dumps({"connections": [
+            {"source_flow_id": "2", "target_flow_id": "4", "target_port": "b"},
+            {"source_flow_id": "3", "target_flow_id": "4", "target_port": "nope"},
+        ]})))
+    assert _edges(asyncio.run(store.get_graph())) == before
+
+
+def test_create_steps_designs_a_whole_pipeline_in_one_call():
+    store = InMemoryGraphStore()
+    tools = _tools(store)
+    assert "create_step" not in tools
+    result = json.loads(asyncio.run(tools["create_steps"](json.dumps({
+        "pipeline": {"name": "Order checks", "description": "Route valid orders"},
+        "steps": [
+            {"id": "orders", "type": "source", "label": "Orders", "description": "x"},
+            {"id": "check", "type": "flow", "template": "Condition", "label": "Valid?",
+             "description": "x", "expression": "value.is_valid == true", "after": "orders"},
+            {"type": "destination", "label": "Valid", "description": "x",
+             "after": "check", "source_port": "when_true"},
+            {"type": "destination", "label": "Rejected", "description": "x",
+             "after": "check", "source_port": "when_false"},
+        ],
+    }))))
+    graph = asyncio.run(store.get_graph())
+    assert graph["pipeline"]["name"] == "Order checks"
+    condition = next(node for node in graph["nodes"] if node["data"]["label"] == "Valid?")
+    assert condition["data"]["param"] == {"expression": "value.is_valid == true"}
+    assert validate_pipeline_graph(graph)["valid"]
+    # The result carries the graph, so the agent needs no overview call to verify it.
+    assert result["overview"] == json.loads(asyncio.run(store.overview()))
+
+
+def test_create_steps_rejects_an_expression_outside_a_condition():
+    with pytest.raises(RuntimeError, match="expression is only for a Flow step"):
+        asyncio.run(_tools(InMemoryGraphStore())["create_steps"](json.dumps(
+            {"type": "task", "label": "Price", "description": "x", "expression": "value.a == 1"})))
+
+
+def test_design_tools_accept_params_as_a_string_an_object_or_the_bare_object():
+    from autogen_core import CancellationToken
+
+    from inlumen.design.team import TolerantFunctionTool
+
+    step = {"type": "source", "label": "Orders", "description": "x"}
+    for arguments in ({"params": json.dumps(step)}, {"params": step}, step):
+        store = InMemoryGraphStore()
+        tools = {tool.__name__: TolerantFunctionTool(tool) for tool in build_pipeline_editor_tools(store)}
+        asyncio.run(tools["create_steps"].run_json(arguments, CancellationToken()))
+        assert [node["data"]["label"] for node in asyncio.run(store.get_graph())["nodes"]] == ["Orders"]
+        # Tools without a payload still run when a model sends nothing or an empty params.
+        asyncio.run(tools["list_reusable_pipelines"].run_json({}, CancellationToken()))
+        asyncio.run(tools["overview"].run_json({"params": {}}, CancellationToken()))

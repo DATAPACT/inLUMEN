@@ -6,6 +6,8 @@ operation is a single query, so a graph change is one transaction.
 from __future__ import annotations
 
 import json
+import uuid
+from contextlib import contextmanager
 from typing import Any
 
 from graph_client import fetch_pipeline_graph, run_neo4j_query, sync_backend_to_canvas_graph
@@ -96,6 +98,17 @@ class Neo4jGraphStore:
         self.preview_mode = preview_mode
         self.active_version_uid = active_version_uid
         self.active_version_name = active_version_name
+        self._tool_call: dict[str, str] | None = None
+
+    @contextmanager
+    def tool_call(self, name: str):
+        """Group the writes made inside one agent tool call into one provenance event."""
+        previous = self._tool_call
+        self._tool_call = {"tool": name, "tool_call_id": str(uuid.uuid4())}
+        try:
+            yield
+        finally:
+            self._tool_call = previous
 
     async def _run(self, query: str, query_type: str) -> Rows:
         """Run a Cypher query against Neo4j and return results."""
@@ -115,7 +128,11 @@ class Neo4jGraphStore:
             query,
             query_type,
             authorization=self.authorization,
-            provenance_context=self.provenance_context,
+            provenance_context=(
+                {**(self.provenance_context or {}), **self._tool_call}
+                if self._tool_call
+                else self.provenance_context
+            ),
             workspace_id=workspace_id_for_query,
         )
 
