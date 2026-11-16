@@ -89,7 +89,7 @@ class ProvenanceToolCallTests(unittest.TestCase):
         self.assertEqual(
             event["summary"],
             "Agent called tool 'create_steps' once; it performed 2 create_step."
-            " The call was rejected and these changes were rolled back.",
+            " The call was rejected and the graph was put back as it was.",
         )
         self.assertTrue(json.loads(event["details_json"])["rolled_back"])
 
@@ -111,10 +111,10 @@ class ProvenanceToolCallTests(unittest.TestCase):
         self.assertEqual([event["action"] for event in session.events],
                          ["overview", "create_steps", "overview", "create_steps"])
         self.assertEqual([event["summary"] for event in session.events], [
-            "Agent called tool 'overview' once; it changed nothing in the graph.",
-            "Agent called tool 'create_steps' once; it changed nothing in the graph."
+            "Agent called tool 'overview' once; it made no graph write.",
+            "Agent called tool 'create_steps' once; it made no graph write."
             " The call failed: steps[0]: bad",
-            "Agent called tool 'overview' once; it changed nothing in the graph.",
+            "Agent called tool 'overview' once; it made no graph write.",
             "Agent called tool 'create_steps' once; it performed 1 create_step.",
         ])
         last = json.loads(session.events[-1]["details_json"])
@@ -139,6 +139,37 @@ class ProvenanceToolCallTests(unittest.TestCase):
         self.assertEqual(run.await_args_list[-1].args[1], "tool_call_finished")
         self.assertEqual((contexts[-1]["status"], contexts[-1]["error"]), ("failed", "rejected"))
         self.assertIsNone(store._tool_call)
+
+    def test_overlapping_tool_calls_keep_their_own_call(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from pipeline_agent.neo4j_store import Neo4jGraphStore
+
+        store = Neo4jGraphStore()
+        seen = {}
+
+        async def call(name, first_wait, second_wait):
+            with store.tool_call(name):
+                await asyncio.sleep(first_wait)
+                await store.overview()
+                await asyncio.sleep(second_wait)
+                await store.overview()
+
+        async def run_both():
+            await asyncio.gather(call("a", 0, 0.02), call("b", 0.01, 0.03))
+
+        with patch("pipeline_agent.neo4j_store.run_neo4j_query", new_callable=AsyncMock, return_value="[]") as run:
+            asyncio.run(run_both())
+        for awaited in run.await_args_list:
+            context = awaited.kwargs["provenance_context"]
+            seen.setdefault(context["tool"], set()).add(context["tool_call_id"])
+        self.assertEqual({tool: len(ids) for tool, ids in seen.items()}, {"a": 1, "b": 1})
+        self.assertNotEqual(seen["a"], seen["b"])
+
+    def test_writes_of_every_tool_are_counted(self):
+        for query_type in ("configure_subpipeline_step", "create_reusable_pipeline"):
+            self.assertTrue(neo4j_api._mutation_query_type(query_type))
 
     def test_the_agent_store_writes_to_the_version_being_edited(self):
         from llm_config import LLMConfig

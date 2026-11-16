@@ -407,8 +407,11 @@ def test_every_tool_call_is_reported_to_a_store_that_keeps_provenance():
         scopes.append(name)
         yield
 
+    recorded = []
+
     async def tool_call_finished(name, arguments, error):
         finished.append((name, bool(error)))
+        recorded.append(arguments)
 
     store.tool_call, store.tool_call_finished = tool_call, tool_call_finished
     tools = {tool.__name__: TolerantFunctionTool(tool, store) for tool in build_pipeline_editor_tools(store)}
@@ -420,4 +423,22 @@ def test_every_tool_call_is_reported_to_a_store_that_keeps_provenance():
         asyncio.run(tools["create_steps"].run_json({**step, "after_flow_id": "1"}, CancellationToken()))
     assert finished == [("overview", False), ("overview", False), ("create_steps", False), ("create_steps", True)]
     assert scopes[:2] == ["overview", "overview"]
+    # The record holds the decoded arguments, without the value of a field the tools refuse.
+    assert json.loads(recorded[2]) == step
+    with pytest.raises(RuntimeError):
+        asyncio.run(tools["create_steps"].run_json(
+            {**step, "parameters": {"api_key": "sk-secret"}}, CancellationToken()))
+    assert "sk-secret" not in recorded[-1] and json.loads(recorded[-1])["parameters"] == "[removed]"
+
+
+def test_create_steps_sets_the_pipeline_name_but_never_its_version():
+    store = InMemoryGraphStore()
+    tools = _tools(store)
+    asyncio.run(tools["create_pipeline"](json.dumps({"name": "Original", "description": "First"})))
+    version = asyncio.run(store.get_graph())["pipeline"]["version"]
+    asyncio.run(tools["create_steps"](json.dumps({
+        "pipeline": {"name": "Renamed", "description": "Second", "version": "other"},
+        "steps": [{"type": "source", "label": "Orders", "description": "x"}]})))
+    pipeline = asyncio.run(store.get_graph())["pipeline"]
+    assert (pipeline["name"], pipeline["version"]) == ("Renamed", version)
 

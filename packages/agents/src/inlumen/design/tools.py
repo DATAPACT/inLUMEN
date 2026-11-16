@@ -986,14 +986,17 @@ def build_pipeline_editor_tools(
                 previous = snapshot.get("pipeline") if isinstance(snapshot, dict) else None
                 name = str((previous or {}).get("name") or "").strip()
                 description = str((previous or {}).get("description") or "").strip()
+                # An empty value cannot be written back over the new one.
+                kept = [word for word, value in (("name", name), ("description", description)) if not value]
                 try:
-                    if not name or not description:
-                        # An empty value cannot be written back over the new one.
-                        raise RuntimeError("no earlier name and description")
-                    await store.upsert_pipeline(name, description, "")
-                    return ""
+                    if name or description:
+                        await store.upsert_pipeline(name, description, "")
                 except Exception:
-                    return ' The pipeline name and description from "pipeline" were kept.'
+                    kept = ["name", "description"]
+                if not kept:
+                    return ""
+                verb = "were" if len(kept) > 1 else "was"
+                return f' The pipeline {" and ".join(kept)} from "pipeline" {verb} kept.'
 
             flow_ids: dict[str, str] = {}
             created: list[dict[str, Any]] = []
@@ -1001,12 +1004,13 @@ def build_pipeline_editor_tools(
             try:
                 with _tool_call("create_steps"):
                     if pipeline is not None:
-                        pipeline_written = True
+                        # The version is the user's to name; the agent sets name and description.
                         await store.upsert_pipeline(
                             str(pipeline.get("name") or ""),
                             str(pipeline.get("description") or ""),
-                            str(pipeline.get("version") or ""),
+                            "",
                         )
+                        pipeline_written = True
                     for index, (alias, after, after_flow_id, prepared) in enumerate(plan):
                         try:
                             result = await _create_prepared(
@@ -1048,9 +1052,11 @@ def build_pipeline_editor_tools(
                         )
             except Exception as exc:
                 if not created:
+                    if not pipeline_written:
+                        raise
                     note = await pipeline_note()
                     if not note:
-                        raise
+                        await _note_rollback()
                     raise ValueError(f"{exc}.{note}") from exc
                 kept = ", ".join(
                     f"{step.get('id') or step.get('label')}=flow_id {step.get('flow_id')}"

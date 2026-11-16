@@ -26,6 +26,33 @@ PREVIEW_MODE_MESSAGE = (
 )
 
 
+# Fields the design tools refuse. Their values may be secrets a user pasted
+# into the chat, so they are never written to the record of a tool call.
+_REFUSED_FIELDS = {"parameters", "secret_parameters", "implementation", "param", "secret_params"}
+
+
+def _without_refused_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: "[removed]" if key in _REFUSED_FIELDS else _without_refused_values(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_without_refused_values(item) for item in value]
+    return value
+
+
+def _arguments_for_record(arguments: Mapping[str, Any]) -> str:
+    """A tool call's arguments as JSON text, decoded once and without refused values."""
+    payload: Any = arguments.get("params", arguments) if isinstance(arguments, Mapping) else arguments
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            return "[not valid JSON]"
+    return json.dumps(_without_refused_values(payload), ensure_ascii=False, default=str)
+
+
 class TolerantFunctionTool(FunctionTool):
     """A design tool that accepts its JSON however the model sends it.
 
@@ -64,7 +91,7 @@ class TolerantFunctionTool(FunctionTool):
             finally:
                 if finished is not None:
                     try:
-                        await finished(self.__name__, arguments, error)
+                        await finished(self.__name__, _arguments_for_record(arguments), error)
                     except Exception:
                         pass  # the record is missing; the tool's own result stands
 

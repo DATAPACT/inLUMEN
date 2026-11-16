@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from contextvars import ContextVar
 from contextlib import contextmanager
 from typing import Any
 
@@ -98,8 +99,13 @@ class Neo4jGraphStore:
         self.preview_mode = preview_mode
         self.active_version_uid = active_version_uid
         self.active_version_name = active_version_name
-        self._tool_call: dict[str, str] | None = None
+        # Per asyncio task: tool calls that overlap must not share or clear each other's call.
+        self._current_call: ContextVar[dict[str, str] | None] = ContextVar("tool_call", default=None)
         self._last_tool_call: dict[str, str] | None = None
+
+    @property
+    def _tool_call(self) -> dict[str, str] | None:
+        return self._current_call.get()
 
     @contextmanager
     def tool_call(self, name: str):
@@ -108,11 +114,12 @@ class Neo4jGraphStore:
             # Already inside the agent's tool call: its writes stay on that call.
             yield
             return
-        self._tool_call = self._last_tool_call = {"tool": name, "tool_call_id": str(uuid.uuid4())}
+        call = self._last_tool_call = {"tool": name, "tool_call_id": str(uuid.uuid4())}
+        token = self._current_call.set(call)
         try:
             yield
         finally:
-            self._tool_call = None
+            self._current_call.reset(token)
 
     async def tool_call_finished(self, name: str, arguments: object, error: str | None) -> None:
         """Record that the agent's current tool call ended, and how."""
@@ -134,12 +141,13 @@ class Neo4jGraphStore:
 
     async def tool_call_rolled_back(self) -> None:
         """Mark the latest tool call's provenance event: its writes were undone."""
-        if self._last_tool_call:
+        call = self._tool_call or self._last_tool_call
+        if call:
             await run_neo4j_query(
                 "RETURN 1",
                 "tool_call_rolled_back",
                 authorization=self.authorization,
-                provenance_context={**(self.provenance_context or {}), **self._last_tool_call},
+                provenance_context={**(self.provenance_context or {}), **call},
                 workspace_id=self.workspace_id,
             )
 

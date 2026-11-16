@@ -1162,10 +1162,10 @@ def _tool_call_summary(tool: str, operations: dict, details: dict | None = None)
     details = details or {}
     parts = ", ".join(f"{count} {name}" for name, count in operations.items())
     summary = f"Agent called tool '{tool}' once; " + (
-        f"it performed {parts}." if parts else "it changed nothing in the graph."
+        f"it performed {parts}." if parts else "it made no graph write."
     )
     if details.get("rolled_back"):
-        summary += ROLLED_BACK_NOTE
+        summary += " The call was rejected and the graph was put back as it was."
     if details.get("status") == "failed":
         summary += f" The call failed: {_short_text(details.get('error'), 300)}"
     return summary
@@ -1221,9 +1221,6 @@ def _record_agent_tool_call(session, query_type: str, context: dict, results: An
     SET event.summary = $summary, event.details_json = $details_json
     """, uid=existing["uid"], summary=_tool_call_summary(tool, operations, details),
          details_json=_json_details(details))
-
-
-ROLLED_BACK_NOTE = " The call was rejected and these changes were rolled back."
 
 
 def _mark_agent_tool_call_rolled_back(session, context: dict) -> None:
@@ -1335,7 +1332,9 @@ def _mutation_query_type(query_type: str | None) -> bool:
     return str(query_type or "") in {
         "create_pipeline",
         "create_step",
+        "create_reusable_pipeline",
         "configure_flow_step",
+        "configure_subpipeline_step",
         "connect_steps",
         "disconnect_steps",
         "insert_initial_step",
