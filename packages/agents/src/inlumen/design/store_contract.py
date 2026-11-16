@@ -244,8 +244,12 @@ def _mask(value: Any) -> Any:
 
 
 def _sorted_rows(output: Any) -> Any:
+    """Rows in a fixed order: stores may return the same rows in different orders."""
     if isinstance(output, list):
         return sorted(output, key=lambda row: json.dumps(row, sort_keys=True))
+    if isinstance(output, dict) and isinstance(output.get("overview"), list):
+        # create_steps carries the overview rows inside its result.
+        return {**output, "overview": _sorted_rows(output["overview"])}
     return output
 
 
