@@ -59,6 +59,29 @@ def _valid_identifier(value: str) -> bool:
     return all(character.isalnum() or character in "_.-" for character in value)
 
 
+def _required_id(data: dict[str, Any], name: str, tool: str) -> str:
+    value = str(data.get(name) or "").strip()
+    if not value:
+        raise ValueError(f"{tool} requires {name}")
+    if not _valid_identifier(value):
+        raise ValueError(f"{tool} received an invalid {name}")
+    return value
+
+
+def _require_condition_expression(expression: str) -> None:
+    if not FLOW_EXPRESSION_PATTERN.fullmatch(expression):
+        raise ValueError(
+            "Condition expressions must compare value or value.field with a literal"
+        )
+
+
+def _connection_rows(result: Any) -> list[dict[str, Any]]:
+    return [
+        row["connection"] for row in decoded_rows(result)
+        if isinstance(row.get("connection"), dict)
+    ]
+
+
 def pipeline_palette(node_definitions: NodeDefinitionRegistry | None = None) -> dict[str, Any]:
     """The enabled structural components and the installed plugins."""
     try:
@@ -117,6 +140,36 @@ def build_pipeline_editor_tools(
                 await note()
             except Exception:
                 pass  # the rollback itself succeeded; only its record is missing
+
+    async def _snapshot() -> Any:
+        """The graph before a batch of writes, or None when it cannot be read."""
+        try:
+            return await store.get_graph()
+        except Exception:
+            return None
+
+    async def _rolled_back(
+        snapshot: Any, error: Exception, *, kept: str, verb: str, after: Any = None,
+    ) -> ValueError:
+        """Put the graph back after a batch failed part-way; return the error to raise.
+
+        ``after`` runs once the graph is back and returns text to add to the message.
+        """
+        try:
+            if snapshot is None:
+                raise RuntimeError("no snapshot was available")
+            await store.restore_graph(snapshot)
+        except Exception as restore_error:
+            return ValueError(
+                f"{error}. The graph could not be put back ({restore_error}); {kept}. "
+                "Call overview before continuing."
+            )
+        await _note_rollback()
+        extra = await after() if after else ""
+        return ValueError(
+            f"{error}. Nothing was {verb}: the graph was put back as it was."
+            f"{extra} Fix that entry and send the whole list again."
+        )
 
     async def overview() -> str:
         """Gives a design-only overview of the pipeline and its connections."""
@@ -513,8 +566,8 @@ def build_pipeline_editor_tools(
             raise ValueError("Each named input must be distinct.")
         return names
 
-    async def _prepare_step(data: dict[str, Any], *, has_predecessor: bool, tool: str) -> dict[str, Any]:
-        """Validate one step request and build what the store needs to create it."""
+    async def _base_step(data: dict[str, Any]) -> tuple[str, str, dict[str, Any], dict[str, Any] | None]:
+        """A step request's type, template, properties and pinned saved pipeline."""
         step_type = require_agent_step_type(data.get("type"))
         raw_label = str(data.get("label", ""))
         raw_description = str(data.get("description", ""))
@@ -538,6 +591,11 @@ def build_pipeline_editor_tools(
         if step_type == "subpipeline":
             resolved_subpipeline = await _resolve_subpipeline_for_creation(data, raw_label)
             _bind_subpipeline(props, resolved_subpipeline)
+        return step_type, resolved_template, props, resolved_subpipeline
+
+    async def _prepare_step(data: dict[str, Any], *, has_predecessor: bool, tool: str) -> dict[str, Any]:
+        """Validate one step request and build what the store needs to create it."""
+        step_type, resolved_template, props, resolved_subpipeline = await _base_step(data)
         expression = str(data.get("expression") or "").strip()
         is_condition = step_type == "flow" and props["template_label"] == "Condition"
         if is_condition and not expression:
@@ -547,10 +605,7 @@ def build_pipeline_editor_tools(
         if expression:
             if not is_condition:
                 raise ValueError("expression is only for a Flow step with template Condition")
-            if not FLOW_EXPRESSION_PATTERN.fullmatch(expression):
-                raise ValueError(
-                    "Condition expressions must compare value or value.field with a literal"
-                )
+            _require_condition_expression(expression)
             props["param_json"] = json.dumps({"expression": expression}, sort_keys=True)
             props["configuration_status"] = "configured"
         named_inputs = _named_input_ports(data.get("inputs"), step_type)
@@ -667,16 +722,8 @@ def build_pipeline_editor_tools(
 
     async def _connect(data: dict[str, Any]) -> str:
         """Validate and create one port-aware connection."""
-        def required_value(name: str) -> str:
-            value = str(data.get(name) or "").strip()
-            if not value:
-                raise ValueError(f"connect_steps requires {name}")
-            if not _valid_identifier(value):
-                raise ValueError(f"connect_steps received an invalid {name}")
-            return value
-
-        source_flow_id = required_value("source_flow_id")
-        target_flow_id = required_value("target_flow_id")
+        source_flow_id = _required_id(data, "source_flow_id", "connect_steps")
+        target_flow_id = _required_id(data, "target_flow_id", "connect_steps")
         allow_fan_out = data.get("allow_fan_out") is True
         if source_flow_id == target_flow_id:
             raise ValueError("connect_steps cannot connect a step to itself")
@@ -777,41 +824,25 @@ def build_pipeline_editor_tools(
                 for end in ("source", "target"):
                     request.setdefault(f"{end}_flow_id", connection.get(end))
                 requests.append(request)
-            try:
-                snapshot = await store.get_graph()
-            except Exception:
-                snapshot = None
+            snapshot = await _snapshot()
             connected: list[dict[str, Any]] = []
-            scope = _tool_call("connect_steps")
-            scope.__enter__()
-            for index, request in enumerate(requests):
-                try:
-                    result = await _connect(request)
-                except Exception as exc:
-                    scope.__exit__(None, None, None)
-                    where = f"connections[{index}]: {exc}"
-                    if not index:
-                        raise ValueError(where) from exc
-                    try:
-                        if snapshot is None:
-                            raise RuntimeError("no snapshot was available")
-                        await store.restore_graph(snapshot)
-                    except Exception as restore_error:
-                        raise ValueError(
-                            f"{where}. The graph could not be put back ({restore_error}); "
-                            f"the first {index} connections were kept. Call overview "
-                            "before continuing."
-                        ) from exc
-                    await _note_rollback()
-                    raise ValueError(
-                        f"{where}. Nothing was connected: the graph was put back as it "
-                        "was. Fix that entry and send the whole list again."
-                    ) from exc
-                connected.extend(
-                    row["connection"] for row in decoded_rows(result)
-                    if isinstance(row.get("connection"), dict)
-                )
-            scope.__exit__(None, None, None)
+            applied = 0
+            try:
+                with _tool_call("connect_steps"):
+                    for index, request in enumerate(requests):
+                        try:
+                            result = await _connect(request)
+                        except Exception as exc:
+                            raise ValueError(f"connections[{index}]: {exc}") from exc
+                        applied += 1
+                        connected.extend(_connection_rows(result))
+            except Exception as exc:
+                if not applied:
+                    raise
+                raise await _rolled_back(
+                    snapshot, exc,
+                    kept=f"the first {applied} connections were kept", verb="connected",
+                ) from exc
             return json.dumps({"connections": connected}, ensure_ascii=False, sort_keys=True)
         except Exception as exc:
             raise RuntimeError(f"connect_steps failed: {exc}") from exc
@@ -969,13 +1000,12 @@ def build_pipeline_editor_tools(
                     if not ref or not _valid_identifier(ref):
                         raise ValueError(f"{where} requires a valid {end}")
 
-            snapshot = None
             # One write is atomic by itself; a pipeline rename is a second write.
-            if len(plan) + len(raw_connections) > 1 or pipeline is not None:
-                try:
-                    snapshot = await store.get_graph()
-                except Exception:
-                    snapshot = None
+            snapshot = (
+                await _snapshot()
+                if len(plan) + len(raw_connections) > 1 or pipeline is not None
+                else None
+            )
 
             pipeline_written = False
 
@@ -1046,10 +1076,7 @@ def build_pipeline_editor_tools(
                             })
                         except Exception as exc:
                             raise ValueError(f"connections[{index}]: {exc}") from exc
-                        connected.extend(
-                            row["connection"] for row in decoded_rows(result)
-                            if isinstance(row.get("connection"), dict)
-                        )
+                        connected.extend(_connection_rows(result))
             except Exception as exc:
                 if not created:
                     if not pipeline_written:
@@ -1067,17 +1094,9 @@ def build_pipeline_editor_tools(
                         f"{exc}. The earlier entries were kept ({kept}); do not create "
                         "them again, continue from these flow_ids."
                     ) from exc
-                try:
-                    await store.restore_graph(snapshot)
-                except Exception as restore_error:
-                    raise ValueError(
-                        f"{exc}. The graph could not be put back ({restore_error}); the "
-                        f"earlier entries were kept ({kept}). Call overview before continuing."
-                    ) from exc
-                await _note_rollback()
-                raise ValueError(
-                    f"{exc}. Nothing was created: the graph was put back as it was."
-                    f"{await pipeline_note()} Fix that entry and send the whole list again."
+                raise await _rolled_back(
+                    snapshot, exc, kept=f"the earlier entries were kept ({kept})",
+                    verb="created", after=pipeline_note,
                 ) from exc
             try:
                 graph_rows: Any = decoded_rows(await store.overview())
@@ -1107,22 +1126,10 @@ def build_pipeline_editor_tools(
         """
         try:
             data = json.loads(params)
-
-            def required_value(name: str) -> str:
-                value = str(data.get(name) or "").strip()
-                if not value:
-                    raise ValueError(f"disconnect_steps requires {name}")
-                if not _valid_identifier(value):
-                    raise ValueError(f"disconnect_steps received an invalid {name}")
-                return value
-
-            source_flow_id = required_value("source_flow_id")
-            target_flow_id = required_value("target_flow_id")
-            source_port = required_value("source_port")
-            target_port = required_value("target_port")
-            result = await store.disconnect_steps(
-                source_flow_id, target_flow_id, source_port, target_port
-            )
+            result = await store.disconnect_steps(*(
+                _required_id(data, name, "disconnect_steps")
+                for name in ("source_flow_id", "target_flow_id", "source_port", "target_port")
+            ))
             if returned_no_rows(result):
                 raise ValueError("No connection matched all four identifiers")
             return repr(result)
@@ -1169,11 +1176,7 @@ def build_pipeline_editor_tools(
                         "Condition configuration requires an expression such as "
                         "value.is_valid == true"
                     )
-                if not FLOW_EXPRESSION_PATTERN.fullmatch(expression):
-                    raise ValueError(
-                        "Condition expressions must compare value or value.field "
-                        "with a literal"
-                    )
+                _require_condition_expression(expression)
             result = await store.configure_flow_step(FlowConfiguration(
                 flow_id=flow_id,
                 behavior=behavior,
@@ -1380,15 +1383,6 @@ def build_pipeline_editor_tools(
         try:
             data = json.loads(params)
             step_type = require_agent_step_type(data.get("type"))
-            raw_label = str(data.get("label", ""))
-            raw_description = str(data.get("description", ""))
-            resolved_template = _resolved_template_for_step(
-                step_type,
-                data.get("template"),
-                raw_label,
-                raw_description,
-            )
-            require_supported_connector(step_type, resolved_template)
             before_flow_id = str(data["before_flow_id"])
             raw_after_flow_id = data.get("after_flow_id")
             after_flow_id = (
@@ -1397,22 +1391,7 @@ def build_pipeline_editor_tools(
                 else None
             )
             validate_insertion_kind(step_type, initial=after_flow_id is None)
-            props = _step_props(
-                step_type,
-                raw_label,
-                raw_description,
-                resolved_template,
-                data.get("implementation"),
-                data.get("parameters"),
-                data.get("secret_parameters"),
-            )
-            resolved_subpipeline = None
-            if step_type == "subpipeline":
-                resolved_subpipeline = await _resolve_subpipeline_for_creation(
-                    data,
-                    raw_label,
-                )
-                _bind_subpipeline(props, resolved_subpipeline)
+            _, resolved_template, props, resolved_subpipeline = await _base_step(data)
             new_input_port = (
                 resolved_subpipeline["input_ids"][0]
                 if resolved_subpipeline

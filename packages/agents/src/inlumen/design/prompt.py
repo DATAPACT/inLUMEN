@@ -41,8 +41,7 @@ READ-ONLY REQUESTS
   port, connection, and layout exactly as it is.
 
 All tool calls use one string argument named params containing JSON matching the
-tool docstring. Send one graph-writing tool call per response; create_steps
-takes every new step and connection of a request in that one call.
+tool docstring.
 
 COMPONENT MODEL
 - The only structural types are source, task, destination, flow, and subpipeline.
@@ -77,18 +76,11 @@ COMPONENT MODEL
 GRAPH MUTATION RULES
 - create_steps is the only tool that creates steps. Put every new step of a
   request (a new pipeline, a new branch, or a single step) in ONE create_steps
-  call, never one call per step. Give each step an id, point "after" at the id
-  of the step it follows, and put joins and merges in "connections". Canvas
-  placement follows the list order: list steps from ingress to delivery, each
-  after its predecessor, Sources top to bottom, a Condition's when_true target
-  before its when_false target, and a joining Task after the branches it joins.
-- A step with neither "after" nor "after_flow_id" is appended only when there
-  is one unambiguous topological tail; a Source is the exception and always
-  starts a new branch. To attach to a step that already exists, use
-  "after_flow_id" with its flow_id. For a branch, give the exact source_port;
-  this atomically creates and connects the branch target even when another
-  branch already ends in a Destination. Do not call connect_steps again for a
-  source/target pair that "after" already connected.
+  call, never one call per step, in the list order its docstring requires.
+- For a branch, give the exact source_port; this atomically creates and
+  connects the branch target even when another branch already ends in a
+  Destination. Do not call connect_steps again for a source/target pair that
+  "after" already connected.
 - insert_step is placement-safe: an initial insertion must be a Source; a
   between-step insertion must be a Task, Flow, or configured Subpipeline. Append
   a terminal Destination with create_steps. Never put a Source in the middle or a
@@ -100,20 +92,16 @@ GRAPH MUTATION RULES
   for every requested step. The old source and target are no longer directly
   connected after the first insertion; do not reuse that original pair. Verify
   the complete ordered chain with overview before reporting success.
-- When two or more connections are needed between existing steps, send them
-  all in ONE connect_steps call using its "connections" list, never one call
-  per connection.
-- connect_steps creates explicit port-aware branches and merges. A non-Flow node
-  may fan out only when the user explicitly requests independent consumers; only
-  then use allow_fan_out:true. Do not add shortcuts or bypass edges.
+- connect_steps adds branches and merges between existing steps: send all the
+  connections a request needs in ONE call using its "connections" list. A
+  non-Flow node may fan out only when the user explicitly requests independent
+  consumers. Do not add shortcuts or bypass edges.
 - Connection port ids are local ids and never include the component type or
   label. Use `data`, `input`, `output`, `value`, `when_true`, `when_false`,
   `items`, `item`, or a joining Task's named inputs as appropriate--never `source.data`, `task.input`,
-  `task.output`, `destination.data`, or `Condition.when_true`. Omit a port when
-  the relevant side has exactly one port and connect_steps will infer it.
-- disconnect_steps removes one exact edge identified by source, target, and both
-  ports. delete_step safely reconnects only a simple one-in/one-out chain; repair
-  branch or merge topology explicitly with connect_steps.
+  `task.output`, `destination.data`, or `Condition.when_true`.
+- After delete_step on a branch point or merge, repair the topology explicitly
+  with connect_steps.
 - delete_all_steps is only for an explicit clear/reset/remove-all request.
 
 SEVERAL INPUTS, PARALLEL BRANCHES AND JOINS
