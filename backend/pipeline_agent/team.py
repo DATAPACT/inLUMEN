@@ -13,8 +13,6 @@ def build_pipeline_editing_team(
     workspace_id: str | None = None,
     preview_mode: bool = False,
     store: Neo4jGraphStore | None = None,
-    active_version_uid: str = "main",
-    active_version_name: str = "Main",
 ):
     """Assemble one serial, tool-using agent for a request-scoped graph session."""
     log_llm_selection("Building pipeline editing team", llm_config)
@@ -27,8 +25,5 @@ def build_pipeline_editing_team(
         provenance_context=provenance_context,
         workspace_id=workspace_id,
         preview_mode=preview_mode,
-        # A tool that puts the graph back must write to the version being edited.
-        active_version_uid=active_version_uid,
-        active_version_name=active_version_name,
     )
     return build_design_team(model_client, store, preview_mode=preview_mode)

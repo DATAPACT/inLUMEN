@@ -140,6 +140,58 @@ class ProvenanceToolCallTests(unittest.TestCase):
         self.assertEqual((contexts[-1]["status"], contexts[-1]["error"]), ("failed", "rejected"))
         self.assertIsNone(store._tool_call)
 
+    def test_an_applied_preview_adds_its_tool_calls_to_the_history_in_order(self):
+        session = _Session()
+        neo4j_api._record_applied_preview_tool_calls(session, {
+            "user_query": "build it", "session_id": "s",
+            "calls": [
+                {"tool": "create_steps", "operations": {}, "status": "failed", "error": "steps[2]: bad",
+                 "arguments": "{}"},
+                {"tool": "create_steps", "operations": {"create_pipeline": 1, "create_step": 7},
+                 "status": "completed", "arguments": "{}"},
+            ],
+        })
+        self.assertEqual([event["summary"] for event in session.events], [
+            "Agent called tool 'create_steps' once; it made no graph write. The call failed: steps[2]: bad"
+            " Made in a preview that the user applied.",
+            "Agent called tool 'create_steps' once; it performed 1 create_pipeline, 7 create_step."
+            " Made in a preview that the user applied.",
+        ])
+        details = json.loads(session.events[1]["details_json"])
+        self.assertTrue(details["from_preview"])
+        self.assertEqual(details["user_query"], "build it")
+        neo4j_api._record_applied_preview_tool_calls(session, None)  # a proposal without calls
+        self.assertEqual(len(session.events), 2)
+
+    def test_a_preview_store_keeps_its_tool_calls_for_the_proposal(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from pipeline_agent.neo4j_store import Neo4jGraphStore
+
+        store = Neo4jGraphStore(workspace_id="preview-1", preview_mode=True)
+
+        async def run_query(query, query_type, **kwargs):
+            return json.dumps([{"pipeline": {}}]) if query_type == "create_pipeline" else "[]"
+
+        async def turn():
+            with store.tool_call("overview"):
+                await store.overview()
+                await store.tool_call_finished("overview", "{}", None)
+            with store.tool_call("create_pipeline"):
+                await store.upsert_pipeline("Orders", "Reads orders", "")
+                await store.tool_call_finished("create_pipeline", {"name": "Orders"}, None)
+
+        with patch("pipeline_agent.neo4j_store.run_neo4j_query", new_callable=AsyncMock, side_effect=run_query) as run:
+            asyncio.run(turn())
+        self.assertEqual(store.tool_calls, [
+            {"tool": "overview", "operations": {}, "status": "completed", "arguments": "{}"},
+            {"tool": "create_pipeline", "operations": {"create_pipeline": 1}, "status": "completed",
+             "arguments": '{"name": "Orders"}'},
+        ])
+        # Nothing about the calls is written to the preview workspace, which is deleted anyway.
+        self.assertNotIn("tool_call_finished", [call.args[1] for call in run.await_args_list])
+
     def test_overlapping_tool_calls_keep_their_own_call(self):
         import asyncio
         from unittest.mock import AsyncMock
@@ -170,18 +222,6 @@ class ProvenanceToolCallTests(unittest.TestCase):
     def test_writes_of_every_tool_are_counted(self):
         for query_type in ("configure_subpipeline_step", "create_reusable_pipeline"):
             self.assertTrue(neo4j_api._mutation_query_type(query_type))
-
-    def test_the_agent_store_writes_to_the_version_being_edited(self):
-        from llm_config import LLMConfig
-        from pipeline_agent.team import build_pipeline_editing_team
-
-        config = LLMConfig(provider="openrouter", model="test/model", base_url="https://example.test/v1", api_key="k")
-        with patch("pipeline_agent.team.select_model_client"), \
-                patch("pipeline_agent.team.build_design_team") as build_design_team:
-            build_pipeline_editing_team(config, active_version_uid="v2", active_version_name="Second")
-        store = build_design_team.call_args.args[1]
-        self.assertEqual((store.active_version_uid, store.active_version_name), ("v2", "Second"))
-
 
 if __name__ == "__main__":
     unittest.main()

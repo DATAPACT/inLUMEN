@@ -22,7 +22,9 @@ from inlumen.design.store import (
     Predecessor,
     Rows,
     SubpipelineConfiguration,
+    returned_no_rows,
 )
+from workspace_queries import AGENT_WRITE_QUERY_TYPES
 
 # How each STEP property is written in a CREATE map, as the queries always had it.
 _PROPERTY_FORMATS = {
@@ -102,6 +104,10 @@ class Neo4jGraphStore:
         # Per asyncio task: tool calls that overlap must not share or clear each other's call.
         self._current_call: ContextVar[dict[str, str] | None] = ContextVar("tool_call", default=None)
         self._last_tool_call: dict[str, str] | None = None
+        # Every tool call of this turn, in order: what a preview turn hands over
+        # with its proposal, since its own workspace is deleted afterwards.
+        self.tool_calls: list[dict[str, Any]] = []
+        self._call_log: dict[str, dict[str, Any]] = {}
 
     @property
     def _tool_call(self) -> dict[str, str] | None:
@@ -115,6 +121,7 @@ class Neo4jGraphStore:
             yield
             return
         call = self._last_tool_call = {"tool": name, "tool_call_id": str(uuid.uuid4())}
+        self._call_log[call["tool_call_id"]] = {"tool": name, "operations": {}}
         token = self._current_call.set(call)
         try:
             yield
@@ -124,6 +131,15 @@ class Neo4jGraphStore:
     async def tool_call_finished(self, name: str, arguments: object, error: str | None) -> None:
         """Record that the agent's current tool call ended, and how."""
         call = self._tool_call or {"tool": name, "tool_call_id": str(uuid.uuid4())}
+        text = arguments if isinstance(arguments, str) else json.dumps(
+            arguments, ensure_ascii=False, default=str)
+        entry = self._call_log.pop(call["tool_call_id"], {"tool": name, "operations": {}})
+        entry.update(status="failed" if error else "completed", arguments=text[:2000])
+        if error:
+            entry["error"] = error[:600]
+        self.tool_calls.append(entry)
+        if self.preview_mode:
+            return  # the preview workspace is thrown away; the proposal carries the calls
         await run_neo4j_query(
             "RETURN 1",
             "tool_call_finished",
@@ -133,8 +149,7 @@ class Neo4jGraphStore:
                 **call,
                 "status": "failed" if error else "completed",
                 "error": error or "",
-                "arguments": arguments if isinstance(arguments, str) else json.dumps(
-                    arguments, ensure_ascii=False, default=str),
+                "arguments": text,
             },
             workspace_id=self.workspace_id,
         )
@@ -143,6 +158,8 @@ class Neo4jGraphStore:
         """Mark the latest tool call's provenance event: its writes were undone."""
         call = self._tool_call or self._last_tool_call
         if call:
+            if call["tool_call_id"] in self._call_log:
+                self._call_log[call["tool_call_id"]]["rolled_back"] = True
             await run_neo4j_query(
                 "RETURN 1",
                 "tool_call_rolled_back",
@@ -165,17 +182,21 @@ class Neo4jGraphStore:
             # shared immutable catalog from the authenticated workspace so an
             # existing Subpipeline can still be designed and validated.
             workspace_id_for_query = None
-        return await run_neo4j_query(
+        call = self._tool_call
+        result = await run_neo4j_query(
             query,
             query_type,
             authorization=self.authorization,
             provenance_context=(
-                {**(self.provenance_context or {}), **self._tool_call}
-                if self._tool_call
-                else self.provenance_context
+                {**(self.provenance_context or {}), **call} if call else self.provenance_context
             ),
             workspace_id=workspace_id_for_query,
         )
+        if call and query_type in AGENT_WRITE_QUERY_TYPES and not returned_no_rows(result):
+            operations = self._call_log.get(call["tool_call_id"], {}).get("operations")
+            if operations is not None:
+                operations[query_type] = operations.get(query_type, 0) + 1
+        return result
 
     # Reads
 

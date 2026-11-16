@@ -66,7 +66,7 @@ _WORKSPACE_OWNED_LABELS = (
 
 
 from workspace_queries import (
-    INTERNAL_QUERY_CAPABILITY, parameterize_literals,
+    AGENT_WRITE_QUERY_TYPES, INTERNAL_QUERY_CAPABILITY, parameterize_literals,
     scope_cypher as _scope_cypher, workspace_label as _workspace_label,
 )
 
@@ -1248,6 +1248,46 @@ def _mark_agent_tool_call_rolled_back(session, context: dict) -> None:
          details_json=_json_details(details))
 
 
+def _record_applied_preview_tool_calls(session, recorded: Any) -> None:
+    """Add the tool calls of an accepted preview turn to the pipeline's history.
+
+    A preview turn runs on a temporary copy of the graph that is deleted when
+    the turn ends, so its calls are kept with the proposal and written here,
+    in order, once the user applies it. A discarded proposal leaves no trace.
+    """
+    if not isinstance(recorded, dict) or not isinstance(recorded.get("calls"), list):
+        return
+    shared = {
+        "user_query": _short_text(recorded.get("user_query"), 2000),
+        "session_id": _short_text(recorded.get("session_id"), 120),
+    }
+    for call in recorded["calls"][:60]:
+        if not isinstance(call, dict):
+            continue
+        tool = _short_text(call.get("tool"), 80) or "tool"
+        operations = {
+            _short_text(name, 80): int(count)
+            for name, count in (call.get("operations") or {}).items()
+            if isinstance(count, int)
+        } if isinstance(call.get("operations"), dict) else {}
+        details = {
+            "tool": tool, "tool_calls": 1, "operations": operations,
+            "status": "failed" if call.get("status") == "failed" else "completed",
+            "arguments": _short_text(call.get("arguments"), 2000),
+            "from_preview": True,
+            **shared,
+        }
+        if call.get("error"):
+            details["error"] = _short_text(call.get("error"), 600)
+        if call.get("rolled_back"):
+            details["rolled_back"] = True
+        _record_provenance_event(
+            session, tool, "agent",
+            _tool_call_summary(tool, operations, details) + " Made in a preview that the user applied.",
+            details,
+        )
+
+
 def _finish_agent_tool_call(session, context: dict) -> None:
     """Record the outcome of one agent tool call.
 
@@ -1329,19 +1369,7 @@ def _event_details(record) -> dict:
 
 
 def _mutation_query_type(query_type: str | None) -> bool:
-    return str(query_type or "") in {
-        "create_pipeline",
-        "create_step",
-        "create_reusable_pipeline",
-        "configure_flow_step",
-        "configure_subpipeline_step",
-        "connect_steps",
-        "disconnect_steps",
-        "insert_initial_step",
-        "insert_between_steps",
-        "delete_step",
-        "delete_all_steps",
-    }
+    return str(query_type or "") in AGENT_WRITE_QUERY_TYPES
 
 
 def _provenance_context_from_payload(data: dict) -> dict:
@@ -3114,6 +3142,10 @@ def neo4j_run_query():
         if query_type == "tool_call_rolled_back":
             # Not a graph query: the agent's tool put the graph back after a failed batch.
             _mark_agent_tool_call_rolled_back(session, _provenance_context_from_payload(data))
+            return jsonify([])
+        if query_type == "preview_tool_calls_applied":
+            # The user accepted a preview: its tool calls now belong to this pipeline's history.
+            _record_applied_preview_tool_calls(session, data.get("tool_calls"))
             return jsonify([])
         if query_type == "tool_call_finished":
             # Not a graph query either: one agent tool call ended; record how.

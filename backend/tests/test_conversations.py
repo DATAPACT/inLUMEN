@@ -115,6 +115,22 @@ class ConversationStoreTests(unittest.TestCase):
         self.assertEqual([m["id"] for m in changed["messages"]], [message["id"]])
         self.assertEqual(changed["messages"][0]["proposal_status"], "applied")
 
+    def test_applying_a_proposal_hands_over_its_preview_tool_calls_once(self):
+        calls = {"user_query": "build it", "session_id": "s", "calls": [{"tool": "create_steps"}]}
+        self.store.start(ALICE, turn_id="preview-turn", request_sha256="x", user_message="build it")
+        response = {"assistant_message": "Proposal", "sync": {"preview_pending": True, "preview_tool_calls": calls}}
+        self.store.finish(ALICE, "preview-turn", response)
+        message_id = response["assistant_message_id"]
+        self.assertEqual(self.store.update_proposal(ALICE, message_id, "applied"), calls)
+        self.assertIsNone(self.store.update_proposal(ALICE, message_id, "applied"))
+
+    def test_discarding_a_proposal_hands_over_nothing(self):
+        calls = {"user_query": "build it", "session_id": "s", "calls": [{"tool": "create_steps"}]}
+        self.store.start(ALICE, turn_id="preview-turn", request_sha256="x", user_message="build it")
+        response = {"assistant_message": "Proposal", "sync": {"preview_pending": True, "preview_tool_calls": calls}}
+        self.store.finish(ALICE, "preview-turn", response)
+        self.assertIsNone(self.store.update_proposal(ALICE, response["assistant_message_id"], "discarded"))
+
     def test_expired_turn_is_failed_without_replaying_the_model(self):
         self.turn(pending=True)
         with self.store.engine.begin() as connection:
@@ -258,6 +274,21 @@ class ConversationApiTests(unittest.TestCase):
         self.assertEqual(result.status_code, 409, result.json)
         model.assert_not_called()
         self.assertEqual(self.client.get('/api/chat/conversation').json['messages'][-1]['status'], 'cancelled')
+
+    def test_applying_a_proposal_records_its_preview_tool_calls_once(self):
+        calls = {'user_query': 'Create', 'session_id': 's', 'calls': [{'tool': 'create_steps'}]}
+        self.store.start(ALICE, turn_id='preview-turn', request_sha256='x', user_message='Create')
+        response = {'assistant_message': 'Proposal', 'sync': {'preview_pending': True, 'preview_tool_calls': calls}}
+        self.store.finish(ALICE, 'preview-turn', response)
+        owner = SimpleNamespace(user_id=ALICE['user_id'], workspace_id=ALICE['workspace_id'])
+        url = '/api/chat/messages/' + response['assistant_message_id']
+        with patch('conversations.current_principal', return_value=owner), \
+                patch('chat_routes.record_applied_preview_tool_calls', side_effect=RuntimeError('down')) as record:
+            # A history that cannot be written must not undo an applied proposal.
+            self.assertEqual(self.client.patch(url, json={'proposal_status': 'applied'}).status_code, 200)
+            self.assertEqual(self.client.patch(url, json={'proposal_status': 'applied'}).status_code, 200)
+        self.assertEqual(record.call_count, 1)
+        self.assertEqual(record.call_args.args[0], calls)
 
     def test_members_in_the_same_workspace_cannot_read_or_modify_each_others_chat(self):
         cid, _, _ = self.store.start(ALICE, turn_id='private-turn', request_sha256='private', user_message='Alice only')

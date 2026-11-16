@@ -4,6 +4,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from auth_middleware import require_auth
 from chat_state import clear_state_from_disk
 from conversations import ConversationError, chat_scope, conversation_store
+from graph_client import record_applied_preview_tool_calls
 
 
 def create_chat_blueprint():
@@ -51,7 +52,14 @@ def create_chat_blueprint():
         if request.method == "OPTIONS":
             return "", 200
         payload = request.get_json(silent=True) or {}
-        conversation_store().update_proposal(chat_scope(), message_id, payload.get("proposal_status"))
+        applied_calls = conversation_store().update_proposal(
+            chat_scope(), message_id, payload.get("proposal_status"))
+        if applied_calls:
+            try:
+                record_applied_preview_tool_calls(applied_calls, request.headers.get("Authorization"))
+            except Exception as exc:
+                # The proposal is applied either way; only its history entries are missing.
+                print("[chat_routes] Could not record the applied preview's tool calls:", exc)
         return jsonify({"ok": True}), 200
 
     return blueprint

@@ -6,6 +6,21 @@ import hashlib
 import re
 
 INTERNAL_QUERY_CAPABILITY = object()
+
+# Agent query types that write to the design graph; each is counted on its tool call.
+AGENT_WRITE_QUERY_TYPES = frozenset({
+    "create_pipeline",
+    "create_step",
+    "create_reusable_pipeline",
+    "configure_flow_step",
+    "configure_subpipeline_step",
+    "connect_steps",
+    "disconnect_steps",
+    "insert_initial_step",
+    "insert_between_steps",
+    "delete_step",
+    "delete_all_steps",
+})
 OWNED_LABELS = ("PROVENANCE_EVENT", "PIPELINE_VERSION", "PIPELINE", "STEP", "FILE")
 # Preserve literals, identifiers and comments rather than rewriting their contents.
 TOKENS = re.compile(r"('(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:``|[^`])*`|//[^\n]*|/\*[\s\S]*?\*/)")

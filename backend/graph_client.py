@@ -251,6 +251,19 @@ async def clear_preview_workspace(
         raise RuntimeError(f"Failed to clean up agent preview workspace: {exc}") from exc
 
 
+def record_applied_preview_tool_calls(tool_calls: dict, authorization: str | None = None) -> None:
+    """Write an accepted preview turn's tool calls to the current workspace's provenance."""
+    from workspace_queries import INTERNAL_QUERY_CAPABILITY
+    response = dispatch_graph_request(
+        "neo4j_run_query",
+        method="POST",
+        json_payload={"query": "RETURN 1", "query_type": "preview_tool_calls_applied", "tool_calls": tool_calls},
+        headers=_json_headers(authorization, _request_workspace_id()),
+        query_capability=INTERNAL_QUERY_CAPABILITY,
+    )
+    response.raise_for_status()
+
+
 async def run_neo4j_query(
     query: str,
     query_type: str,
