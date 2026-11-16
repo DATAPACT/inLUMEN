@@ -1,6 +1,7 @@
 """The design agent: one serial, tool-using autogen agent over a graph store."""
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 from collections.abc import Mapping
@@ -34,16 +35,38 @@ class TolerantFunctionTool(FunctionTool):
     full retry, so they are turned into the declared form here.
     """
 
-    def __init__(self, func: Any) -> None:
+    def __init__(self, func: Any, store: Any = None) -> None:
         super().__init__(func, description=inspect.getdoc(func) or "", name=func.__name__)
         self.__name__ = func.__name__
+        self._store = store
         self._takes_params = "params" in inspect.signature(func).parameters
 
     async def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return await self._func(*args, **kwargs)
 
     async def run_json(self, args: Mapping[str, Any], cancellation_token: Any, call_id: str | None = None) -> Any:
-        return await super().run_json(self.normalized(args), cancellation_token, call_id)
+        """Run the tool and report the call to the store, whatever its outcome.
+
+        A store that keeps provenance (``tool_call`` and ``tool_call_finished``)
+        records every call the agent makes: reads, failed calls and repeated
+        calls each count as one.
+        """
+        arguments = self.normalized(args)
+        scope = getattr(self._store, "tool_call", None)
+        finished = getattr(self._store, "tool_call_finished", None)
+        with scope(self.__name__) if scope else contextlib.nullcontext():
+            error = None
+            try:
+                return await super().run_json(arguments, cancellation_token, call_id)
+            except BaseException as exc:
+                error = str(exc) or type(exc).__name__
+                raise
+            finally:
+                if finished is not None:
+                    try:
+                        await finished(self.__name__, arguments, error)
+                    except Exception:
+                        pass  # the record is missing; the tool's own result stands
 
     def normalized(self, args: Mapping[str, Any]) -> Mapping[str, Any]:
         if not self._takes_params or not isinstance(args, Mapping):
@@ -97,7 +120,7 @@ def build_design_team(
     not make parallel tool calls.
     """
     tools = [
-        TolerantFunctionTool(tool)
+        TolerantFunctionTool(tool, store)
         for tool in build_pipeline_editor_tools(store, node_definitions=node_definitions)
     ]
     system_message = PIPELINE_EDITOR_SYSTEM_MESSAGE + (

@@ -390,3 +390,34 @@ def test_a_failed_batch_says_so_when_the_new_pipeline_name_stays():
         asyncio.run(_tools(store)["create_steps"](json.dumps({
             "pipeline": {"name": "Renamed", "description": "Second"}, "steps": FAILING_BATCH})))
     assert asyncio.run(store.get_graph())["nodes"] == []
+
+
+def test_every_tool_call_is_reported_to_a_store_that_keeps_provenance():
+    from contextlib import contextmanager
+
+    from autogen_core import CancellationToken
+
+    from inlumen.design.team import TolerantFunctionTool
+
+    store = InMemoryGraphStore()
+    scopes, finished = [], []
+
+    @contextmanager
+    def tool_call(name):
+        scopes.append(name)
+        yield
+
+    async def tool_call_finished(name, arguments, error):
+        finished.append((name, bool(error)))
+
+    store.tool_call, store.tool_call_finished = tool_call, tool_call_finished
+    tools = {tool.__name__: TolerantFunctionTool(tool, store) for tool in build_pipeline_editor_tools(store)}
+    step = {"type": "source", "label": "Orders", "description": "x"}
+    asyncio.run(tools["overview"].run_json({}, CancellationToken()))
+    asyncio.run(tools["overview"].run_json({}, CancellationToken()))  # a repeat is its own call
+    asyncio.run(tools["create_steps"].run_json(step, CancellationToken()))
+    with pytest.raises(RuntimeError):
+        asyncio.run(tools["create_steps"].run_json({**step, "after_flow_id": "1"}, CancellationToken()))
+    assert finished == [("overview", False), ("overview", False), ("create_steps", False), ("create_steps", True)]
+    assert scopes[:2] == ["overview", "overview"]
+

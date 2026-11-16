@@ -478,10 +478,14 @@ def _event_story(index: int, event: dict[str, Any], styles: dict[str, ParagraphS
         visible_details = [
             f"<b>{_paragraph_text(key)}:</b> {_paragraph_text(_compact_detail(value))}"
             for key, value in details.items()
-            if key not in {"query", "raw_query", "user_query", "graph_snapshot", "result", "tool_call_id"}
+            if key not in {"query", "raw_query", "user_query", "graph_snapshot", "result", "arguments", "error"}
         ]
         if visible_details:
             story.append(Paragraph("; ".join(visible_details), styles["small"]))
+        arguments = _safe_text(details.get("arguments"))
+        if arguments:
+            # What the agent sent with this tool call (the failure, if any, is in the summary).
+            story.append(Paragraph(f"<b>Arguments:</b> {_paragraph_text(arguments)}", styles["small"]))
     story.append(Spacer(1, 6))
     return story
 

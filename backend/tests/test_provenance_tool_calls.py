@@ -93,6 +93,53 @@ class ProvenanceToolCallTests(unittest.TestCase):
         )
         self.assertTrue(json.loads(event["details_json"])["rolled_back"])
 
+    def test_every_agent_tool_call_is_one_event_also_reads_failures_and_repeats(self):
+        session = _Session()
+
+        def finish(call_id, tool, status="completed", error=""):
+            neo4j_api._finish_agent_tool_call(session, {
+                "user_query": "build it", "session_id": "s", "tool": tool, "tool_call_id": call_id,
+                "status": status, "error": error, "arguments": '{"params": "{}"}'})
+
+        finish("call-1", "overview")                                   # a read
+        finish("call-2", "create_steps", "failed", "steps[0]: bad")    # failed before any write
+        finish("call-3", "overview")                                   # the same read again
+        write = {"user_query": "build it", "session_id": "s", "tool": "create_steps", "tool_call_id": "call-4"}
+        neo4j_api._record_agent_tool_call(session, "create_step", write, [{"step": {}}])
+        finish("call-4", "create_steps")                               # a write, then its outcome
+
+        self.assertEqual([event["action"] for event in session.events],
+                         ["overview", "create_steps", "overview", "create_steps"])
+        self.assertEqual([event["summary"] for event in session.events], [
+            "Agent called tool 'overview' once; it changed nothing in the graph.",
+            "Agent called tool 'create_steps' once; it changed nothing in the graph."
+            " The call failed: steps[0]: bad",
+            "Agent called tool 'overview' once; it changed nothing in the graph.",
+            "Agent called tool 'create_steps' once; it performed 1 create_step.",
+        ])
+        last = json.loads(session.events[-1]["details_json"])
+        self.assertEqual((last["status"], last["operations"]), ("completed", {"create_step": 1}))
+
+    def test_the_store_reports_each_tool_call_once_with_its_outcome(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from pipeline_agent.neo4j_store import Neo4jGraphStore
+
+        store = Neo4jGraphStore(provenance_context={"user_query": "q", "session_id": "s"})
+        with patch("pipeline_agent.neo4j_store.run_neo4j_query", new_callable=AsyncMock, return_value="[]") as run:
+            async def call():
+                with store.tool_call("create_steps"):
+                    with store.tool_call("create_steps"):  # the tool's own scope joins the call
+                        await store.overview()
+                    await store.tool_call_finished("create_steps", {"params": "{}"}, "rejected")
+            asyncio.run(call())
+        contexts = [c.kwargs["provenance_context"] for c in run.await_args_list]
+        self.assertEqual(len({context["tool_call_id"] for context in contexts}), 1)
+        self.assertEqual(run.await_args_list[-1].args[1], "tool_call_finished")
+        self.assertEqual((contexts[-1]["status"], contexts[-1]["error"]), ("failed", "rejected"))
+        self.assertIsNone(store._tool_call)
+
     def test_the_agent_store_writes_to_the_version_being_edited(self):
         from llm_config import LLMConfig
         from pipeline_agent.team import build_pipeline_editing_team

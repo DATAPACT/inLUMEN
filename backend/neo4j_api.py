@@ -1154,9 +1154,21 @@ def _record_provenance_event(
          details_json=details_json)
 
 
-def _tool_call_summary(tool: str, operations: dict) -> str:
+_CALL_FIELDS = {"tool", "tool_call_id", "status", "error", "arguments"}
+
+
+def _tool_call_summary(tool: str, operations: dict, details: dict | None = None) -> str:
+    """One sentence per fact: what the call wrote, whether it was undone, whether it failed."""
+    details = details or {}
     parts = ", ".join(f"{count} {name}" for name, count in operations.items())
-    return f"Agent called tool '{tool}' once; it performed {parts}."
+    summary = f"Agent called tool '{tool}' once; " + (
+        f"it performed {parts}." if parts else "it changed nothing in the graph."
+    )
+    if details.get("rolled_back"):
+        summary += ROLLED_BACK_NOTE
+    if details.get("status") == "failed":
+        summary += f" The call failed: {_short_text(details.get('error'), 300)}"
+    return summary
 
 
 def _record_agent_tool_call(session, query_type: str, context: dict, results: Any) -> None:
@@ -1170,7 +1182,7 @@ def _record_agent_tool_call(session, query_type: str, context: dict, results: An
     tool_call_id = context.get("tool_call_id") or ""
     if tool_call_id and not results:
         return  # the write matched nothing, so the tool call did not perform it
-    shared = {key: value for key, value in context.items() if key not in {"tool", "tool_call_id"}}
+    shared = {key: value for key, value in context.items() if key not in _CALL_FIELDS}
     existing = None
     if tool_call_id:
         existing = session.run("""
@@ -1207,7 +1219,7 @@ def _record_agent_tool_call(session, query_type: str, context: dict, results: An
     session.run("""
     MATCH (event:PROVENANCE_EVENT {uid: $uid})
     SET event.summary = $summary, event.details_json = $details_json
-    """, uid=existing["uid"], summary=_tool_call_summary(tool, operations),
+    """, uid=existing["uid"], summary=_tool_call_summary(tool, operations, details),
          details_json=_json_details(details))
 
 
@@ -1235,7 +1247,50 @@ def _mark_agent_tool_call_rolled_back(session, context: dict) -> None:
     MATCH (event:PROVENANCE_EVENT {uid: $uid})
     SET event.summary = $summary, event.details_json = $details_json
     """, uid=existing["uid"],
-         summary=_tool_call_summary(context.get("tool") or "tool", operations) + ROLLED_BACK_NOTE,
+         summary=_tool_call_summary(context.get("tool") or "tool", operations, details),
+         details_json=_json_details(details))
+
+
+def _finish_agent_tool_call(session, context: dict) -> None:
+    """Record the outcome of one agent tool call.
+
+    Every call the agent makes is one provenance event, also a call that only
+    read the graph, a call that failed, and a repeat of an earlier call. A call
+    that wrote to the graph already has its event; any other gets one here.
+    """
+    tool = context.get("tool") or "tool"
+    tool_call_id = context.get("tool_call_id") or ""
+    if not tool_call_id:
+        return
+    outcome = {
+        "status": context.get("status") or "completed",
+        "arguments": context.get("arguments") or "",
+    }
+    if context.get("error"):
+        outcome["error"] = context["error"]
+    existing = session.run("""
+    MATCH (event:PROVENANCE_EVENT {tool_call_id: $tool_call_id})
+    RETURN event.uid AS uid, event.pipeline_uid AS pipeline_uid, event.details_json AS details_json
+    LIMIT 1
+    """, tool_call_id=tool_call_id).single()
+    if existing is None:
+        shared = {key: value for key, value in context.items() if key not in _CALL_FIELDS}
+        details = {"tool": tool, "tool_calls": 1, "operations": {}, **outcome, **shared}
+        _record_provenance_event(
+            session, tool, "agent", _tool_call_summary(tool, {}, details), details,
+            tool_call_id=tool_call_id,
+        )
+        return
+    try:
+        details = json.loads(existing["details_json"] or "{}")
+    except (TypeError, ValueError):
+        details = {}
+    details.update(outcome)
+    operations = details.get("operations") if isinstance(details.get("operations"), dict) else {}
+    session.run("""
+    MATCH (event:PROVENANCE_EVENT {uid: $uid})
+    SET event.summary = $summary, event.details_json = $details_json
+    """, uid=existing["uid"], summary=_tool_call_summary(tool, operations, details),
          details_json=_json_details(details))
 
 
@@ -1299,6 +1354,9 @@ def _provenance_context_from_payload(data: dict) -> dict:
         "session_id": _short_text(context.get("session_id"), 120),
         "tool": _short_text(context.get("tool"), 80),
         "tool_call_id": _short_text(context.get("tool_call_id"), 80),
+        "status": _short_text(context.get("status"), 20),
+        "error": _short_text(context.get("error"), 600),
+        "arguments": _short_text(context.get("arguments"), 2000),
     }
 
 
@@ -3057,6 +3115,10 @@ def neo4j_run_query():
         if query_type == "tool_call_rolled_back":
             # Not a graph query: the agent's tool put the graph back after a failed batch.
             _mark_agent_tool_call_rolled_back(session, _provenance_context_from_payload(data))
+            return jsonify([])
+        if query_type == "tool_call_finished":
+            # Not a graph query either: one agent tool call ended; record how.
+            _finish_agent_tool_call(session, _provenance_context_from_payload(data))
             return jsonify([])
         query, parameters = parameterize_literals(query)
         session_result = session.run(query, **parameters)

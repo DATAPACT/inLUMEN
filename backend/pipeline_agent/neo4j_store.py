@@ -104,12 +104,33 @@ class Neo4jGraphStore:
     @contextmanager
     def tool_call(self, name: str):
         """Group the writes made inside one agent tool call into one provenance event."""
-        previous = self._tool_call
+        if self._tool_call is not None:
+            # Already inside the agent's tool call: its writes stay on that call.
+            yield
+            return
         self._tool_call = self._last_tool_call = {"tool": name, "tool_call_id": str(uuid.uuid4())}
         try:
             yield
         finally:
-            self._tool_call = previous
+            self._tool_call = None
+
+    async def tool_call_finished(self, name: str, arguments: object, error: str | None) -> None:
+        """Record that the agent's current tool call ended, and how."""
+        call = self._tool_call or {"tool": name, "tool_call_id": str(uuid.uuid4())}
+        await run_neo4j_query(
+            "RETURN 1",
+            "tool_call_finished",
+            authorization=self.authorization,
+            provenance_context={
+                **(self.provenance_context or {}),
+                **call,
+                "status": "failed" if error else "completed",
+                "error": error or "",
+                "arguments": arguments if isinstance(arguments, str) else json.dumps(
+                    arguments, ensure_ascii=False, default=str),
+            },
+            workspace_id=self.workspace_id,
+        )
 
     async def tool_call_rolled_back(self) -> None:
         """Mark the latest tool call's provenance event: its writes were undone."""
