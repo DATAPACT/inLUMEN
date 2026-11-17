@@ -76,12 +76,29 @@ def sample_from_bytes(
     descriptor: dict[str, Any],
     *,
     binary_max_bytes: int = DEFAULT_SAMPLE_BINARY_MAX_BYTES,
+    whole_file_max_bytes: int = 0,
 ) -> dict[str, Any]:
     """Describe a file's contents for the model and the validation sandbox.
 
     Tables and JSON get columns and up to ten rows, text its first 12000
     characters; binary files travel whole (base64) up to ``binary_max_bytes``.
+    A table, JSON or text file no larger than ``whole_file_max_bytes`` also
+    carries its full bytes, so the sample run reads the real file while the
+    model still sees only the excerpt.
     """
+    described = _excerpt(content, descriptor, binary_max_bytes)
+    sample = described.get("sample")
+    if (
+        isinstance(sample, dict)
+        and "content_base64" not in sample
+        and len(content) <= whole_file_max_bytes
+    ):
+        sample["content_base64"] = base64.b64encode(content).decode("ascii")
+        sample["content_sha256"] = hashlib.sha256(content).hexdigest()
+    return described
+
+
+def _excerpt(content: bytes, descriptor: dict[str, Any], binary_max_bytes: int) -> dict[str, Any]:
     kind = descriptor.get("kind")
     file_format = descriptor.get("format")
     if kind not in {"table", "json", "text"}:
@@ -152,8 +169,13 @@ def directory_sampler(
     root: str | Path,
     *,
     binary_max_bytes: int = DEFAULT_SAMPLE_BINARY_MAX_BYTES,
+    whole_files: bool = True,
 ) -> Sampler:
     """Sample attached files from a local folder.
+
+    With ``whole_files`` the sample run reads each real file (up to
+    ``binary_max_bytes``), as it does in the app; without it a table is cut to
+    its first ten rows and text to its first 12000 characters.
 
     A file attached to a step is looked up as ``root/<flow_id>/<filename>``
     (bucket ``files-step-id-<flow_id>``), then as ``root/<filename>``. Missing
@@ -168,7 +190,12 @@ def directory_sampler(
         candidates = ([folder / filename] if folder is not None else []) + [base / filename]
         for candidate in candidates:
             if candidate.is_file():
-                return sample_from_bytes(candidate.read_bytes(), entry, binary_max_bytes=binary_max_bytes)
+                return sample_from_bytes(
+                    candidate.read_bytes(),
+                    entry,
+                    binary_max_bytes=binary_max_bytes,
+                    whole_file_max_bytes=binary_max_bytes if whole_files else 0,
+                )
         return {}
 
     return sample

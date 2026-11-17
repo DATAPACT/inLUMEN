@@ -118,6 +118,31 @@ def test_directory_sampler_describes_attached_files(tmp_path):
     assert entry["sample"]["rows"][1] == {"id": "2", "amount": "3"}
 
 
+def test_directory_sampler_gives_the_sample_run_the_whole_file(tmp_path):
+    from inlumen.codegen.llm import without_validation_bytes
+    from inlumen.codegen.sandbox import write_sample_inputs
+    from inlumen.codegen.schemas import FileDescriptor
+
+    content = "id,amount\n" + "".join(f"{n},{n}.5\n" for n in range(40))
+    (tmp_path / "orders.csv").write_text(content, encoding="utf-8")
+
+    def entry(**options):
+        context = pipeline_context(_graph(["orders.csv"]), sample=directory_sampler(tmp_path, **options))
+        return context["graph"]["nodes"][0]["files"][0]
+
+    whole = entry()
+    assert len(whole["sample"]["rows"]) == 10
+    assert "content_base64" not in json.dumps(without_validation_bytes(whole))
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    write_sample_inputs(inputs / "input_manifest.json", inputs, [FileDescriptor(**{
+        key: value for key, value in whole.items() if key in FileDescriptor.model_fields})])
+    assert (inputs / "orders.csv").read_text(encoding="utf-8") == content
+
+    assert "content_base64" not in entry(whole_files=False)["sample"]
+    assert "content_base64" not in entry(binary_max_bytes=20)["sample"]
+
+
 def test_the_sandbox_is_chosen_per_run(monkeypatch):
     monkeypatch.setenv("CODEGEN_DOCKER_VALIDATION_ENABLED", "true")
     with use_sandbox(NoSandbox()):
