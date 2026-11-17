@@ -53,6 +53,18 @@ _SANDBOX_LOCK = threading.RLock()
 _STANDARD_SANDBOX_PROFILE = RESOURCE_PROFILES["standard"]
 
 
+def log_tail(logs: bytes, limit: int) -> str:
+    """The last ``limit`` characters of a container log.
+
+    A failed run ends with the traceback and the exception, so the end of the
+    log is the part a repair needs.
+    """
+    text = logs.decode("utf-8", errors="replace")
+    if len(text) <= limit:
+        return text
+    return "[earlier output omitted] " + text[-limit:]
+
+
 def thread_limit_environment(cpus: float) -> dict[str, str]:
     """Caps the thread pools of numeric libraries at the sandbox's CPU count.
 
@@ -941,7 +953,7 @@ def validate_pipeline_program_with_docker(
                     errors=[
                         (
                             f"Whole-pipeline sample run failed with exit code {status_code}: "
-                            f"{logs.decode('utf-8', errors='replace')[:4000]}"
+                            f"{log_tail(logs, 4000)}"
                         )
                     ],
                 )
@@ -1165,7 +1177,7 @@ def _cached_dependency_image(
                 logs = b""
             raise SandboxUnavailable(
                 "Dependency installation failed with exit code "
-                f"{status_code}: {logs.decode('utf-8', errors='replace')[:4000]}"
+                f"{status_code}: {log_tail(logs, 4000)}"
             )
         repository, tag = image_tag.split(":", 1)
         return container.commit(repository=repository, tag=tag)
@@ -1322,7 +1334,7 @@ def run_docker_validation(
                 errors=[
                     (
                         f"Container sample run failed with exit code {status_code}: "
-                        f"{logs.decode('utf-8', errors='replace')[:2000]}"
+                        f"{log_tail(logs, 2000)}"
                     )
                 ],
             )

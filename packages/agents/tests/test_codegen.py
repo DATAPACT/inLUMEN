@@ -180,3 +180,116 @@ def test_sandbox_caps_numeric_thread_pools_at_its_cpus():
     assert env["OPENBLAS_NUM_THREADS"] == "2"
     assert env["OMP_NUM_THREADS"] == env["MKL_NUM_THREADS"] == env["NUMEXPR_NUM_THREADS"] == "2"
     assert thread_limit_environment(0.5)["OPENBLAS_NUM_THREADS"] == "1"
+
+
+def test_a_failed_run_reports_the_end_of_its_log():
+    from inlumen.codegen.sandbox import log_tail
+
+    logs = ("pip output\n" * 500 + "KeyError: 'amount'").encode()
+    excerpt = log_tail(logs, 200)
+    assert excerpt.endswith("KeyError: 'amount'") and excerpt.startswith("[earlier output omitted]")
+    assert log_tail(b"short", 200) == "short"
+
+
+class Raw:
+    """Answers each request with the next (content, finish_reason) pair."""
+
+    name = "raw"
+
+    def __init__(self, *replies):
+        self.replies = list(replies)
+        self.requests = []
+
+    async def complete(self, *, system_prompt, user_prompt, json_output, max_tokens):
+        self.requests.append({"system_prompt": system_prompt, "max_tokens": max_tokens})
+        content, finish_reason = self.replies.pop(0)
+        return ModelReply(content=content, finish_reason=finish_reason)
+
+
+def _ask(model):
+    from inlumen.codegen.llm import generate_json
+    from inlumen.codegen.model import use_model
+
+    async def run():
+        with use_model(model):
+            return await generate_json(None, system_prompt="JSON", user_prompt="{}")
+
+    return asyncio.run(run())
+
+
+def test_a_cut_off_reply_is_requested_again_with_a_higher_limit():
+    model = Raw(('{"pipeline_py": "def a(', "length"), ('{"ok": true}', "stop"))
+    assert _ask(model) == {"ok": True}
+    assert [item["max_tokens"] for item in model.requests] == [16384, 32768]
+
+
+def test_a_reply_that_is_not_json_is_requested_again_with_the_error():
+    model = Raw(("Sure! Here is the code", "stop"), ('{"ok": true}', "stop"))
+    assert _ask(model) == {"ok": True}
+    assert "invalid JSON" in model.requests[1]["system_prompt"]
+    assert model.requests[0]["system_prompt"] == "JSON"
+
+
+def test_a_reply_that_stays_unusable_fails_after_one_retry():
+    from inlumen.codegen.llm import LLMGenerationError
+
+    model = Raw(("{", "length"), ("{", "length"))
+    with pytest.raises(LLMGenerationError, match="cut off"):
+        _ask(model)
+    assert len(model.requests) == 2
+
+
+def _task_function(source, name):
+    import ast
+
+    tree = ast.parse(source)
+    node = next(item for item in tree.body if getattr(item, "name", "") == name)
+    return ast.get_source_segment(source, node)
+
+
+def _break_task(prompt):
+    """A valid draft whose task function (step 2) has the wrong signature."""
+    payload = _valid(prompt)
+    name = next(n["function_name"] for n in prompt["pipeline_plan"]["nodes"] if n["flow_id"] == "2")
+    good = _task_function(payload["pipeline_py"], name)
+    bad = good.replace("(inputs, output_dir, context)", "(inputs, output_dir)", 1)
+    assert bad != good
+    return {**payload, "pipeline_py": payload["pipeline_py"].replace(good, bad)}, name, good
+
+
+def test_only_the_failing_step_is_repaired():
+    seen = {}
+
+    def repair(prompt):
+        seen.update(prompt)
+        name = prompt["repair_functions"][0]
+        _payload, _name, good = _break_task({"pipeline_plan": prompt["pipeline_plan"]})
+        return {"functions": {name: good}, "helpers_py": "", "requirements": [], "notes": []}
+
+    model = Scripted(lambda prompt: _break_task(prompt)[0], repair)
+    result = asyncio.run(generate(_graph(), model=model))
+    assert result.accepted, result.validation
+    assert model.operations == ["generate_canonical_pipeline", "repair_pipeline_nodes"]
+    assert seen["repair_flow_ids"] == ["2"] and len(seen["repair_functions"]) == 1
+
+
+def test_an_unusable_step_repair_falls_back_to_the_whole_pipeline():
+    model = Scripted(lambda prompt: _break_task(prompt)[0], {"functions": {}}, _valid)
+    result = asyncio.run(generate(_graph(), model=model))
+    assert result.accepted, result.validation
+    assert model.operations == [
+        "generate_canonical_pipeline", "repair_pipeline_nodes", "repair_canonical_pipeline",
+    ]
+
+
+def test_replacing_a_function_keeps_the_rest_and_rejects_name_clashes():
+    from inlumen.codegen.pipeline_compiler import PipelineCompilerError, replace_node_functions
+
+    source = "import os\n\nLIMIT = 3\n\n\ndef a(x):\n    return 1\n\n\ndef b(x):\n    return 2  # kept\n"
+    out = replace_node_functions(source, {"a": "def a(x):\n    return helper(x)"}, "def helper(x):\n    return x")
+    assert "return 2  # kept" in out and out.index("def helper") < out.index("def a(x)")
+    compile(out, "pipeline.py", "exec")
+    with pytest.raises(PipelineCompilerError, match="redefines"):
+        replace_node_functions(source, {"a": "def a(x):\n    return 1"}, "LIMIT = 9")
+    with pytest.raises(PipelineCompilerError, match="exactly one definition"):
+        replace_node_functions(source, {"a": "def c(x):\n    return 1"})

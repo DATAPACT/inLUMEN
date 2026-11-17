@@ -37,6 +37,11 @@ class LLMGenerationError(RuntimeError):
 
 UsageCallback = Callable[[GenerationUsage], Awaitable[None] | None]
 
+# One retry when a reply is cut off or is not a JSON object.
+REPLY_ATTEMPTS = 2
+MAX_OUTPUT_TOKENS = 32768
+CUT_OFF_FINISH_REASONS = {"length", "max_tokens"}
+
 
 def _openrouter_headers() -> dict[str, str]:
     return {
@@ -267,7 +272,9 @@ async def generate_json(
     The request goes to the client installed with
     :func:`inlumen.codegen.model.use_model`, else to ``config``'s endpoint.
     Every request counts against the run's budget and is reported to the
-    usage callback and the event sink.
+    usage callback and the event sink. A reply that was cut off at the output
+    limit, or that is not a JSON object, is requested once more: with a
+    doubled output limit, or with the parse error added to the system prompt.
     """
     client = CURRENT_MODEL.get()
     if client is None:
@@ -277,27 +284,70 @@ async def generate_json(
         _check_endpoint(client.config)
 
     budget = CURRENT_BUDGET.get()
-    if budget is not None: budget.reserve()
     events = CURRENT_EVENTS.get()
-    started = time.monotonic()
-    try:
-        reply = await client.complete(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            json_output=config.supports_json_output if config is not None else True,
-            max_tokens=config.max_output_tokens if config is not None else 16384,
-        )
-    except BaseException as exc:
-        raw_usage = exc.usage if isinstance(exc, LLMGenerationError) else None
-        if raw_usage is not None:
-            await _record_usage(raw_usage, usage_callback)
-        if events is not None:
-            events(_request_event(client, started, raw_usage, error=exc))
-        raise
-    if events is not None:
-        events(_request_event(client, started, reply.usage, finish_reason=reply.finish_reason))
-    await _record_usage(reply.usage, usage_callback)
-    return _json_from_model_content(reply.content)
+    max_tokens = config.max_output_tokens if config is not None else 16384
+    retry_note = ""
+    for attempt in range(REPLY_ATTEMPTS):
+        last = attempt == REPLY_ATTEMPTS - 1
+        if budget is not None: budget.reserve()
+        started = time.monotonic()
+        try:
+            reply = await client.complete(
+                system_prompt=system_prompt + retry_note,
+                user_prompt=user_prompt,
+                json_output=config.supports_json_output if config is not None else True,
+                max_tokens=max_tokens,
+            )
+        except BaseException as exc:
+            raw_usage = exc.usage if isinstance(exc, LLMGenerationError) else None
+            if raw_usage is not None:
+                await _record_usage(raw_usage, usage_callback)
+            if events is not None:
+                events(_request_event(client, started, raw_usage, error=exc))
+            if last or not _output_limit_reached(exc):
+                raise
+        else:
+            if events is not None:
+                events(_request_event(client, started, reply.usage, finish_reason=reply.finish_reason))
+            await _record_usage(reply.usage, usage_callback)
+            if reply.finish_reason not in CUT_OFF_FINISH_REASONS:
+                try:
+                    return _json_from_model_content(reply.content)
+                except LLMGenerationError as exc:
+                    if last:
+                        raise
+                    retry_note = (
+                        f"\n\nYour previous reply was rejected: {str(exc).rstrip('.')}. Reply again "
+                        "with one complete JSON object and nothing else."
+                    )
+                    continue
+            if last:
+                raise LLMGenerationError(
+                    "Coding model reply was cut off at the output limit of "
+                    f"{max_tokens} tokens. No unfinished output was accepted.",
+                    status_code=502,
+                    code="incomplete_response",
+                    param="max_output_tokens",
+                )
+        # The reply was cut off: allow a longer one, or ask for a shorter one
+        # when the limit cannot grow.
+        larger = min(MAX_OUTPUT_TOKENS, max_tokens * 2)
+        if larger > max_tokens:
+            max_tokens, retry_note = larger, ""
+        else:
+            retry_note = (
+                "\n\nYour previous reply was cut off at the output limit of "
+                f"{max_tokens} tokens. Reply again with a shorter, complete JSON object."
+            )
+    raise AssertionError("unreachable")
+
+
+def _output_limit_reached(exc: BaseException) -> bool:
+    return (
+        isinstance(exc, LLMGenerationError)
+        and exc.code == "incomplete_response"
+        and exc.param == "max_output_tokens"
+    )
 
 
 async def _record_usage(raw_usage: dict | None, callback: UsageCallback | None) -> None:
@@ -484,6 +534,51 @@ async def repair_pipeline_payload(
     return await generate_json(
         config,
         system_prompt=PIPELINE_SYSTEM_PROMPT,
+        user_prompt=json.dumps(without_validation_bytes(prompt), ensure_ascii=False),
+        usage_callback=usage_callback,
+    )
+
+
+NODE_REPAIR_SYSTEM_PROMPT = PIPELINE_SYSTEM_PROMPT + """
+
+This request repairs an existing module. previous_pipeline_py is the complete
+module; only the node functions named in repair_functions failed validation.
+Return exactly one JSON object with functions (an object that maps each name
+in repair_functions to the complete new source of that function, starting at
+its def line), helpers_py (a string of new imports and new helper definitions
+the repaired functions need, or an empty string), requirements (the full
+array for the whole module) and notes. Do not return pipeline_py. Every other
+function stays as it is: do not redefine or rename an existing top-level
+name, and give any new helper a new name."""
+
+
+async def repair_pipeline_nodes_payload(
+    config: LLMConfig,
+    plan: dict[str, Any],
+    payload: dict[str, Any],
+    repair_functions: dict[str, str],
+    validation: ValidationReport,
+    user_instruction: str,
+    usage_callback: UsageCallback | None = None,
+) -> dict[str, Any]:
+    """Ask for new source of only the failing node functions.
+
+    ``repair_functions`` maps each failing flow_id to its function name.
+    """
+    prompt = {
+        "operation": "repair_pipeline_nodes",
+        "pipeline_plan": plan,
+        "user_instruction": user_instruction,
+        "previous_pipeline_py": payload.get("pipeline_py"),
+        "previous_requirements": payload.get("requirements"),
+        "repair_functions": sorted(repair_functions.values()),
+        "repair_flow_ids": sorted(repair_functions),
+        "validation_errors": validation.errors,
+        "validation_warnings": validation.warnings,
+    }
+    return await generate_json(
+        config,
+        system_prompt=NODE_REPAIR_SYSTEM_PROMPT,
         user_prompt=json.dumps(without_validation_bytes(prompt), ensure_ascii=False),
         usage_callback=usage_callback,
     )

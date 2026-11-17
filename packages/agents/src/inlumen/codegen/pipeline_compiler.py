@@ -250,6 +250,93 @@ def isolate_pipeline_nodes(
     return ast.unparse(module).strip() + "\n"
 
 
+def replace_node_functions(
+    source: str,
+    replacements: dict[str, str],
+    helpers_py: str = "",
+) -> str:
+    """Return ``source`` with the named top-level functions replaced.
+
+    Every other line is kept as written. ``helpers_py`` holds new imports and
+    new helper definitions; it goes before the first replaced function and
+    may not redefine a name the module already defines.
+    """
+    try:
+        tree = ast.parse(source, filename="pipeline.py")
+    except SyntaxError as exc:
+        raise PipelineCompilerError(f"pipeline.py has invalid syntax: {exc}") from exc
+    definitions = {
+        statement.name: statement
+        for statement in tree.body
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    spans: list[tuple[int, int, str]] = []
+    for name, text in replacements.items():
+        target = definitions.get(name)
+        if target is None:
+            raise PipelineCompilerError(f"Cannot replace unknown function {name}")
+        text = str(text or "").strip("\n")
+        try:
+            body = ast.parse(text).body
+        except SyntaxError as exc:
+            raise PipelineCompilerError(
+                f"Replacement for {name} has invalid syntax: {exc}"
+            ) from exc
+        if (
+            len(body) != 1
+            or not isinstance(body[0], (ast.FunctionDef, ast.AsyncFunctionDef))
+            or body[0].name != name
+        ):
+            raise PipelineCompilerError(
+                f"Replacement for {name} must be exactly one definition of {name}"
+            )
+        first_line = min(
+            [target.lineno, *(item.lineno for item in target.decorator_list)]
+        )
+        spans.append((first_line, target.end_lineno or first_line, text))
+    if not spans:
+        return source
+
+    helpers = str(helpers_py or "").strip("\n")
+    if helpers.strip():
+        try:
+            helper_body = ast.parse(helpers).body
+        except SyntaxError as exc:
+            raise PipelineCompilerError(
+                f"helpers_py has invalid syntax: {exc}"
+            ) from exc
+        existing = {
+            name
+            for statement in tree.body
+            if not isinstance(statement, (ast.Import, ast.ImportFrom))
+            for name in provided_names(statement)
+        }
+        clashes = sorted(
+            {
+                name
+                for statement in helper_body
+                if not isinstance(statement, (ast.Import, ast.ImportFrom))
+                for name in provided_names(statement)
+            }
+            & existing
+        )
+        if clashes:
+            raise PipelineCompilerError(
+                "helpers_py redefines existing names: " + ", ".join(clashes)
+            )
+    else:
+        helpers = ""
+
+    lines = source.splitlines()
+    spans.sort()
+    for index, (first_line, last_line, text) in reversed(list(enumerate(spans))):
+        block = text.splitlines()
+        if index == 0 and helpers:
+            block = [*helpers.splitlines(), "", "", *block]
+        lines[first_line - 1 : last_line] = block
+    return "\n".join(lines) + "\n"
+
+
 def transitive_shared_statements(
     body: list[ast.stmt],
     target: ast.stmt,

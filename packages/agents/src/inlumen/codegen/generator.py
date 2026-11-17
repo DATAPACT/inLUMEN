@@ -22,6 +22,7 @@ from .llm import (
     generate_node_payload,
     generate_pipeline_payload,
     repair_node_payload,
+    repair_pipeline_nodes_payload,
     repair_pipeline_payload,
 )
 from .pipeline_compiler import (
@@ -31,6 +32,7 @@ from .pipeline_compiler import (
     deterministic_pipeline_source,
     function_name_for_flow_id,
     isolate_pipeline_nodes,
+    replace_node_functions,
     validate_compiled_equivalence,
     validate_pipeline_source,
 )
@@ -401,6 +403,7 @@ async def generate_pipeline_script_bundles_pipeline_first(
     await set_running_pipeline_stage(run, "pipeline_validation", progress_callback)
     validation_started = time.perf_counter()
     attempt = 1
+    tried_scopes: set[frozenset[str]] = set()
     while True:
         for step in run.steps:
             step.attempts = attempt
@@ -421,13 +424,14 @@ async def generate_pipeline_script_bundles_pipeline_first(
             break
         await set_running_pipeline_stage(run, "pipeline_repair", progress_callback)
         try:
-            payload = await repair_pipeline_payload(
+            payload = await repair_pipeline_draft(
                 request.llm_config,
                 plan,
                 payload,
                 integration_validation,
                 request.options.user_instruction,
                 record_usage,
+                tried_scopes,
             )
         except LLMGenerationError:
             if not request.options.allow_deterministic_fallback:
@@ -950,6 +954,113 @@ async def evaluate_pipeline_draft(
             )
             merge_validation_report(validation, execution)
     return requirements, compiled_by_node, validation
+
+
+def failing_flow_ids(
+    errors: list[str],
+    node_functions: dict[str, str],
+) -> set[str] | None:
+    """The nodes that the validation errors name, when every error names one.
+
+    Returns None when an error cannot be traced to a node function or when
+    every node failed, so the whole module has to be repaired.
+    """
+    failing: set[str] = set()
+    for error in errors:
+        named = {
+            flow_id
+            for flow_id in [
+                *re.findall(r"\bNode\s+([^:,\s]+)", error),
+                *re.findall(r"\.runtime/([^/\s'\"]+)/main\.py", error),
+            ]
+            if flow_id in node_functions
+        }
+        named.update(
+            flow_id
+            for flow_id, function_name in node_functions.items()
+            if error.startswith(function_name + " ")
+        )
+        if not named:
+            return None
+        failing.update(named)
+    if not failing or len(failing) >= len(node_functions):
+        return None
+    return failing
+
+
+def apply_node_repair(
+    payload: dict[str, Any],
+    patch: dict[str, Any],
+    function_names: list[str],
+) -> dict[str, Any]:
+    """Put the repaired node functions into the previous pipeline payload."""
+    functions = patch.get("functions") if isinstance(patch, dict) else None
+    if not isinstance(functions, dict):
+        raise PipelineCompilerError("Node repair payload is missing functions.")
+    missing = [name for name in function_names if not str(functions.get(name) or "").strip()]
+    if missing:
+        raise PipelineCompilerError(
+            "Node repair payload is missing functions: " + ", ".join(missing)
+        )
+    repaired = dict(payload)
+    repaired["pipeline_py"] = replace_node_functions(
+        str(payload.get("pipeline_py") or ""),
+        {name: str(functions[name]) for name in function_names},
+        str(patch.get("helpers_py") or ""),
+    )
+    if isinstance(patch.get("requirements"), list):
+        repaired["requirements"] = patch["requirements"]
+    if isinstance(patch.get("notes"), list):
+        repaired["notes"] = patch["notes"]
+    return repaired
+
+
+async def repair_pipeline_draft(
+    llm_config,
+    plan: dict[str, Any],
+    payload: dict[str, Any],
+    validation: ValidationReport,
+    user_instruction: str,
+    record_usage,
+    tried_scopes: set[frozenset[str]],
+) -> dict[str, Any]:
+    """Repair only the failing node functions when the errors name them.
+
+    The whole module is regenerated when the errors are not tied to nodes,
+    when the same nodes already had a scoped repair in this run (the cause
+    may be in another step), or when the scoped reply cannot be applied.
+    """
+    node_functions = {
+        str(node["flow_id"]): str(node["function_name"]) for node in plan["nodes"]
+    }
+    scope = failing_flow_ids(validation.errors, node_functions)
+    if scope and frozenset(scope) not in tried_scopes:
+        tried_scopes.add(frozenset(scope))
+        repair_functions = {flow_id: node_functions[flow_id] for flow_id in scope}
+        try:
+            patch = await repair_pipeline_nodes_payload(
+                llm_config,
+                plan,
+                payload,
+                repair_functions,
+                validation,
+                user_instruction,
+                record_usage,
+            )
+            return apply_node_repair(
+                payload, patch, sorted(repair_functions.values())
+            )
+        except (LLMGenerationError, PipelineCompilerError):
+            # Fall back to regenerating the whole module below.
+            pass
+    return await repair_pipeline_payload(
+        llm_config,
+        plan,
+        payload,
+        validation,
+        user_instruction,
+        record_usage,
+    )
 
 
 def model_free_executable_subplan(plan: dict[str, Any]) -> dict[str, Any]:
