@@ -250,6 +250,78 @@ def isolate_pipeline_nodes(
     return ast.unparse(module).strip() + "\n"
 
 
+def statement_source(lines: list[str], statement: ast.stmt) -> str:
+    """The source lines of one top-level statement, with its decorators."""
+    first_line = min(
+        [statement.lineno, *(item.lineno for item in getattr(statement, "decorator_list", []))]
+    )
+    return "\n".join(lines[first_line - 1 : statement.end_lineno or first_line])
+
+
+def split_node_functions(
+    functions_py: str,
+    function_names: list[str],
+) -> tuple[dict[str, str], str]:
+    """Split one source into the named function definitions and the rest."""
+    try:
+        body = ast.parse(functions_py).body
+    except SyntaxError as exc:
+        raise PipelineCompilerError(
+            f"Repaired functions have invalid syntax: {exc}"
+        ) from exc
+    lines = functions_py.splitlines()
+    replacements: dict[str, str] = {}
+    helpers: list[str] = []
+    for statement in body:
+        if (
+            isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and statement.name in function_names
+        ):
+            replacements[statement.name] = statement_source(lines, statement)
+        else:
+            helpers.append(statement_source(lines, statement))
+    return replacements, "\n\n\n".join(helpers)
+
+
+def _new_helper_source(tree: ast.Module, helpers_py: str) -> str:
+    """The helper statements the module does not have yet.
+
+    Imports always pass. A definition the module already has, unchanged, is
+    dropped; a changed one is an error, because other nodes may rely on it.
+    """
+    if not helpers_py.strip():
+        return ""
+    try:
+        helper_body = ast.parse(helpers_py).body
+    except SyntaxError as exc:
+        raise PipelineCompilerError(f"helpers_py has invalid syntax: {exc}") from exc
+    existing: dict[str, ast.stmt] = {}
+    for statement in tree.body:
+        if not isinstance(statement, (ast.Import, ast.ImportFrom)):
+            for name in provided_names(statement):
+                existing[name] = statement
+    lines = helpers_py.splitlines()
+    kept: list[str] = []
+    clashes: set[str] = set()
+    for statement in helper_body:
+        names = (
+            set() if isinstance(statement, (ast.Import, ast.ImportFrom))
+            else provided_names(statement) & existing.keys()
+        )
+        changed = {
+            name for name in names
+            if ast.dump(existing[name]) != ast.dump(statement)
+        }
+        clashes.update(changed)
+        if not names:
+            kept.append(statement_source(lines, statement))
+    if clashes:
+        raise PipelineCompilerError(
+            "helpers_py redefines existing names: " + ", ".join(sorted(clashes))
+        )
+    return "\n\n\n".join(kept)
+
+
 def replace_node_functions(
     source: str,
     replacements: dict[str, str],
@@ -297,35 +369,7 @@ def replace_node_functions(
     if not spans:
         return source
 
-    helpers = str(helpers_py or "").strip("\n")
-    if helpers.strip():
-        try:
-            helper_body = ast.parse(helpers).body
-        except SyntaxError as exc:
-            raise PipelineCompilerError(
-                f"helpers_py has invalid syntax: {exc}"
-            ) from exc
-        existing = {
-            name
-            for statement in tree.body
-            if not isinstance(statement, (ast.Import, ast.ImportFrom))
-            for name in provided_names(statement)
-        }
-        clashes = sorted(
-            {
-                name
-                for statement in helper_body
-                if not isinstance(statement, (ast.Import, ast.ImportFrom))
-                for name in provided_names(statement)
-            }
-            & existing
-        )
-        if clashes:
-            raise PipelineCompilerError(
-                "helpers_py redefines existing names: " + ", ".join(clashes)
-            )
-    else:
-        helpers = ""
+    helpers = _new_helper_source(tree, str(helpers_py or ""))
 
     lines = source.splitlines()
     spans.sort()

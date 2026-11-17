@@ -293,3 +293,138 @@ def test_replacing_a_function_keeps_the_rest_and_rejects_name_clashes():
         replace_node_functions(source, {"a": "def a(x):\n    return 1"}, "LIMIT = 9")
     with pytest.raises(PipelineCompilerError, match="exactly one definition"):
         replace_node_functions(source, {"a": "def c(x):\n    return 1"})
+
+
+class Text:
+    """Like Scripted, but each reply is the reply text itself."""
+
+    name = "text"
+
+    def __init__(self, *replies):
+        self.replies = list(replies)
+        self.prompts = []
+        self.requests = []
+
+    async def complete(self, *, system_prompt, user_prompt, json_output, max_tokens):
+        prompt = json.loads(user_prompt)
+        self.prompts.append(prompt)
+        self.requests.append({"system_prompt": system_prompt, "json_output": json_output})
+        reply = self.replies.pop(0)
+        return ModelReply(content=reply(prompt) if callable(reply) else reply)
+
+
+def _blocks(meta, code):
+    return f"Here it is.\n```json\n{json.dumps(meta)}\n```\n\n```python\n{code}\n```\n"
+
+
+def _valid_blocks(prompt):
+    payload = _valid(prompt)
+    return _blocks({"requirements": payload["requirements"], "notes": []}, payload["pipeline_py"])
+
+
+def test_code_can_be_returned_outside_json():
+    model = Text(_valid_blocks)
+    result = asyncio.run(generate(_graph(), model=model, options={"reply_format": "code_block"}))
+    assert result.accepted, result.validation
+    assert model.requests[0]["json_output"] is False
+    assert "```python block" in model.requests[0]["system_prompt"]
+    assert "exactly one JSON object" not in model.requests[0]["system_prompt"]
+
+
+def test_a_code_block_step_repair_returns_only_the_function():
+    def broken(prompt):
+        payload, _name, _good = _break_task(prompt)
+        return _blocks({"requirements": []}, payload["pipeline_py"])
+
+    def repair(prompt):
+        _payload, _name, good = _break_task({"pipeline_plan": prompt["pipeline_plan"]})
+        return _blocks({"requirements": []}, "import json\n\n\n" + good)
+
+    model = Text(broken, repair)
+    result = asyncio.run(generate(_graph(), model=model, options={"reply_format": "code_block"}))
+    assert result.accepted, result.validation
+    assert [p["operation"] for p in model.prompts] == ["generate_canonical_pipeline", "repair_pipeline_nodes"]
+    # The system prompt is the same for the draft and the repair.
+    assert model.requests[0]["system_prompt"] == model.requests[1]["system_prompt"]
+
+
+def test_a_repair_is_told_about_earlier_attempts_after_the_stable_prefix():
+    def broken(_prompt):
+        return {"nodes": "not a list"}
+
+    model = Text(*[lambda prompt: json.dumps(broken(prompt))] * 3)
+    asyncio.run(generate(_graph(), model=model, options={"repair_attempts": 2}))
+    first, second, third = model.prompts
+    assert all(list(prompt)[:2] == ["pipeline_plan", "user_instruction"] for prompt in model.prompts)
+    assert first["pipeline_plan"] == third["pipeline_plan"]
+    assert "earlier_attempts" not in second
+    assert [item["attempt"] for item in third["earlier_attempts"]] == [1]
+    assert third["earlier_attempts"][0]["validation_errors"]
+
+
+def _node_draft(context):
+    """A valid draft for one node; a destination declares no output."""
+    from inlumen.codegen.generator import fallback_script_payload
+    from inlumen.codegen.schemas import GenerateNodeScriptRequest
+
+    request = GenerateNodeScriptRequest.model_validate({"context": context})
+    payload = fallback_script_payload(request)
+    if not request.context.expected_outputs:
+        payload["outputs"] = []
+    return request.context.target_node.flow_id, payload
+
+
+def _node_drafts(prompt, skip=()):
+    drafts = {}
+    for node in prompt["nodes"]:
+        context = dict(node)
+        context["graph"] = {**prompt["graph"], "upstream_nodes": context.pop("upstream_nodes"),
+                            "downstream_nodes": context.pop("downstream_nodes")}
+        context["pipeline"] = {**prompt["pipeline"], **context["pipeline"]}
+        flow_id, payload = _node_draft(context)
+        if flow_id not in skip:
+            drafts[flow_id] = payload
+    return {"nodes": drafts}
+
+
+def _node_first(model, **options):
+    options = {"generation_strategy": "node_first", "validation_mode": "static", **options}
+    return asyncio.run(generate(_graph(), model=model, options=options))
+
+
+def test_node_first_drafts_every_step_in_one_request():
+    model = Scripted(_node_drafts)
+    result = _node_first(model)
+    assert result.accepted, result.validation
+    assert model.operations == ["generate_node_runtimes"]
+    assert sorted(result.packages) == ["1", "2", "3"]
+
+
+def test_a_step_missing_from_the_batch_is_generated_on_its_own():
+    def one(prompt):
+        return _node_draft(prompt["context"])[1]
+
+    model = Scripted(lambda prompt: _node_drafts(prompt, skip={"2"}), one)
+    result = _node_first(model)
+    assert result.accepted, result.validation
+    assert model.operations == ["generate_node_runtimes", "generate_node_runtime"]
+
+
+def test_node_first_can_still_ask_once_per_step():
+    def one(prompt):
+        return _node_draft(prompt["context"])[1]
+
+    model = Scripted(one, one, one)
+    result = _node_first(model, batch_node_drafts=False)
+    assert result.accepted, result.validation
+    assert model.operations == ["generate_node_runtime"] * 3
+
+
+def test_a_batch_of_code_blocks_is_split_by_node_heading():
+    from inlumen.codegen.llm import _node_batch_from_code_reply
+
+    reply = ('```json\n{"nodes": {"2": {"requirements": ["pandas"]}}}\n```\n'
+             "## node 2\n```python\nprint('two')\n```\n\n### node: 3\n```py\nprint('3')\n```\n")
+    nodes = _node_batch_from_code_reply(reply)["nodes"]
+    assert nodes == {"2": {"requirements": ["pandas"], "main_py": "print('two')\n"},
+                     "3": {"main_py": "print('3')\n"}}

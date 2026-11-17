@@ -84,13 +84,93 @@ def _usage_from_response(
     )
 
 
-def _json_from_model_content(content: Any) -> dict[str, Any]:
+def _reply_text(content: Any) -> str:
     if isinstance(content, list):
         content = "".join(
             str(item.get("text") or "") if isinstance(item, dict) else str(item)
             for item in content
         )
-    text = str(content or "").strip()
+    return str(content or "").strip()
+
+
+_FENCED_BLOCK = re.compile(
+    r"^```[ \t]*([A-Za-z0-9_+-]*)[ \t]*\r?\n(.*?)^```[ \t]*\r?$",
+    re.DOTALL | re.MULTILINE,
+)
+_PYTHON_FENCES = {"python", "py", "python3"}
+_NODE_HEADING = re.compile(
+    r"^#{2,}[ \t]*node[ \t:]+(\S+)[ \t]*\r?$", re.MULTILINE | re.IGNORECASE
+)
+
+
+def _json_block(text: str) -> dict[str, Any]:
+    """The object in the reply's first ```json block; {} when there is none."""
+    for language, body in _FENCED_BLOCK.findall(text):
+        if language.lower() != "json":
+            continue
+        try:
+            value = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise LLMGenerationError(
+                f"Coding model returned invalid JSON in its json block: {exc.msg}"
+            ) from exc
+        if not isinstance(value, dict):
+            raise LLMGenerationError("The json block must hold one JSON object.")
+        return value
+    return {}
+
+
+def code_reply_parser(code_key: str) -> Callable[[Any], dict[str, Any]]:
+    """Parse a reply of one ```json block and ```python code into a payload.
+
+    The code is stored under ``code_key``, so the payload has the same shape
+    as a JSON-mode reply.
+    """
+
+    def parse(content: Any) -> dict[str, Any]:
+        text = _reply_text(content)
+        code = [
+            body for language, body in _FENCED_BLOCK.findall(text)
+            if language.lower() in _PYTHON_FENCES
+        ]
+        if not code:
+            raise LLMGenerationError(
+                "Coding model reply has no complete ```python block"
+            )
+        return {**_json_block(text), code_key: "\n\n\n".join(code)}
+
+    return parse
+
+
+def _node_batch_from_code_reply(content: Any) -> dict[str, Any]:
+    """Parse '## node <flow_id>' headings, each followed by a ```python block."""
+    text = _reply_text(content)
+    described = _json_block(text).get("nodes")
+    described = described if isinstance(described, dict) else {}
+    headings = list(_NODE_HEADING.finditer(text))
+    nodes: dict[str, Any] = {}
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+        code = [
+            body for language, body in _FENCED_BLOCK.findall(text[heading.end():end])
+            if language.lower() in _PYTHON_FENCES
+        ]
+        if code:
+            flow_id = heading.group(1).strip("`*:")
+            details = described.get(flow_id)
+            nodes[flow_id] = {
+                **(details if isinstance(details, dict) else {}),
+                "main_py": code[0],
+            }
+    if not nodes:
+        raise LLMGenerationError(
+            "Coding model reply has no '## node <flow_id>' heading with a ```python block"
+        )
+    return {"nodes": nodes}
+
+
+def _json_from_model_content(content: Any) -> dict[str, Any]:
+    text = _reply_text(content)
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*```$", "", text)
     start = text.find("{")
@@ -266,8 +346,12 @@ async def generate_json(
     system_prompt: str,
     user_prompt: str,
     usage_callback: UsageCallback | None = None,
+    parse: Callable[[Any], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Ask the model for one JSON object.
+    """Ask the model for one payload: a JSON object unless ``parse`` is given.
+
+    ``parse`` turns the reply into the payload when the code is not wrapped
+    in JSON (see :func:`code_reply_parser`); JSON mode is then not requested.
 
     The request goes to the client installed with
     :func:`inlumen.codegen.model.use_model`, else to ``config``'s endpoint.
@@ -295,7 +379,8 @@ async def generate_json(
             reply = await client.complete(
                 system_prompt=system_prompt + retry_note,
                 user_prompt=user_prompt,
-                json_output=config.supports_json_output if config is not None else True,
+                json_output=parse is None
+                and (config.supports_json_output if config is not None else True),
                 max_tokens=max_tokens,
             )
         except BaseException as exc:
@@ -312,13 +397,14 @@ async def generate_json(
             await _record_usage(reply.usage, usage_callback)
             if reply.finish_reason not in CUT_OFF_FINISH_REASONS:
                 try:
-                    return _json_from_model_content(reply.content)
+                    return (parse or _json_from_model_content)(reply.content)
                 except LLMGenerationError as exc:
                     if last:
                         raise
                     retry_note = (
                         f"\n\nYour previous reply was rejected: {str(exc).rstrip('.')}. Reply again "
-                        "with one complete JSON object and nothing else."
+                        + ("in the required format, complete." if parse else
+                           "with one complete JSON object and nothing else.")
                     )
                     continue
             if last:
@@ -337,7 +423,7 @@ async def generate_json(
         else:
             retry_note = (
                 "\n\nYour previous reply was cut off at the output limit of "
-                f"{max_tokens} tokens. Reply again with a shorter, complete JSON object."
+                f"{max_tokens} tokens. Reply again with a shorter, complete reply."
             )
     raise AssertionError("unreachable")
 
@@ -445,6 +531,84 @@ packages. Use only allowed packages; do not use subprocess, sockets, eval,
 exec, os.system, or undeclared network access."""
 
 
+# The reply format is the only part of a system prompt that depends on
+# GenerationOptions.reply_format. "code_block" keeps the code out of a JSON
+# string, so the model does not have to escape quotes and newlines.
+_NODE_JSON_REPLY = """Return exactly one JSON object with: main_py (string), requirements (array of
+PEP 508 strings), outputs (array), implementation_plan (object), and notes
+(array of strings). Never return Markdown or a Dockerfile."""
+_NODE_CODE_REPLY = """Reply with one ```json block holding an object with requirements (array of
+PEP 508 strings), outputs (array), implementation_plan (object) and notes
+(array of strings), followed by one ```python block holding the complete
+main.py. Write the code as plain Python, never as a JSON string. Never return
+a Dockerfile."""
+_PIPELINE_JSON_REPLY = """Return
+exactly one JSON object with pipeline_py (string), requirements (array of PEP
+508 strings), and notes (array of strings). Never return Markdown or a
+Dockerfile."""
+_PIPELINE_CODE_REPLY = """Reply
+with one ```json block holding an object with requirements (array of PEP 508
+strings) and notes (array of strings), followed by one ```python block holding
+the complete module. Write the code as plain Python, never as a JSON string.
+Never return a Dockerfile."""
+assert _NODE_JSON_REPLY in NODE_SYSTEM_PROMPT and _PIPELINE_JSON_REPLY in PIPELINE_SYSTEM_PROMPT
+NODE_CODE_SYSTEM_PROMPT = NODE_SYSTEM_PROMPT.replace(_NODE_JSON_REPLY, _NODE_CODE_REPLY)
+PIPELINE_CODE_SYSTEM_PROMPT = PIPELINE_SYSTEM_PROMPT.replace(
+    _PIPELINE_JSON_REPLY, _PIPELINE_CODE_REPLY
+)
+
+# Instructions for one operation go in the user prompt, after the plan, so the
+# system prompt and the plan stay the same from the first draft to the last
+# repair and a provider can reuse them from its prompt cache.
+_NODE_REPAIR_INSTRUCTIONS = {
+    "json": (
+        "This request repairs an existing module. previous_pipeline_py is the "
+        "complete module; only the node functions named in repair_functions "
+        "failed validation. Instead of the usual reply, return exactly one JSON "
+        "object with functions (an object that maps each name in "
+        "repair_functions to the complete new source of that function, starting "
+        "at its def line), helpers_py (a string of new imports and new helper "
+        "definitions the repaired functions need, or an empty string), "
+        "requirements (the full array for the whole module) and notes. Do not "
+        "return pipeline_py. Every other function stays as it is: do not "
+        "redefine or rename an existing top-level name, and give any new helper "
+        "a new name."
+    ),
+    "code_block": (
+        "This request repairs an existing module. previous_pipeline_py is the "
+        "complete module; only the node functions named in repair_functions "
+        "failed validation. In the ```python block return only the complete new "
+        "definition of each function named in repair_functions, plus any new "
+        "imports and new helper definitions they need. Do not return the rest of "
+        "the module. Every other function stays as it is: do not redefine or "
+        "rename an existing top-level name, and give any new helper a new name. "
+        "The json block holds the full requirements array for the whole module."
+    ),
+}
+_NODE_BATCH_INSTRUCTIONS = {
+    "json": (
+        "This request generates several nodes at once. Each entry of nodes is "
+        "the context of one node; graph and pipeline are shared. Instead of the "
+        "usual reply, return exactly one JSON object with nodes: an object that "
+        "maps every flow_id in nodes to the usual object for that node (main_py, "
+        "requirements, outputs, implementation_plan, notes). Each main.py is a "
+        "separate program and shares no code with the others."
+    ),
+    "code_block": (
+        "This request generates several nodes at once. Each entry of nodes is "
+        "the context of one node; graph and pipeline are shared. Instead of the "
+        "usual reply, write one ```json block holding an object with nodes: an "
+        "object that maps every flow_id to requirements, outputs, "
+        "implementation_plan and notes for that node. Then, for every node, "
+        "write a line '## node <flow_id>' followed by one ```python block "
+        "holding its complete main.py. Each main.py is a separate program and "
+        "shares no code with the others."
+    ),
+}
+MAX_HISTORY_ATTEMPTS = 3
+MAX_HISTORY_ERROR_CHARS = 1500
+
+
 def without_validation_bytes(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: without_validation_bytes(item) for key, item in value.items()
@@ -454,23 +618,125 @@ def without_validation_bytes(value: Any) -> Any:
     return value
 
 
+def attempt_record(attempt: int, validation: ValidationReport) -> dict[str, Any]:
+    """What a later repair is told about an attempt that failed validation."""
+    return {
+        "attempt": attempt,
+        "validation_errors": [
+            error if len(error) <= MAX_HISTORY_ERROR_CHARS
+            else "[earlier text omitted] " + error[-MAX_HISTORY_ERROR_CHARS:]
+            for error in validation.errors
+        ],
+    }
+
+
+def _history(earlier_attempts: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """The attempts before the one being repaired, oldest first."""
+    if not earlier_attempts:
+        return {}
+    return {
+        "earlier_attempts_note": (
+            "These earlier drafts also failed. Do not bring their errors back."
+        ),
+        "earlier_attempts": earlier_attempts[-MAX_HISTORY_ATTEMPTS:],
+    }
+
+
+async def _ask(
+    config: LLMConfig,
+    prompt: dict[str, Any],
+    usage_callback: UsageCallback | None,
+    *,
+    json_system_prompt: str,
+    code_system_prompt: str,
+    reply_format: str,
+    code_key: str,
+    parse: Callable[[Any], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    code_reply = reply_format == "code_block"
+    return await generate_json(
+        config,
+        system_prompt=code_system_prompt if code_reply else json_system_prompt,
+        user_prompt=json.dumps(without_validation_bytes(prompt), ensure_ascii=False),
+        usage_callback=usage_callback,
+        parse=(parse or code_reply_parser(code_key)) if code_reply else None,
+    )
+
+
+async def _ask_node(config, prompt, usage_callback, reply_format, parse=None):
+    return await _ask(
+        config, prompt, usage_callback, reply_format=reply_format, code_key="main_py",
+        json_system_prompt=NODE_SYSTEM_PROMPT, code_system_prompt=NODE_CODE_SYSTEM_PROMPT,
+        parse=parse,
+    )
+
+
+async def _ask_pipeline(config, prompt, usage_callback, reply_format, code_key="pipeline_py"):
+    return await _ask(
+        config, prompt, usage_callback, reply_format=reply_format, code_key=code_key,
+        json_system_prompt=PIPELINE_SYSTEM_PROMPT,
+        code_system_prompt=PIPELINE_CODE_SYSTEM_PROMPT,
+    )
+
+
 async def generate_node_payload(
     config: LLMConfig,
     request: GenerateNodeScriptRequest,
     usage_callback: UsageCallback | None = None,
 ) -> dict[str, Any]:
-    context = request.context.model_dump(mode="json")
     prompt = {
-        "operation": "generate_node_runtime",
-        "context": context,
+        "context": request.context.model_dump(mode="json"),
         "user_instruction": request.options.user_instruction,
+        "operation": "generate_node_runtime",
     }
-    return await generate_json(
-        config,
-        system_prompt=NODE_SYSTEM_PROMPT,
-        user_prompt=json.dumps(without_validation_bytes(prompt), ensure_ascii=False),
-        usage_callback=usage_callback,
+    return await _ask_node(config, prompt, usage_callback, request.options.reply_format)
+
+
+async def generate_node_payloads(
+    config: LLMConfig,
+    requests: list[GenerateNodeScriptRequest],
+    usage_callback: UsageCallback | None = None,
+) -> dict[str, dict[str, Any]]:
+    """First drafts for several nodes of one pipeline in one request.
+
+    Returns the payloads by flow_id; a node the reply left out is missing.
+    """
+    first = requests[0]
+    shared = first.context.model_dump(mode="json", include={"graph", "pipeline"})
+    for key in ("upstream_nodes", "downstream_nodes"):
+        shared["graph"].pop(key, None)
+    for key in ("upstream_contracts", "downstream_contracts"):
+        shared["pipeline"].pop(key, None)
+    nodes = []
+    for request in requests:
+        context = request.context.model_dump(mode="json", exclude={"graph"})
+        context["upstream_nodes"] = request.context.graph.upstream_nodes
+        context["downstream_nodes"] = request.context.graph.downstream_nodes
+        context["pipeline"] = {
+            key: value for key, value in context["pipeline"].items()
+            if key in ("upstream_contracts", "downstream_contracts")
+        }
+        nodes.append(context)
+    reply_format = first.options.reply_format
+    prompt = {
+        **shared,
+        "user_instruction": first.options.user_instruction,
+        "operation": "generate_node_runtimes",
+        "instructions": _NODE_BATCH_INSTRUCTIONS[reply_format],
+        "nodes": nodes,
+    }
+    payload = await _ask_node(
+        config, prompt, usage_callback, reply_format, parse=_node_batch_from_code_reply
     )
+    drafts = payload.get("nodes")
+    if not isinstance(drafts, dict):
+        raise LLMGenerationError("Node batch reply is missing the nodes object.")
+    wanted = {request.context.target_node.flow_id for request in requests}
+    return {
+        str(flow_id): draft for flow_id, draft in drafts.items()
+        if str(flow_id) in wanted and isinstance(draft, dict)
+        and str(draft.get("main_py") or "").strip()
+    }
 
 
 async def repair_node_payload(
@@ -479,21 +745,18 @@ async def repair_node_payload(
     payload: dict[str, Any],
     validation: ValidationReport,
     usage_callback: UsageCallback | None = None,
+    earlier_attempts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     prompt = {
-        "operation": "repair_node_runtime",
         "context": request.context.model_dump(mode="json"),
         "user_instruction": request.options.user_instruction,
+        "operation": "repair_node_runtime",
+        **_history(earlier_attempts),
         "previous_payload": payload,
         "validation_errors": validation.errors,
         "validation_warnings": validation.warnings,
     }
-    return await generate_json(
-        config,
-        system_prompt=NODE_SYSTEM_PROMPT,
-        user_prompt=json.dumps(without_validation_bytes(prompt), ensure_ascii=False),
-        usage_callback=usage_callback,
-    )
+    return await _ask_node(config, prompt, usage_callback, request.options.reply_format)
 
 
 async def generate_pipeline_payload(
@@ -501,18 +764,14 @@ async def generate_pipeline_payload(
     plan: dict[str, Any],
     user_instruction: str,
     usage_callback: UsageCallback | None = None,
+    reply_format: str = "json",
 ) -> dict[str, Any]:
     prompt = {
-        "operation": "generate_canonical_pipeline",
         "pipeline_plan": plan,
         "user_instruction": user_instruction,
+        "operation": "generate_canonical_pipeline",
     }
-    return await generate_json(
-        config,
-        system_prompt=PIPELINE_SYSTEM_PROMPT,
-        user_prompt=json.dumps(without_validation_bytes(prompt), ensure_ascii=False),
-        usage_callback=usage_callback,
-    )
+    return await _ask_pipeline(config, prompt, usage_callback, reply_format)
 
 
 async def repair_pipeline_payload(
@@ -522,34 +781,19 @@ async def repair_pipeline_payload(
     validation: ValidationReport,
     user_instruction: str,
     usage_callback: UsageCallback | None = None,
+    reply_format: str = "json",
+    earlier_attempts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     prompt = {
-        "operation": "repair_canonical_pipeline",
         "pipeline_plan": plan,
         "user_instruction": user_instruction,
+        "operation": "repair_canonical_pipeline",
+        **_history(earlier_attempts),
         "previous_payload": payload,
         "validation_errors": validation.errors,
         "validation_warnings": validation.warnings,
     }
-    return await generate_json(
-        config,
-        system_prompt=PIPELINE_SYSTEM_PROMPT,
-        user_prompt=json.dumps(without_validation_bytes(prompt), ensure_ascii=False),
-        usage_callback=usage_callback,
-    )
-
-
-NODE_REPAIR_SYSTEM_PROMPT = PIPELINE_SYSTEM_PROMPT + """
-
-This request repairs an existing module. previous_pipeline_py is the complete
-module; only the node functions named in repair_functions failed validation.
-Return exactly one JSON object with functions (an object that maps each name
-in repair_functions to the complete new source of that function, starting at
-its def line), helpers_py (a string of new imports and new helper definitions
-the repaired functions need, or an empty string), requirements (the full
-array for the whole module) and notes. Do not return pipeline_py. Every other
-function stays as it is: do not redefine or rename an existing top-level
-name, and give any new helper a new name."""
+    return await _ask_pipeline(config, prompt, usage_callback, reply_format)
 
 
 async def repair_pipeline_nodes_payload(
@@ -560,15 +804,21 @@ async def repair_pipeline_nodes_payload(
     validation: ValidationReport,
     user_instruction: str,
     usage_callback: UsageCallback | None = None,
+    reply_format: str = "json",
+    earlier_attempts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Ask for new source of only the failing node functions.
 
-    ``repair_functions`` maps each failing flow_id to its function name.
+    ``repair_functions`` maps each failing flow_id to its function name. A
+    "json" reply holds ``functions`` and ``helpers_py``; a "code_block" reply
+    holds ``functions_py``, the new definitions and helpers as one source.
     """
     prompt = {
-        "operation": "repair_pipeline_nodes",
         "pipeline_plan": plan,
         "user_instruction": user_instruction,
+        "operation": "repair_pipeline_nodes",
+        "instructions": _NODE_REPAIR_INSTRUCTIONS[reply_format],
+        **_history(earlier_attempts),
         "previous_pipeline_py": payload.get("pipeline_py"),
         "previous_requirements": payload.get("requirements"),
         "repair_functions": sorted(repair_functions.values()),
@@ -576,9 +826,6 @@ async def repair_pipeline_nodes_payload(
         "validation_errors": validation.errors,
         "validation_warnings": validation.warnings,
     }
-    return await generate_json(
-        config,
-        system_prompt=NODE_REPAIR_SYSTEM_PROMPT,
-        user_prompt=json.dumps(without_validation_bytes(prompt), ensure_ascii=False),
-        usage_callback=usage_callback,
+    return await _ask_pipeline(
+        config, prompt, usage_callback, reply_format, code_key="functions_py"
     )

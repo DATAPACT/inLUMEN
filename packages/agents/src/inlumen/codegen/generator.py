@@ -19,7 +19,9 @@ from inlumen.contracts.task_package_contract import public_manifest, validate_pa
 from .generation_budget import budgeted
 from .llm import (
     LLMGenerationError,
+    attempt_record,
     generate_node_payload,
+    generate_node_payloads,
     generate_pipeline_payload,
     repair_node_payload,
     repair_pipeline_nodes_payload,
@@ -33,6 +35,7 @@ from .pipeline_compiler import (
     function_name_for_flow_id,
     isolate_pipeline_nodes,
     replace_node_functions,
+    split_node_functions,
     validate_compiled_equivalence,
     validate_pipeline_source,
 )
@@ -140,7 +143,13 @@ async def generate_node_script_bundle(
     request: GenerateNodeScriptRequest,
     *,
     usage_callback: GenerationUsageCallback | None = None,
+    draft_payload: dict[str, Any] | None = None,
 ) -> GenerateNodeScriptResponse:
+    """Generate, validate and repair one node.
+
+    ``draft_payload`` is a first draft that was already generated (in a batch
+    with other nodes); the node's own generation request is then skipped.
+    """
     # Freeze the same declaration used by whole-pipeline generation before any
     # implementation or repair request. Older callers may omit concrete paths.
     if not request.context.expected_outputs:
@@ -170,6 +179,8 @@ async def generate_node_script_bundle(
             raise LLMGenerationError("Code-generation model configuration is required.")
         payload = fallback_script_payload(request)
         used_fallback = True
+    elif draft_payload is not None:
+        payload = draft_payload
     else:
         try:
             payload = await generate_node_payload(
@@ -185,6 +196,7 @@ async def generate_node_script_bundle(
 
     files, data_contract, validation = await build_and_validate_node(request, payload)
     attempts = 1
+    earlier_attempts: list[dict[str, Any]] = []
     while (
         validation.status == "invalid"
         and request.llm_config is not None
@@ -197,12 +209,14 @@ async def generate_node_script_bundle(
                 payload,
                 validation,
                 record_usage,
+                earlier_attempts,
             )
         except LLMGenerationError:
             if not request.options.allow_deterministic_fallback:
                 raise
             payload = fallback_script_payload(request)
             used_fallback = True
+        earlier_attempts.append(attempt_record(attempts, validation))
         attempts += 1
         files, data_contract, validation = await build_and_validate_node(
             request,
@@ -389,6 +403,7 @@ async def generate_pipeline_script_bundles_pipeline_first(
                 plan,
                 request.options.user_instruction,
                 record_usage,
+                request.options.reply_format,
             )
         except LLMGenerationError:
             if not request.options.allow_deterministic_fallback:
@@ -404,6 +419,7 @@ async def generate_pipeline_script_bundles_pipeline_first(
     validation_started = time.perf_counter()
     attempt = 1
     tried_scopes: set[frozenset[str]] = set()
+    earlier_attempts: list[dict[str, Any]] = []
     while True:
         for step in run.steps:
             step.attempts = attempt
@@ -432,6 +448,8 @@ async def generate_pipeline_script_bundles_pipeline_first(
                 request.options.user_instruction,
                 record_usage,
                 tried_scopes,
+                request.options.reply_format,
+                earlier_attempts,
             )
         except LLMGenerationError:
             if not request.options.allow_deterministic_fallback:
@@ -439,6 +457,7 @@ async def generate_pipeline_script_bundles_pipeline_first(
             payload = deterministic_pipeline_payload(plan)
             used_fallback = True
         payload = normalize_pipeline_payload(payload, plan)
+        earlier_attempts.append(attempt_record(attempt, integration_validation))
         attempt += 1
         await set_running_pipeline_stage(run, "pipeline_validation", progress_callback)
 
@@ -994,7 +1013,14 @@ def apply_node_repair(
     function_names: list[str],
 ) -> dict[str, Any]:
     """Put the repaired node functions into the previous pipeline payload."""
-    functions = patch.get("functions") if isinstance(patch, dict) else None
+    patch = patch if isinstance(patch, dict) else {}
+    helpers_py = str(patch.get("helpers_py") or "")
+    functions = patch.get("functions")
+    if str(patch.get("functions_py") or "").strip():
+        # A code-block reply: the new definitions and helpers in one source.
+        functions, helpers_py = split_node_functions(
+            str(patch["functions_py"]), function_names
+        )
     if not isinstance(functions, dict):
         raise PipelineCompilerError("Node repair payload is missing functions.")
     missing = [name for name in function_names if not str(functions.get(name) or "").strip()]
@@ -1006,7 +1032,7 @@ def apply_node_repair(
     repaired["pipeline_py"] = replace_node_functions(
         str(payload.get("pipeline_py") or ""),
         {name: str(functions[name]) for name in function_names},
-        str(patch.get("helpers_py") or ""),
+        helpers_py,
     )
     if isinstance(patch.get("requirements"), list):
         repaired["requirements"] = patch["requirements"]
@@ -1023,6 +1049,8 @@ async def repair_pipeline_draft(
     user_instruction: str,
     record_usage,
     tried_scopes: set[frozenset[str]],
+    reply_format: str = "json",
+    earlier_attempts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Repair only the failing node functions when the errors name them.
 
@@ -1046,6 +1074,8 @@ async def repair_pipeline_draft(
                 validation,
                 user_instruction,
                 record_usage,
+                reply_format,
+                earlier_attempts,
             )
             return apply_node_repair(
                 payload, patch, sorted(repair_functions.values())
@@ -1060,6 +1090,8 @@ async def repair_pipeline_draft(
         validation,
         user_instruction,
         record_usage,
+        reply_format,
+        earlier_attempts,
     )
 
 
@@ -1255,6 +1287,17 @@ async def generate_pipeline_script_bundles_node_first(
 
     await emit_pipeline_progress(progress_callback, run)
 
+    drafts = await draft_nodes_in_one_request(
+        request,
+        nodes_to_generate(
+            ordered_ids, nodes_by_id, start_from_flow_id, target_flow_ids
+        ),
+        planned_contexts,
+        planned_nodes,
+        run.run_id,
+        record_usage,
+    )
+
     with validation_workspace(f"pipeline-run-{run.run_id}") as handoff_tmp:
         handoff_root = Path(handoff_tmp)
         for flow_id in ordered_ids:
@@ -1438,6 +1481,7 @@ async def generate_pipeline_script_bundles_node_first(
                     llm_config=request.llm_config,
                 ),
                 usage_callback=record_usage,
+                draft_payload=drafts.get(flow_id),
             )
             artifact = node_response.generated_artifact
             step.stage = "static_validation"
@@ -1529,6 +1573,82 @@ async def generate_pipeline_script_bundles_node_first(
         integration_validation=integration_validation,
         generation_run=run,
     )
+
+
+def nodes_to_generate(
+    ordered_ids: list[str],
+    nodes_by_id: dict[str, Any],
+    start_from_flow_id: str | None,
+    target_flow_ids: set[str] | None,
+) -> list[str]:
+    """The nodes a node-first run generates; the others are replayed."""
+    selected: list[str] = []
+    started = start_from_flow_id is None
+    for flow_id in ordered_ids:
+        if nodes_by_id[flow_id].type == "config":
+            continue
+        if flow_id == start_from_flow_id:
+            started = True
+        if started and not (target_flow_ids and flow_id not in target_flow_ids):
+            selected.append(flow_id)
+    return selected
+
+
+async def draft_nodes_in_one_request(
+    request: GeneratePipelineScriptsRequest,
+    flow_ids: list[str],
+    planned_contexts: dict[str, GenerationContext],
+    planned_nodes: dict[str, dict[str, Any]],
+    run_id: str,
+    record_usage,
+) -> dict[str, dict[str, Any]]:
+    """First drafts for every node to generate, from one model request.
+
+    One request per node resends the whole graph each time. The batch is
+    written from the planned contracts, before any upstream node has run, so
+    a draft does not see samples of real upstream output; each node is still
+    validated and repaired on its own, and a repair does see them. A node
+    missing from the reply, or a failed batch, is generated on its own.
+    """
+    if (
+        len(flow_ids) < 2
+        or request.llm_config is None
+        or not request.options.batch_node_drafts
+    ):
+        return {}
+    requests = []
+    for flow_id in flow_ids:
+        planned = planned_contexts[flow_id]
+        requests.append(
+            GenerateNodeScriptRequest(
+                context=planned.model_copy(
+                    update={
+                        "pipeline": {
+                            **planned.pipeline,
+                            "downstream_contracts": planned_nodes[flow_id][
+                                "downstream_contracts"
+                            ],
+                            "generation_mode": "pipeline",
+                            "generation_run_id": run_id,
+                        },
+                        "expected_outputs": [
+                            item if item.filename else item.model_copy(
+                                update={"filename": artifact_filename(flow_id, item)}
+                            )
+                            for item in planned.expected_outputs
+                        ],
+                    }
+                ),
+                options=request.options,
+                llm_config=request.llm_config,
+            )
+        )
+    try:
+        return await generate_node_payloads(
+            request.llm_config, requests, record_usage
+        )
+    except LLMGenerationError:
+        return {}
 
 
 async def run_pipeline_docker_validation(
