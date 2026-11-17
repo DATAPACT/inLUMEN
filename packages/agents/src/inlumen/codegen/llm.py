@@ -485,7 +485,11 @@ PIPELINE_WORK_DIR, INLUMEN_INPUT_MANIFEST and the parameter variables named
 below; do not read any other environment variable. Each descriptor has filename, path,
 target_port, source_node, kind and format. Open the file at the descriptor's
 path value; it is PIPELINE_INPUT_DIR joined with the descriptor's filename,
-which may include a folder. No output manifest is required: the platform
+which may include a folder. The manifest has one descriptor for each entry of
+context.available_inputs, with exactly the same filename and target_port: find
+the descriptor of an input by comparing its filename with that entry's
+filename. Do not match on a name you derive, on source_node or on a file name
+without its folder. No output manifest is required: the platform
 finds the declared files in PIPELINE_OUTPUT_DIR.
 There is exactly one descriptor per incoming connection, identified by
 consumer target_port and declared artifact name or filename. Runtime connection_id and source_node are diagnostic identities; do not hard-code their graph-specific values. Never discover inputs by scanning a directory or
@@ -516,7 +520,8 @@ Dockerfile. Define every requested node function exactly once with signature
 (inputs, output_dir, context). Functions must be synchronous, must not call
 other node functions, must materialize their declared artifacts in output_dir,
 and must return a list with one descriptor per declared output, in any order
-(terminal destinations may return no artifact). Most nodes declare one output;
+(terminal destinations may return no artifact). In a returned descriptor,
+filename is the declared file name exactly as declared, never a path. Most nodes declare one output;
 a node with several declares a distinct port on each. A directory bundle is
 one descriptor.
 Inputs are explicitly bound by the runtime. Select by consumer target_port and,

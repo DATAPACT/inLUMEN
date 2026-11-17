@@ -453,7 +453,8 @@ def source_semantic_errors(
                 + "."
             )
     if task == "model_training" and plan.get("execution_profile") == "classical_ml":
-        if "fit" not in call_names:
+        # Clustering and decomposition fit through fit_predict / fit_transform.
+        if not call_names & {"fit", "fit_predict", "fit_transform", "partial_fit"}:
             errors.append(
                 f"Node {node.flow_id} does not fit a classical ML estimator."
             )

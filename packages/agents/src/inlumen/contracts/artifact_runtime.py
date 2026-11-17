@@ -287,6 +287,12 @@ def validate_result(root, declarations, actual=None, *, producer=""):
                         and declaration.get(field)
                         and str(item[field]) != str(declaration[field])
                     ):
+                        # A filename given as a path to the declared file is the same file.
+                        if field == "filename" and (
+                            (Path(root) / str(item[field])).resolve()
+                            == (Path(root) / declaration[field]).resolve()
+                        ):
+                            continue
                         raise ArtifactContractError(
                             f"Returned artifact {field} {item[field]!r} does not match {declaration[field]!r}"
                         )

@@ -387,17 +387,34 @@ def _node_drafts(prompt, skip=()):
     return {"nodes": drafts}
 
 
+def _two_task_graph():
+    graph = _graph()
+    graph["nodes"].insert(2, {"id": "2b", "data": {"type": "task", "label": "Round", "description": "Round the total"}})
+    graph["edges"] = [{"id": "e1", "source": "1", "target": "2"}, {"id": "e2", "source": "2", "target": "2b"},
+                      {"id": "e3", "source": "2b", "target": "3"}]
+    return graph
+
+
 def _node_first(model, **options):
     options = {"generation_strategy": "node_first", "validation_mode": "static", **options}
-    return asyncio.run(generate(_graph(), model=model, options=options))
+    return asyncio.run(generate(_two_task_graph(), model=model, options=options))
 
 
 def test_node_first_drafts_every_step_in_one_request():
-    model = Scripted(_node_drafts)
+    asked = []
+
+    def drafts(prompt):
+        asked.extend(node["target_node"]["flow_id"] for node in prompt["nodes"])
+        return _node_drafts(prompt)
+
+    model = Scripted(drafts)
     result = _node_first(model)
     assert result.accepted, result.validation
     assert model.operations == ["generate_node_runtimes"]
-    assert sorted(result.packages) == ["1", "2", "3"]
+    assert sorted(result.packages) == ["1", "2", "2b", "3"]
+    # The source and the destination are compiler-owned, as in whole-pipeline generation.
+    assert asked == ["2", "2b"]
+    assert "Compiler-owned boundary adapter." in result.packages["1"]["node-manifest.json"]
 
 
 def test_a_step_missing_from_the_batch_is_generated_on_its_own():
@@ -414,10 +431,10 @@ def test_node_first_can_still_ask_once_per_step():
     def one(prompt):
         return _node_draft(prompt["context"])[1]
 
-    model = Scripted(one, one, one)
+    model = Scripted(one, one)
     result = _node_first(model, batch_node_drafts=False)
     assert result.accepted, result.validation
-    assert model.operations == ["generate_node_runtime"] * 3
+    assert model.operations == ["generate_node_runtime"] * 2
 
 
 def test_a_batch_of_code_blocks_is_split_by_node_heading():
@@ -430,23 +447,26 @@ def test_a_batch_of_code_blocks_is_split_by_node_heading():
                      "3": {"main_py": "print('3')\n"}}
 
 
-def test_a_malformed_output_declaration_is_repaired_not_fatal():
-    seen = []
+def test_a_malformed_output_declaration_is_an_error_not_a_crash():
+    from inlumen.codegen.generator import declared_outputs
 
-    def drafts(prompt):
-        reply = _node_drafts(prompt)
-        reply["nodes"]["3"]["outputs"] = [{"filename": "report.csv"}]  # no name, no kind
-        return reply
+    outputs, errors = declared_outputs({"outputs": [
+        {"filename": "report.csv"},  # no name, no kind
+        {"name": "report", "kind": "table", "format": "csv", "filename": "report.csv"},
+    ]})
+    assert [item.name for item in outputs] == ["report"]
+    assert len(errors) == 1 and "outputs[0] is not a valid artifact declaration" in errors[0]
 
-    def repair(prompt):
-        seen.extend(prompt["validation_errors"])
-        return _node_draft(prompt["context"])[1]
 
-    model = Scripted(drafts, repair)
-    result = _node_first(model)
-    assert result.accepted, result.validation
-    assert model.operations == ["generate_node_runtimes", "repair_node_runtime"]
-    assert any("outputs[0] is not a valid artifact declaration" in error for error in seen)
+def test_a_returned_path_to_the_declared_file_is_accepted(tmp_path):
+    from inlumen.contracts.artifact_runtime import ArtifactContractError, validate_result
+
+    (tmp_path / "totals.csv").write_text("customer,total\nann,15\n")
+    declared = [{"name": "totals", "kind": "table", "format": "csv", "filename": "totals.csv"}]
+    returned = {"name": "totals", "filename": str(tmp_path / "totals.csv")}
+    assert validate_result(tmp_path, declared, [returned])
+    with pytest.raises(ArtifactContractError):
+        validate_result(tmp_path, declared, [{"name": "totals", "filename": str(tmp_path / "other.csv")}])
 
 
 def test_outputs_are_handed_on_without_an_output_manifest(tmp_path):

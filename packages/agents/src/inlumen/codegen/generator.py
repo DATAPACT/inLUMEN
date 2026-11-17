@@ -1292,16 +1292,19 @@ async def generate_pipeline_script_bundles_node_first(
 
     await emit_pipeline_progress(progress_callback, run)
 
+    to_generate = nodes_to_generate(
+        ordered_ids, nodes_by_id, start_from_flow_id, target_flow_ids
+    )
+    boundary_drafts = boundary_node_payloads(complete_plan, to_generate)
     drafts = await draft_nodes_in_one_request(
         request,
-        nodes_to_generate(
-            ordered_ids, nodes_by_id, start_from_flow_id, target_flow_ids
-        ),
+        [flow_id for flow_id in to_generate if flow_id not in boundary_drafts],
         planned_contexts,
         planned_nodes,
         run.run_id,
         record_usage,
     )
+    drafts.update(boundary_drafts)
 
     with validation_workspace(f"pipeline-run-{run.run_id}") as handoff_tmp:
         handoff_root = Path(handoff_tmp)
@@ -1578,6 +1581,50 @@ async def generate_pipeline_script_bundles_node_first(
         integration_validation=integration_validation,
         generation_run=run,
     )
+
+
+def boundary_node_payloads(
+    plan: dict[str, Any],
+    flow_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Compiler-owned programs for the source and destination nodes.
+
+    Whole-pipeline generation never asks the model for these nodes: it
+    replaces them with trusted adapters. Node-first uses the same code, so a
+    source or destination behaves the same whichever way it was generated.
+    """
+    boundary = [
+        node for node in plan["nodes"]
+        if node["flow_id"] in flow_ids
+        and (
+            is_input_node_kind(str((node.get("descriptor") or {}).get("type") or ""))
+            or is_output_node_kind(str((node.get("descriptor") or {}).get("type") or ""))
+        )
+    ]
+    if not boundary:
+        return {}
+    node_functions = {
+        str(node["flow_id"]): str(node["function_name"]) for node in plan["nodes"]
+    }
+    try:
+        source = apply_trusted_adapters(deterministic_pipeline_source(plan), plan)
+        compiled = {
+            item.flow_id: item.source
+            for item in compile_pipeline_nodes(source, node_functions)
+        }
+    except PipelineCompilerError:
+        return {}
+    return {
+        node["flow_id"]: {
+            "main_py": compiled[node["flow_id"]],
+            "requirements": [],
+            "implementation_plan": node.get("implementation_plan") or {},
+            "outputs": node["outputs"],
+            "notes": ["Compiler-owned boundary adapter."],
+        }
+        for node in boundary
+        if compiled.get(node["flow_id"])
+    }
 
 
 def nodes_to_generate(

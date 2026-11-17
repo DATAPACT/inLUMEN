@@ -531,6 +531,10 @@ import subprocess
 import sys
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
+class _NodeFailed(Exception):
+    """A node's program exited with an error; its own output says why."""
+
+
 def _run_compiled_pipeline():
     root = Path(os.environ.get("PIPELINE_OUTPUT_DIR") or os.environ["INLUMEN_OUTPUT_DIR"]).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -579,7 +583,9 @@ def _run_compiled_pipeline():
         contract = {"contract_id": CONTRACT_ID, "version": "2", "inputs": node.get("inputs", []), "outputs": node.get("outputs", [])}
         env = {**os.environ, **prepare_node_environment(input_dir, output, work, inputs, contract,
             node.get("descriptor", {}).get("parameters", {}))}
-        subprocess.run([sys.executable, str(script)], env=env, check=True)
+        status = subprocess.run([sys.executable, str(script)], env=env).returncode
+        if status:
+            raise _NodeFailed(flow_id, status)
         actual = json.loads((work / "outputs.json").read_text())["outputs"]
         if contract["outputs"]:
             actual = validate_result(output, contract["outputs"], actual, producer=flow_id)
@@ -624,7 +630,11 @@ def _run_compiled_pipeline():
     atomic_json(os.environ.get("INLUMEN_OUTPUT_MANIFEST") or root / "output_manifest.json", {"outputs": final})
 
 if __name__ == "__main__":
-    _run_compiled_pipeline()
+    try:
+        _run_compiled_pipeline()
+    except _NodeFailed as failure:
+        # The node already printed its error; a second traceback would hide it.
+        sys.exit(f"Node {failure.args[0]}: the step's program exited with status {failure.args[1]}. Its error is printed above.")
 '''
 
 
