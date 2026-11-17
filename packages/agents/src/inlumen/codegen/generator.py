@@ -273,6 +273,11 @@ async def build_and_validate_node(
     if not is_output_node_kind(request.context.target_node.type) and not data_contract.outputs:
         validation.errors.append("Producing nodes must declare at least one output artifact.")
         validation.status = "invalid"
+    if not request.context.expected_outputs:
+        declaration_errors = declared_outputs(payload)[1]
+        if declaration_errors:
+            validation.errors.extend(declaration_errors)
+            validation.status = "invalid"
     merge_validation_report(
         validation,
         validate_contract_alignment(
@@ -1900,21 +1905,40 @@ def infer_requirements_from_imports(
     return requirements
 
 
+def declared_outputs(payload: dict[str, Any]) -> tuple[list[ExpectedArtifact], list[str]]:
+    """The outputs a model reply declares, and an error for each unusable one.
+
+    A reply is model text: a declaration without a name or a kind is reported
+    for the repair loop instead of ending the run.
+    """
+    outputs: list[ExpectedArtifact] = []
+    errors: list[str] = []
+    items = payload.get("outputs")
+    for index, item in enumerate(items if isinstance(items, list) else []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            outputs.append(ExpectedArtifact.model_validate(item))
+        except ValueError as exc:
+            fields = sorted(
+                {".".join(str(part) for part in error["loc"]) for error in exc.errors()}
+            ) if hasattr(exc, "errors") else []
+            errors.append(
+                f"outputs[{index}] is not a valid artifact declaration"
+                + (f" (missing or invalid: {', '.join(fields)})" if fields else "")
+                + ". Each output needs a name and a kind."
+            )
+    return outputs, errors
+
+
 def data_contract_from_payload(
     request: GenerateNodeScriptRequest,
     payload: dict[str, Any],
 ) -> DataContract:
-    output_payload = payload.get("outputs")
     if request.context.expected_outputs:
         outputs = request.context.expected_outputs
-    elif isinstance(output_payload, list):
-        outputs = [
-            ExpectedArtifact.model_validate(item)
-            for item in output_payload
-            if isinstance(item, dict)
-        ]
     else:
-        outputs = []
+        outputs = declared_outputs(payload)[0]
     return DataContract(
         inputs=[
             ExpectedArtifact(
@@ -2815,7 +2839,13 @@ def validate_contract_alignment(
     checks = ["planned_output_contract_alignment"]
     errors: list[str] = []
     if len(actual.outputs) != len(expected_outputs):
-        errors.append("Output cardinality differs from the agreed artifact contract")
+        detail = (
+            f": the node declares {len(actual.outputs)} output(s), the contract "
+            f"has {len(expected_outputs)}."
+        )
+        if not expected_outputs:
+            detail += " A node without an agreed output must return an empty outputs array."
+        errors.append("Output cardinality differs from the agreed artifact contract" + detail)
     actual_by_name = {item.name: item for item in actual.outputs}
     for expected in expected_outputs:
         actual_output = actual_by_name.get(expected.name)

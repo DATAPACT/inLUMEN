@@ -333,6 +333,7 @@ def execute_node_with_docker_handoff(
                 output_descriptors_from_manifest(
                     workspace / "runtime" / "outputs.json",
                     outputs_dir,
+                    artifact.data_contract.outputs,
                 ),
                 handoff_dir,
             )
@@ -433,6 +434,7 @@ def validate_pipeline_with_docker(
                         output_descriptors_from_manifest(
                             workspace / "runtime" / "outputs.json",
                             outputs_dir,
+                            artifact.data_contract.outputs,
                         ),
                         handoff_root / flow_id,
                     )
@@ -1653,9 +1655,23 @@ def json_type_matches(value: object, expected_type: str) -> bool:
 def output_descriptors_from_manifest(
     output_manifest_path: Path,
     outputs_dir: Path,
+    expected_outputs: list[ExpectedArtifact] | None = None,
 ) -> list[FileDescriptor]:
-    manifest = json.loads(output_manifest_path.read_text(encoding="utf-8"))
-    outputs = manifest.get("outputs") or manifest.get("files") or []
+    """Describe what a node published, for the node that consumes it.
+
+    A script does not have to write an output manifest: the declared files
+    are then looked up in ``outputs_dir``. A node without declared outputs,
+    such as a destination, hands nothing on.
+    """
+    if output_manifest_path.is_file():
+        manifest = json.loads(output_manifest_path.read_text(encoding="utf-8"))
+        outputs = manifest.get("outputs") or manifest.get("files") or []
+    else:
+        outputs = [
+            item.model_dump(mode="json")
+            for item in expected_outputs or []
+            if item.filename and (outputs_dir / item.filename).exists()
+        ]
     descriptors = []
     for item in outputs:
         if not isinstance(item, dict):

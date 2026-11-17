@@ -477,6 +477,16 @@ main.py in a standard workspace. The program must read upstream files directly
 from PIPELINE_INPUT_DIR and write every downstream artifact directly beneath
 PIPELINE_OUTPUT_DIR. Port names never create implicit workspace directories.
 Use the input descriptors in INLUMEN_INPUT_MANIFEST to open their explicit paths.
+INLUMEN_INPUT_MANIFEST holds the path of a JSON file, not JSON text and not a
+file name inside the input folder. Read it exactly like this:
+with open(os.environ["INLUMEN_INPUT_MANIFEST"]) as handle: inputs = json.load(handle)["inputs"]
+The platform sets only PIPELINE_INPUT_DIR, PIPELINE_OUTPUT_DIR,
+PIPELINE_WORK_DIR, INLUMEN_INPUT_MANIFEST and the parameter variables named
+below; do not read any other environment variable. Each descriptor has filename, path,
+target_port, source_node, kind and format. Open the file at the descriptor's
+path value; it is PIPELINE_INPUT_DIR joined with the descriptor's filename,
+which may include a folder. No output manifest is required: the platform
+finds the declared files in PIPELINE_OUTPUT_DIR.
 There is exactly one descriptor per incoming connection, identified by
 consumer target_port and declared artifact name or filename. Runtime connection_id and source_node are diagnostic identities; do not hard-code their graph-specific values. Never discover inputs by scanning a directory or
 selecting the first matching file. Only the declared output artifacts are handed

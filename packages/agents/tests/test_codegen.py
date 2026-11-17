@@ -428,3 +428,45 @@ def test_a_batch_of_code_blocks_is_split_by_node_heading():
     nodes = _node_batch_from_code_reply(reply)["nodes"]
     assert nodes == {"2": {"requirements": ["pandas"], "main_py": "print('two')\n"},
                      "3": {"main_py": "print('3')\n"}}
+
+
+def test_a_malformed_output_declaration_is_repaired_not_fatal():
+    seen = []
+
+    def drafts(prompt):
+        reply = _node_drafts(prompt)
+        reply["nodes"]["3"]["outputs"] = [{"filename": "report.csv"}]  # no name, no kind
+        return reply
+
+    def repair(prompt):
+        seen.extend(prompt["validation_errors"])
+        return _node_draft(prompt["context"])[1]
+
+    model = Scripted(drafts, repair)
+    result = _node_first(model)
+    assert result.accepted, result.validation
+    assert model.operations == ["generate_node_runtimes", "repair_node_runtime"]
+    assert any("outputs[0] is not a valid artifact declaration" in error for error in seen)
+
+
+def test_outputs_are_handed_on_without_an_output_manifest(tmp_path):
+    from inlumen.codegen.sandbox import output_descriptors_from_manifest
+    from inlumen.codegen.schemas import ExpectedArtifact
+
+    (tmp_path / "totals.csv").write_text("customer,total\nann,15\n")
+    declared = [
+        ExpectedArtifact(name="totals", kind="table", format="csv", filename="totals.csv"),
+        ExpectedArtifact(name="absent", kind="json", format="json", filename="absent.json"),
+    ]
+    found = output_descriptors_from_manifest(tmp_path / "runtime" / "outputs.json", tmp_path, declared)
+    assert [(item.filename, item.kind, item.columns) for item in found] == [("totals.csv", "table", ["customer", "total"])]
+    # A destination declares nothing and hands nothing on.
+    assert output_descriptors_from_manifest(tmp_path / "runtime" / "outputs.json", tmp_path, []) == []
+
+
+def test_the_node_prompt_says_how_to_read_the_input_manifest():
+    from inlumen.codegen.llm import NODE_CODE_SYSTEM_PROMPT, NODE_SYSTEM_PROMPT
+
+    for prompt in (NODE_SYSTEM_PROMPT, NODE_CODE_SYSTEM_PROMPT):
+        assert 'open(os.environ["INLUMEN_INPUT_MANIFEST"])' in prompt
+        assert "No output manifest is required" in prompt
