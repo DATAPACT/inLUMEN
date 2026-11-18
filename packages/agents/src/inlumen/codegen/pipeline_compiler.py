@@ -250,6 +250,184 @@ def isolate_pipeline_nodes(
     return ast.unparse(module).strip() + "\n"
 
 
+def statement_source(lines: list[str], statement: ast.stmt) -> str:
+    """The source lines of one top-level statement, with its decorators."""
+    first_line = min(
+        [statement.lineno, *(item.lineno for item in getattr(statement, "decorator_list", []))]
+    )
+    return "\n".join(lines[first_line - 1 : statement.end_lineno or first_line])
+
+
+def split_node_functions(
+    functions_py: str,
+    function_names: list[str],
+) -> tuple[dict[str, str], str]:
+    """Split one source into the named function definitions and the rest."""
+    try:
+        body = ast.parse(functions_py).body
+    except SyntaxError as exc:
+        raise PipelineCompilerError(
+            f"Repaired functions have invalid syntax: {exc}"
+        ) from exc
+    lines = functions_py.splitlines()
+    replacements: dict[str, str] = {}
+    helpers: list[str] = []
+    for statement in body:
+        if (
+            isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and statement.name in function_names
+        ):
+            replacements[statement.name] = statement_source(lines, statement)
+        else:
+            helpers.append(statement_source(lines, statement))
+    return replacements, "\n\n\n".join(helpers)
+
+
+def outline_module(source: str, shown: set[str], node_functions: set[str]) -> str:
+    """``source`` with the bodies of the node functions not in ``shown`` left out.
+
+    Imports, constants and helpers stay, so a repair of the shown functions
+    sees every name it may use without reading the other steps.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+    lines = source.splitlines()
+    hidden = [
+        statement for statement in tree.body
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and statement.name in node_functions - shown
+        and statement.body[0].lineno > statement.lineno
+    ]
+    for statement in sorted(hidden, key=lambda item: item.lineno, reverse=True):
+        first = statement.body[0].lineno
+        lines[first - 1 : statement.end_lineno] = ["    ...  # unchanged, not shown"]
+    return "\n".join(lines) + "\n"
+
+
+def _new_helper_source(tree: ast.Module, helpers_py: str) -> tuple[str, str]:
+    """The imports and the other helper statements the module does not have yet.
+
+    Imports always pass. A definition the module already has, unchanged, is
+    dropped; a changed one is an error, because other nodes may rely on it.
+    """
+    if not helpers_py.strip():
+        return "", ""
+    try:
+        helper_body = ast.parse(helpers_py).body
+    except SyntaxError as exc:
+        raise PipelineCompilerError(f"helpers_py has invalid syntax: {exc}") from exc
+    existing: dict[str, ast.stmt] = {}
+    for statement in tree.body:
+        if not isinstance(statement, (ast.Import, ast.ImportFrom)):
+            for name in provided_names(statement):
+                existing[name] = statement
+    lines = helpers_py.splitlines()
+    kept: list[str] = []
+    imports: list[str] = []
+    clashes: set[str] = set()
+    for statement in helper_body:
+        if isinstance(statement, (ast.Import, ast.ImportFrom)):
+            imports.append(statement_source(lines, statement))
+            continue
+        names = (
+            set() if isinstance(statement, (ast.Import, ast.ImportFrom))
+            else provided_names(statement) & existing.keys()
+        )
+        changed = {
+            name for name in names
+            if ast.dump(existing[name]) != ast.dump(statement)
+        }
+        clashes.update(changed)
+        if not names:
+            kept.append(statement_source(lines, statement))
+    if clashes:
+        raise PipelineCompilerError(
+            "helpers_py redefines existing names: " + ", ".join(sorted(clashes))
+        )
+    return "\n".join(imports), "\n\n\n".join(kept)
+
+
+def _first_code_line(tree: ast.Module) -> int:
+    """The line of the first statement after the docstring and __future__ imports."""
+    for index, statement in enumerate(tree.body):
+        docstring = (
+            index == 0
+            and isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Constant)
+            and isinstance(statement.value.value, str)
+        )
+        future = isinstance(statement, ast.ImportFrom) and statement.module == "__future__"
+        if not docstring and not future:
+            return min([statement.lineno, *(item.lineno for item in getattr(statement, "decorator_list", []))])
+    return len(tree.body) and (tree.body[-1].end_lineno or 0) + 1 or 1
+
+
+def replace_node_functions(
+    source: str,
+    replacements: dict[str, str],
+    helpers_py: str = "",
+) -> str:
+    """Return ``source`` with the named top-level functions replaced.
+
+    Every other line is kept as written. ``helpers_py`` holds new imports and
+    new helper definitions. Its imports go to the top of the module, so every
+    definition can use them (annotations are evaluated when a function is
+    defined); its definitions go before the first replaced function and may
+    not redefine a name the module already defines.
+    """
+    try:
+        tree = ast.parse(source, filename="pipeline.py")
+    except SyntaxError as exc:
+        raise PipelineCompilerError(f"pipeline.py has invalid syntax: {exc}") from exc
+    definitions = {
+        statement.name: statement
+        for statement in tree.body
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    spans: list[tuple[int, int, str]] = []
+    for name, text in replacements.items():
+        target = definitions.get(name)
+        if target is None:
+            raise PipelineCompilerError(f"Cannot replace unknown function {name}")
+        text = str(text or "").strip("\n")
+        try:
+            body = ast.parse(text).body
+        except SyntaxError as exc:
+            raise PipelineCompilerError(
+                f"Replacement for {name} has invalid syntax: {exc}"
+            ) from exc
+        if (
+            len(body) != 1
+            or not isinstance(body[0], (ast.FunctionDef, ast.AsyncFunctionDef))
+            or body[0].name != name
+        ):
+            raise PipelineCompilerError(
+                f"Replacement for {name} must be exactly one definition of {name}"
+            )
+        first_line = min(
+            [target.lineno, *(item.lineno for item in target.decorator_list)]
+        )
+        spans.append((first_line, target.end_lineno or first_line, text))
+    if not spans:
+        return source
+
+    imports, helpers = _new_helper_source(tree, str(helpers_py or ""))
+
+    lines = source.splitlines()
+    spans.sort()
+    for index, (first_line, last_line, text) in reversed(list(enumerate(spans))):
+        block = text.splitlines()
+        if index == 0 and helpers:
+            block = [*helpers.splitlines(), "", "", *block]
+        lines[first_line - 1 : last_line] = block
+    if imports:
+        top = _first_code_line(tree) - 1
+        lines[top:top] = imports.splitlines()
+    return "\n".join(lines) + "\n"
+
+
 def transitive_shared_statements(
     body: list[ast.stmt],
     target: ast.stmt,
@@ -400,6 +578,10 @@ import subprocess
 import sys
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
+class _NodeFailed(Exception):
+    """A node's program exited with an error; its own output says why."""
+
+
 def _run_compiled_pipeline():
     root = Path(os.environ.get("PIPELINE_OUTPUT_DIR") or os.environ["INLUMEN_OUTPUT_DIR"]).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -448,7 +630,9 @@ def _run_compiled_pipeline():
         contract = {"contract_id": CONTRACT_ID, "version": "2", "inputs": node.get("inputs", []), "outputs": node.get("outputs", [])}
         env = {**os.environ, **prepare_node_environment(input_dir, output, work, inputs, contract,
             node.get("descriptor", {}).get("parameters", {}))}
-        subprocess.run([sys.executable, str(script)], env=env, check=True)
+        status = subprocess.run([sys.executable, str(script)], env=env).returncode
+        if status:
+            raise _NodeFailed(flow_id, status)
         actual = json.loads((work / "outputs.json").read_text())["outputs"]
         if contract["outputs"]:
             actual = validate_result(output, contract["outputs"], actual, producer=flow_id)
@@ -493,7 +677,11 @@ def _run_compiled_pipeline():
     atomic_json(os.environ.get("INLUMEN_OUTPUT_MANIFEST") or root / "output_manifest.json", {"outputs": final})
 
 if __name__ == "__main__":
-    _run_compiled_pipeline()
+    try:
+        _run_compiled_pipeline()
+    except _NodeFailed as failure:
+        # The node already printed its error; a second traceback would hide it.
+        sys.exit(f"Node {failure.args[0]}: the step's program exited with status {failure.args[1]}. Its error is printed above.")
 '''
 
 

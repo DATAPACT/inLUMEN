@@ -256,6 +256,15 @@ def _match_returned(item, expected, root):
     )
 
 
+def _describe_returned(actual):
+    if not isinstance(actual, list):
+        return f"a {type(actual).__name__}, not a list"
+    if not all(isinstance(item, dict) for item in actual):
+        return "a list whose items are " + ", ".join(sorted({type(item).__name__ for item in actual})) + ", not dicts"
+    names = [str(item.get("filename") or item.get("name") or item.get("path") or "?")[:80] for item in actual[:8]]
+    return f"{len(actual)} descriptor(s): {names}"
+
+
 def validate_result(root, declarations, actual=None, *, producer=""):
     try:
         if not declarations:
@@ -269,9 +278,13 @@ def validate_result(root, declarations, actual=None, *, producer=""):
                 or not all(isinstance(item, dict) for item in actual)
             ):
                 raise ArtifactContractError(
-                    "Expected exactly one returned artifact descriptor"
-                    if len(expected) == 1
-                    else f"Expected one returned artifact descriptor per declared output ({len(expected)})"
+                    (
+                        "Expected exactly one returned artifact descriptor"
+                        if len(expected) == 1
+                        else f"Expected one returned artifact descriptor per declared output ({len(expected)})"
+                    )
+                    + f": a list with one dict for each of {[item['filename'] for item in expected]}. "
+                    + f"The function returned {_describe_returned(actual)}."
                 )
             seen = set()
             for item in actual:
@@ -287,6 +300,12 @@ def validate_result(root, declarations, actual=None, *, producer=""):
                         and declaration.get(field)
                         and str(item[field]) != str(declaration[field])
                     ):
+                        # A filename given as a path to the declared file is the same file.
+                        if field == "filename" and (
+                            (Path(root) / str(item[field])).resolve()
+                            == (Path(root) / declaration[field]).resolve()
+                        ):
+                            continue
                         raise ArtifactContractError(
                             f"Returned artifact {field} {item[field]!r} does not match {declaration[field]!r}"
                         )

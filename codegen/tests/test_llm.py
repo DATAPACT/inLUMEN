@@ -366,7 +366,10 @@ def test_codegen_rejects_parseable_artifact_from_incomplete_response(
     assert caught.value.status_code == 502
     assert caught.value.code == "incomplete_response"
     assert reason in str(caught.value)
-    assert len(requests) == 1
+    # A reply cut off at the output limit is requested once more; any other
+    # incomplete reply is not.
+    assert len(requests) == (2 if reason == "max_output_tokens" else 1)
+    assert len(reported) == len(requests)
 
 
 @pytest.mark.parametrize("provider", ["openrouter", "custom"])

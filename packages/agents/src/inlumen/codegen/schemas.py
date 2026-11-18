@@ -245,6 +245,12 @@ class GenerationOptions(BaseModel):
         )
     )
     generation_strategy: PipelineGenerationStrategy = "pipeline_first"
+    # How the model returns code: "json" wraps it in a JSON string;
+    # "code_block" asks for a ```python block next to a small ```json block.
+    reply_format: Literal["json", "code_block"] = "json"
+    # Node-first generation asks for the first draft of every node it has to
+    # generate in one request, then validates and repairs each node on its own.
+    batch_node_drafts: bool = True
     # When populated, the pipeline service regenerates only these nodes and
     # replays validated bundles for the rest of the graph.  Keeping this on the
     # generation contract (rather than only filtering persistence) preserves
@@ -280,6 +286,9 @@ class ValidationReport(BaseModel):
     checks: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    # What a failed sample run observed (the failing node and the files it
+    # received). It guides the next repair and is not part of the stored report.
+    evidence: dict[str, Any] = Field(default_factory=dict, exclude=True)
 
 
 class GenerationUsage(BaseModel):

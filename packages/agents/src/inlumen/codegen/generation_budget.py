@@ -21,6 +21,15 @@ class GenerationBudget:
 CURRENT_BUDGET: ContextVar[GenerationBudget | None] = ContextVar('generation_budget', default=None)
 
 
+def generation_budget_spent() -> bool:
+    """Whether the current run has no model request left to make."""
+    budget = CURRENT_BUDGET.get()
+    return budget is not None and (
+        budget.requests >= budget.max_requests
+        or budget.reported_cost_usd >= budget.max_reported_cost_usd
+    )
+
+
 def budgeted(function):
     @functools.wraps(function)
     async def wrapper(request, *args, **kwargs):

@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import docker
@@ -51,6 +52,18 @@ _ACTIVE_SANDBOX_CONTAINERS: dict[str, set[str]] = {}
 _CANCELLED_SANDBOX_RUNS: set[str] = set()
 _SANDBOX_LOCK = threading.RLock()
 _STANDARD_SANDBOX_PROFILE = RESOURCE_PROFILES["standard"]
+
+
+def log_tail(logs: bytes, limit: int) -> str:
+    """The last ``limit`` characters of a container log.
+
+    A failed run ends with the traceback and the exception, so the end of the
+    log is the part a repair needs.
+    """
+    text = logs.decode("utf-8", errors="replace")
+    if len(text) <= limit:
+        return text
+    return "[earlier output omitted] " + text[-limit:]
 
 
 def thread_limit_environment(cpus: float) -> dict[str, str]:
@@ -238,7 +251,7 @@ def validate_node_with_docker(
         manifest_path = inputs_dir / "input_manifest.json"
         write_sample_inputs(manifest_path, inputs_dir, input_files)
 
-        return run_docker_validation(
+        report = run_docker_validation(
             flow_id=flow_id,
             workspace=workspace,
             inputs_dir=inputs_dir,
@@ -253,6 +266,12 @@ def validate_node_with_docker(
             run_id=run_id,
             stage_callback=stage_callback,
         )
+        if report.status == "invalid":
+            report.evidence = {
+                "failed_node": flow_id,
+                "received_files": describe_received_files(inputs_dir),
+            }
+        return report
 
 
 def execute_node_with_docker_handoff(
@@ -315,12 +334,18 @@ def execute_node_with_docker_handoff(
             run_id=run_id,
             stage_callback=stage_callback,
         )
+        if report.status == "invalid":
+            report.evidence = {
+                "failed_node": flow_id,
+                "received_files": describe_received_files(inputs_dir),
+            }
         outputs: list[FileDescriptor] = []
         if report.status == "valid":
             outputs = persist_descriptors_for_handoff(
                 output_descriptors_from_manifest(
                     workspace / "runtime" / "outputs.json",
                     outputs_dir,
+                    artifact.data_contract.outputs,
                 ),
                 handoff_dir,
             )
@@ -421,6 +446,7 @@ def validate_pipeline_with_docker(
                         output_descriptors_from_manifest(
                             workspace / "runtime" / "outputs.json",
                             outputs_dir,
+                            artifact.data_contract.outputs,
                         ),
                         handoff_root / flow_id,
                     )
@@ -431,6 +457,54 @@ def validate_pipeline_with_docker(
         errors=errors,
         warnings=warnings,
     )
+
+
+RECEIVED_FILES_LIMIT = 12
+RECEIVED_VALUE_CHARS = 60
+_FAILED_NODE = re.compile(r"Node (\S+): the step's program exited with status")
+
+
+def describe_received_files(directory: Path) -> list[dict[str, Any]]:
+    """What a step found in its input folder: names, columns, sizes, two rows.
+
+    A repair needs the real shape of the data the failing step read, which
+    can differ from what the earlier steps declared.
+    """
+    described: list[dict[str, Any]] = []
+    if not directory.is_dir():
+        return described
+    files = sorted(
+        path for path in directory.rglob("*")
+        if path.is_file() and path.name != "input_manifest.json"
+    )
+    for path in files[:RECEIVED_FILES_LIMIT]:
+        entry: dict[str, Any] = {
+            "filename": path.relative_to(directory).as_posix(),
+            "size_bytes": path.stat().st_size,
+        }
+        suffix = path.suffix.lower()
+        try:
+            if suffix in {".csv", ".tsv"}:
+                with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+                    reader = csv.reader(handle, delimiter="\t" if suffix == ".tsv" else ",")
+                    entry["columns"] = next(reader, [])
+                    rows = [row for _, row in zip(range(2), reader)]
+                    entry["first_rows"] = [
+                        [value[:RECEIVED_VALUE_CHARS] for value in row] for row in rows
+                    ]
+                    entry["row_count"] = len(rows) + sum(1 for _ in reader)
+            elif suffix == ".json" and entry["size_bytes"] <= 1024 * 1024:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    entry["keys"] = sorted(map(str, payload))[:30]
+                elif isinstance(payload, list):
+                    entry["items"] = len(payload)
+                    if payload and isinstance(payload[0], dict):
+                        entry["keys"] = sorted(map(str, payload[0]))[:30]
+        except (OSError, ValueError, csv.Error):
+            entry["unreadable"] = True
+        described.append(entry)
+    return described
 
 
 def persist_descriptors_for_handoff(
@@ -941,9 +1015,10 @@ def validate_pipeline_program_with_docker(
                     errors=[
                         (
                             f"Whole-pipeline sample run failed with exit code {status_code}: "
-                            f"{logs.decode('utf-8', errors='replace')[:4000]}"
+                            f"{log_tail(logs, 4000)}"
                         )
                     ],
+                    evidence=pipeline_failure_evidence(logs, plan, outputs_dir),
                 )
             if logs:
                 warnings.append(
@@ -990,6 +1065,26 @@ def validate_pipeline_program_with_docker(
         errors=errors,
         warnings=warnings,
     )
+
+
+def pipeline_failure_evidence(logs: bytes, plan: dict, outputs_dir: Path) -> dict[str, Any]:
+    """The step a failed pipeline run stopped at and the files it had received."""
+    flow_ids = [str(node.get("flow_id") or "") for node in plan.get("nodes") or []]
+    failed = [
+        flow_id
+        for flow_id in _FAILED_NODE.findall(logs.decode("utf-8", errors="replace"))
+        if flow_id in flow_ids
+    ]
+    if not failed:
+        return {}
+    return {
+        "failed_node": failed[-1],
+        "completed_nodes": [
+            flow_id for flow_id in flow_ids
+            if (outputs_dir / ".runtime" / (flow_id + ".json")).is_file()
+        ],
+        "received_files": describe_received_files(outputs_dir / ".inputs" / failed[-1]),
+    }
 
 
 def validate_pipeline_dependencies_with_docker(
@@ -1165,7 +1260,7 @@ def _cached_dependency_image(
                 logs = b""
             raise SandboxUnavailable(
                 "Dependency installation failed with exit code "
-                f"{status_code}: {logs.decode('utf-8', errors='replace')[:4000]}"
+                f"{status_code}: {log_tail(logs, 4000)}"
             )
         repository, tag = image_tag.split(":", 1)
         return container.commit(repository=repository, tag=tag)
@@ -1322,7 +1417,7 @@ def run_docker_validation(
                 errors=[
                     (
                         f"Container sample run failed with exit code {status_code}: "
-                        f"{logs.decode('utf-8', errors='replace')[:2000]}"
+                        f"{log_tail(logs, 2000)}"
                     )
                 ],
             )
@@ -1641,9 +1736,23 @@ def json_type_matches(value: object, expected_type: str) -> bool:
 def output_descriptors_from_manifest(
     output_manifest_path: Path,
     outputs_dir: Path,
+    expected_outputs: list[ExpectedArtifact] | None = None,
 ) -> list[FileDescriptor]:
-    manifest = json.loads(output_manifest_path.read_text(encoding="utf-8"))
-    outputs = manifest.get("outputs") or manifest.get("files") or []
+    """Describe what a node published, for the node that consumes it.
+
+    A script does not have to write an output manifest: the declared files
+    are then looked up in ``outputs_dir``. A node without declared outputs,
+    such as a destination, hands nothing on.
+    """
+    if output_manifest_path.is_file():
+        manifest = json.loads(output_manifest_path.read_text(encoding="utf-8"))
+        outputs = manifest.get("outputs") or manifest.get("files") or []
+    else:
+        outputs = [
+            item.model_dump(mode="json")
+            for item in expected_outputs or []
+            if item.filename and (outputs_dir / item.filename).exists()
+        ]
     descriptors = []
     for item in outputs:
         if not isinstance(item, dict):
