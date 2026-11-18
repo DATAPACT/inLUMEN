@@ -134,7 +134,7 @@ export const outputsForNode = (outputs: RunOutput[], nodeId: string) =>
     (output) => output.sourceNode === nodeId && !isInternalRunOutput(output),
   );
 
-export const summarizeNodeEvents = (events: PipelineRunEvent[]) => {
+export const summarizeNodeEvents = (events: PipelineRunEvent[], runStatus?: string) => {
   const latestByNode = new Map<string, PipelineRunEvent>();
   const cachedNodes = new Set<string>();
   const unscoped: PipelineRunEvent[] = [];
@@ -151,7 +151,19 @@ export const summarizeNodeEvents = (events: PipelineRunEvent[]) => {
       : event;
     latestByNode.set(nodeId, keep);
   });
-  return [...unscoped, ...latestByNode.values()]
+  // Once the run has finished, a step still shown as started can no longer be
+  // running: settle it from the final run status so it matches Run status.
+  const settled = (event: PipelineRunEvent): PipelineRunEvent => {
+    if (event.status !== 'running' || !event.node_id) return event;
+    if (runStatus === 'succeeded') {
+      return { ...event, type: 'node.completed', status: 'succeeded', message: event.message?.replace(/ started\.$/, ' completed.') };
+    }
+    if (runStatus === 'failed' || runStatus === 'cancelled') {
+      return { ...event, status: 'failed', message: event.message?.replace(/ started\.$/, ' did not finish.') };
+    }
+    return event;
+  };
+  return [...unscoped, ...[...latestByNode.values()].map(settled)]
     .sort((left, right) => left.id - right.id)
     .slice(-8);
 };

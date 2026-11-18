@@ -65,7 +65,7 @@ it('explains artifact boundary failures without hiding the connection', () => {
 });
 
 import { isWaitingForExecution, presentRunPhase } from './runPresentation';
-import type { PipelineRunRecord } from './pipelineRuns';
+import type { PipelineRunEvent, PipelineRunRecord } from './pipelineRuns';
 it('shows a waiting worker as queued even if the lifecycle status is running', () => {
   const run = { status: 'running', progress: { phase: 'waiting_for_capacity', queue_position: 12 } } as PipelineRunRecord;
   expect(isWaitingForExecution(run)).toBe(true);
@@ -107,6 +107,19 @@ describe('run outputs per step', () => {
   it('selects a canvas node outputs without runtime manifests', () => {
     expect(outputsForNode(outputs, '2').map((output) => output.filename)).toEqual(['result.csv']);
     expect(outputsForNode(outputs, 'missing')).toEqual([]);
+  });
+});
+
+describe('activity of a finished run', () => {
+  const started: PipelineRunEvent[] = [
+    { id: 1, timestamp: '', type: 'node.started', status: 'running', node_id: 'a', message: 'A started.' },
+  ];
+  it('shows a step still marked started as done when the run succeeded', () => {
+    expect(summarizeNodeEvents(started, 'succeeded')[0]).toMatchObject({ status: 'succeeded', message: 'A completed.' });
+  });
+  it('shows it as failed when the run failed, and leaves live runs alone', () => {
+    expect(summarizeNodeEvents(started, 'failed')[0].status).toBe('failed');
+    expect(summarizeNodeEvents(started, 'running')[0].status).toBe('running');
   });
 });
 

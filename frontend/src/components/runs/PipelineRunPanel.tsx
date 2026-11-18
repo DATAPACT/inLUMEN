@@ -190,8 +190,8 @@ export const PipelineRunPanel = () => {
   const selectedRunIdForRefresh = selectedRun?.run_id || '';
   const selectedRunStatus = selectedRun?.status;
   const nodeEvents = useMemo(
-    () => summarizeNodeEvents(events.filter((event) => event.type.startsWith('node.'))),
-    [events],
+    () => summarizeNodeEvents(events.filter((event) => event.type.startsWith('node.')), selectedRun?.status),
+    [events, selectedRun?.status],
   );
   const technicalLogs = useMemo(
     () => events.filter((event) => event.type.endsWith('.log')),
