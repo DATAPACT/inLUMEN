@@ -111,15 +111,43 @@ describe('run outputs per step', () => {
 });
 
 describe('activity of a finished run', () => {
-  const started: PipelineRunEvent[] = [
-    { id: 1, timestamp: '', type: 'node.started', status: 'running', node_id: 'a', message: 'A started.' },
-  ];
+  const started = (id: number, node: string | undefined, message = `${node} started.`): PipelineRunEvent => (
+    { id, timestamp: '', type: 'node.started', status: 'running', node_id: node, message }
+  );
+
   it('shows a step still marked started as done when the run succeeded', () => {
-    expect(summarizeNodeEvents(started, 'succeeded')[0]).toMatchObject({ status: 'succeeded', message: 'A completed.' });
+    expect(summarizeNodeEvents([started(1, 'a', 'A started.')], 'succeeded')[0])
+      .toMatchObject({ type: 'node.completed', status: 'succeeded', message: 'A completed.' });
   });
-  it('shows it as failed when the run failed, and leaves live runs alone', () => {
-    expect(summarizeNodeEvents(started, 'failed')[0].status).toBe('failed');
-    expect(summarizeNodeEvents(started, 'running')[0].status).toBe('running');
+
+  it('does not guess success or failure for unfinished steps of a failed run', () => {
+    const events = summarizeNodeEvents([
+      started(1, 'a', 'A started.'),
+      { id: 2, timestamp: '', type: 'node.completed', status: 'succeeded', node_id: 'a', message: 'A completed.' },
+      started(3, 'b', 'B started.'),
+      { id: 4, timestamp: '', type: 'node.failed', status: 'failed', node_id: 'b', message: 'B failed.' },
+      started(5, 'c', 'C started.'),
+    ], 'failed');
+    expect(events.map((event) => event.status)).toEqual(['succeeded', 'failed', 'cancelled']);
+    expect(events[2].message).toBe('C did not finish.');
+  });
+
+  it('uses a neutral state for a cancelled run', () => {
+    expect(summarizeNodeEvents([started(1, 'a', 'A started.')], 'cancelled')[0])
+      .toMatchObject({ status: 'cancelled', message: 'A did not finish.' });
+  });
+
+  it('leaves live runs and events without a node alone', () => {
+    expect(summarizeNodeEvents([started(1, 'a')], 'running')[0].status).toBe('running');
+    expect(summarizeNodeEvents([started(1, undefined, 'Working.')], 'succeeded')[0])
+      .toMatchObject({ status: 'running', message: 'Working.' });
+  });
+
+  it('writes sensible text when the message does not end in started', () => {
+    expect(summarizeNodeEvents([started(1, 'node_a', 'Step A is running')], 'succeeded')[0].message)
+      .toBe('Step A is running completed.');
+    expect(summarizeNodeEvents([started(1, 'node_a', '')], 'succeeded')[0].message)
+      .toBe('node_a completed.');
   });
 });
 
