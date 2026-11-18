@@ -101,7 +101,13 @@ jobs:
         run: |
           docker build -t inlumen-frontend:ci frontend
           docker run --rm inlumen-frontend:ci npm exec vite -- --version
-      - name: Audit frontend dependencies
+      # Blocking: the packages shipped to users.
+      - name: Audit frontend production dependencies
+        run: npm audit --prefix frontend --omit=dev --audit-level=moderate
+      # Reported only: build and test tools. An advisory without a patched
+      # release there (picomatch, GHSA-fc5q-39xc-vjpf) must not block merges.
+      - name: Report advisories in frontend development dependencies
+        continue-on-error: true
         run: npm audit --prefix frontend --audit-level=moderate
 
   # The e2e specs are split across two parallel shards. The stress harness
