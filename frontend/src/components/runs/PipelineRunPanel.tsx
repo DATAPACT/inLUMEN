@@ -190,8 +190,8 @@ export const PipelineRunPanel = () => {
   const selectedRunIdForRefresh = selectedRun?.run_id || '';
   const selectedRunStatus = selectedRun?.status;
   const nodeEvents = useMemo(
-    () => summarizeNodeEvents(events.filter((event) => event.type.startsWith('node.'))),
-    [events],
+    () => summarizeNodeEvents(events.filter((event) => event.type.startsWith('node.')), selectedRun?.status),
+    [events, selectedRun?.status],
   );
   const technicalLogs = useMemo(
     () => events.filter((event) => event.type.endsWith('.log')),
@@ -602,7 +602,7 @@ export const PipelineRunPanel = () => {
                       'mt-1 h-1.5 w-1.5 shrink-0 rounded-full',
                       event.type === 'node.cached'
                         ? 'bg-sky-400'
-                        : event.status === 'failed' ? 'bg-red-400' : event.status === 'succeeded' ? 'bg-emerald-400' : 'bg-amber-400',
+                        : event.status === 'failed' ? 'bg-red-400' : event.status === 'succeeded' ? 'bg-emerald-400' : event.status === 'cancelled' ? 'bg-muted-foreground' : 'bg-amber-400',
                     )} />
                     <span>{event.message || event.type}</span>
                   </div>

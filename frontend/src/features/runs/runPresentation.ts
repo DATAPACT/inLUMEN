@@ -1,4 +1,4 @@
-import type { PipelineRunEvent, PipelineRunRecord } from '@/features/runs/pipelineRuns';
+import { isActivePipelineRun, type PipelineRunEvent, type PipelineRunRecord, type PipelineRunStatus } from '@/features/runs/pipelineRuns';
 
 export const isWaitingForExecution = (run: PipelineRunRecord) =>
   ['queued', 'preparing', 'running'].includes(run.status)
@@ -134,7 +134,7 @@ export const outputsForNode = (outputs: RunOutput[], nodeId: string) =>
     (output) => output.sourceNode === nodeId && !isInternalRunOutput(output),
   );
 
-export const summarizeNodeEvents = (events: PipelineRunEvent[]) => {
+export const summarizeNodeEvents = (events: PipelineRunEvent[], runStatus?: PipelineRunStatus) => {
   const latestByNode = new Map<string, PipelineRunEvent>();
   const cachedNodes = new Set<string>();
   const unscoped: PipelineRunEvent[] = [];
@@ -151,7 +151,21 @@ export const summarizeNodeEvents = (events: PipelineRunEvent[]) => {
       : event;
     latestByNode.set(nodeId, keep);
   });
-  return [...unscoped, ...latestByNode.values()]
+  // Once the run has finished, a step still shown as started can no longer be
+  // running. A succeeded run means every step finished. Otherwise we cannot
+  // tell which unfinished steps failed (a failing step has its own failed
+  // event), so show them with the neutral cancelled state instead of guessing.
+  const settled = (event: PipelineRunEvent): PipelineRunEvent => {
+    if (event.status !== 'running' || !event.node_id || !runStatus || isActivePipelineRun(runStatus)) {
+      return event;
+    }
+    const name = event.message?.replace(/\s+started\.?$/i, '').trim() || String(event.node_id);
+    if (runStatus === 'succeeded') {
+      return { ...event, type: 'node.completed', status: 'succeeded', message: `${name} completed.` };
+    }
+    return { ...event, type: 'node.cancelled', status: 'cancelled', message: `${name} did not finish.` };
+  };
+  return [...unscoped, ...[...latestByNode.values()].map(settled)]
     .sort((left, right) => left.id - right.id)
     .slice(-8);
 };
