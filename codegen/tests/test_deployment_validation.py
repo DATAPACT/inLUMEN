@@ -10,6 +10,7 @@ from unittest import mock
 
 from app.deployment_validation import (
     _isolated_runtime_environment,
+    _tail_keeping_step_events,
     _prepare_worker_directories,
     _read_run_output_files,
     repair_deployment_bundle,
@@ -667,3 +668,24 @@ class ParallelExecutionTest(unittest.TestCase):
             script.index("inlumen_dagster_project.run"),
             script.index("dg.materialize("),
         )
+
+
+class LogTailKeepsNodeEventsTest(unittest.TestCase):
+    def test_short_logs_are_returned_unchanged(self):
+        self.assertEqual(_tail_keeping_step_events("a\nb", 100), "a\nb")
+
+    def test_step_lines_cut_from_the_tail_are_kept(self):
+        logs = (
+            "dagster - node_1_a - STEP_START - running\n"
+            + "noise line\n" * 50
+            + "dagster - node_1_a - STEP_SUCCESS - done\n"
+            + "more noise\n" * 50
+        )
+        result = _tail_keeping_step_events(logs, 100)
+        self.assertIn("node_1_a - STEP_START", result)
+        self.assertIn("node_1_a - STEP_SUCCESS", result)
+        self.assertTrue(result.endswith(logs[-100:]))
+
+    def test_logs_without_step_lines_are_only_tailed(self):
+        logs = "noise\n" * 100
+        self.assertEqual(_tail_keeping_step_events(logs, 50), logs[-50:])

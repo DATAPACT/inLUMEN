@@ -599,6 +599,7 @@ class PipelineRunManager:
                 self._finish_failed(record, error, outputs=output_files)
                 return
 
+            self._complete_started_nodes(record)
             now = utc_now_iso()
             record["status"] = "succeeded"
             record["updated_at"] = now
@@ -937,6 +938,31 @@ class PipelineRunManager:
             )
             changed = True
         return changed
+
+    def _complete_started_nodes(self, record: dict[str, Any]) -> None:
+        """Close nodes whose completion line was missing from the observed logs.
+
+        Called only when the whole run succeeded, so every started node finished.
+        """
+        events = record.get("_events") or []
+        settled = {
+            event.get("node_id")
+            for event in events
+            if event.get("type") in {"node.completed", "node.failed", "node.cached"}
+        }
+        started = []
+        for event in events:
+            node_id = event.get("node_id")
+            if event.get("type") == "node.started" and node_id not in settled and node_id not in started:
+                started.append(node_id)
+        for node_id in started:
+            self._append_event(
+                record,
+                "node.completed",
+                "succeeded",
+                f"{self._node_display_name(node_id)} completed.",
+                node_id=node_id,
+            )
 
     @staticmethod
     def _node_display_name(node_id: str) -> str:

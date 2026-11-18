@@ -316,6 +316,26 @@ async def test_background_run_persists_live_node_heartbeat_progress():
 
 
 @pytest.mark.asyncio
+async def test_succeeded_run_completes_nodes_whose_success_line_was_not_observed():
+    # Logs show the node started but never its STEP_SUCCESS line.
+    executor = ProgressDagsterExecutor(delay=0.08)
+    manager = PipelineRunManager(
+        PipelineRunStore(":memory:"), adapter="dagster", executor=executor
+    )
+    queued, _created = await manager.start(request(key="missing-success-line"))
+    await manager.tasks[queued["run_id"]]
+
+    assert manager.get(queued["run_id"])["status"] == "succeeded"
+    events = [
+        event
+        for event in manager.events(queued["run_id"])["events"]
+        if event.get("node_id") == "node_1_task"
+    ]
+    assert [event["type"] for event in events] == ["node.started", "node.completed"]
+    assert events[-1]["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
 async def test_idempotency_is_bound_to_executable_bundle_snapshot():
     executor = FakeDagsterExecutor(delay=10)
     manager = PipelineRunManager(

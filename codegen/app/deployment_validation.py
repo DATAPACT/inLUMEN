@@ -11,6 +11,7 @@ import json
 import mimetypes
 import os
 import logging
+import re
 import shutil
 import subprocess
 import sys
@@ -50,6 +51,31 @@ _ACTIVE_DEPLOYMENT_PROCESSES: dict[str, subprocess.Popen[str]] = {}
 _CANCELLED_DEPLOYMENT_EXECUTIONS: set[str] = set()
 _DEPLOYMENT_EXECUTION_PROGRESS: dict[str, dict[str, Any]] = {}
 _DEPLOYMENT_PROCESS_LOCK = threading.RLock()
+
+
+_NODE_STEP_EVENT_LINE = re.compile(
+    r"-\s+node_[A-Za-z0-9_]+\s+-\s+STEP_(?:START|SUCCESS|FAILURE)\b"
+)
+_LOG_TAIL_CHARS = 12000
+_KEPT_STEP_EVENT_LINES = 400
+
+
+def _tail_keeping_step_events(logs: str, limit: int = _LOG_TAIL_CHARS) -> str:
+    """Return the log tail without losing per-node STEP_* lines from the cut part.
+
+    Verbose steps can push early STEP_SUCCESS lines out of the tail, and the
+    runner builds node.completed events from those lines.
+    """
+    if len(logs) <= limit:
+        return logs
+    kept = [
+        line.strip()
+        for line in logs[:-limit].splitlines()
+        if _NODE_STEP_EVENT_LINE.search(line)
+    ][-_KEPT_STEP_EVENT_LINES:]
+    if not kept:
+        return logs[-limit:]
+    return "\n".join(kept) + "\n" + logs[-limit:]
 
 
 def observe_host_capacity() -> None:
@@ -817,7 +843,7 @@ def _isolated_dagster_execution(
                 "name": "dagster_materialize",
                 "command": ["python", "-c", "<dagster materialize>"],
                 "returncode": status_code,
-                "output": logs[-12000:],
+                "output": _tail_keeping_step_events(logs),
                 "ok": status_code == 0 and not cancelled,
                 **({"cancelled": True} if cancelled else {}),
             }
