@@ -14,8 +14,65 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Decides which groups of jobs a pull request needs. A push to main runs
+  # everything, because a passing run there is what gets deployed.
+  #
+  # - frontend: the frontend, plus the files outside it that its tests read.
+  # - python: everything except documentation. Frontend changes count too,
+  #   because backend tests read generated frontend files.
+  # - frontend_image: the inputs of the development container image.
+  changes:
+    name: Changed areas
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      frontend: ${{ steps.areas.outputs.frontend }}
+      python: ${{ steps.areas.outputs.python }}
+      frontend_image: ${{ steps.areas.outputs.frontend_image }}
+    steps:
+      - name: Find the changed areas
+        id: areas
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PULL_REQUEST: ${{ github.event.pull_request.number }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        run: |
+          frontend=false; python=false; frontend_image=false
+          # The files API lists at most 3000 files; beyond that, run everything.
+          if [ "$EVENT" != "pull_request" ] || [ "${CHANGED_FILES:-0}" -ge 3000 ]; then
+            frontend=true; python=true; frontend_image=true
+          else
+            files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST/files" \
+              --jq '.[] | .filename, (.previous_filename // empty)')
+            while IFS= read -r file; do
+              case "$file" in
+                .github/workflows/test-suite.yml|scripts/run_tests.py)
+                  frontend=true; python=true; frontend_image=true ;;
+                frontend/Dockerfile|frontend/.dockerignore|frontend/package.json|frontend/package-lock.json)
+                  frontend=true; python=true; frontend_image=true ;;
+                frontend/*)
+                  frontend=true; python=true ;;
+                backend/tests/fixtures/*|packages/agents/src/inlumen/contracts/*)
+                  frontend=true; python=true ;;
+                docs/*|*.md)
+                  ;;
+                *)
+                  python=true ;;
+              esac
+            done <<< "$files"
+          fi
+          {
+            echo "frontend=$frontend"
+            echo "python=$python"
+            echo "frontend_image=$frontend_image"
+          } | tee -a "$GITHUB_OUTPUT"
+
   backend:
     name: Backend
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -35,6 +92,8 @@ jobs:
 
   agents:
     name: Agents library
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -51,6 +110,8 @@ jobs:
 
   codegen:
     name: Code generation service
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -68,6 +129,8 @@ jobs:
 
   runner:
     name: Pipeline runner
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -85,22 +148,40 @@ jobs:
 
   frontend:
     name: Frontend
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+      # node_modules is cached whole, keyed by the lockfile: restoring it is
+      # several times faster than `npm ci`, which only runs when the lockfile
+      # changes.
+      - name: Restore frontend dependencies
+        id: node-modules
+        uses: actions/cache@v6
+        with:
+          path: frontend/node_modules
+          key: node-modules-${{ runner.os }}-node22-${{ hashFiles('frontend/package-lock.json') }}
       - name: Install frontend dependencies
+        if: steps.node-modules.outputs.cache-hit != 'true'
         run: npm ci --prefix frontend
       - name: Run frontend tests and checks
         run: python3 scripts/run_tests.py --component frontend
-      - name: Verify development container runtime
-        run: |
-          docker build -t inlumen-frontend:ci frontend
-          docker run --rm inlumen-frontend:ci npm exec vite -- --version
+
+  # Needs only the lockfile, so it runs beside the tests instead of after them.
+  frontend-audit:
+    name: Frontend dependency audit
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
       # Blocking: the packages shipped to users.
       - name: Audit frontend production dependencies
         run: npm audit --prefix frontend --omit=dev --audit-level=moderate
@@ -110,10 +191,25 @@ jobs:
         continue-on-error: true
         run: npm audit --prefix frontend --audit-level=moderate
 
+  # The development image only changes with its Dockerfile and dependencies.
+  frontend-image:
+    name: Frontend development image
+    needs: changes
+    if: needs.changes.outputs.frontend_image == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify development container runtime
+        run: |
+          docker build -t inlumen-frontend:ci frontend
+          docker run --rm inlumen-frontend:ci npm exec vite -- --version
+
   # The e2e specs are split across two parallel shards. The stress harness
   # tests live in stress-harness.yml and only run when the harness changes.
   frontend-browser:
     name: Frontend browser (e2e ${{ matrix.shard }}/2)
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -124,9 +220,14 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+      - name: Restore frontend dependencies
+        id: node-modules
+        uses: actions/cache@v6
+        with:
+          path: frontend/node_modules
+          key: node-modules-${{ runner.os }}-node22-${{ hashFiles('frontend/package-lock.json') }}
       - name: Install frontend dependencies
+        if: steps.node-modules.outputs.cache-hit != 'true'
         run: npm ci --prefix frontend
       - name: Restore test browser
         id: playwright-cache
@@ -136,15 +237,24 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
       - name: Install test browser
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: cd frontend && npx playwright install --with-deps chromium
+        run: cd frontend && npx playwright install chromium
+      # The runner image already has the libraries Chromium needs. Installing
+      # them again through apt took between 8 seconds and over 3 minutes, so
+      # it is done only when the browser does not start.
+      - name: Check that the test browser starts
+        id: browser
+        continue-on-error: true
+        run: cd frontend && node e2e/helpers/check-browser.cjs
       - name: Install test browser system dependencies
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        if: steps.browser.outcome == 'failure'
         run: cd frontend && npx playwright install-deps chromium
       - name: Browser recovery and accessibility tests
         run: npm run test:e2e --prefix frontend -- --shard=${{ matrix.shard }}/2
 
   integration:
     name: Graph transactions and workspace isolation
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
