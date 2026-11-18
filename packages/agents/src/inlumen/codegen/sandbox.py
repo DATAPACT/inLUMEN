@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import docker
@@ -250,7 +251,7 @@ def validate_node_with_docker(
         manifest_path = inputs_dir / "input_manifest.json"
         write_sample_inputs(manifest_path, inputs_dir, input_files)
 
-        return run_docker_validation(
+        report = run_docker_validation(
             flow_id=flow_id,
             workspace=workspace,
             inputs_dir=inputs_dir,
@@ -265,6 +266,12 @@ def validate_node_with_docker(
             run_id=run_id,
             stage_callback=stage_callback,
         )
+        if report.status == "invalid":
+            report.evidence = {
+                "failed_node": flow_id,
+                "received_files": describe_received_files(inputs_dir),
+            }
+        return report
 
 
 def execute_node_with_docker_handoff(
@@ -327,6 +334,11 @@ def execute_node_with_docker_handoff(
             run_id=run_id,
             stage_callback=stage_callback,
         )
+        if report.status == "invalid":
+            report.evidence = {
+                "failed_node": flow_id,
+                "received_files": describe_received_files(inputs_dir),
+            }
         outputs: list[FileDescriptor] = []
         if report.status == "valid":
             outputs = persist_descriptors_for_handoff(
@@ -445,6 +457,54 @@ def validate_pipeline_with_docker(
         errors=errors,
         warnings=warnings,
     )
+
+
+RECEIVED_FILES_LIMIT = 12
+RECEIVED_VALUE_CHARS = 60
+_FAILED_NODE = re.compile(r"Node (\S+): the step's program exited with status")
+
+
+def describe_received_files(directory: Path) -> list[dict[str, Any]]:
+    """What a step found in its input folder: names, columns, sizes, two rows.
+
+    A repair needs the real shape of the data the failing step read, which
+    can differ from what the earlier steps declared.
+    """
+    described: list[dict[str, Any]] = []
+    if not directory.is_dir():
+        return described
+    files = sorted(
+        path for path in directory.rglob("*")
+        if path.is_file() and path.name != "input_manifest.json"
+    )
+    for path in files[:RECEIVED_FILES_LIMIT]:
+        entry: dict[str, Any] = {
+            "filename": path.relative_to(directory).as_posix(),
+            "size_bytes": path.stat().st_size,
+        }
+        suffix = path.suffix.lower()
+        try:
+            if suffix in {".csv", ".tsv"}:
+                with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+                    reader = csv.reader(handle, delimiter="\t" if suffix == ".tsv" else ",")
+                    entry["columns"] = next(reader, [])
+                    rows = [row for _, row in zip(range(2), reader)]
+                    entry["first_rows"] = [
+                        [value[:RECEIVED_VALUE_CHARS] for value in row] for row in rows
+                    ]
+                    entry["row_count"] = len(rows) + sum(1 for _ in reader)
+            elif suffix == ".json" and entry["size_bytes"] <= 1024 * 1024:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    entry["keys"] = sorted(map(str, payload))[:30]
+                elif isinstance(payload, list):
+                    entry["items"] = len(payload)
+                    if payload and isinstance(payload[0], dict):
+                        entry["keys"] = sorted(map(str, payload[0]))[:30]
+        except (OSError, ValueError, csv.Error):
+            entry["unreadable"] = True
+        described.append(entry)
+    return described
 
 
 def persist_descriptors_for_handoff(
@@ -958,6 +1018,7 @@ def validate_pipeline_program_with_docker(
                             f"{log_tail(logs, 4000)}"
                         )
                     ],
+                    evidence=pipeline_failure_evidence(logs, plan, outputs_dir),
                 )
             if logs:
                 warnings.append(
@@ -1004,6 +1065,26 @@ def validate_pipeline_program_with_docker(
         errors=errors,
         warnings=warnings,
     )
+
+
+def pipeline_failure_evidence(logs: bytes, plan: dict, outputs_dir: Path) -> dict[str, Any]:
+    """The step a failed pipeline run stopped at and the files it had received."""
+    flow_ids = [str(node.get("flow_id") or "") for node in plan.get("nodes") or []]
+    failed = [
+        flow_id
+        for flow_id in _FAILED_NODE.findall(logs.decode("utf-8", errors="replace"))
+        if flow_id in flow_ids
+    ]
+    if not failed:
+        return {}
+    return {
+        "failed_node": failed[-1],
+        "completed_nodes": [
+            flow_id for flow_id in flow_ids
+            if (outputs_dir / ".runtime" / (flow_id + ".json")).is_file()
+        ],
+        "received_files": describe_received_files(outputs_dir / ".inputs" / failed[-1]),
+    }
 
 
 def validate_pipeline_dependencies_with_docker(

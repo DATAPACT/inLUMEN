@@ -283,6 +283,29 @@ def split_node_functions(
     return replacements, "\n\n\n".join(helpers)
 
 
+def outline_module(source: str, shown: set[str], node_functions: set[str]) -> str:
+    """``source`` with the bodies of the node functions not in ``shown`` left out.
+
+    Imports, constants and helpers stay, so a repair of the shown functions
+    sees every name it may use without reading the other steps.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+    lines = source.splitlines()
+    hidden = [
+        statement for statement in tree.body
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and statement.name in node_functions - shown
+        and statement.body[0].lineno > statement.lineno
+    ]
+    for statement in sorted(hidden, key=lambda item: item.lineno, reverse=True):
+        first = statement.body[0].lineno
+        lines[first - 1 : statement.end_lineno] = ["    ...  # unchanged, not shown"]
+    return "\n".join(lines) + "\n"
+
+
 def _new_helper_source(tree: ast.Module, helpers_py: str) -> tuple[str, str]:
     """The imports and the other helper statements the module does not have yet.
 

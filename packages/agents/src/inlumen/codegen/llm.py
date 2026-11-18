@@ -14,6 +14,7 @@ from inlumen.llm_requests import (
 )
 from inlumen.contracts.events import model_request_event
 from .generation_budget import CURRENT_BUDGET
+from .pipeline_compiler import outline_module
 from .model import CURRENT_EVENTS, CURRENT_MODEL, ModelClient, ModelReply
 
 from .schemas import (
@@ -575,14 +576,26 @@ PIPELINE_CODE_SYSTEM_PROMPT = PIPELINE_SYSTEM_PROMPT.replace(
 # Instructions for one operation go in the user prompt, after the plan, so the
 # system prompt and the plan stay the same from the first draft to the last
 # repair and a provider can reuse them from its prompt cache.
+_SCOPED_REPAIR_INPUT = (
+    "This request repairs an existing module. Only the node functions named in "
+    "repair_functions failed validation. previous_pipeline_py is the module "
+    "with the bodies of the unrelated node functions left out (shown as ...); "
+    "those functions exist and stay as they are. pipeline_plan describes in "
+    "full only the failing nodes and the nodes that feed them. observed, when "
+    "present, lists the files the failing node really received in the sample "
+    "run, with their real columns: trust it over what an earlier node was "
+    "expected to write. When the cause is in a function named in "
+    "may_also_change (for example it does not write a column the failing "
+    "function needs), return a new definition of that function too. "
+)
 _NODE_REPAIR_INSTRUCTIONS = {
     "json": (
-        "This request repairs an existing module. previous_pipeline_py is the "
-        "complete module; only the node functions named in repair_functions "
-        "failed validation. Instead of the usual reply, return exactly one JSON "
+        _SCOPED_REPAIR_INPUT +
+        "Instead of the usual reply, return exactly one JSON "
         "object with functions (an object that maps each name in "
         "repair_functions to the complete new source of that function, starting "
-        "at its def line), helpers_py (a string of new imports and new helper "
+        "at its def line; it may also hold a function named in "
+        "may_also_change), helpers_py (a string of new imports and new helper "
         "definitions the repaired functions need, or an empty string), "
         "requirements (the full array for the whole module) and notes. Do not "
         "return pipeline_py. Every other function stays as it is: do not "
@@ -590,10 +603,10 @@ _NODE_REPAIR_INSTRUCTIONS = {
         "a new name."
     ),
     "code_block": (
-        "This request repairs an existing module. previous_pipeline_py is the "
-        "complete module; only the node functions named in repair_functions "
-        "failed validation. In the ```python block return only the complete new "
-        "definition of each function named in repair_functions, plus any new "
+        _SCOPED_REPAIR_INPUT +
+        "In the ```python block return only the complete new "
+        "definition of each function named in repair_functions (and of a "
+        "function named in may_also_change when you change it), plus any new "
         "imports and new helper definitions they need. Do not return the rest of "
         "the module. Every other function stays as it is: do not redefine or "
         "rename an existing top-level name, and give any new helper a new name. "
@@ -754,6 +767,37 @@ async def generate_node_payloads(
     }
 
 
+def _observed(validation: ValidationReport) -> dict[str, Any]:
+    return {"observed": validation.evidence} if validation.evidence else {}
+
+
+def focused_plan(plan: dict[str, Any], flow_ids: set[str]) -> dict[str, Any]:
+    """The plan with only ``flow_ids`` described in full.
+
+    Every other node keeps its identity, its place in the graph and the names
+    of the files it writes, which is what a repair of ``flow_ids`` can rely on.
+    """
+    nodes = []
+    for node in plan.get("nodes") or []:
+        if str(node.get("flow_id")) in flow_ids:
+            nodes.append(node)
+            continue
+        nodes.append({
+            "flow_id": node.get("flow_id"),
+            "function_name": node.get("function_name"),
+            "parents": node.get("parents") or [],
+            "children": node.get("children") or [],
+            "outputs": [
+                item.get("filename") or item.get("name")
+                for item in node.get("outputs") or []
+            ],
+        })
+    return {
+        key: value for key, value in {**plan, "nodes": nodes}.items()
+        if key != "edges"
+    }
+
+
 async def repair_node_payload(
     config: LLMConfig,
     request: GenerateNodeScriptRequest,
@@ -768,6 +812,7 @@ async def repair_node_payload(
         "operation": "repair_node_runtime",
         **_history(earlier_attempts),
         "previous_payload": payload,
+        **_observed(validation),
         "validation_errors": validation.errors,
         "validation_warnings": validation.warnings,
     }
@@ -805,6 +850,7 @@ async def repair_pipeline_payload(
         "operation": "repair_canonical_pipeline",
         **_history(earlier_attempts),
         "previous_payload": payload,
+        **_observed(validation),
         "validation_errors": validation.errors,
         "validation_warnings": validation.warnings,
     }
@@ -821,23 +867,35 @@ async def repair_pipeline_nodes_payload(
     usage_callback: UsageCallback | None = None,
     reply_format: str = "json",
     earlier_attempts: list[dict[str, Any]] | None = None,
+    may_also_change: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Ask for new source of only the failing node functions.
 
-    ``repair_functions`` maps each failing flow_id to its function name. A
-    "json" reply holds ``functions`` and ``helpers_py``; a "code_block" reply
-    holds ``functions_py``, the new definitions and helpers as one source.
+    ``repair_functions`` maps each failing flow_id to its function name;
+    ``may_also_change`` does the same for the nodes that feed them, which the
+    reply may replace as well. The request carries only what such a repair
+    needs: the plan of those nodes and the module without the bodies of the
+    other node functions. A "json" reply holds ``functions`` and
+    ``helpers_py``; a "code_block" reply holds ``functions_py``, the new
+    definitions and helpers as one source.
     """
+    may_also_change = may_also_change or {}
+    shown = {**may_also_change, **repair_functions}
+    all_functions = {str(node["function_name"]) for node in plan.get("nodes") or []}
     prompt = {
-        "pipeline_plan": plan,
+        "pipeline_plan": focused_plan(plan, set(shown)),
         "user_instruction": user_instruction,
         "operation": "repair_pipeline_nodes",
         "instructions": _NODE_REPAIR_INSTRUCTIONS[reply_format],
         **_history(earlier_attempts),
-        "previous_pipeline_py": payload.get("pipeline_py"),
+        "previous_pipeline_py": outline_module(
+            str(payload.get("pipeline_py") or ""), set(shown.values()), all_functions
+        ),
         "previous_requirements": payload.get("requirements"),
         "repair_functions": sorted(repair_functions.values()),
         "repair_flow_ids": sorted(repair_functions),
+        "may_also_change": sorted(may_also_change.values()),
+        **_observed(validation),
         "validation_errors": validation.errors,
         "validation_warnings": validation.warnings,
     }

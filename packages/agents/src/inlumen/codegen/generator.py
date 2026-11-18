@@ -16,7 +16,7 @@ from inlumen.contracts.declared_outputs import typed_output_ports
 from inlumen.contracts.map_scope import is_collect, is_map
 from inlumen.contracts.port_types import FILES_AS_SEPARATE, file_port_ids, files_as, parse_port_type
 from inlumen.contracts.task_package_contract import public_manifest, validate_package
-from .generation_budget import budgeted
+from .generation_budget import budgeted, generation_budget_spent
 from .llm import (
     LLMGenerationError,
     attempt_record,
@@ -423,6 +423,11 @@ async def generate_pipeline_script_bundles_pipeline_first(
     await set_running_pipeline_stage(run, "pipeline_validation", progress_callback)
     validation_started = time.perf_counter()
     attempt = 1
+    # repair_attempts counts repairs that do not move the pipeline forward: a
+    # repair after which a later step is the first to fail does not use one
+    # up. The request and cost budget bound the run as a whole.
+    stalled_repairs = 0
+    furthest_front = -1
     tried_scopes: set[frozenset[str]] = set()
     earlier_attempts: list[dict[str, Any]] = []
     while True:
@@ -441,7 +446,15 @@ async def generate_pipeline_script_bundles_pipeline_first(
         )
         if integration_validation.status == "valid":
             break
-        if request.llm_config is None or attempt > request.options.repair_attempts:
+        front = repair_front(integration_validation, plan)
+        if attempt > 1 and front <= furthest_front:
+            stalled_repairs += 1
+        furthest_front = max(furthest_front, front)
+        if (
+            request.llm_config is None
+            or stalled_repairs >= request.options.repair_attempts
+            or generation_budget_spent()
+        ):
             break
         await set_running_pipeline_stage(run, "pipeline_repair", progress_callback)
         try:
@@ -1016,15 +1029,21 @@ def apply_node_repair(
     payload: dict[str, Any],
     patch: dict[str, Any],
     function_names: list[str],
+    optional_names: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Put the repaired node functions into the previous pipeline payload."""
+    """Put the repaired node functions into the previous pipeline payload.
+
+    Every name in ``function_names`` must come back; a name in
+    ``optional_names`` is replaced only when the reply holds it.
+    """
+    optional_names = optional_names or []
     patch = patch if isinstance(patch, dict) else {}
     helpers_py = str(patch.get("helpers_py") or "")
     functions = patch.get("functions")
     if str(patch.get("functions_py") or "").strip():
         # A code-block reply: the new definitions and helpers in one source.
         functions, helpers_py = split_node_functions(
-            str(patch["functions_py"]), function_names
+            str(patch["functions_py"]), [*function_names, *optional_names]
         )
     if not isinstance(functions, dict):
         raise PipelineCompilerError("Node repair payload is missing functions.")
@@ -1036,7 +1055,11 @@ def apply_node_repair(
     repaired = dict(payload)
     repaired["pipeline_py"] = replace_node_functions(
         str(payload.get("pipeline_py") or ""),
-        {name: str(functions[name]) for name in function_names},
+        {
+            name: str(functions[name])
+            for name in [*function_names, *optional_names]
+            if str(functions.get(name) or "").strip()
+        },
         helpers_py,
     )
     if isinstance(patch.get("requirements"), list):
@@ -1044,6 +1067,37 @@ def apply_node_repair(
     if isinstance(patch.get("notes"), list):
         repaired["notes"] = patch["notes"]
     return repaired
+
+
+def model_written_parents(plan: dict[str, Any], flow_ids: set[str]) -> set[str]:
+    """The nodes that feed ``flow_ids`` and whose code the model writes."""
+    nodes = {str(node["flow_id"]): node for node in plan["nodes"]}
+    parents = {
+        str(parent)
+        for flow_id in flow_ids
+        for parent in nodes[flow_id].get("parents") or []
+    } - flow_ids
+    return {
+        parent for parent in parents
+        if parent in nodes
+        and not is_input_node_kind(str((nodes[parent].get("descriptor") or {}).get("type") or ""))
+    }
+
+
+def repair_front(validation: ValidationReport, plan: dict[str, Any]) -> int:
+    """How far the pipeline got: the position of the first failing node.
+
+    -1 when the errors are not tied to a node (nothing ran).
+    """
+    order = [str(node["flow_id"]) for node in plan["nodes"]]
+    named = failing_flow_ids(
+        validation.errors,
+        {str(node["flow_id"]): str(node["function_name"]) for node in plan["nodes"]},
+    ) or set()
+    failed = str(validation.evidence.get("failed_node") or "")
+    if failed in order:
+        named = {*named, failed}
+    return min((order.index(flow_id) for flow_id in named), default=-1)
 
 
 async def repair_pipeline_draft(
@@ -1070,6 +1124,8 @@ async def repair_pipeline_draft(
     if scope and frozenset(scope) not in tried_scopes:
         tried_scopes.add(frozenset(scope))
         repair_functions = {flow_id: node_functions[flow_id] for flow_id in scope}
+        feeders = model_written_parents(plan, scope)
+        may_also_change = {flow_id: node_functions[flow_id] for flow_id in feeders}
         try:
             patch = await repair_pipeline_nodes_payload(
                 llm_config,
@@ -1081,9 +1137,13 @@ async def repair_pipeline_draft(
                 record_usage,
                 reply_format,
                 earlier_attempts,
+                may_also_change,
             )
             return apply_node_repair(
-                payload, patch, sorted(repair_functions.values())
+                payload,
+                patch,
+                sorted(repair_functions.values()),
+                sorted(may_also_change.values()),
             )
         except (LLMGenerationError, PipelineCompilerError):
             # Fall back to regenerating the whole module below.
@@ -2956,6 +3016,8 @@ def merge_validation_report(target: ValidationReport, extra: ValidationReport) -
     target.checks.extend(check for check in extra.checks if check not in target.checks)
     target.errors.extend(extra.errors)
     target.warnings.extend(extra.warnings)
+    if extra.evidence:
+        target.evidence = extra.evidence
     if target.errors:
         target.status = "invalid"
     elif extra.status == "not_run" and target.status == "valid":

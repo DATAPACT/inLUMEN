@@ -530,3 +530,114 @@ def test_repair_helpers_get_their_imports_first():
         '"""Doc."""\nfrom __future__ import annotations\n' + source,
         {"node_a": "def node_a(inputs, output_dir, context):\n    return []\n"}, "import os")
     assert kept.splitlines()[:3] == ['"""Doc."""', "from __future__ import annotations", "import os"]
+
+
+def test_a_step_repair_request_holds_only_what_the_step_needs():
+    seen = {}
+
+    def repair(prompt):
+        seen.update(prompt)
+        name = prompt["repair_functions"][0]
+        good = _break_task({"pipeline_plan": prompt["pipeline_plan"]})[2]
+        return {"functions": {name: good}, "helpers_py": "", "requirements": [], "notes": []}
+
+    first = {}
+
+    def draft(prompt):
+        first.update(prompt)
+        return _break_task(prompt)[0]
+
+    result = asyncio.run(generate(_graph(), model=Scripted(draft, repair)))
+    assert result.accepted, result.validation
+    full = {node["flow_id"]: node for node in first["pipeline_plan"]["nodes"]}
+    sent = {node["flow_id"]: node for node in seen["pipeline_plan"]["nodes"]}
+    assert sent["2"] == full["2"]
+    other = next(flow_id for flow_id in sent if flow_id not in {"2", *full["2"]["parents"]})
+    assert set(sent[other]) == {"flow_id", "function_name", "parents", "children", "outputs"}
+    assert "edges" not in seen["pipeline_plan"]
+    assert "..." in seen["previous_pipeline_py"]
+    assert f"def {full[other]['function_name']}(" in seen["previous_pipeline_py"]
+    assert len(json.dumps(seen)) < len(json.dumps(first)) + len(seen["previous_pipeline_py"])
+
+
+def test_outlining_a_module_keeps_helpers_and_hides_other_steps():
+    from inlumen.codegen.pipeline_compiler import outline_module
+
+    source = (
+        "import os\n\n\ndef _helper(x):\n    return x\n\n\n"
+        "def node_a(inputs, output_dir, context):\n    secret = 1\n    return [secret]\n\n\n"
+        "def node_b(inputs, output_dir, context):\n    return _helper([])\n"
+    )
+    outline = outline_module(source, {"node_b"}, {"node_a", "node_b"})
+    assert "secret" not in outline and "def node_a(inputs, output_dir, context):" in outline
+    assert "return _helper([])" in outline and "def _helper(x):\n    return x" in outline
+    compile(outline, "pipeline.py", "exec")
+
+
+def test_a_step_repair_may_also_replace_a_feeding_step():
+    from inlumen.codegen.generator import apply_node_repair
+
+    payload = {"pipeline_py": "def a(x):\n    return 1\n\n\ndef b(x):\n    return 2\n\n\ndef c(x):\n    return 3\n"}
+    both = apply_node_repair(
+        payload, {"functions": {"b": "def b(x):\n    return 20", "a": "def a(x):\n    return 10"}}, ["b"], ["a"])
+    assert "return 10" in both["pipeline_py"] and "return 20" in both["pipeline_py"]
+    one = apply_node_repair(payload, {"functions": {"b": "def b(x):\n    return 20"}}, ["b"], ["a"])
+    assert "return 1\n" in one["pipeline_py"] and "return 3" in one["pipeline_py"]
+    blocks = apply_node_repair(
+        payload, {"functions_py": "def a(x):\n    return 10\n\n\ndef b(x):\n    return 20\n"}, ["b"], ["a"])
+    assert blocks["pipeline_py"] == both["pipeline_py"]
+
+
+def test_a_failed_run_describes_the_files_the_step_received(tmp_path):
+    from inlumen.codegen.sandbox import describe_received_files, pipeline_failure_evidence
+
+    received = tmp_path / ".inputs" / "train"
+    received.mkdir(parents=True)
+    (received / "features.csv").write_text("id,score\n1,0.5\n2,0.7\n3,0.9\n", encoding="utf-8")
+    (received / "report.json").write_text('{"rows": 3, "ok": true}', encoding="utf-8")
+    (received / "input_manifest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / ".runtime").mkdir()
+    (tmp_path / ".runtime" / "clean.json").write_text("{}", encoding="utf-8")
+    table, report = describe_received_files(received)
+    assert table == {"filename": "features.csv", "size_bytes": 27, "columns": ["id", "score"],
+                     "first_rows": [["1", "0.5"], ["2", "0.7"]], "row_count": 3}
+    assert report["keys"] == ["ok", "rows"]
+    plan = {"nodes": [{"flow_id": "clean"}, {"flow_id": "train"}]}
+    logs = b"KeyError: 'label'\nNode train: the step's program exited with status 1. Its error is printed above.\n"
+    evidence = pipeline_failure_evidence(logs, plan, tmp_path)
+    assert evidence["failed_node"] == "train" and evidence["completed_nodes"] == ["clean"]
+    assert evidence["received_files"][0]["columns"] == ["id", "score"]
+    assert pipeline_failure_evidence(b"Traceback", plan, tmp_path) == {}
+
+
+def test_what_a_failed_run_observed_reaches_the_repair_but_not_the_stored_report():
+    from inlumen.codegen.llm import _observed
+    from inlumen.codegen.schemas import ValidationReport
+
+    report = ValidationReport(status="invalid", errors=["boom"], evidence={"failed_node": "2"})
+    assert _observed(report) == {"observed": {"failed_node": "2"}}
+    assert "evidence" not in report.model_dump() and _observed(ValidationReport(status="valid")) == {}
+
+
+def test_only_repairs_without_progress_count_against_the_limit():
+    from inlumen.codegen.generator import repair_front
+    from inlumen.codegen.schemas import ValidationReport
+
+    plan = {"nodes": [{"flow_id": flow_id, "function_name": "node_" + flow_id} for flow_id in "abc"]}
+    stuck = ValidationReport(status="invalid", errors=["Node b: failed"])
+    assert repair_front(stuck, plan) == 1
+    moved = ValidationReport(status="invalid", errors=["Traceback"], evidence={"failed_node": "c"})
+    assert repair_front(moved, plan) == 2
+    assert repair_front(ValidationReport(status="invalid", errors=["bad JSON"]), plan) == -1
+
+
+def test_a_wrong_number_of_returned_outputs_says_what_was_returned(tmp_path):
+    from inlumen.contracts.artifact_runtime import ArtifactContractError, validate_result
+
+    declared = [{"name": "total", "filename": "total.csv", "kind": "table", "format": "csv"}]
+    returned = [{"filename": "total.csv"}, {"filename": "notes.json"}]
+    with pytest.raises(ArtifactContractError) as error:
+        validate_result(tmp_path, declared, returned)
+    assert "['total.csv']" in str(error.value) and "2 descriptor(s): ['total.csv', 'notes.json']" in str(error.value)
+    with pytest.raises(ArtifactContractError, match="a dict, not a list"):
+        validate_result(tmp_path, declared, {"filename": "total.csv"})

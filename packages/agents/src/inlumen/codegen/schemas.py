@@ -286,6 +286,9 @@ class ValidationReport(BaseModel):
     checks: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    # What a failed sample run observed (the failing node and the files it
+    # received). It guides the next repair and is not part of the stored report.
+    evidence: dict[str, Any] = Field(default_factory=dict, exclude=True)
 
 
 class GenerationUsage(BaseModel):
