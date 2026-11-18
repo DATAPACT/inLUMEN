@@ -83,8 +83,12 @@ class PipelineRunApiTest(unittest.TestCase):
         )
         self.assertEqual("request-1", payload["idempotency_key"])
 
+    # Clearing runs also deletes their stored outputs. Without this patch the
+    # test talks to the real object storage: it waits minutes for the client's
+    # retries when none is reachable, and deletes real outputs when one is.
+    @patch("inlumen_api.remove_run_artifacts", return_value=3)
     @patch("inlumen_api.runner_request")
-    def test_list_and_cancel_proxy_to_private_runner(self, runner):
+    def test_list_and_cancel_proxy_to_private_runner(self, runner, remove_artifacts):
         runner.side_effect = [
             {"runs": []},
             {"run_id": "run-1", "status": "cancelling"},
@@ -111,6 +115,8 @@ class PipelineRunApiTest(unittest.TestCase):
             ("DELETE", "/v1/pipeline-runs"),
             runner.call_args_list[2].args,
         )
+        self.assertEqual(3, cleared.get_json()["removed_artifact_objects"])
+        self.assertTrue(remove_artifacts.called)
 
     @patch("inlumen_api.runner_request")
     @patch(

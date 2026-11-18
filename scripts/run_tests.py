@@ -8,6 +8,8 @@ import os
 import shutil
 import subprocess
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -131,7 +133,33 @@ def parse_args() -> argparse.Namespace:
         choices=("agents", "backend", "codegen", "runner", "frontend", "compose"),
         help="Run only this component. Repeat the option to select more than one.",
     )
+    parser.add_argument(
+        "--sequential",
+        action="store_true",
+        help="Run one check at a time and show its output as it is produced.",
+    )
     return parser.parse_args()
+
+
+def run_check(check: Check, *, capture: bool) -> tuple[bool, str, float]:
+    """Run one check; returns whether it passed, its captured output and its seconds."""
+    started = time.monotonic()
+    environment = os.environ.copy()
+    environment.update(check.environment or {})
+    try:
+        result = subprocess.run(
+            check.command,
+            cwd=check.cwd,
+            check=False,
+            env=environment,
+            stdout=subprocess.PIPE if capture else None,
+            stderr=subprocess.STDOUT if capture else None,
+            text=True,
+            errors="replace",
+        )
+    except FileNotFoundError as error:
+        return False, f"Unable to start {check.command[0]}: {error}\n", time.monotonic() - started
+    return result.returncode == 0, result.stdout or "", time.monotonic() - started
 
 
 def main() -> int:
@@ -144,26 +172,28 @@ def main() -> int:
         "frontend",
         "compose",
     ]
+    checks = [check for component in components for check in checks_for(component)]
     failures: list[str] = []
 
-    for component in components:
-        for check in checks_for(component):
+    if args.sequential or len(checks) == 1:
+        for check in checks:
             print(f"\n=== {check.name} ===", flush=True)
-            try:
-                environment = os.environ.copy()
-                environment.update(check.environment or {})
-                result = subprocess.run(
-                    check.command,
-                    cwd=check.cwd,
-                    check=False,
-                    env=environment,
-                )
-            except FileNotFoundError as error:
-                print(f"Unable to start {check.command[0]}: {error}", file=sys.stderr)
+            passed, output, _seconds = run_check(check, capture=False)
+            print(output, end="", file=sys.stderr)
+            if not passed:
                 failures.append(check.name)
-                continue
-            if result.returncode != 0:
-                failures.append(check.name)
+    else:
+        # The checks are independent, so they run side by side; each one's
+        # output is printed as a block when it finishes.
+        with ThreadPoolExecutor(max_workers=min(len(checks), os.cpu_count() or 2)) as pool:
+            running = {pool.submit(run_check, check, capture=True): check for check in checks}
+            for future in as_completed(running):
+                check = running[future]
+                passed, output, seconds = future.result()
+                status = "passed" if passed else "FAILED"
+                print(f"\n=== {check.name}: {status} in {seconds:.0f}s ===\n{output}", end="", flush=True)
+                if not passed:
+                    failures.append(check.name)
 
     if failures:
         print("\nFailed checks:", file=sys.stderr)
