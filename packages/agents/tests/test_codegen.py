@@ -515,3 +515,18 @@ def test_the_node_prompt_says_how_to_read_the_input_manifest():
     for prompt in (NODE_SYSTEM_PROMPT, NODE_CODE_SYSTEM_PROMPT):
         assert 'open(os.environ["INLUMEN_INPUT_MANIFEST"])' in prompt
         assert "No output manifest is required" in prompt
+
+
+def test_repair_helpers_get_their_imports_first():
+    from inlumen.codegen.pipeline_compiler import replace_node_functions
+
+    source = "import math\n\n\ndef node_a(inputs, output_dir, context):\n    return []\n"
+    helpers = "def _read(path) -> pd.DataFrame:\n    return pd.read_csv(path)\n\nimport pandas as pd\n"
+    patched = replace_node_functions(
+        source, {"node_a": "def node_a(inputs, output_dir, context):\n    return [_read]\n"}, helpers)
+    assert patched.startswith("import pandas as pd\nimport math\n")
+    compile(patched, "pipeline.py", "exec")
+    kept = replace_node_functions(
+        '"""Doc."""\nfrom __future__ import annotations\n' + source,
+        {"node_a": "def node_a(inputs, output_dir, context):\n    return []\n"}, "import os")
+    assert kept.splitlines()[:3] == ['"""Doc."""', "from __future__ import annotations", "import os"]

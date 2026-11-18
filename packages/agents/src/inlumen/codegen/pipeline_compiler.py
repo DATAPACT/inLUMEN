@@ -283,14 +283,14 @@ def split_node_functions(
     return replacements, "\n\n\n".join(helpers)
 
 
-def _new_helper_source(tree: ast.Module, helpers_py: str) -> str:
-    """The helper statements the module does not have yet.
+def _new_helper_source(tree: ast.Module, helpers_py: str) -> tuple[str, str]:
+    """The imports and the other helper statements the module does not have yet.
 
     Imports always pass. A definition the module already has, unchanged, is
     dropped; a changed one is an error, because other nodes may rely on it.
     """
     if not helpers_py.strip():
-        return ""
+        return "", ""
     try:
         helper_body = ast.parse(helpers_py).body
     except SyntaxError as exc:
@@ -302,8 +302,12 @@ def _new_helper_source(tree: ast.Module, helpers_py: str) -> str:
                 existing[name] = statement
     lines = helpers_py.splitlines()
     kept: list[str] = []
+    imports: list[str] = []
     clashes: set[str] = set()
     for statement in helper_body:
+        if isinstance(statement, (ast.Import, ast.ImportFrom)):
+            imports.append(statement_source(lines, statement))
+            continue
         names = (
             set() if isinstance(statement, (ast.Import, ast.ImportFrom))
             else provided_names(statement) & existing.keys()
@@ -319,7 +323,22 @@ def _new_helper_source(tree: ast.Module, helpers_py: str) -> str:
         raise PipelineCompilerError(
             "helpers_py redefines existing names: " + ", ".join(sorted(clashes))
         )
-    return "\n\n\n".join(kept)
+    return "\n".join(imports), "\n\n\n".join(kept)
+
+
+def _first_code_line(tree: ast.Module) -> int:
+    """The line of the first statement after the docstring and __future__ imports."""
+    for index, statement in enumerate(tree.body):
+        docstring = (
+            index == 0
+            and isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Constant)
+            and isinstance(statement.value.value, str)
+        )
+        future = isinstance(statement, ast.ImportFrom) and statement.module == "__future__"
+        if not docstring and not future:
+            return min([statement.lineno, *(item.lineno for item in getattr(statement, "decorator_list", []))])
+    return len(tree.body) and (tree.body[-1].end_lineno or 0) + 1 or 1
 
 
 def replace_node_functions(
@@ -330,8 +349,10 @@ def replace_node_functions(
     """Return ``source`` with the named top-level functions replaced.
 
     Every other line is kept as written. ``helpers_py`` holds new imports and
-    new helper definitions; it goes before the first replaced function and
-    may not redefine a name the module already defines.
+    new helper definitions. Its imports go to the top of the module, so every
+    definition can use them (annotations are evaluated when a function is
+    defined); its definitions go before the first replaced function and may
+    not redefine a name the module already defines.
     """
     try:
         tree = ast.parse(source, filename="pipeline.py")
@@ -369,7 +390,7 @@ def replace_node_functions(
     if not spans:
         return source
 
-    helpers = _new_helper_source(tree, str(helpers_py or ""))
+    imports, helpers = _new_helper_source(tree, str(helpers_py or ""))
 
     lines = source.splitlines()
     spans.sort()
@@ -378,6 +399,9 @@ def replace_node_functions(
         if index == 0 and helpers:
             block = [*helpers.splitlines(), "", "", *block]
         lines[first_line - 1 : last_line] = block
+    if imports:
+        top = _first_code_line(tree) - 1
+        lines[top:top] = imports.splitlines()
     return "\n".join(lines) + "\n"
 
 
