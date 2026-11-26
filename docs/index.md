@@ -37,7 +37,8 @@ installation and use.
 
 ## Releases
 
-- [Beta 5 release plan](./release-plan.md)
+- [Release plan and roadmap](./release-plan.md): what the next release contains and what comes after
+- [Beta 5 release plan](./beta5-release-plan.md)
 - [Beta 5 release notes](./beta5-release-notes.md) and [verification](./operations/beta5-verification.md)
 - [Beta 4 release notes](./beta4-release-notes.md) and [verification](./operations/beta4-verification.md)
 - [Beta 3 release plan and issue review](./beta3-release-plan.md)
