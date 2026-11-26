@@ -11,7 +11,7 @@ from packaging.requirements import InvalidRequirement, Requirement
 import argo_bundle
 from inlumen.contracts.artifact_runtime import ArtifactContractError, CONTRACT_ID, assign_output_ports, validate_connection_contract, validate_declaration
 from artifact_content import decode_artifact_content, verify_artifact_integrity
-from inlumen.contracts.artifact_contract import ArtifactBinding, artifact_bindings, classify_artifact
+from inlumen.contracts.artifact_contract import ArtifactBinding, artifact_bindings
 from inlumen.contracts.connector_catalog import connector_definition
 from filesystem_runtime import filesystem_shell_component_source
 from inlumen.contracts.node_parameters import normalize_secret_param_keys
@@ -3758,53 +3758,6 @@ def _root_input_owner(
             f"available roots are {', '.join(root_step_ids)}."
         ],
     )
-
-
-def _manifest_input_entry(file_entry: dict, *, path_prefix: str) -> dict:
-    filename = _clean_string(file_entry.get("filename"))
-    classification = classify_artifact(
-        filename,
-        kind=file_entry.get("kind"),
-        file_format=file_entry.get("format"),
-    )
-    return {
-        "filename": filename,
-        "path": f"{path_prefix}/{_safe_docker_source(filename)}",
-        **classification,
-        "description": _clean_string(file_entry.get("description"))
-        or "Input file supplied for this execution.",
-        **(
-            {"columns": list(file_entry.get("columns") or [])}
-            if file_entry.get("columns")
-            else {}
-        ),
-        **(
-            {"required_columns": list(file_entry.get("required_columns") or [])}
-            if file_entry.get("required_columns")
-            else {}
-        ),
-        **(
-            {"schema": file_entry.get("schema")}
-            if isinstance(file_entry.get("schema"), dict)
-            and file_entry.get("schema")
-            else {}
-        ),
-        **(
-            {"semantic_role": _clean_string(file_entry.get("semantic_role"))}
-            if _clean_string(file_entry.get("semantic_role"))
-            else {}
-        ),
-        **(
-            {"size_bytes": file_entry.get("size_bytes")}
-            if file_entry.get("size_bytes") is not None
-            else {}
-        ),
-        **(
-            {"sha256": _clean_string(file_entry.get("sha256"))}
-            if _clean_string(file_entry.get("sha256"))
-            else {}
-        ),
-    }
 
 
 def build_dagster_project_files(
