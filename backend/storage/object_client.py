@@ -30,7 +30,7 @@ def dispatch_object_request(
 
 
 def _minio_app():
-    from minio_api import app
+    from storage.minio_api import app
 
     return app
 

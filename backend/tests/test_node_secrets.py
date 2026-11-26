@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from node_secrets import (  # noqa: E402
+from auth.node_secrets import (  # noqa: E402
     clear_node_secrets,
     configured_node_secrets,
     delete_node_secret,

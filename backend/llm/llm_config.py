@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
 from autogen_core.models import ChatCompletionClient
-from application_llm import application_llm_request_config
+from llm.application_llm import application_llm_request_config
 from inlumen.llm_requests import request_policy
 from inlumen.llm_autogen import OpenAIResponsesClient, ProviderAwareChatClient as OpenAIChatCompletionClient
 
@@ -115,7 +115,7 @@ def resolve_llm_config(raw_config: Optional[Mapping[str, Any]] = None) -> LLMCon
     if not api_key:
         # Import lazily: this module is also used by non-request tooling, while
         # credential resolution is meaningful only inside the gateway request.
-        from llm_credential_store import get_llm_credential
+        from llm.llm_credential_store import get_llm_credential
 
         api_key = (
             get_llm_credential(

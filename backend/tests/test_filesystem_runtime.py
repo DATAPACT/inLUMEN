@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from filesystem_runtime import (  # noqa: E402
+from export.filesystem_runtime import (  # noqa: E402
     PIPELINE_INPUT_DIR,
     PIPELINE_OUTPUT_DIR,
     discover_artifacts,

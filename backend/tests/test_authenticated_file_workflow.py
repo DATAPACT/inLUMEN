@@ -17,9 +17,9 @@ import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 import inlumen_api as api
-from auth_middleware import require_auth
-from workspace_store import Principal, WorkspaceAccessDenied
-from workspace_storage import node_bucket_name, workspace_bucket_prefix, version_snapshot_bucket
+from auth.auth_middleware import require_auth
+from workspaces.workspace_store import Principal, WorkspaceAccessDenied
+from workspaces.workspace_storage import node_bucket_name, workspace_bucket_prefix, version_snapshot_bucket
 
 
 @unittest.skipUnless(os.getenv("RUN_AUTH_FILE_INTEGRATION") == "1", "requires local Neo4j and MinIO")
@@ -31,14 +31,14 @@ class AuthenticatedFileWorkflowTests(unittest.TestCase):
         self.env = patch.dict(os.environ, {"AUTH_ENABLED": "true", "APP_ENV": "production",
             "KEYCLOAK_ISSUER": "https://test.invalid/realm", "KEYCLOAK_AUDIENCE": "inlumen-test"})
         self.env.start()
-        self.jwks = patch("auth_middleware._get_jwks_client")
+        self.jwks = patch("auth.auth_middleware._get_jwks_client")
         self.jwks.start().return_value.get_signing_key_from_jwt.return_value = SimpleNamespace(key=self.key.public_key())
         def principal(claims, requested):
             workspace = self.workspace if claims["sub"] == "owner" else self.other
             if requested and requested != workspace:
                 raise WorkspaceAccessDenied("not a member")
             return Principal(claims["sub"], claims["sub"], claims["iss"], workspace, workspace, "owner")
-        self.membership = patch("auth_middleware.resolve_principal", side_effect=principal)
+        self.membership = patch("auth.auth_middleware.resolve_principal", side_effect=principal)
         self.membership.start()
         self.client = api.app.test_client()
         self.headers = self.headers_for()
@@ -51,8 +51,8 @@ class AuthenticatedFileWorkflowTests(unittest.TestCase):
                 "X-InLumen-Workspace-Id": self.workspace if subject == "owner" else self.other}
 
     def tearDown(self):
-        from neo4j_api import _base_driver, _workspace_label
-        from minio_gateway import get_minio_client
+        from graph.neo4j_api import _base_driver, _workspace_label
+        from storage.minio_gateway import get_minio_client
         try:
             for workspace in (self.workspace, self.other):
                 with _base_driver.session() as session:

@@ -13,7 +13,7 @@ from unittest.mock import patch
 @unittest.skipUnless(os.getenv('RUN_NEO4J_INTEGRATION') == '1', 'requires disposable Neo4j')
 class DesignStoreParityTests(unittest.TestCase):
     def _clear(self):
-        from neo4j_api import _base_driver
+        from graph.neo4j_api import _base_driver
 
         with _base_driver.session() as session:
             session.run('MATCH (n) DETACH DELETE n').consume()

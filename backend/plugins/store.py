@@ -39,7 +39,7 @@ CACHE_TTL_SECONDS = 5.0
 
 
 def _database_url() -> str:
-    from node_secrets import _database_url as shared_database_url
+    from auth.node_secrets import _database_url as shared_database_url
 
     return shared_database_url()
 

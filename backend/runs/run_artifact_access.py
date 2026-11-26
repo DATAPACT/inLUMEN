@@ -13,7 +13,7 @@ from typing import Any, Iterator
 
 from minio.deleteobjects import DeleteObject
 
-from minio_gateway import get_minio_client
+from storage.minio_gateway import get_minio_client
 from run_artifact_names import RUN_ARTIFACTS_PREFIX, run_artifacts_bucket, run_output_key, run_prefix
 
 STREAM_CHUNK_BYTES = 1024 * 1024

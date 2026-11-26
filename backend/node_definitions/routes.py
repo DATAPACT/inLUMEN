@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from flask import Blueprint, jsonify, make_response, request
 
-from auth_middleware import require_auth
+from auth.auth_middleware import require_auth
 
 from inlumen.contracts.node_definitions.registry import NodeDefinitionRegistry, get_node_definition_registry
 

@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from llm_config import resolve_llm_config, select_model_client
+from llm.llm_config import resolve_llm_config, select_model_client
 
 
 class LLMConfigTest(unittest.TestCase):
@@ -60,7 +60,7 @@ class LLMConfigTest(unittest.TestCase):
         self.assertEqual("https://openrouter.ai/api/v1", config.base_url)
         self.assertEqual("session-secret", config.api_key)
 
-    @patch("llm_config.OpenAIChatCompletionClient")
+    @patch("llm.llm_config.OpenAIChatCompletionClient")
     def test_restricts_openrouter_to_selected_provider(self, client_mock):
         config = resolve_llm_config({
             "provider": "openrouter",

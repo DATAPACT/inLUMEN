@@ -7,7 +7,7 @@ from urllib.parse import urlencode
 
 from sqlalchemy import create_engine, text
 
-from conversations import ConversationError, ConversationStore
+from chat.conversations import ConversationError, ConversationStore
 
 
 @unittest.skipUnless(os.getenv('TEST_POSTGRES_URL'), 'requires disposable PostgreSQL')

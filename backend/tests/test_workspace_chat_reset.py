@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import chat_state
+from chat import chat_state
 
 
 class WorkspaceChatResetTests(unittest.TestCase):

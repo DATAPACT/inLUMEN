@@ -10,7 +10,7 @@ from typing import Any
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import create_engine, text
 
-from auth_middleware import current_workspace_id
+from auth.auth_middleware import current_workspace_id
 from inlumen.contracts.node_parameters import normalize_secret_param_keys
 
 
@@ -24,7 +24,7 @@ def _database_location() -> str:
     return (
         os.getenv("DATABASE_URL", "").strip()
         or os.getenv("INLUMEN_SECRET_DB_PATH", "").strip()
-        or str(Path(__file__).parent / "state" / "node-secrets.sqlite3")
+        or str(Path(__file__).parents[1] / "state" / "node-secrets.sqlite3")
     )
 
 
@@ -42,7 +42,7 @@ def _key_path() -> Path:
     return (
         Path(configured)
         if configured
-        else Path(__file__).parent / "state" / "node-secrets.key"
+        else Path(__file__).parents[1] / "state" / "node-secrets.key"
     )
 
 

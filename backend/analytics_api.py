@@ -12,27 +12,27 @@ from urllib.request import Request, urlopen
 from flask import Flask, jsonify, has_request_context, make_response, request
 
 from async_runtime import run_async
-from auth_middleware import current_workspace_id, current_principal, require_auth
-from conversations import ConversationError, chat_scope, conversation_store, registry_turn_id
-from chat_routes import create_chat_blueprint
+from auth.auth_middleware import current_workspace_id, current_principal, require_auth
+from chat.conversations import ConversationError, chat_scope, conversation_store, registry_turn_id
+from chat.chat_routes import create_chat_blueprint
 from sqlalchemy.exc import SQLAlchemyError
-from chat_state import clear_state_from_disk
-from deployment_artifacts import (
+from chat.chat_state import clear_state_from_disk
+from export.deployment_artifacts import (
     DeploymentArtifactValidationError,
     build_argo_workflow_yaml,
     build_dagster_project_files,
     build_deployment_bundle_files,
 )
-from deployment_agents import (
+from export.deployment_agents import (
     generate_argo_yaml_from_graph,
     generate_dockerfiles_with_agent,
 )
-from graph_client import (
+from graph.graph_client import (
     fetch_pipeline_graph,
     fetch_pipeline_versions,
 )
-from llm_config import llm_config_from_payload, log_llm_selection
-from node_secrets import runtime_secret_environment
+from llm.llm_config import llm_config_from_payload, log_llm_selection
+from auth.node_secrets import runtime_secret_environment
 from inlumen.design.context import _clean_client_graph
 from pipeline_agent.cancellation import (
     request_pipeline_turn_cancel,
@@ -40,8 +40,8 @@ from pipeline_agent.cancellation import (
 )
 from pipeline_agent.service import PipelineEditorTurnCancelled, run_pipeline_editor_turn
 from runtime_config import add_cors_headers
-from workspace_storage import node_bucket_name
-from workspace_store import WORKSPACE_HEADER
+from workspaces.workspace_storage import node_bucket_name
+from workspaces.workspace_store import WORKSPACE_HEADER
 
 app = Flask(__name__)
 app.register_blueprint(create_chat_blueprint())

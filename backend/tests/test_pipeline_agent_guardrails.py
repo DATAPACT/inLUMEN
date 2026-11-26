@@ -8,10 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from graph_client import run_neo4j_query
-from llm_config import LLMConfig
+from graph.graph_client import run_neo4j_query
+from llm.llm_config import LLMConfig
 from local_api_client import LocalApiResponse
-from neo4j_api import _validate_workspace_cypher
+from graph.neo4j_api import _validate_workspace_cypher
 from inlumen.design.context import (
     _assistant_message_from_result,
     _clean_client_graph,
@@ -1745,7 +1745,7 @@ class PipelineAgentGuardrailTest(unittest.TestCase):
         self.assertEqual("find_reusable_pipeline_by_name", run_query.await_args_list[0].args[1])
         self.assertEqual("create_reusable_pipeline", run_query.await_args.args[1])
 
-    @patch("graph_client.dispatch_graph_request")
+    @patch("graph.graph_client.dispatch_graph_request")
     def test_graph_client_raises_http_failures_as_tool_errors(self, dispatch_graph_request):
         dispatch_graph_request.return_value = LocalApiResponse(
             content=b'{"error":"deadlock"}',

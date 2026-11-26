@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import os
 
-from chatbot_config_store import _engine as chatbot_config_engine
-from chat_state import _engine as chat_state_engine
-from codegen_runs import CodegenRunStore
-from llm_credential_store import _engine as llm_credential_engine
-from application_llm_store import _engine as application_llm_engine
-from node_secrets import _engine as node_secret_engine
-from workspace_store import ensure_schema
-from conversations import conversation_store
+from llm.chatbot_config_store import _engine as chatbot_config_engine
+from chat.chat_state import _engine as chat_state_engine
+from runs.codegen_runs import CodegenRunStore
+from llm.llm_credential_store import _engine as llm_credential_engine
+from llm.application_llm_store import _engine as application_llm_engine
+from auth.node_secrets import _engine as node_secret_engine
+from workspaces.workspace_store import ensure_schema
+from chat.conversations import conversation_store
 
 
 def main() -> None:

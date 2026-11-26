@@ -87,7 +87,7 @@ def validate_application_llm_config(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 def application_llm_settings() -> dict:
     """Metadata only, including disabled settings for the administrator."""
-    from application_llm_store import read_application_llm
+    from llm.application_llm_store import read_application_llm
     saved = read_application_llm()
     config = saved["config"]
     return {
@@ -97,7 +97,7 @@ def application_llm_settings() -> dict:
 
 
 def load_application_llm() -> ApplicationLLM | None:
-    from application_llm_store import read_application_llm
+    from llm.application_llm_store import read_application_llm
     saved = read_application_llm(include_key=True)
     if not saved["enabled"] or not saved["config"]:
         return None
@@ -113,7 +113,7 @@ def application_llm_request_config(
     # authenticated principal has been established. require_auth sets g first.
     if not has_request_context() or getattr(g, "inlumen_principal", None) is None:
         raise ValueError("Application LLM access requires an authorized workspace request.")
-    from auth_middleware import is_auth_enabled
+    from auth.auth_middleware import is_auth_enabled
     if os.getenv("APP_ENV", "development").strip().lower() == "production" and not is_auth_enabled():
         raise ValueError("Application LLM access requires authentication in production.")
     configured = load_application_llm()

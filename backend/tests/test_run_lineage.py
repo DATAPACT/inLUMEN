@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from provenance_provo import build_run_prov_o_jsonld  # noqa: E402
+from provenance.provenance_provo import build_run_prov_o_jsonld  # noqa: E402
 
 
 def run_record():

@@ -1,10 +1,10 @@
 from flask import Blueprint, jsonify, request
 from sqlalchemy.exc import SQLAlchemyError
 
-from auth_middleware import require_auth
-from chat_state import clear_state_from_disk
-from conversations import ConversationError, chat_scope, conversation_store
-from graph_client import record_applied_preview_tool_calls
+from auth.auth_middleware import require_auth
+from chat.chat_state import clear_state_from_disk
+from chat.conversations import ConversationError, chat_scope, conversation_store
+from graph.graph_client import record_applied_preview_tool_calls
 
 
 def create_chat_blueprint():

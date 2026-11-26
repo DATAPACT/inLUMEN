@@ -1,6 +1,6 @@
 import unittest
 
-from artifact_content import decode_artifact_content, encode_artifact_bytes
+from storage.artifact_content import decode_artifact_content, encode_artifact_bytes
 
 
 class ArtifactContentTransportTest(unittest.TestCase):

@@ -6,7 +6,7 @@ from unittest.mock import patch
 import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from auth_middleware import (
+from auth.auth_middleware import (
     _keycloak_clock_skew_seconds,
     validate_keycloak_bearer_token,
     validate_production_auth_configuration,
@@ -27,7 +27,7 @@ class AuthClockSkewTests(unittest.TestCase):
         with patch.dict("os.environ", {
             "KEYCLOAK_ISSUER": "https://issuer/realms/test",
             "KEYCLOAK_AUDIENCE": "frontend", "KEYCLOAK_CLOCK_SKEW_SECONDS": skew,
-        }), patch("auth_middleware._get_jwks_client") as client, patch("jwt.api_jwt.datetime") as clock:
+        }), patch("auth.auth_middleware._get_jwks_client") as client, patch("jwt.api_jwt.datetime") as clock:
             client.return_value.get_signing_key_from_jwt.return_value = SimpleNamespace(key=self.key.public_key())
             clock.now.return_value = datetime.fromtimestamp(now, timezone.utc)
             return validate_keycloak_bearer_token("Bearer " + token)

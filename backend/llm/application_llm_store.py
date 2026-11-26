@@ -7,7 +7,7 @@ import threading
 from cryptography.fernet import InvalidToken
 from sqlalchemy import create_engine, text
 
-from node_secrets import _database_url, _fernet
+from auth.node_secrets import _database_url, _fernet
 
 _ENGINE = None
 _ENGINE_URL = ""

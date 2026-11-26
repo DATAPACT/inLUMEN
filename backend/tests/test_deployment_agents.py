@@ -16,11 +16,11 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from async_runtime import run_async  # noqa: E402
-from deployment_artifacts import build_deployment_bundle_files  # noqa: E402
-from runtime_environment import discover_runtime_environment  # noqa: E402
+from export.deployment_artifacts import build_deployment_bundle_files  # noqa: E402
+from export.runtime_environment import discover_runtime_environment  # noqa: E402
 
 try:
-    from deployment_agents import (  # noqa: E402
+    from export.deployment_agents import (  # noqa: E402
         DeploymentArtifactValidationError,
         _cli_task_contract,
         _cli_task_launcher_source,
@@ -149,7 +149,7 @@ class DeploymentAgentsTest(unittest.TestCase):
 
 
     def test_multi_file_bundle_matches_codegen_name_and_kinds(self):
-        from deployment_agents import _multi_file_source_bundle
+        from export.deployment_agents import _multi_file_source_bundle
 
         bundle = _multi_file_source_bundle(
             {"flow_id": "1", "label": "!!"},
@@ -703,10 +703,10 @@ parser.add_argument('--output')
         }
 
         with patch(
-            "deployment_agents._read_persisted_codegen_artifact",
+            "export.deployment_agents._read_persisted_codegen_artifact",
             side_effect=stale_error,
         ), patch(
-            "deployment_agents._read_attached_python_runtime",
+            "export.deployment_agents._read_attached_python_runtime",
             return_value=(attached_runtime, attached_dockerfile),
         ) as read_uploaded:
             payload = run_async(
@@ -808,7 +808,7 @@ parser.add_argument('--output')
         }
 
         with patch(
-            "deployment_agents.read_minio_object_bytes",
+            "export.deployment_agents.read_minio_object_bytes",
             side_effect=read_object,
         ):
             payload = run_async(
@@ -897,7 +897,7 @@ parser.add_argument('--output')
         }
 
         with patch(
-            "deployment_agents.read_minio_object_bytes",
+            "export.deployment_agents.read_minio_object_bytes",
             side_effect=read_object,
         ):
             payload = run_async(
@@ -1007,7 +1007,7 @@ parser.add_argument('--output')
         }
 
         with patch(
-            "deployment_agents.read_minio_object_bytes",
+            "export.deployment_agents.read_minio_object_bytes",
             side_effect=read_object,
         ):
             payload = run_async(

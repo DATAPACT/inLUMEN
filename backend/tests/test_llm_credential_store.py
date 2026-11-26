@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import llm_credential_store
+from llm import llm_credential_store
 
 
 class LLMCredentialStoreTests(unittest.TestCase):

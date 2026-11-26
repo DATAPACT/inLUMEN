@@ -6,8 +6,8 @@ from flask import g
 
 import inlumen_api as api
 from local_api_client import LocalApiResponse
-from workspace_store import Principal
-from workspace_storage import node_bucket_name, version_snapshot_bucket
+from workspaces.workspace_store import Principal
+from workspaces.workspace_storage import node_bucket_name, version_snapshot_bucket
 
 
 class InputStagingTests(unittest.TestCase):

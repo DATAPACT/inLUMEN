@@ -26,8 +26,8 @@ def main():
     parser.add_argument("--materialize", action="store_true", help="Requires Docker and codegen dependencies.")
     args = parser.parse_args()
 
-    from deployment_agents import generate_dockerfiles_with_agent
-    from deployment_artifacts import build_deployment_bundle_files
+    from export.deployment_agents import generate_dockerfiles_with_agent
+    from export.deployment_artifacts import build_deployment_bundle_files
     from inlumen.contracts.pipeline_graph_validation import validate_pipeline_graph
 
     example = ROOT / "examples" / "order-summary"
@@ -47,7 +47,7 @@ def main():
     async def read_object(bucket, filename):
         return stored[(bucket, filename)]
 
-    with patch("deployment_agents.read_minio_object_bytes", side_effect=read_object):
+    with patch("export.deployment_agents.read_minio_object_bytes", side_effect=read_object):
         runtime = asyncio.run(generate_dockerfiles_with_agent(
             [], [], pipeline_graph=graph, require_attached_runtime=True,
         ))

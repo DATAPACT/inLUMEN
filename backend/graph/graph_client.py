@@ -2,9 +2,9 @@ import asyncio
 
 from flask import has_request_context
 
-from auth_middleware import current_workspace_id
+from auth.auth_middleware import current_workspace_id
 from local_api_client import LocalApiResponse, dispatch_flask_request
-from workspace_store import WORKSPACE_HEADER
+from workspaces.workspace_store import WORKSPACE_HEADER
 
 
 async def _await_uncancellable_executor(future):
@@ -78,7 +78,7 @@ def dispatch_graph_request(
 
 
 def _neo4j_app():
-    from neo4j_api import app
+    from graph.neo4j_api import app
 
     return app
 
@@ -253,7 +253,7 @@ async def clear_preview_workspace(
 
 def record_applied_preview_tool_calls(tool_calls: dict, authorization: str | None = None) -> None:
     """Write an accepted preview turn's tool calls to the current workspace's provenance."""
-    from workspace_queries import INTERNAL_QUERY_CAPABILITY
+    from workspaces.workspace_queries import INTERNAL_QUERY_CAPABILITY
     response = dispatch_graph_request(
         "neo4j_run_query",
         method="POST",
@@ -272,7 +272,7 @@ async def run_neo4j_query(
     workspace_id: str | None = None,
 ) -> str:
     """Run a Cypher query through the Neo4j API and return a string payload."""
-    from workspace_queries import INTERNAL_QUERY_CAPABILITY
+    from workspaces.workspace_queries import INTERNAL_QUERY_CAPABILITY
     try:
         print("[graph_client.py] Executing Neo4J query of type: " + query_type)
         payload = {"query": query, "query_type": query_type}

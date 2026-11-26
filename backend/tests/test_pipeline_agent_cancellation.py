@@ -15,8 +15,8 @@ from pipeline_agent.cancellation import (  # noqa: E402
     run_cancellable_pipeline_turn,
 )
 from analytics_api import app  # noqa: E402
-from graph_client import run_neo4j_query  # noqa: E402
-from conversations import chat_scope, registry_turn_id
+from graph.graph_client import run_neo4j_query  # noqa: E402
+from chat.conversations import chat_scope, registry_turn_id
 
 
 class PipelineAgentCancellationTest(unittest.TestCase):
@@ -59,7 +59,7 @@ class PipelineAgentCancellationTest(unittest.TestCase):
             return response
 
         async def exercise():
-            with patch("graph_client.dispatch_graph_request", side_effect=blocking_graph_request):
+            with patch("graph.graph_client.dispatch_graph_request", side_effect=blocking_graph_request):
                 task = asyncio.create_task(run_neo4j_query("CREATE ()", "create_step"))
                 started_ok = await asyncio.to_thread(started.wait, 2)
                 self.assertTrue(started_ok)

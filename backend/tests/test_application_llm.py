@@ -8,12 +8,12 @@ from unittest.mock import patch
 from flask import g
 
 import inlumen_api
-from application_llm import APPLICATION_LLM_ID, application_llm_request_config, load_application_llm, validate_application_llm_config, application_llm_settings
-import application_llm_store
-from application_llm_store import save_application_llm, read_application_llm
-from auth_middleware import AuthValidationError, current_workspace_id
-from llm_config import resolve_llm_config
-from workspace_store import Principal
+from llm.application_llm import APPLICATION_LLM_ID, application_llm_request_config, load_application_llm, validate_application_llm_config, application_llm_settings
+from llm import application_llm_store
+from llm.application_llm_store import save_application_llm, read_application_llm
+from auth.auth_middleware import AuthValidationError, current_workspace_id
+from llm.llm_config import resolve_llm_config
+from workspaces.workspace_store import Principal
 
 
 def principal(name="alice"):
@@ -42,7 +42,7 @@ class ApplicationLLMTests(unittest.TestCase):
 
     def test_disabled_does_not_decrypt_and_rejects_stale_selection(self):
         save_application_llm(self.config, "", enabled=False, revision=1, updated_by="admin")
-        with patch("application_llm_store._fernet") as cipher:
+        with patch("llm.application_llm_store._fernet") as cipher:
             self.assertIsNone(load_application_llm())
             self.assertIsNotNone(application_llm_settings()["config"])
             cipher.assert_not_called()
@@ -117,7 +117,7 @@ class ApplicationLLMTests(unittest.TestCase):
     def test_personal_credentials_do_not_fall_back_to_shared_key(self):
         raw = {"provider": "custom", "model": "personal", "base_url": "https://private.test", "credential_id": "missing"}
         self.assertIs(application_llm_request_config(raw), raw)
-        with patch("llm_credential_store.get_llm_credential", return_value=None):
+        with patch("llm.llm_credential_store.get_llm_credential", return_value=None):
             with self.assertRaisesRegex(ValueError, "API key is required"):
                 resolve_llm_config(raw)
 
@@ -131,7 +131,7 @@ class ApplicationLLMTests(unittest.TestCase):
 
     def test_encrypted_storage_rotation_and_metadata(self):
         self.assertNotIn("shared-secret", Path(self.temp.name, "secrets.sqlite3").read_bytes().decode("latin-1"))
-        with patch("application_llm_store._fernet") as cipher:
+        with patch("llm.application_llm_store._fernet") as cipher:
             self.assertNotIn("shared-secret", json.dumps(application_llm_settings()))
             cipher.assert_not_called()
         save_application_llm(self.config, "replacement", enabled=True, revision=1, updated_by="admin")
@@ -142,13 +142,13 @@ class ApplicationLLMTests(unittest.TestCase):
         self.assertEqual(load_application_llm().api_key, "replacement")
 
     def test_config_api_requires_keycloak_authentication(self):
-        with patch("auth_middleware.validate_keycloak_bearer_token", return_value=(None, AuthValidationError(401, "Unauthorized", "Missing Bearer token"))):
+        with patch("auth.auth_middleware.validate_keycloak_bearer_token", return_value=(None, AuthValidationError(401, "Unauthorized", "Missing Bearer token"))):
             for path in ("/api/chatbot-configs", f"/api/chatbot-configs/{APPLICATION_LLM_ID}"):
                 self.assertEqual(self.client.get(path).status_code, 401)
 
     def test_available_in_two_workspaces_without_copying_or_exposing_key(self):
-        with patch("auth_middleware.validate_keycloak_bearer_token", return_value=({"sub": "user"}, None)), \
-             patch("auth_middleware.resolve_principal") as resolve, \
+        with patch("auth.auth_middleware.validate_keycloak_bearer_token", return_value=({"sub": "user"}, None)), \
+             patch("auth.auth_middleware.resolve_principal") as resolve, \
              patch.object(inlumen_api, "_load_chatbot_configs", side_effect=lambda: [{"id": current_workspace_id(), "name": "Personal"}]), \
              patch.object(inlumen_api, "has_llm_credential", return_value=False), \
              patch.object(inlumen_api, "_save_chatbot_configs") as save:
@@ -166,8 +166,8 @@ class ApplicationLLMTests(unittest.TestCase):
             save.assert_not_called()
 
     def test_reserved_config_cannot_be_created_changed_or_deleted(self):
-        with patch("auth_middleware.validate_keycloak_bearer_token", return_value=({}, None)), \
-             patch("auth_middleware.resolve_principal", return_value=principal()), \
+        with patch("auth.auth_middleware.validate_keycloak_bearer_token", return_value=({}, None)), \
+             patch("auth.auth_middleware.resolve_principal", return_value=principal()), \
              patch.object(inlumen_api, "_load_chatbot_configs", return_value=[]), \
              patch.object(inlumen_api, "_save_chatbot_configs") as save, \
              patch.object(inlumen_api, "save_llm_credential") as save_key, \
@@ -181,8 +181,8 @@ class ApplicationLLMTests(unittest.TestCase):
 
     def test_disabled_config_disappears_from_api(self):
         save_application_llm(self.config, "", enabled=False, revision=1, updated_by="admin")
-        with patch("auth_middleware.validate_keycloak_bearer_token", return_value=({}, None)), \
-             patch("auth_middleware.resolve_principal", return_value=principal()), \
+        with patch("auth.auth_middleware.validate_keycloak_bearer_token", return_value=({}, None)), \
+             patch("auth.auth_middleware.resolve_principal", return_value=principal()), \
              patch.object(inlumen_api, "_load_chatbot_configs", return_value=[]):
             self.assertEqual(self.client.get("/api/chatbot-configs").json, {"configs": []})
             self.assertEqual(self.client.get(f"/api/chatbot-configs/{APPLICATION_LLM_ID}").status_code, 404)

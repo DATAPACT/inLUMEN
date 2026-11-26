@@ -16,8 +16,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import argo_bundle as argo_helpers
-from deployment_artifacts import (
+from export import argo_bundle as argo_helpers
+from export.deployment_artifacts import (
     DeploymentArtifactValidationError,
     build_argo_workflow_object,
     build_deployment_bundle_files,
@@ -439,7 +439,7 @@ class ArgoBundleLayoutTest(unittest.TestCase):
 
 
     def _shared_runtime(self, payload=None):
-        from deployment_artifacts import (
+        from export.deployment_artifacts import (
             _shared_argo_runtime,
             extract_pipeline_steps,
             select_runtime_steps,
@@ -449,7 +449,7 @@ class ArgoBundleLayoutTest(unittest.TestCase):
         return _shared_argo_runtime(steps, [step["flow_id"] for step in steps], payload or whisper_payload())
 
     def test_invalid_workflows_are_reported_at_export_without_network(self):
-        import deployment_artifacts
+        from export import deployment_artifacts
 
         real_builder = deployment_artifacts.build_argo_workflow_object
 
@@ -485,7 +485,7 @@ class ArgoBundleLayoutTest(unittest.TestCase):
                 self.assertIn(message, " ".join(raised.exception.errors))
 
     def test_requirement_conflicts_are_found_offline(self):
-        from deployment_artifacts import _requirement_conflict
+        from export.deployment_artifacts import _requirement_conflict
 
         for first, second, conflict in (
             (["pandas==1.5.3"], ["pandas>=2.0"], "pandas"),

@@ -11,15 +11,15 @@ from plugins.runtime import plugin_data_contract, plugin_main_source, plugin_run
 
 from pydantic import BaseModel, Field
 
-from attachment_validation import attachment_input_errors
-from artifact_content import encode_artifact_bytes, is_text_artifact
+from storage.attachment_validation import attachment_input_errors
+from storage.artifact_content import encode_artifact_bytes, is_text_artifact
 from inlumen.contracts.artifact_contract import classify_artifact
 from inlumen.contracts.artifact_runtime import ArtifactContractError
 from inlumen.contracts.port_types import FILES_AS_SEPARATE, file_port_ids, files_as, kind_for_filename
 from inlumen.contracts.task_package_contract import task_data_contract
 from inlumen.contracts.task_package_contract import validate_package
 from async_runtime import run_async
-from deployment_artifacts import (
+from export.deployment_artifacts import (
     DeploymentArtifactValidationError,
     UV_PINNED_VERSION,
     _argo_name,
@@ -31,7 +31,7 @@ from deployment_artifacts import (
     validate_dockerfile_artifacts,
 )
 from generators.registry import GeneratorRegistry
-from map_runtime import (
+from export.map_runtime import (
     collect_output,
     collect_source,
     lift_step,
@@ -40,13 +40,13 @@ from map_runtime import (
     set_collect_item,
 )
 from inlumen.contracts.map_scope import is_collect, is_map, map_scopes
-from minio_gateway import read_minio_object, read_minio_object_bytes
+from storage.minio_gateway import read_minio_object, read_minio_object_bytes
 from inlumen.contracts.model_plans import (
     infer_implementation_plan_from_python_source,
     unresolved_model_plan_errors_from_python_source,
 )
 from inlumen.contracts.node_parameters import normalize_secret_param_keys
-from workspace_storage import node_bucket_name
+from workspaces.workspace_storage import node_bucket_name
 
 CODEGEN_GENERATOR = "inlumen-codegen-service"
 ATTACHED_RUNTIME_GENERATOR = "inlumen-attached-runtime"
@@ -2485,7 +2485,7 @@ async def _read_attached_python_runtime(
         )
 
     if "inlumen.task.json" in filenames:
-        from artifact_content import decode_artifact_content
+        from storage.artifact_content import decode_artifact_content
         checked = validate_package({item["filename"]: decode_artifact_content(item) for item in runtime_files})
 
     main_file = next(

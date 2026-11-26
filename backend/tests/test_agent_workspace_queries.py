@@ -5,7 +5,7 @@ import unittest
 import uuid
 from unittest.mock import AsyncMock, patch
 
-from neo4j_api import _base_driver, _scope_cypher, _validate_workspace_cypher
+from graph.neo4j_api import _base_driver, _scope_cypher, _validate_workspace_cypher
 from pipeline_agent.tools import build_pipeline_editor_tools
 
 

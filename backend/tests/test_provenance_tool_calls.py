@@ -3,7 +3,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-import neo4j_api
+from graph import neo4j_api
 
 
 class _Result:

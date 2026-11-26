@@ -9,8 +9,8 @@ from unittest.mock import patch
 import yaml
 
 from async_runtime import run_async
-from deployment_agents import generate_dockerfiles_with_agent
-from deployment_artifacts import _ARGO_PORT_RUNNER, build_deployment_bundle_files
+from export.deployment_agents import generate_dockerfiles_with_agent
+from export.deployment_artifacts import _ARGO_PORT_RUNNER, build_deployment_bundle_files
 
 SPLIT = '''import json, os
 from pathlib import Path
@@ -45,7 +45,7 @@ def split_graph():
     async def read(bucket, filename):
         return stored[(bucket, filename)]
 
-    with patch("deployment_agents.read_minio_object_bytes", side_effect=read):
+    with patch("export.deployment_agents.read_minio_object_bytes", side_effect=read):
         payload = run_async(generate_dockerfiles_with_agent([], [], pipeline_graph=graph, require_attached_runtime=True))
     return graph, payload.model_dump()
 
@@ -91,8 +91,8 @@ def test_argo_runner_publishes_each_output_under_its_port(tmp_path):
 
 
 def test_output_declarations_are_not_runtime_parameters():
-    from deployment_artifacts import _step_runtime_parameters
-    from filesystem_runtime import parameter_environment
+    from export.deployment_artifacts import _step_runtime_parameters
+    from export.filesystem_runtime import parameter_environment
 
     param = {"threshold": 2, "output_artifacts": [{"port": "a", "filename": "a.json"}], "model_plan": {}}
     assert _step_runtime_parameters({"flow_id": "1", "param": param}) == {"threshold": 2}

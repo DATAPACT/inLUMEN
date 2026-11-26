@@ -1,8 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-import minio_api
-import neo4j_api
+from storage import minio_api
+from graph import neo4j_api
 
 
 class _Result:

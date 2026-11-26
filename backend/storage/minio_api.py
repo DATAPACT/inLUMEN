@@ -1,13 +1,13 @@
 from flask import Flask, request, jsonify, Response
-from minio_access import remove_bucket, remove_object, download_last_object, list_objects, upload_object, create_bucket, get_object, download_inlumen_object, read_object_bytes
-from auth_middleware import require_auth
-from minio_gateway import get_minio_client
+from storage.minio_access import remove_bucket, remove_object, download_last_object, list_objects, upload_object, create_bucket, get_object, download_inlumen_object, read_object_bytes
+from auth.auth_middleware import require_auth
+from storage.minio_gateway import get_minio_client
 import os
 import datetime
 import mimetypes
 import tempfile
 from runtime_config import add_cors_headers
-from workspace_storage import (
+from workspaces.workspace_storage import (
     bucket_belongs_to_workspace,
     node_bucket_name,
     version_snapshot_bucket,

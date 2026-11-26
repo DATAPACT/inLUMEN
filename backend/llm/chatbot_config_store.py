@@ -8,8 +8,8 @@ from typing import Any
 
 from sqlalchemy import create_engine, text
 
-from auth_middleware import current_workspace_id
-from workspace_store import LOCAL_WORKSPACE_ID
+from auth.auth_middleware import current_workspace_id
+from workspaces.workspace_store import LOCAL_WORKSPACE_ID
 
 
 _ENGINE = None

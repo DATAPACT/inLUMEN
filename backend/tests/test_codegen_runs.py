@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from codegen_runs import CodegenRunStore
+from runs.codegen_runs import CodegenRunStore
 import inlumen_api
 
 

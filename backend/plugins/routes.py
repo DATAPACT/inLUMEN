@@ -16,7 +16,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from flask import Blueprint, jsonify, make_response, request
 
-from auth_middleware import current_principal, is_application_admin, require_auth
+from auth.auth_middleware import current_principal, is_application_admin, require_auth
 
 from . import store
 from inlumen.contracts.plugin_manifest import PluginManifestError, plugin_summary, validate_plugin_manifest

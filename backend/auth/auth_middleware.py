@@ -7,7 +7,7 @@ import jwt
 from jwt import PyJWKClient
 from jwt.exceptions import PyJWKClientConnectionError, PyJWKClientError
 
-from workspace_store import (
+from workspaces.workspace_store import (
     Principal,
     WorkspaceAccessDenied,
     WorkspaceStoreError,
@@ -281,7 +281,7 @@ def require_auth(f):
                 return jsonify({"error": "Forbidden", "code": "application_admin_required"}), 403
             return f(*args, **kwargs)
 
-        from permissions import permits
+        from auth.permissions import permits
         if not permits(g.inlumen_principal.workspace_role, request.method, request.path):
             return jsonify({"error": "Forbidden", "code": "insufficient_permissions"}), 403
         return f(*args, **kwargs)
