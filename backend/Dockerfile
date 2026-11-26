@@ -28,7 +28,4 @@ RUN find . \( -name "*.sh" -o -name "*.py" \) -exec sed -i 's/\r$//' {} +
 # Expose the backend gateway API.
 EXPOSE 5000
 
-# Give execute permission to shell scripts
-RUN chmod +x run_inlumen.sh
-
 CMD ["python", "inlumen_api.py"]
