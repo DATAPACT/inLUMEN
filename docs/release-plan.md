@@ -4,10 +4,6 @@ Reviewed 2026-11-26. This page says what the next release contains, what is
 planned after it, and what is not planned. Earlier plans are kept for history:
 [Beta 5](beta5-release-plan.md), [Beta 3](beta3-release-plan.md).
 
-> **Status: draft.** The Beta 6 scope, gates and title below are a proposal.
-> Nothing here is agreed until the open decisions at the end of the Beta 6
-> section are answered.
-
 ## Where we are
 
 | | |
@@ -20,10 +16,11 @@ planned after it, and what is not planned. Earlier plans are kept for history:
 The deployed instance is ahead of the last release. Beta 6 records, checks and
 tags what is already on `main`; it does not wait for new features.
 
-## Beta 6 (proposed)
+## Beta 6
 
-Working title: **v1.0.0-beta.6 — Typed data flow, run outputs and plugins**
-([milestone](https://github.com/DATAPACT/inLUMEN/milestone/8)). Date: not set.
+Title: **v1.0.0-beta.6 — Typed data flow, run outputs and plugins**
+([milestone](https://github.com/DATAPACT/inLUMEN/milestone/8)). No fixed date: the
+release is tagged when the release gates below pass.
 
 ### Scope: merged since Beta 5
 
@@ -42,7 +39,7 @@ Closed issues covered: #63, #72, #147, #150, #151, #158, #161, #182, #188, #190,
 
 ### Gate issues
 
-Both issues proposed as gates are closed.
+Both gate issues are closed. No other open issue gates Beta 6.
 
 | Issue | What was wrong | Fixed by |
 |---|---|---|
@@ -56,8 +53,8 @@ Same gates as Beta 5, applied to the final candidate commit.
 - [x] Gate issues closed (#193, #202).
 - [ ] Release notes written (`docs/beta6-release-notes.md`).
 - [ ] Verification record written (`docs/operations/beta6-verification.md`).
-- [ ] Compatibility statement: what a Beta 5 installation must do. Contract v4 needs regenerated exports (see [v3 to v4](migrations/artifact-contract-v3-to-v4.md)); whether saved Beta 5 pipelines open unchanged must be checked, not assumed.
-- [ ] `inlumen-agents` 1.0.0b6 released from the candidate commit (the application images install the library from the same commit).
+- [ ] Compatibility statement: what a Beta 5 installation must do. Beta 6 does not certify an in-place upgrade, but the statement reports what was observed: contract v4 needs regenerated exports (see [v3 to v4](migrations/artifact-contract-v3-to-v4.md)), and whether a Beta 5 database and its saved pipelines open unchanged is checked, not assumed.
+- [ ] `inlumen-agents` 1.0.0b6 published to PyPI from the candidate commit (the application images install the library from the same commit).
 - [ ] Full regression suites, type check, lint, build, shared-file check, database integration and Compose checks pass in CI on the candidate.
 - [ ] The [deterministic walkthrough](prototype-quickstart.md) repeated on the candidate.
 - [ ] One generated pipeline per new area designed, run and exported on the deployed instance: typed ports with a Parallel Map, a plugin step, an Argo bundle.
@@ -65,12 +62,17 @@ Same gates as Beta 5, applied to the final candidate commit.
 - [ ] User acceptance.
 - [ ] Prerelease tag and assets published.
 
-### Open decisions
+### Decisions
 
-1. **Title and date** of Beta 6.
-2. **Gate list:** #193 and #202 are closed. Should any other issue gate Beta 6?
-3. **Upgrade promise:** does Beta 6 certify an in-place upgrade from Beta 5, or stay "controlled evaluation, no upgrade guarantee" like Beta 5?
-4. **Library version:** should `inlumen-agents` 1.0.0b6 be released together with the application tag?
+Agreed on 2026-11-26.
+
+| Question | Decision |
+|---|---|
+| Title | Keep "Typed data flow, run outputs and plugins" |
+| Date | No fixed date; tag when the release gates pass |
+| Gate issues | #193 and #202 only, both closed; #194 and #195 stay in "Next" |
+| Upgrade from Beta 5 | Not certified. Beta 6 stays a prerelease for controlled evaluation, like Beta 5; the compatibility statement reports what was checked |
+| Agents library | `inlumen-agents` 1.0.0b6 is released together with the application tag |
 
 ## Next: after Beta 6
 
