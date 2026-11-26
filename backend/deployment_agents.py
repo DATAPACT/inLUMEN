@@ -16,7 +16,7 @@ from artifact_content import encode_artifact_bytes, is_text_artifact
 from inlumen.contracts.artifact_contract import classify_artifact
 from inlumen.contracts.artifact_runtime import ArtifactContractError
 from inlumen.contracts.port_types import FILES_AS_SEPARATE, file_port_ids, files_as, kind_for_filename
-from task_artifacts import task_data_contract
+from inlumen.contracts.task_package_contract import task_data_contract
 from inlumen.contracts.task_package_contract import validate_package
 from async_runtime import run_async
 from deployment_artifacts import (

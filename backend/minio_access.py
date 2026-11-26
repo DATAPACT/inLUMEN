@@ -1,9 +1,6 @@
 from minio import Minio
 from minio.error import S3Error
-import time
-from datetime import timedelta
 import os
-from urllib.parse import urlparse, urlunparse
 from runtime_config import get_minio_settings
 
 
@@ -132,25 +129,6 @@ def read_object_bytes(bucket_name, object_name, prefix = None, version_id=None, 
         response.close()
         response.release_conn()
 
-def download_object(bucket_name, object_name, file_path, prefix = None, version_id=None):
-    '''
-        Download object data from given bucket (and eventual prefix) to given path.
-    '''
-    global client
-    try:
-        main()
-    except S3Error as exc:
-        print("[minio_access.py] Error occurred.", exc)
-    if prefix is not None:
-        object_name = prefix + object_name
-
-    # Ensure the directory exists:
-    directory = os.path.dirname(file_path)
-    if not os.path.exists(directory):
-        os.makedirs(directory)
-
-    # TODO: Provide the correct SSE-C key if encrypted object
-    client.fget_object(bucket_name, object_name, file_path, version_id = version_id)
     # Tested
 
 def download_last_object(bucket_name, file_path, prefix = None, version_id=None):
@@ -234,59 +212,3 @@ def remove_object(bucket_name, object_name, prefix = None, version_id=None):
     print("[minio_access.py] Removed {0} object with version-id: {1} from {2} bucket. ".format(object_name, version_id, bucket_name),)
     # Tested
 
-def print_info_object(bucket_name, object_name, prefix = None, version_id=None):
-    '''
-        Print object (and metadata) information given bucket location (using eventual prefix) and version.
-    '''
-    global client
-    try:
-        main()
-    except S3Error as exc:
-        print("[minio_access.py] Error occurred.", exc)
-    if prefix is not None:
-        object_name = prefix + object_name
-    # TODO: Provide the correct SSE-C key if encrypted object
-    result = client.stat_object(bucket_name, object_name, version_id = version_id)
-    # TODO: Provide more info (depends on need)
-    string_to_be_returned = "Object "+object_name+" was last-modified: "+str(result.last_modified)+", and has size: "+str(result.size)
-    print("[minio_access.py] Object {0} was last-modified: {1}, has size: {2}".format(object_name, result.last_modified, result.size,),)
-    # Tested
-    return string_to_be_returned
-
-def get_url_object(bucket_name, object_name, prefix = None, version_id=None, expires = timedelta(hours=1)):
-    '''
-        Obtain object (and metadata) download URL given bucket location (using eventual prefix) and version. Link expires afters a (default) 1 hour period.
-    '''
-    global client
-    try:
-        main()
-    except S3Error as exc:
-        print("[minio_access.py] Error occurred.", exc)
-    if prefix is not None:
-        object_name = prefix + object_name
-    url = client.presigned_get_object(bucket_name, object_name, expires=expires)
-    print("[minio_access.py] Object {0} - download URL (expires soon!): {1}".format(object_name, url,),)
-    # Tested
-    return url
-
-def get_url_last_object(bucket_name, prefix=None, expires=timedelta(hours=1)):
-    '''
-    Obtain URL for the last added object (using optional prefix) in a bucket. Link expires after a (default) 1 hour period.
-    '''
-    global client
-    try:
-        main()
-    except S3Error as exc:
-        print("[minio_access.py] Error occurred.", exc)
-    try:
-        # List objects in the bucket
-        objects = client.list_objects(bucket_name, prefix=prefix, recursive=True)
-        # Retrieve the latest added object
-        latest_object = max(objects, key=lambda obj: obj.last_modified)
-        # Get the URL for the latest object
-        url = client.presigned_get_object(bucket_name, latest_object.object_name, expires=expires)
-        print("[minio_access.py] Last added object - download URL (expires soon!):", url)
-        return url
-    except S3Error as exc:
-        print("[minio_access.py] Error occurred:", exc)
-        return None

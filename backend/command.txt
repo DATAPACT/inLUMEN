@@ -1,4 +1,0 @@
-Legacy manual backend startup is no longer required.
-
-Start the full stack from the repository root:
-docker compose up --build

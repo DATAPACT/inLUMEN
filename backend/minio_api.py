@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify, Response
-from minio_access import remove_bucket, remove_object, download_last_object, get_url_last_object, list_objects, upload_object, create_bucket, get_object, print_info_object, download_inlumen_object, read_object_bytes
+from minio_access import remove_bucket, remove_object, download_last_object, list_objects, upload_object, create_bucket, get_object, download_inlumen_object, read_object_bytes
 from auth_middleware import require_auth
 from minio_gateway import get_minio_client
 import os

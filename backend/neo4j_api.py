@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, g, has_request_context
+from flask import Flask, request, jsonify, g
 from neo4j import GraphDatabase
 from auth_middleware import (
     INTERNAL_PREVIEW_CLEANUP_CAPABILITY,
@@ -10,7 +10,6 @@ from auth_middleware import (
 import uuid
 import json
 import os
-import hashlib
 import re
 import tempfile
 from datetime import datetime, timezone
@@ -1343,20 +1342,6 @@ def _copy_provenance_to_version(session, source_version_uid: str, target_version
       MERGE (target)-[:HAS_PROVENANCE]->(event)
     )
     """, source_version_uid=source_version_uid, target_version_uid=target_version_uid)
-
-
-def _clear_pipeline_provenance(session, pipeline_uid: str) -> int:
-    record = session.run("""
-    MATCH (p:PIPELINE {uid: $pipeline_uid})-[:HAS_PROVENANCE]->(event:PROVENANCE_EVENT)
-    RETURN count(DISTINCT event) AS deleted_count
-    """, pipeline_uid=pipeline_uid).single()
-    deleted_count = int(record["deleted_count"] if record and record["deleted_count"] is not None else 0)
-    session.run("""
-    MATCH (p:PIPELINE {uid: $pipeline_uid})-[:HAS_PROVENANCE]->(event:PROVENANCE_EVENT)
-    WITH DISTINCT event
-    DETACH DELETE event
-    """, pipeline_uid=pipeline_uid)
-    return deleted_count
 
 
 def _event_details(record) -> dict:

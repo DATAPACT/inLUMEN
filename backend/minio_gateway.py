@@ -24,12 +24,6 @@ def get_minio_client() -> Minio:
     return MINIO_CLIENT
 
 
-async def read_minio_object(bucket_name: str, object_name: str) -> str:
-    """Return the text content of a MinIO object."""
-    data = await read_minio_object_bytes(bucket_name, object_name)
-    return data.decode("utf-8", errors="ignore")
-
-
 async def read_minio_object_bytes(bucket_name: str, object_name: str) -> bytes:
     """Return a MinIO object without interpreting its bytes as text."""
     def _sync_read() -> bytes:
