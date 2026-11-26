@@ -1,4 +1,5 @@
 """Parallel Map runtime: split -> per-item steps -> Collect, run like the engine runs steps."""
+import hashlib
 import json
 import os
 import subprocess
@@ -17,6 +18,7 @@ from inlumen.contracts.artifact_runtime import (  # noqa: E402
     validate_result,
 )
 from export.deployment_agents import _control_flow_runtime, _lift_map_scopes  # noqa: E402
+from export.deployment_artifacts import _is_codegen_dockerfile_payload  # noqa: E402
 
 CONTRACT_ID = "inlumen.generic-node@2"
 
@@ -173,6 +175,40 @@ class MapRuntimeTest(unittest.TestCase):
         manifest = json.loads(next(f["content"] for f in extract["files"] if f["filename"] == "node-manifest.json"))
         self.assertEqual(extract["data_contract"], manifest["data_contract"])
 
+    def test_rewritten_manifest_keeps_no_stale_size_or_checksum(self):
+        """A stored package records each file's size and checksum; the run
+        bundle is rejected when they describe the manifest before the rewrite."""
+        steps = [
+            {"flow_id": "2", "type": "flow", "template": "Parallel Map", "label": "Each Invoice", "param": {},
+             "ports": {"inputs": [{"id": "items"}], "outputs": [{"id": "item"}]}},
+            {"flow_id": "3", "type": "task", "label": "Extract Fields",
+             "ports": {"inputs": [{"id": "input"}], "outputs": [{"id": "output"}]}},
+            {"flow_id": "4", "type": "flow", "template": "Collect", "label": "Collect Invoices",
+             "ports": {"inputs": [{"id": "item"}], "outputs": [{"id": "items"}]}},
+        ]
+        graph = {"edges": [
+            {"source": "2", "sourceHandle": "item", "target": "3", "targetHandle": "input"},
+            {"source": "3", "sourceHandle": "output", "target": "4", "targetHandle": "item"},
+        ]}
+        extract, extract_docker = extract_runtime()
+        stored = next(f for f in extract["files"] if f["filename"] == "node-manifest.json")
+        before = stored["content"].encode("utf-8")
+        stored.update(size_bytes=len(before), sha256="sha256:" + hashlib.sha256(before).hexdigest())
+        pairs = [_control_flow_runtime(steps[0]), (extract, extract_docker), _control_flow_runtime(steps[2])]
+        self.assertEqual([], _lift_map_scopes(steps, graph, [p[0] for p in pairs], [p[1] for p in pairs]))
+        after = stored["content"].encode("utf-8")
+        self.assertNotEqual(before, after)
+        self.assertEqual(len(after), stored["size_bytes"])
+        self.assertEqual("sha256:" + hashlib.sha256(after).hexdigest(), stored["sha256"])
+
+    def test_argo_export_treats_map_and_collect_as_current_steps(self):
+        """Otherwise the exporter falls back to the old workflow, which names
+        an image the bundle never builds."""
+        built = build("stop")
+        dockerfiles = {flow_id: dockerfile for flow_id, (_, dockerfile, _) in built.items()}
+        dockerfiles["3"] = {**dockerfiles["3"], "generator": "inlumen-codegen-service"}
+        self.assertEqual("inlumen-control-flow", dockerfiles["2"]["generator"])
+        self.assertTrue(_is_codegen_dockerfile_payload(["2", "3", "4"], dockerfiles))
 
     def test_collect_holds_the_output_wired_into_it(self):
         steps = [

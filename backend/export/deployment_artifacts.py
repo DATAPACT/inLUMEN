@@ -53,6 +53,7 @@ STEP_ID_RE = re.compile(r"files-step-id-([^/]+)$")
 CODEGEN_GENERATOR = "inlumen-codegen-service"
 ATTACHED_RUNTIME_GENERATOR = "inlumen-attached-runtime"
 MANAGED_ADAPTER_GENERATOR = "inlumen-managed-adapter"
+CONTROL_FLOW_GENERATOR = "inlumen-control-flow"
 DAGSTER_PINNED_VERSION = "1.13.12"
 DAGSTER_LIBRARY_PINNED_VERSION = "0.29.12"
 UV_PINNED_VERSION = "0.11.32"
@@ -1185,6 +1186,7 @@ def _is_current_codegen_step(step: dict) -> bool:
         CODEGEN_GENERATOR,
         ATTACHED_RUNTIME_GENERATOR,
         MANAGED_ADAPTER_GENERATOR,
+        CONTROL_FLOW_GENERATOR,
     }:
         return False
     return (_clean_string(artifact.get("status")) or "current").lower() == "current"
@@ -1204,6 +1206,7 @@ def _is_codegen_dockerfile_payload(
             CODEGEN_GENERATOR,
             ATTACHED_RUNTIME_GENERATOR,
             MANAGED_ADAPTER_GENERATOR,
+            CONTROL_FLOW_GENERATOR,
         }:
             return False
     return True
