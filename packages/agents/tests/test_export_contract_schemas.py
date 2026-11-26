@@ -1,14 +1,11 @@
 import json
-import sys
 import unittest
 from pathlib import Path
 
 
-BACKEND_ROOT = Path(__file__).resolve().parents[1]
-REPOSITORY_ROOT = BACKEND_ROOT.parent
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 CONTRACT_V2_ROOT = REPOSITORY_ROOT / "contracts" / "v2"
 CONTRACT_V3_ROOT = REPOSITORY_ROOT / "contracts" / "v3"
-sys.path.insert(0, str(BACKEND_ROOT))
 
 from inlumen.contracts.artifact_contract import CANONICAL_ARTIFACT_KINDS  # noqa: E402
 

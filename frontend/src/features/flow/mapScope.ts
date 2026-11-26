@@ -4,7 +4,7 @@
  *
  * A Parallel Map opens a scope and a Collect closes it; every step between
  * them runs once per item. Both implementations are tested against the same
- * graphs (mapScope.test.ts, backend/tests/test_map_scope.py).
+ * graphs (mapScope.test.ts, packages/agents/tests/test_map_scope.py).
  */
 export type ScopeConnection = { source: string; sourcePort: string; target: string; targetPort: string };
 export type MapScope = { map: string; collect: string; body: string[] };

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { mapScopes, type ScopeConnection } from "./mapScope";
 
-// Same graphs as backend/tests/test_map_scope.py.
+// Same graphs as packages/agents/tests/test_map_scope.py.
 const FLOWS = { map: "Parallel Map", collect: "Collect" };
 const link = (source: string, sourcePort: string, target: string, targetPort: string): ScopeConnection =>
   ({ source, sourcePort, target, targetPort });
