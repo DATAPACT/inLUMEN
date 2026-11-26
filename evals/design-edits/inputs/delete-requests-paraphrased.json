@@ -1,0 +1,22 @@
+{
+  "canvas": {
+    "nodes": [
+      {"id": "1", "type": "custom", "position": {"x": 150, "y": 150}, "data": {"type": "source", "label": "Incoming Scans", "description": "Scanned pages uploaded by the user"}},
+      {"id": "2", "type": "custom", "position": {"x": 450, "y": 150}, "data": {"type": "task", "label": "Extract Text From Pages", "description": "Run optical character recognition on each page"}},
+      {"id": "3", "type": "custom", "position": {"x": 750, "y": 150}, "data": {"type": "task", "label": "Identify Language", "description": "Detect which language the extracted text is written in"}},
+      {"id": "4", "type": "custom", "position": {"x": 1050, "y": 150}, "data": {"type": "task", "label": "Translate To English", "description": "Translate non-English text to English"}},
+      {"id": "5", "type": "custom", "position": {"x": 1350, "y": 150}, "data": {"type": "task", "label": "Condense Document", "description": "Summarize the translated text in a few sentences"}},
+      {"id": "6", "type": "custom", "position": {"x": 1650, "y": 150}, "data": {"type": "task", "label": "Score Sentiment", "description": "Rate the sentiment of the summary"}},
+      {"id": "7", "type": "custom", "position": {"x": 1950, "y": 150}, "data": {"type": "destination", "label": "Insights Report", "description": "Summaries and sentiment saved as a report"}}
+    ],
+    "edges": [
+      {"id": "e1", "source": "1", "target": "2"}, {"id": "e2", "source": "2", "target": "3"}, {"id": "e3", "source": "3", "target": "4"},
+      {"id": "e4", "source": "4", "target": "5"}, {"id": "e5", "source": "5", "target": "6"}, {"id": "e6", "source": "6", "target": "7"}
+    ]
+  },
+  "requests": [
+    {"id": "delete-imperative", "request": "delete language detection", "deleted_label": "Identify Language"},
+    {"id": "delete-indirect", "request": "I don't want OCR in this pipeline", "deleted_label": "Extract Text From Pages"},
+    {"id": "delete-take-out", "request": "take out the summarizer", "deleted_label": "Condense Document"}
+  ]
+}
