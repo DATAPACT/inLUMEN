@@ -1,7 +1,6 @@
 """Bounded ZIP inspection and graph-aware Task package validation (no execution)."""
 import hashlib
 import io
-import json
 import re
 import stat
 import zipfile
