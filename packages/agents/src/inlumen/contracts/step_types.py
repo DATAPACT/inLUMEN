@@ -17,7 +17,6 @@ STEP_TYPE_ALIASES = {
     "ingestion": "source",
     "sensor": "source",
     "sensors": "source",
-    "collect": "source",
     "collection": "source",
     "sink": "destination",
     "output": "destination",
