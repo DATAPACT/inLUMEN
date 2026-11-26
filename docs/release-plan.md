@@ -51,9 +51,9 @@ Both gate issues are closed. No other open issue gates Beta 6.
 Same gates as Beta 5, applied to the final candidate commit.
 
 - [x] Gate issues closed (#193, #202).
-- [ ] Release notes written (`docs/beta6-release-notes.md`).
-- [ ] Verification record written (`docs/operations/beta6-verification.md`).
-- [ ] Compatibility statement: what a Beta 5 installation must do. Beta 6 does not certify an in-place upgrade, but the statement reports what was observed: contract v4 needs regenerated exports (see [v3 to v4](migrations/artifact-contract-v3-to-v4.md)), and whether a Beta 5 database and its saved pipelines open unchanged is checked, not assumed.
+- [x] Release notes written ([`docs/beta6-release-notes.md`](beta6-release-notes.md)).
+- [x] Verification record written ([`docs/operations/beta6-verification.md`](operations/beta6-verification.md)); it is completed as the gates below pass.
+- [x] Compatibility statement ([`docs/operations/beta6-compatibility.md`](operations/beta6-compatibility.md)): what a Beta 5 installation must do. Beta 6 does not certify an in-place upgrade, but the statement reports what was observed: contract v4 needs regenerated exports (see [v3 to v4](migrations/artifact-contract-v3-to-v4.md)), and whether a Beta 5 database and its saved pipelines open unchanged is checked, not assumed.
 - [ ] `inlumen-agents` 1.0.0b6 published to PyPI from the candidate commit (the application images install the library from the same commit).
 - [ ] Full regression suites, type check, lint, build, shared-file check, database integration and Compose checks pass in CI on the candidate.
 - [ ] The [deterministic walkthrough](prototype-quickstart.md) repeated on the candidate.

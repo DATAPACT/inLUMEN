@@ -169,3 +169,16 @@ Workflows v4.1.5 quick-start.
   accepted the bundle.
 - Not run: the CI template (`ci/github-actions/build-image.yml`) in a real
   GitHub repository. Its make commands are covered by unit tests only.
+
+### 2026-11-26 (Beta 6 release check, order-summary only)
+
+Environment: Docker 29.8.0 on macOS ARM64, k3d v5.9.0 (k3s v1.35.5), Argo
+Workflows v4.1.5 quick-start.
+
+- Order-summary pipeline, bundle built offline from `examples/order-summary` at
+  commit `f309e5f`: 3/3 steps succeeded in 31 seconds; each step pod had 1 CPU
+  and 1Gi as request and limit;
+  `inlumen/output/<run id>/result/data/summary.json` matched
+  `examples/order-summary/expected-summary.json` (3 orders, 49.75).
+- Not repeated: the bundle with reviewed models and the baked-model run
+  (sections 2 and 5).
