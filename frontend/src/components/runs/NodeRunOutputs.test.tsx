@@ -2,9 +2,9 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { describe, expect, it, vi } from 'vitest';
 
-import { apiFetch } from '@/utils/apiFetch';
+import { apiFetch } from '@/lib/apiFetch';
 
-vi.mock('@/utils/apiFetch', () => ({ apiFetch: vi.fn() }));
+vi.mock('@/lib/apiFetch', () => ({ apiFetch: vi.fn() }));
 
 import { NodeRunOutputs } from '@/components/runs/NodeRunOutputs';
 import { PIPELINE_RUN_STARTED_EVENT, startPipelineRun } from '@/features/runs/pipelineRuns';

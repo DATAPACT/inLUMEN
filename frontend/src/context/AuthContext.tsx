@@ -8,10 +8,10 @@ import {
   TOOLBOX_ORIGIN,
 } from '@/config/auth';
 import { INLUMEN_API_URL } from '@/config/api';
-import { setActiveWorkspaceId, setAuthToken } from '@/utils/apiFetch';
-import { SessionInitializationError, sessionResponseError } from '@/utils/sessionError';
+import { setActiveWorkspaceId, setAuthToken } from '@/lib/apiFetch';
+import { SessionInitializationError, sessionResponseError } from '@/lib/sessionError';
 import { AuthSessionContext, LOCAL_SESSION, type AuthSession } from './authSession';
-import { setWorkspaceStorageScope } from '@/utils/workspaceStorage';
+import { setWorkspaceStorageScope } from '@/lib/workspaceStorage';
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [ready, setReady] = useState(!AUTH_ENABLED);

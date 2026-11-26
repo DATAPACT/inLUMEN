@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { apiFetch } from "@/utils/apiFetch";
+import { apiFetch } from "@/lib/apiFetch";
 import { readNodeFile, updateNodeTextFile, uploadNodeFile } from "./nodePersistence";
 
-vi.mock("@/utils/apiFetch", () => ({ apiFetch: vi.fn() }));
+vi.mock("@/lib/apiFetch", () => ({ apiFetch: vi.fn() }));
 
 describe("file persistence in authenticated workspaces", () => {
   const ref = { filename: "real.csv", bucket: "files-ws-opaque-1-hash", snapshot_bucket: "pipeline-snapshots-ws-opaque", snapshot_object: "old/real.csv" };

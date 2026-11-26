@@ -5,7 +5,7 @@ import {
   fetchOpenRouterModels,
   formatContextLength,
   formatTokenPrice,
-} from "@/services/openRouterModels";
+} from "@/features/chat/openRouterModels";
 
 describe("OpenRouter model catalog", () => {
   afterEach(() => {

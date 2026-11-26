@@ -1,5 +1,5 @@
 import { INLUMEN_API_URL } from '@/config/api';
-import { apiFetch } from '@/utils/apiFetch';
+import { apiFetch } from '@/lib/apiFetch';
 import type { ChatMessage } from './chatTypes';
 import { sanitizeAssistantMessage } from './messageSafety';
 

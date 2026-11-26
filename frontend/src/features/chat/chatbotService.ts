@@ -1,7 +1,7 @@
 import { INLUMEN_API_URL } from "@/config/api";
-import { apiFetch } from "@/utils/apiFetch";
+import { apiFetch } from "@/lib/apiFetch";
 import { toast } from "sonner";
-import { getWorkspaceStorage, captureWorkspaceGeneration, isWorkspaceGenerationCurrent, type WorkspaceStorage } from '@/utils/workspaceStorage';
+import { getWorkspaceStorage, captureWorkspaceGeneration, isWorkspaceGenerationCurrent, type WorkspaceStorage } from '@/lib/workspaceStorage';
 
 export type LLMProvider = "openrouter" | "ollama_cloud" | "custom";
 export const APPLICATION_LLM_ID = "application-llm";

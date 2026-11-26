@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import ReactFlow, { Background, Controls, ReactFlowProvider } from "reactflow";
 
-import { nodeTypes } from "@/components/NodeTypes";
+import { nodeTypes } from "@/components/flow/NodeTypes";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { normalizeGraph } from "@/features/flow/flowGraph";

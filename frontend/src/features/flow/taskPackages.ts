@@ -1,4 +1,4 @@
-import { apiFetch } from '@/utils/apiFetch';
+import { apiFetch } from '@/lib/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
 
 type TaskNode = { id: string; data?: { label?: unknown } };

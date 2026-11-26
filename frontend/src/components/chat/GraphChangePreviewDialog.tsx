@@ -8,7 +8,7 @@ import ReactFlow, {
   ReactFlowProvider,
 } from "reactflow";
 import { ArrowRight, Check, CircleAlert, Minus, Plus, RefreshCw } from "lucide-react";
-import { nodeTypes } from "@/components/NodeTypes";
+import { nodeTypes } from "@/components/flow/NodeTypes";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { PortDisplayContext } from "@/features/nodes/PortDisplayContext";

@@ -2,9 +2,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { installTestStorage } from '@/test-utils/storage';
 vi.mock('@/config/auth', () => ({ AUTH_ENABLED: true }));
 const mocks = vi.hoisted(() => ({ fetch: vi.fn() }));
-vi.mock('@/utils/apiFetch', () => ({ apiFetch: mocks.fetch }));
+vi.mock('@/lib/apiFetch', () => ({ apiFetch: mocks.fetch }));
 import { fetchChatbotConfigs, createChatbotConfig, readSelectedChatbotConfigId, writeSelectedChatbotConfigId } from './chatbotService';
-import { getWorkspaceStorage, setWorkspaceStorageScope } from '@/utils/workspaceStorage';
+import { getWorkspaceStorage, setWorkspaceStorageScope } from '@/lib/workspaceStorage';
 
 describe('account-scoped chatbot settings', () => {
   beforeEach(() => {

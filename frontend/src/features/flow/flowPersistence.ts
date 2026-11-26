@@ -1,11 +1,11 @@
 import { rememberGraphRead, persistenceEpoch } from "./persistenceState";
 import { Connection, Edge, Node } from 'reactflow';
-import { apiFetch } from '@/utils/apiFetch';
+import { apiFetch } from '@/lib/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
 import {
   buildCodegenLLMRequestConfig,
   ChatbotConfig,
-} from '@/services/chatbotService';
+} from '@/features/chat/chatbotService';
 import {
   normalizeType,
   pickBackendUpdatableProps,

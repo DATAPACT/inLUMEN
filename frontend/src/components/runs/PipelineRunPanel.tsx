@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { startPolling } from '@/utils/polling';
+import { startPolling } from '@/lib/polling';
 import {
   AlertCircle,
   Ban,

@@ -14,7 +14,7 @@ vi.mock('@/config/auth', () => ({
   KEYCLOAK_URL: 'https://sso.example.test', KEYCLOAK_REALM: 'test',
   KEYCLOAK_CLIENT_ID: 'frontend', TOOLBOX_ORIGIN: 'https://host.example.test',
 }));
-vi.mock('@/utils/apiFetch', () => mocks);
+vi.mock('@/lib/apiFetch', () => mocks);
 vi.mock('keycloak-js', () => ({ default: function () {
   return { token: 'test-token', init: mocks.init, logout: mocks.logout,
     login: mocks.login, updateToken: mocks.updateToken };

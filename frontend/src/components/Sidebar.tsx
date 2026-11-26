@@ -3,14 +3,14 @@ import { getGraphRevision, subscribePersistence, persistenceEpoch, getPersistenc
 import { normalizeGraph } from '@/features/flow/flowGraph';
 import { readNodeFile } from '@/features/nodes/nodePersistence';
 
-import { apiFetch } from '@/utils/apiFetch';
+import { apiFetch } from '@/lib/apiFetch';
 import {
   buildDeploymentZip,
   safeZipPath,
   type DeploymentBundleFile,
 } from '@/features/deployment/deploymentBundleZip';
 import { INLUMEN_API_URL } from '@/config/api';
-import type { ChatbotConfig } from '@/services/chatbotService';
+import type { ChatbotConfig } from '@/features/chat/chatbotService';
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";

@@ -27,7 +27,7 @@ import {
   formatContextLength,
   formatTokenPrice,
   type OpenRouterModel,
-} from "@/services/openRouterModels";
+} from "@/features/chat/openRouterModels";
 
 interface OpenRouterModelComboboxProps {
   value: string;

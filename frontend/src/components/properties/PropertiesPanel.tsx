@@ -1,6 +1,6 @@
 import JSZip from 'jszip';
 import { checkTaskPackages, importTaskPackages } from '@/features/flow/taskPackages';
-import { TaskPackageHelp } from '@/components/TaskPackageHelp';
+import { TaskPackageHelp } from '@/components/properties/TaskPackageHelp';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ReusablePipelineViewerDialog } from '@/components/subpipeline/ReusablePipelineViewerDialog';
 import { Textarea } from "@/components/ui/textarea";
@@ -44,7 +44,7 @@ import {
   filesAs,
   type FilesAs,
 } from '@/features/flow/portTypes';
-import { ChatbotConfig } from '@/services/chatbotService';
+import { ChatbotConfig } from '@/features/chat/chatbotService';
 import {
   normalizeType,
   getStepTypeLabel,
