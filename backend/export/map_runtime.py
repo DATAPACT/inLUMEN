@@ -18,6 +18,7 @@ engine (Dagster, Argo, local) without engine-specific mapping.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 from pathlib import Path, PurePosixPath
@@ -92,6 +93,14 @@ def _replace_file(files: list[dict[str, Any]], filename: str, content: str, cont
     for item in files:
         if item.get("filename") == filename:
             item["content"] = content
+            # The stored file's size and checksum describe the old content. A
+            # bundle that keeps them fails its integrity check before the run.
+            raw = content.encode("utf-8")
+            item.pop("content_encoding", None)
+            if "size_bytes" in item:
+                item["size_bytes"] = len(raw)
+            if "sha256" in item:
+                item["sha256"] = "sha256:" + hashlib.sha256(raw).hexdigest()
             return
     files.append({"filename": filename, "content": content, "content_type": content_type})
 
