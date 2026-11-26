@@ -20,11 +20,9 @@ from inlumen.design.context import (
     _safe_assistant_message,
 )
 from inlumen.design.guardrails import _build_graph_sync_guardrail
-from pipeline_editor_team import (
-    _agent_query_returned_no_rows,
-    build_pipeline_editing_team,
-    normalize_agent_implementation,
-)
+from inlumen.design.contract import normalize_agent_implementation
+from inlumen.design.store import returned_no_rows as _agent_query_returned_no_rows
+from pipeline_agent.team import build_pipeline_editing_team
 from inlumen.contracts.pipeline_graph_validation import validate_pipeline_graph
 
 

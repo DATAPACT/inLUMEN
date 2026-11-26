@@ -13,7 +13,7 @@ from inlumen.contracts.artifact_runtime import ArtifactContractError, CONTRACT_I
 from async_runtime import run_async
 from deployment_agents import generate_dockerfiles_with_agent
 from deployment_artifacts import _ARGO_PORT_RUNNER, _parse_requirements_for_dagster_project, build_deployment_bundle_files
-from task_artifacts import parse_task_metadata
+from inlumen.contracts.task_package_contract import parse_task_metadata
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGES = ROOT / 'examples' / 'uploaded-audio-pipeline'

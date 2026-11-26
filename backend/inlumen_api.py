@@ -26,7 +26,7 @@ from inlumen.codegen.context import (
     sample_from_bytes,
 )
 from inlumen.contracts.artifact_runtime import ArtifactContractError
-from task_artifacts import TASK_METADATA_FILENAME, parse_task_metadata
+from inlumen.contracts.task_package_contract import TASK_METADATA_FILENAME, parse_task_metadata
 from inlumen.contracts.task_package_contract import AUTHORING_GUIDE, EXAMPLE, TASK_SCHEMA, public_manifest, validate_package
 from task_packages import inspect_packages, task_package_folder, MAX_ARCHIVE, PLATFORM_FILES
 from application_llm import (
