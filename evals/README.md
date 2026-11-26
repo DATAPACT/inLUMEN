@@ -27,3 +27,4 @@ evals/<name>/
 | Folder | What it evaluates |
 |---|---|
 | [`pipeline-intents/`](pipeline-intents/README.md) | Pipeline designs produced for a fixed set of user intents |
+| [`design-edits/`](design-edits/README.md) | Small edit requests on an existing canvas (calls a real model) |

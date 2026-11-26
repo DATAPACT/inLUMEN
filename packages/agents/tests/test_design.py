@@ -67,6 +67,20 @@ def test_branching_layout_and_rejections():
     assert ("2", "when_false", "4") in handles and ("2", "when_true", "3") in handles
 
 
+def test_delete_step_takes_the_snapshot_id():
+    """The canvas snapshot shows flow_ids, so a delete must not need an overview first."""
+    outputs, graph = asyncio.run(run_scenario(InMemoryGraphStore(), "delete_by_flow_id"))
+    deleted = outputs[1][0]["deleted_step"]
+    assert (deleted["flow_id"], deleted["label"], deleted["chain_reconnected"]) == ("20", "OCR", True)
+    assert outputs[3][0]["deleted_step"]["flow_id"] == "30"  # snapshot id sent as step_uid
+    assert "No design-pipeline step matched the supplied flow_id" in outputs[4]["error"]
+    assert "requires flow_id or step_uid" in outputs[5]["error"]
+    assert [node["id"] for node in graph["nodes"]] == ["10", "40"]
+    assert [(e["source"], e["sourceHandle"], e["target"], e["targetHandle"]) for e in graph["edges"]] == [
+        ("10", "data", "40", "data")
+    ]
+
+
 def test_insert_and_delete_rewire_and_shift_the_chain():
     outputs, _ = asyncio.run(run_scenario(InMemoryGraphStore(), "insert_delete"))
     inserted = outputs[3][0]["step"]
@@ -108,6 +122,39 @@ def test_design_builds_a_pipeline_and_exports_project_json():
     assert result.usage == {"requests": 4, "prompt_tokens": 420, "completion_tokens": 50}
     assert events == result.requests and all(e["type"] == "model_request" for e in events)
     assert result.catalog_fingerprint == Catalog.default().fingerprint()
+
+
+def test_design_deletes_a_step_with_the_id_from_the_snapshot():
+    """A delete request needs one tool call: the snapshot id goes straight to delete_step."""
+    canvas = {
+        "nodes": [
+            {"id": "10", "type": "custom", "position": {"x": 0, "y": 0}, "data": {
+                "type": "source", "label": "Documents", "description": "Scanned documents"}},
+            {"id": "20", "type": "custom", "position": {"x": 300, "y": 0}, "data": {
+                "type": "task", "label": "OCR", "description": "Extract the text"}},
+            {"id": "30", "type": "custom", "position": {"x": 600, "y": 0}, "data": {
+                "type": "task", "label": "Language detection", "description": "Detect the language"}},
+            {"id": "40", "type": "custom", "position": {"x": 900, "y": 0}, "data": {
+                "type": "destination", "label": "Report", "description": "Text report"}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "10", "target": "20"},
+            {"id": "e2", "source": "20", "target": "30"},
+            {"id": "e3", "source": "30", "target": "40"},
+        ],
+    }
+    model = _scripted(
+        _call("delete_step", flow_id="30"),
+        _reply("I removed Language detection; OCR now feeds Report."),
+    )
+    result = asyncio.run(design("delete language detection", model=model, graph=canvas))
+
+    assert result.accepted, result.sync
+    assert result.sync["graph_changed"]
+    assert [n["data"]["label"] for n in sorted(result.graph["nodes"], key=lambda n: n["id"])] == [
+        "Documents", "OCR", "Report"]
+    assert [(e["source"], e["target"]) for e in result.graph["edges"]] == [("10", "20"), ("20", "40")]
+    assert result.usage["requests"] == 2
 
 
 def test_design_rejects_an_invalid_result_and_keeps_the_starting_graph():

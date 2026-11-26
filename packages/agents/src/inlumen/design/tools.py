@@ -1421,10 +1421,23 @@ def build_pipeline_editor_tools(
         except Exception as exc:
             raise RuntimeError(f"insert_step failed: {exc}") from exc
 
+    async def _step_uid_for_flow_id(flow_id: str) -> str | None:
+        """The uid of the design step with this flow_id, read from the overview."""
+        for row in decoded_rows(await store.overview()):
+            for key in ("step", "next_step"):
+                step = row.get(key)
+                if isinstance(step, dict) and str(step.get("flow_id")) == flow_id and step.get("uid"):
+                    return str(step["uid"])
+        return None
+
     async def delete_step(params: str) -> str:
         """Deletes one STEP from the design pipeline.
 
-        params JSON: {"step_uid": "step uid returned by overview"}
+        params JSON: {"flow_id": "the step's id in the snapshot"}
+
+        The id of each node in the canvas snapshot is its flow_id, so no
+        overview call is needed first. {"step_uid": "..."} from overview is
+        accepted as well.
 
         A simple one-in/one-out chain is reconnected with its original external
         port handles. Branch points and merges are not bridged automatically;
@@ -1432,15 +1445,24 @@ def build_pipeline_editor_tools(
         """
         try:
             data = json.loads(params)
-            step_uid = str(data["step_uid"]).strip()
-            if not step_uid or not _valid_identifier(step_uid):
-                raise ValueError("delete_step requires a valid step_uid")
+            flow_id = str(data.get("flow_id") or "").strip()
+            step_uid = str(data.get("step_uid") or "").strip()
+            if not flow_id and not step_uid:
+                raise ValueError("delete_step requires flow_id or step_uid")
+            if not _valid_identifier(step_uid or flow_id):
+                raise ValueError("delete_step requires a valid flow_id or step_uid")
+            if not step_uid:
+                step_uid = await _step_uid_for_flow_id(flow_id) or ""
+                if not step_uid:
+                    raise ValueError("No design-pipeline step matched the supplied flow_id")
             result = await store.delete_step(step_uid)
             if returned_no_rows(result):
-                raise ValueError("No design-pipeline step matched the supplied step_uid")
+                # A model may put the snapshot id in step_uid; accept that too.
+                resolved = await _step_uid_for_flow_id(step_uid)
+                result = await store.delete_step(resolved) if resolved else result
+            if returned_no_rows(result):
+                raise ValueError("No design-pipeline step matched the supplied identifier")
             return repr(result)
-        except KeyError as exc:
-            raise ValueError("delete_step requires step_uid") from exc
         except Exception as exc:
             raise RuntimeError(f"delete_step failed: {exc}") from exc
 

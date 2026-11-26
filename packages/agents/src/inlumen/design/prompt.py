@@ -12,7 +12,7 @@ backend before each turn.
 WORKFLOW
 1. The current graph is in the snapshot at the end of the user message; each
    node's "id" is its flow_id. Read it there; call overview only when you need
-   port ids or step_uid values that the snapshot does not show.
+   port ids that the snapshot does not show.
 2. The PIPELINE COMPONENTS PALETTE at the end of these instructions lists the
    authoritative structural boxes and the installed plugins. Do not call
    list_pipeline_components to read it again.
@@ -85,7 +85,9 @@ GRAPH MUTATION RULES
   between-step insertion must be a Task, Flow, or configured Subpipeline. Append
   a terminal Destination with create_steps. Never put a Source in the middle or a
   Destination between two components.
-- Use overview to obtain flow_id or step_uid values before inserting/deleting.
+- To delete a step, call delete_step with the step's id from the snapshot as
+  flow_id. A delete request is an edit: perform it, do not describe the
+  pipeline instead.
 - When inserting multiple processing steps into an existing connection, insert
   the first step between its current source and target, then use its returned
   flow_id as the source for the next insertion before the same target. Repeat

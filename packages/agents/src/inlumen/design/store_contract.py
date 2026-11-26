@@ -90,6 +90,22 @@ _SEED_GRAPH = {
     ],
 }
 
+_CHAIN_GRAPH = {
+    "nodes": [
+        {"id": "10", "position": {"x": 0, "y": 0}, "data": {
+            "type": "source", "label": "Documents", "template_label": "Custom"}},
+        {"id": "20", "position": {"x": 300, "y": 0}, "data": {"type": "task", "label": "OCR"}},
+        {"id": "30", "position": {"x": 600, "y": 0}, "data": {"type": "task", "label": "Language detection"}},
+        {"id": "40", "position": {"x": 900, "y": 0}, "data": {
+            "type": "destination", "label": "Report", "template_label": "Custom"}},
+    ],
+    "edges": [
+        {"source": "10", "target": "20", "sourceHandle": "data", "targetHandle": "input"},
+        {"source": "20", "target": "30", "sourceHandle": "output", "targetHandle": "input"},
+        {"source": "30", "target": "40", "sourceHandle": "output", "targetHandle": "data"},
+    ],
+}
+
 # A step named RESTORE puts this graph back through GraphStore.restore_graph.
 RESTORE = "__restore_graph__"
 
@@ -163,6 +179,15 @@ SCENARIOS: dict[str, list[Step]] = {
         ("delete_step", {"step_uid": "missing-uid"}),
         ("overview", {}),
         ("delete_all_steps", {}),
+        ("overview", {}),
+    ],
+    "delete_by_flow_id": [
+        (RESTORE, _CHAIN_GRAPH),
+        ("delete_step", {"flow_id": "20"}),
+        ("overview", {}),
+        ("delete_step", {"step_uid": "30"}),  # a snapshot id sent as step_uid
+        ("delete_step", {"flow_id": "missing"}),
+        ("delete_step", {}),
         ("overview", {}),
     ],
     "restore": [
