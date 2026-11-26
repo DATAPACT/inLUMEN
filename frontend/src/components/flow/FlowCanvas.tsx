@@ -1,7 +1,7 @@
 import { GraphSaveStatus } from '@/components/flow/GraphSaveStatus';
 import { TaskPackageHelp } from '@/components/properties/TaskPackageHelp';
 import { checkTaskPackages, taskPackageFolder, taskDisplayName, taskConnections, copyExternalPrompt, pipelinePackageIssues, PackageImportError, importTaskPackages as commitTaskPackages, type PackageReport } from '@/features/flow/taskPackages';
-import { clearPersistenceError, reportPersistenceError, getPersistenceState, graphReadTicket, acknowledgeGraphRead, persistenceEpoch } from '@/features/flow/persistenceState';
+import { clearPersistenceError, reportPersistenceError, getPersistenceState, graphReadTicket, graphRecoveryTicket, hasWriteInFlight, acknowledgeGraphRead, persistenceEpoch } from '@/features/flow/persistenceState';
 import { readStoredArray, releaseDraftProtection } from '@/lib/workspaceStorage';
 import { getWorkspaceStorage } from '@/lib/workspaceStorage';
 import { startPolling } from '@/lib/polling';
@@ -814,9 +814,14 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   }, [onActiveVersionChange, onActiveVersionNameChange, onNodeSelect, onPipelineDescriptionChange]);
 
   const fetchGraphAndApply = useCallback(async (recovering = false) => {
-    const ticket = graphReadTicket();
+    // An explicit recovery drops the local edits, so it is only stale when a
+    // write reached the server meanwhile; a background refresh is stale as
+    // soon as any write was queued.
+    const readTicket = recovering ? graphRecoveryTicket : graphReadTicket;
+    const ticket = readTicket();
     const data = await fetchPipelineGraph();
-    if (ticket !== graphReadTicket() || getPersistenceState().pending || (!recovering && getPersistenceState().error)) {
+    const writing = recovering ? hasWriteInFlight() : getPersistenceState().pending > 0;
+    if (ticket !== readTicket() || writing || (!recovering && getPersistenceState().error)) {
       throw new Error('Graph refresh paused to preserve unsaved edits.');
     }
     return applyGraph(data);

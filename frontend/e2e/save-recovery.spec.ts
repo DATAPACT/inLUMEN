@@ -8,6 +8,7 @@ async function savedPipeline(context: BrowserContext, mode: 'metadata' | 'networ
   let graph: Graph = { nodes: [{ id: '1', type: 'custom', position: { x: 150, y: 150 }, data: { type: 'source', label: 'Input records' } }], edges: [], settings: { locale: 'en', retries: 2 }, updated_at: 'initial' };
   const positions: Array<string | undefined> = [];
   const writes: string[] = [];
+  const graphRead = { delayMs: 0 };
   await context.route('**/api/**', async route => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -46,6 +47,7 @@ async function savedPipeline(context: BrowserContext, mode: 'metadata' | 'networ
       revision++;
       await route.fulfill({ json: { ok: true, version: { uid: 'main', name: 'Main' } }, headers: { ETag: `"${revision}"` } });
     } else if (path === '/api/pipeline/graph') {
+      if (graphRead.delayMs) await new Promise(resolve => setTimeout(resolve, graphRead.delayMs));
       await route.fulfill({ json: graph, headers: { ETag: `"${revision}"` } });
     } else if (path === '/api/pipeline/updated-at') {
       // Model a tab which has not yet observed a changed polling timestamp.
@@ -54,7 +56,7 @@ async function savedPipeline(context: BrowserContext, mode: 'metadata' | 'networ
       await route.fulfill({ json: { configs: [], runs: [], versions: [], definitions: [], nodes: [], edges: [] } });
     }
   });
-  return { positions, writes, graph: () => structuredClone(graph) };
+  return { positions, writes, graphRead, graph: () => structuredClone(graph) };
 }
 
 async function moveNode(page: Page, direction: 'ArrowRight' | 'ArrowDown') {
@@ -160,6 +162,29 @@ test('unavailable draft storage does not discard edits and allows a downloaded b
   await download;
   await saveStatus(second).getByRole('button', { name: 'Reload saved graph' }).click();
   await expect(saveStatus(second)).toHaveAttribute('data-save-state', 'saved');
+});
+
+
+test('reloading the saved graph completes when the autosave timer fires during the reload', async ({ page, context }) => {
+  const server = await savedPipeline(context, 'concurrent');
+  const second = await context.newPage();
+  await open(page);
+  await open(second);
+  await moveNode(page, 'ArrowRight');
+  await expect.poll(() => server.graph().nodes[0].position.x).toBeGreaterThan(150);
+  await expect(saveStatus(page)).toHaveAttribute('data-save-state', 'saved');
+  await moveNode(second, 'ArrowDown');
+  await expect(saveStatus(second).getByText('Couldn’t save', { exact: true })).toBeVisible();
+  // The edit above starts the 600 ms active-version autosave timer. A slow
+  // graph read keeps the reload open while that timer fires; the queued
+  // autosave is rejected locally and must not abort the reload.
+  server.graphRead.delayMs = 900;
+  await saveStatus(second).getByRole('button', { name: 'Reload saved graph' }).click();
+  await expect(saveStatus(second)).toHaveAttribute('data-save-state', 'saved');
+  server.graphRead.delayMs = 0;
+  await expect(saveStatus(second).getByRole('button')).toHaveCount(0);
+  const reloaded = await second.locator('.react-flow__node').first().evaluate(node => getComputedStyle(node).transform);
+  expect(reloaded).toBe(`matrix(1, 0, 0, 1, ${server.graph().nodes[0].position.x}, 150)`);
 });
 
 
