@@ -13,7 +13,7 @@ planned after it, and what is not planned. Earlier plans are kept for history:
 | | |
 |---|---|
 | Last release | [`v1.0.0-beta.5`](https://github.com/DATAPACT/inLUMEN/releases/tag/v1.0.0-beta.5), 2026-09-16 |
-| `main` since then | about 48 merged pull requests, no tag |
+| `main` since then | about 50 merged pull requests, no tag |
 | Deployed instance | follows `main`: every merge is deployed after its tests pass |
 | Agents library | `inlumen-agents` 1.0.0b6.dev6 on PyPI (development builds of Beta 6) |
 
@@ -38,20 +38,22 @@ Working title: **v1.0.0-beta.6 — Typed data flow, run outputs and plugins**
 | Operations | Published container images, deploy to the VM on merge, weekly backup | #176, #177, #180 |
 | Maintenance | Code clean-up and folder structure (#182), faster CI, dependency audit | #165, #186, #187, #196 to #201, #203, #204 |
 
-Closed issues covered: #63, #72, #147, #150, #151, #158, #161, #182, #188, #190.
+Closed issues covered: #63, #72, #147, #150, #151, #158, #161, #182, #188, #190, #193, #202.
 
-### Open issues proposed as gates
+### Gate issues
 
-| Issue | Why it gates |
-|---|---|
-| #193 Design agent skips some delete requests | A plain request ("delete language detection") is answered without doing it |
-| #202 Flaky save-recovery browser test | Either the test or the app is wrong; if it is the app, edits can end in a save error |
+Both issues proposed as gates are closed.
+
+| Issue | What was wrong | Fixed by |
+|---|---|---|
+| #193 Design agent skips some delete requests | Deleting a step needed an id that the canvas snapshot does not show, so some requests were answered without the edit | #207 |
+| #202 Flaky save-recovery browser test | The test was right: "Reload saved graph" could fail when an autosave was queued during the reload | #208 |
 
 ### Release gates
 
 Same gates as Beta 5, applied to the final candidate commit.
 
-- [ ] Gate issues closed.
+- [x] Gate issues closed (#193, #202).
 - [ ] Release notes written (`docs/beta6-release-notes.md`).
 - [ ] Verification record written (`docs/operations/beta6-verification.md`).
 - [ ] Compatibility statement: what a Beta 5 installation must do. Contract v4 needs regenerated exports (see [v3 to v4](migrations/artifact-contract-v3-to-v4.md)); whether saved Beta 5 pipelines open unchanged must be checked, not assumed.
@@ -66,7 +68,7 @@ Same gates as Beta 5, applied to the final candidate commit.
 ### Open decisions
 
 1. **Title and date** of Beta 6.
-2. **Gate list:** are #193 and #202 the right gates, and is anything missing?
+2. **Gate list:** #193 and #202 are closed. Should any other issue gate Beta 6?
 3. **Upgrade promise:** does Beta 6 certify an in-place upgrade from Beta 5, or stay "controlled evaluation, no upgrade guarantee" like Beta 5?
 4. **Library version:** should `inlumen-agents` 1.0.0b6 be released together with the application tag?
 
