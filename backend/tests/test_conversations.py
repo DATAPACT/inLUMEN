@@ -10,7 +10,7 @@ from unittest.mock import patch
 from sqlalchemy import text
 
 import analytics_api
-from conversations import ConversationError, ConversationStore, registry_turn_id
+from chat.conversations import ConversationError, ConversationStore, registry_turn_id
 from pipeline_agent.service import PipelineEditorTurnResult
 
 
@@ -163,7 +163,7 @@ class ConversationApiTests(unittest.TestCase):
     def setUp(self):
         self.store = ConversationStore(":memory:")
         self.patches = [patch("analytics_api.conversation_store", return_value=self.store),
-                        patch("chat_routes.conversation_store", return_value=self.store)]
+                        patch("chat.chat_routes.conversation_store", return_value=self.store)]
         for item in self.patches: item.start()
         self.client = analytics_api.app.test_client()
 
@@ -282,8 +282,8 @@ class ConversationApiTests(unittest.TestCase):
         self.store.finish(ALICE, 'preview-turn', response)
         owner = SimpleNamespace(user_id=ALICE['user_id'], workspace_id=ALICE['workspace_id'])
         url = '/api/chat/messages/' + response['assistant_message_id']
-        with patch('conversations.current_principal', return_value=owner), \
-                patch('chat_routes.record_applied_preview_tool_calls', side_effect=RuntimeError('down')) as record:
+        with patch('chat.conversations.current_principal', return_value=owner), \
+                patch('chat.chat_routes.record_applied_preview_tool_calls', side_effect=RuntimeError('down')) as record:
             # A history that cannot be written must not undo an applied proposal.
             self.assertEqual(self.client.patch(url, json={'proposal_status': 'applied'}).status_code, 200)
             self.assertEqual(self.client.patch(url, json={'proposal_status': 'applied'}).status_code, 200)
@@ -295,7 +295,7 @@ class ConversationApiTests(unittest.TestCase):
         response = {'assistant_message': 'Private proposal', 'sync': {'preview_pending': True}}
         self.store.finish(ALICE, 'private-turn', response)
         other = SimpleNamespace(user_id='other-member', workspace_id=ALICE['workspace_id'])
-        with patch('conversations.current_principal', return_value=other):
+        with patch('chat.conversations.current_principal', return_value=other):
             page = self.client.get('/api/chat/conversation?conversation_id=' + cid)
             self.assertIsNone(page.json['conversation'])
             self.assertEqual(page.json['messages'], [])
@@ -305,7 +305,7 @@ class ConversationApiTests(unittest.TestCase):
 
     def test_workspace_reset_rejects_active_chat_before_clearing_other_stores(self):
         import inlumen_api
-        from conversations import chat_scope
+        from chat.conversations import chat_scope
         with inlumen_api.app.test_request_context():
             scope = chat_scope()
         self.store.start(scope, turn_id='pending-turn', request_sha256='pending', user_message='Create')

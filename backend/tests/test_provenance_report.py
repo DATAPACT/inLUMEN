@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from provenance_report import (  # noqa: E402
+from provenance.provenance_report import (  # noqa: E402
     _representative_snapshot_events,
     build_provenance_pdf,
 )

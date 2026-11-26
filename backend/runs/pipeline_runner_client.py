@@ -7,8 +7,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from auth_middleware import current_principal
-from workspace_store import WORKSPACE_HEADER
+from auth.auth_middleware import current_principal
+from workspaces.workspace_store import WORKSPACE_HEADER
 
 RUNNER_SERVICE_URL = os.getenv(
     "INLUMEN_RUNNER_SERVICE_URL",

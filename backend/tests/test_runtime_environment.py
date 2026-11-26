@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runtime_environment import (
+from export.runtime_environment import (
     discover_runtime_environment,
     merge_runtime_environment,
     runtime_environment_from_files,

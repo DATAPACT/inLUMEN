@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 
-from auth_middleware import current_workspace_id
+from auth.auth_middleware import current_workspace_id
 
 
 def _database_url(value: str) -> str:

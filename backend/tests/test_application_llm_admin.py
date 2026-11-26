@@ -7,10 +7,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import inlumen_api
-import application_llm_store
-from application_llm import load_application_llm
-from application_llm_store import read_application_llm
-from auth_middleware import AuthValidationError
+from llm import application_llm_store
+from llm.application_llm import load_application_llm
+from llm.application_llm_store import read_application_llm
+from auth.auth_middleware import AuthValidationError
 from tests.test_application_llm import principal
 
 ADMIN_URL = "/api/admin/application-llm"
@@ -28,10 +28,10 @@ class ApplicationLLMAdminTests(unittest.TestCase):
         ):
             context.start()
             self.addCleanup(context.stop)
-        auth = patch("auth_middleware.validate_keycloak_bearer_token", return_value=(ADMIN_CLAIMS, None))
+        auth = patch("auth.auth_middleware.validate_keycloak_bearer_token", return_value=(ADMIN_CLAIMS, None))
         self.auth = auth.start()
         self.addCleanup(auth.stop)
-        identity = patch("auth_middleware.resolve_principal", return_value=principal("admin"))
+        identity = patch("auth.auth_middleware.resolve_principal", return_value=principal("admin"))
         self.identity = identity.start()
         self.addCleanup(identity.stop)
         self.client = inlumen_api.app.test_client()

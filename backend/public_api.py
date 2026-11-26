@@ -11,25 +11,25 @@ from typing import Any
 
 from flask import Blueprint, g, jsonify, make_response, request
 
-from auth_middleware import is_auth_enabled, validate_keycloak_bearer_token
+from auth.auth_middleware import is_auth_enabled, validate_keycloak_bearer_token
 from async_runtime import run_async
-from deployment_artifacts import (
+from export.deployment_artifacts import (
     DeploymentArtifactValidationError,
     build_argo_workflow_yaml,
     build_deployment_bundle_files,
     deployment_bundle_zip,
     extract_pipeline_steps,
 )
-from graph_client import (
+from graph.graph_client import (
     check_graph_health,
     fetch_pipeline_graph,
     fetch_pipeline_versions,
     update_pipeline_overview,
 )
-from minio_gateway import get_minio_client
-from object_client import check_object_health
-from workspace_storage import node_bucket_name
-from workspace_store import (
+from storage.minio_gateway import get_minio_client
+from storage.object_client import check_object_health
+from workspaces.workspace_storage import node_bucket_name
+from workspaces.workspace_store import (
     WORKSPACE_HEADER,
     WorkspaceAccessDenied,
     WorkspaceStoreError,
@@ -395,7 +395,7 @@ def api_auth_required(route_handler):
                     "workspace_unavailable",
                     "The workspace database could not be queried",
                 )
-            from permissions import permits
+            from auth.permissions import permits
             if not permits(g.inlumen_principal.workspace_role, request.method, request.path):
                 return _error_response(403, "insufficient_permissions", "Your workspace role does not allow this action")
             return route_handler(*args, **kwargs)
@@ -718,7 +718,7 @@ def _build_dockerfile_artifacts_or_error(
     require_attached_runtime: bool = False,
 ) -> dict[str, Any]:
     try:
-        from deployment_agents import generate_dockerfiles_with_agent
+        from export.deployment_agents import generate_dockerfiles_with_agent
 
         steps = extract_pipeline_steps(graph)
         file_refs = [

@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from run_output_preview import build_preview, preview_kind, preview_limits  # noqa: E402
+from runs.run_output_preview import build_preview, preview_kind, preview_limits  # noqa: E402
 
 
 def reader(content: bytes):

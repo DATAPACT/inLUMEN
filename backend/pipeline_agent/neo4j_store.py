@@ -11,7 +11,7 @@ from contextvars import ContextVar
 from contextlib import contextmanager
 from typing import Any
 
-from graph_client import fetch_pipeline_graph, run_neo4j_query, sync_backend_to_canvas_graph
+from graph.graph_client import fetch_pipeline_graph, run_neo4j_query, sync_backend_to_canvas_graph
 # Importing the backend's plugins package registers its plugin store as the
 # plugin source, so the agent's plugin lookups see installed plugins.
 import plugins  # noqa: F401
@@ -24,7 +24,7 @@ from inlumen.design.store import (
     SubpipelineConfiguration,
     returned_no_rows,
 )
-from workspace_queries import AGENT_WRITE_QUERY_TYPES
+from workspaces.workspace_queries import AGENT_WRITE_QUERY_TYPES
 
 # How each STEP property is written in a CREATE map, as the queries always had it.
 _PROPERTY_FORMATS = {

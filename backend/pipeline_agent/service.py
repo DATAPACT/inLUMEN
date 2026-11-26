@@ -7,14 +7,14 @@ import uuid
 from copy import deepcopy
 from dataclasses import dataclass
 
-from chat_state import clear_state_from_disk, load_state_from_disk, save_state_to_disk
-from graph_client import (
+from chat.chat_state import clear_state_from_disk, load_state_from_disk, save_state_to_disk
+from graph.graph_client import (
     clear_preview_workspace,
     fetch_pipeline_graph,
     save_active_pipeline_version,
     sync_backend_to_canvas_graph,
 )
-from llm_config import LLMConfig
+from llm.llm_config import LLMConfig
 from inlumen.design.context import _graph_counts, _safe_assistant_message
 from inlumen.design.turn import run_design_turn
 from pipeline_agent.neo4j_store import Neo4jGraphStore

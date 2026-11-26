@@ -10,14 +10,14 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from deployment_agents import _managed_adapter_runtime
-from deployment_artifacts import (
+from export.deployment_agents import _managed_adapter_runtime
+from export.deployment_artifacts import (
     _ARGO_PORT_RUNNER,
     DeploymentArtifactValidationError,
     build_dagster_project_files,
     build_deployment_bundle_files,
 )
-from filesystem_runtime import (
+from export.filesystem_runtime import (
     filesystem_shell_component_source,
     normalize_single_output_port,
     stage_input_bindings,

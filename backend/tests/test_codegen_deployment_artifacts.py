@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from deployment_artifacts import (
+from export.deployment_artifacts import (
     DeploymentArtifactValidationError,
     _ARGO_PORT_RUNNER,
     _dagster_dockerfile_content,

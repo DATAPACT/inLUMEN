@@ -686,8 +686,8 @@ class PluginDeploymentTest(unittest.TestCase):
     def test_plugin_task_exports_a_managed_runtime(self):
         try:
             from async_runtime import run_async
-            from deployment_agents import generate_dockerfiles_with_agent
-            from deployment_artifacts import build_deployment_bundle_files
+            from export.deployment_agents import generate_dockerfiles_with_agent
+            from export.deployment_artifacts import build_deployment_bundle_files
         except ModuleNotFoundError as exc:  # pragma: no cover - optional app deps
             self.skipTest(f"deployment dependencies are unavailable: {exc}")
         graph = {

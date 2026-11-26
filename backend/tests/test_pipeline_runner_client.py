@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import pipeline_runner_client  # noqa: E402
+from runs import pipeline_runner_client  # noqa: E402
 
 
 class FakeResponse:
@@ -29,7 +29,7 @@ class FakeResponse:
 class PipelineRunnerClientTest(unittest.TestCase):
     @patch.object(pipeline_runner_client, "RUNNER_SERVICE_API_KEY", "runner-token")
     @patch.object(pipeline_runner_client, "RUNNER_SERVICE_URL", "http://runner:8020")
-    @patch("pipeline_runner_client.urlopen")
+    @patch("runs.pipeline_runner_client.urlopen")
     def test_private_request_uses_bearer_auth_and_json(self, urlopen):
         urlopen.return_value = FakeResponse({"run_id": "run-1", "status": "queued"})
 

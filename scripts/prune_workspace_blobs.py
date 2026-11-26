@@ -48,8 +48,8 @@ def main():
     from neo4j import GraphDatabase
     from minio import Minio
     from runtime_config import get_neo4j_settings, get_minio_settings
-    from workspace_queries import workspace_label
-    from workspace_storage import workspace_bucket_prefix, version_snapshot_bucket
+    from workspaces.workspace_queries import workspace_label
+    from workspaces.workspace_storage import workspace_bucket_prefix, version_snapshot_bucket
 
     uri, username, password = get_neo4j_settings()
     endpoint, access, secret, secure = get_minio_settings()

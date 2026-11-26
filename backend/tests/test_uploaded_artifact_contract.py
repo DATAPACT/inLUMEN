@@ -11,8 +11,8 @@ import pytest
 
 from inlumen.contracts.artifact_runtime import ArtifactContractError, CONTRACT_ID, validate_result
 from async_runtime import run_async
-from deployment_agents import generate_dockerfiles_with_agent
-from deployment_artifacts import _ARGO_PORT_RUNNER, _parse_requirements_for_dagster_project, build_deployment_bundle_files
+from export.deployment_agents import generate_dockerfiles_with_agent
+from export.deployment_artifacts import _ARGO_PORT_RUNNER, _parse_requirements_for_dagster_project, build_deployment_bundle_files
 from inlumen.contracts.task_package_contract import parse_task_metadata
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -77,7 +77,7 @@ def uploaded_payload():
             graph['edges'].append({'source': str(index-1), 'target': str(index), 'sourceHandle': 'output', 'targetHandle': 'input'})
     async def read(bucket, filename):
         return stored[(bucket, filename)]
-    with patch('deployment_agents.read_minio_object_bytes', side_effect=read):
+    with patch('export.deployment_agents.read_minio_object_bytes', side_effect=read):
         result = run_async(generate_dockerfiles_with_agent([], [], pipeline_graph=graph, require_attached_runtime=True))
     return graph, result.model_dump()
 

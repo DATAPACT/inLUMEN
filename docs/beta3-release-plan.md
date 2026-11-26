@@ -144,9 +144,9 @@ close an issue.
 
 ### Why #116 is still open
 
-[`_control_flow_main_source`](../backend/deployment_agents.py) still emits indexed
+[`_control_flow_main_source`](../backend/export/deployment_agents.py) still emits indexed
 `os.environ["INLUMEN_OUTPUT_DIR"]` inside a legacy fallback.
-[`discover_runtime_environment`](../backend/runtime_environment.py) is
+[`discover_runtime_environment`](../backend/export/runtime_environment.py) is
 branch-insensitive and correctly identifies that access as required.
 The generated code also references the legacy input/output manifest variables.
 
@@ -171,7 +171,7 @@ and `INLUMEN_OUTPUT_MANIFEST` (optional). Expected: `[]`.
 The existing `test_control_flow_runtime_passes_through_filesystem_inputs`
 passes because it directly calls the generated script with standard directories;
 it does not exercise the preceding required-environment validation in
-[`filesystem_runtime.py`](../backend/filesystem_runtime.py).
+[`filesystem_runtime.py`](../backend/export/filesystem_runtime.py).
 
 Acceptance: use only `PIPELINE_INPUT_DIR` and `PIPELINE_OUTPUT_DIR` for generated
 Flow file handling; remove legacy manifest handling as well as the directory

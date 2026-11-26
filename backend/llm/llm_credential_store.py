@@ -15,8 +15,8 @@ from pathlib import Path
 from cryptography.fernet import InvalidToken
 from sqlalchemy import create_engine, text
 
-from auth_middleware import current_workspace_id
-from node_secrets import _fernet
+from auth.auth_middleware import current_workspace_id
+from auth.node_secrets import _fernet
 
 
 _ENGINE = None
@@ -28,7 +28,7 @@ def _database_location() -> str:
     return (
         os.getenv("DATABASE_URL", "").strip()
         or os.getenv("INLUMEN_SECRET_DB_PATH", "").strip()
-        or str(Path(__file__).parent / "state" / "node-secrets.sqlite3")
+        or str(Path(__file__).parents[1] / "state" / "node-secrets.sqlite3")
     )
 
 

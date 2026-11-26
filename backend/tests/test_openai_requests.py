@@ -19,7 +19,7 @@ from openai import AsyncOpenAI
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from inlumen.llm_requests import provider_error
-from llm_config import resolve_llm_config, select_model_client
+from llm.llm_config import resolve_llm_config, select_model_client
 
 
 @pytest.fixture(autouse=True)

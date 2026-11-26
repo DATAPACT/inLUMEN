@@ -6,9 +6,9 @@ from flask import Flask, jsonify
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from auth_middleware import current_workspace_id  # noqa: E402
+from auth.auth_middleware import current_workspace_id  # noqa: E402
 from local_api_client import dispatch_flask_request  # noqa: E402
-from workspace_store import WORKSPACE_HEADER  # noqa: E402
+from workspaces.workspace_store import WORKSPACE_HEADER  # noqa: E402
 
 
 class PreviewWorkspaceScopeTest(unittest.TestCase):

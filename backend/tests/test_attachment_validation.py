@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from attachment_validation import (  # noqa: E402
+from storage.attachment_validation import (  # noqa: E402
     attachment_input_errors,
     read_attachment_probe,
 )

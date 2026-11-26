@@ -18,7 +18,7 @@ from inlumen.contracts.artifact_runtime import (
     stage_bound_artifacts,
     validate_result,
 )
-from deployment_artifacts import _ARGO_PORT_RUNNER
+from export.deployment_artifacts import _ARGO_PORT_RUNNER
 from inlumen.codegen.pipeline_compiler import compile_pipeline_nodes
 
 
@@ -369,7 +369,7 @@ def test_component_loader_numeric_ids_are_normalized_to_strings(tmp_path):
 )
 def test_real_dagster_loader_handoff_and_inactive_branch(tmp_path):
     """Run the same YAML component loading used by managed production execution."""
-    from filesystem_runtime import filesystem_shell_component_source
+    from export.filesystem_runtime import filesystem_shell_component_source
 
     (tmp_path / "component.py").write_text(filesystem_shell_component_source())
     source = """import json

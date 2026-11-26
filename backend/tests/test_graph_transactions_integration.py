@@ -4,7 +4,7 @@ import json
 import unittest
 import uuid
 from unittest.mock import patch
-from neo4j_api import app, _base_driver, driver
+from graph.neo4j_api import app, _base_driver, driver
 
 
 @unittest.skipUnless(os.getenv('RUN_NEO4J_INTEGRATION') == '1', 'requires disposable Neo4j')
@@ -143,8 +143,8 @@ class GraphTransactionIntegrationTests(unittest.TestCase):
 
     @unittest.skipUnless(os.getenv('RUN_MINIO_INTEGRATION') == '1', 'requires disposable MinIO')
     def test_reusable_attachments_survive_source_removal_and_loading_autosave(self):
-        from neo4j_api import _upload_bytes_to_minio
-        from minio_access import remove_object, read_object_bytes
+        from graph.neo4j_api import _upload_bytes_to_minio
+        from storage.minio_access import remove_object, read_object_bytes
         from pathlib import Path
         graph = json.loads((Path(__file__).resolve().parents[2] / 'examples/order-summary/pipeline.json').read_text())
         source = graph['nodes'][0]['data']
@@ -243,7 +243,7 @@ class GraphTransactionIntegrationTests(unittest.TestCase):
             self.assertEqual(data['file_buckets'][0]['snapshot_object'], original['snapshot_object'])
 
     def test_internal_read_post_does_not_invalidate_browser_revision(self):
-        from workspace_queries import INTERNAL_QUERY_CAPABILITY
+        from workspaces.workspace_queries import INTERNAL_QUERY_CAPABILITY
         with patch.dict('os.environ', {'AUTH_ENABLED': 'false'}):
             client = app.test_client()
             initial = client.get('/neo4j_get_graph')
@@ -258,14 +258,14 @@ class GraphTransactionIntegrationTests(unittest.TestCase):
             self.assertNotEqual(saved.headers['ETag'], initial.headers['ETag'])
 
     def test_auth_toggle_and_local_clear_preserve_private_graph(self):
-        import neo4j_api
-        from workspace_store import Principal, LOCAL_WORKSPACE_ID
+        from graph import neo4j_api
+        from workspaces.workspace_store import Principal, LOCAL_WORKSPACE_ID
         private = Principal('test-user', 'test-user', 'issuer', 'private-toggle-test', 'tenant', 'owner')
         private_label = neo4j_api._workspace_label(private.workspace_id)
         local_label = neo4j_api._workspace_label(LOCAL_WORKSPACE_ID)
         client = app.test_client()
-        with patch('auth_middleware.validate_keycloak_bearer_token', return_value=({'sub': 'test-user'}, None)), \
-             patch('auth_middleware.resolve_principal', return_value=private):
+        with patch('auth.auth_middleware.validate_keycloak_bearer_token', return_value=({'sub': 'test-user'}, None)), \
+             patch('auth.auth_middleware.resolve_principal', return_value=private):
             with patch.dict('os.environ', {'AUTH_ENABLED': 'true'}):
                 saved = client.post('/neo4j_sync_graph', json={'graph': {'nodes': [
                     {'id': 'private-drawing', 'data': {'type': 'source', 'label': 'Keep me'}, 'position': {'x': 12, 'y': 34}},

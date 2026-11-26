@@ -18,6 +18,26 @@ not fit the purpose of its folder belongs somewhere else.
 | `docs/` | Documentation. See the [documentation index](./index.md). |
 | `.github/` | CI workflows (tests, container images, deploy) and release notes for GitHub releases. |
 
+## Inside `backend/`
+
+The entry points and cross-cutting helpers stay at the root of `backend/`; everything else is in a package named after its area.
+
+| Package | Contents |
+|---|---|
+| root | `inlumen_api.py` (the gateway app and entry point), `analytics_api.py`, `public_api.py`, `migrate.py`, `dev_runner.py`, and the helpers every area uses (`runtime_config`, `observability`, `async_runtime`, `local_api_client`, `run_artifact_names`) |
+| `auth/` | Authentication, permissions and encrypted secrets |
+| `workspaces/` | Workspace records, storage scoping and queries |
+| `storage/` | MinIO access, the object API and file validation |
+| `graph/` | The Neo4j API, the graph client and graph revisions |
+| `export/` | Deployment artifacts, the Argo bundle, runtimes and Task packages |
+| `llm/` | LLM configuration, credentials and application-wide LLM settings |
+| `chat/` | Chat routes, chat state and conversations |
+| `provenance/` | Provenance records and reports |
+| `runs/` | Pipeline runner client, code generation runs and run outputs |
+| `pipeline_agent/`, `plugins/`, `generators/`, `node_definitions/` | The design agent wiring, plugins, generator routes and node definitions (unchanged) |
+
+Modules are imported by their full path, for example `from graph.neo4j_api import ...`.
+
 ## Files at the root
 
 - `docker-compose.yml` and `docker-compose-prod.yml`: the development and production stacks.

@@ -18,7 +18,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.pool import StaticPool
 
-from auth_middleware import current_principal, is_auth_enabled
+from auth.auth_middleware import current_principal, is_auth_enabled
 
 
 class ConversationError(Exception):
@@ -319,7 +319,7 @@ _STORE_LOCK = threading.Lock()
 
 def conversation_store():
     global _STORE, _LOCATION
-    location = (os.getenv("DATABASE_URL", "").strip() if is_auth_enabled() else "") or os.getenv("INLUMEN_CHAT_DB_PATH", "").strip() or str(Path(__file__).parent / "state" / "conversations.sqlite3")
+    location = (os.getenv("DATABASE_URL", "").strip() if is_auth_enabled() else "") or os.getenv("INLUMEN_CHAT_DB_PATH", "").strip() or str(Path(__file__).parents[1] / "state" / "conversations.sqlite3")
     with _STORE_LOCK:
         if _STORE is None or _LOCATION != location:
             if _STORE is not None:

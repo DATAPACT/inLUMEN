@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 from flask import Flask, jsonify
-from auth_middleware import is_auth_enabled, require_auth, validate_production_auth_configuration
+from auth.auth_middleware import is_auth_enabled, require_auth, validate_production_auth_configuration
 
 
 class AuthModeMismatchTests(unittest.TestCase):
@@ -34,7 +34,7 @@ class AuthModeMismatchTests(unittest.TestCase):
 class AuthModeContinuityTests(unittest.TestCase):
     def check_transition(self, environment, previous, enabled, *, override=False):
         from unittest.mock import MagicMock
-        from workspace_store import validate_auth_mode_continuity
+        from workspaces.workspace_store import validate_auth_mode_continuity
 
         connection = MagicMock()
         cursor = connection.cursor.return_value.__enter__.return_value
@@ -44,8 +44,8 @@ class AuthModeContinuityTests(unittest.TestCase):
         if environment is not None:
             env['APP_ENV'] = environment
         with patch.dict('os.environ', env, clear=True), \
-             patch('workspace_store.ensure_schema'), \
-             patch('workspace_store._connect') as connect:
+             patch('workspaces.workspace_store.ensure_schema'), \
+             patch('workspaces.workspace_store._connect') as connect:
             connect.return_value.__enter__.return_value = connection
             validate_auth_mode_continuity(enabled)
         return cursor
@@ -63,7 +63,7 @@ class AuthModeContinuityTests(unittest.TestCase):
                     self.assertEqual(parameters, (expected,))
 
     def test_other_environments_keep_transition_guard(self):
-        from workspace_store import AuthModeTransitionError
+        from workspaces.workspace_store import AuthModeTransitionError
         for environment in ('production', 'staging', ''):
             for previous, enabled in (('keycloak', False), ('local', True)):
                 with self.subTest(environment=environment, previous=previous):

@@ -16,7 +16,7 @@ from inlumen.contracts.artifact_runtime import (  # noqa: E402
     stage_bound_artifacts,
     validate_result,
 )
-from deployment_agents import _control_flow_runtime, _lift_map_scopes  # noqa: E402
+from export.deployment_agents import _control_flow_runtime, _lift_map_scopes  # noqa: E402
 
 CONTRACT_ID = "inlumen.generic-node@2"
 

@@ -34,7 +34,7 @@ looked like just another step after the map.
      code.
 3. **An engine-neutral runtime.**
    - Map publishes `items/<key>/<file>` plus `_items.json`.
-   - Each body step is *lifted* at packaging time (`backend/map_runtime.py`):
+   - Each body step is *lifted* at packaging time (`backend/export/map_runtime.py`):
      - the platform's `inlumen_item_runner.py` becomes its entrypoint, and the
        step's own code runs once per item in its own process;
      - items run up to the Map's `max_concurrency`, under its

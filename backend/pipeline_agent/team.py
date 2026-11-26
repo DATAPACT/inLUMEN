@@ -1,7 +1,7 @@
 """High-level construction of the pipeline editing agent."""
 
 from inlumen.design.team import build_design_team
-from llm_config import LLMConfig, log_llm_selection, select_model_client
+from llm.llm_config import LLMConfig, log_llm_selection, select_model_client
 
 from pipeline_agent.neo4j_store import Neo4jGraphStore
 

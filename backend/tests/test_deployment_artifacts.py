@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from deployment_artifacts import (  # noqa: E402
+from export.deployment_artifacts import (  # noqa: E402
     DeploymentArtifactValidationError,
     build_argo_workflow_object,
     build_argo_workflow_yaml,

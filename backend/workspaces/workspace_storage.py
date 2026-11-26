@@ -3,8 +3,8 @@ from __future__ import annotations
 import hashlib
 import re
 
-from auth_middleware import current_workspace_id
-from workspace_store import LOCAL_WORKSPACE_ID
+from auth.auth_middleware import current_workspace_id
+from workspaces.workspace_store import LOCAL_WORKSPACE_ID
 
 
 def _digest(value: str, length: int = 20) -> str:

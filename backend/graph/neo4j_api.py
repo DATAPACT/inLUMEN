@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify, g
 from neo4j import GraphDatabase
-from auth_middleware import (
+from auth.auth_middleware import (
     INTERNAL_PREVIEW_CLEANUP_CAPABILITY,
     INTERNAL_PREVIEW_CLEANUP_ENVIRON_KEY,
     current_workspace_id,
@@ -25,7 +25,7 @@ from inlumen.contracts.node_parameters import (
     secret_params_json,
     without_secret_param_values,
 )
-from minio_access import create_bucket, list_objects, read_object_bytes, remove_object, upload_object
+from storage.minio_access import create_bucket, list_objects, read_object_bytes, remove_object, upload_object
 from inlumen.contracts.node_definitions.instance import normalize_definition_properties
 from inlumen.contracts.graph_records import flow_edges, flows_from_edges, reusable_graph, step_node, step_properties
 from inlumen.contracts.pipeline_graph_validation import validate_pipeline_graph
@@ -38,9 +38,9 @@ from inlumen.contracts.subpipeline_reference import (
     reusable_pipeline_nesting_error,
     hydrate_reusable_file_references,
 )
-from workspace_storage import node_bucket_name, version_snapshot_bucket, bucket_belongs_to_workspace
-from graph_document import validate_graph_document
-from workspace_store import LOCAL_WORKSPACE_ID
+from workspaces.workspace_storage import node_bucket_name, version_snapshot_bucket, bucket_belongs_to_workspace
+from graph.graph_document import validate_graph_document
+from workspaces.workspace_store import LOCAL_WORKSPACE_ID
 
 NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD = get_neo4j_settings()
 
@@ -64,7 +64,7 @@ _WORKSPACE_OWNED_LABELS = (
 )
 
 
-from workspace_queries import (
+from workspaces.workspace_queries import (
     AGENT_WRITE_QUERY_TYPES, INTERNAL_QUERY_CAPABILITY, parameterize_literals,
     scope_cypher as _scope_cypher, workspace_label as _workspace_label,
 )
@@ -78,7 +78,7 @@ def _validate_workspace_cypher(query: str) -> None:
     a workspace-owned label, but every independently introduced node must use
     one of the platform labels that `_scope_cypher` namespaces.
     """
-    from workspace_queries import TOKENS
+    from workspaces.workspace_queries import TOKENS
     code = "".join(TOKENS.split(query)[::2])
     if re.search(r"\b(?:LOAD\s+CSV|CALL\s+[A-Za-z_]\w*|SHOW|DROP|GRANT|DENY|REVOKE)\b", code, re.I):
         raise ValueError("Procedures and administrative Cypher are not allowed.")
@@ -136,7 +136,7 @@ class _WorkspaceQueryRunner:
 
 class _WorkspaceSession(_WorkspaceQueryRunner):
     def __enter__(self):
-        from graph_revision import lock_revision
+        from graph.graph_revision import lock_revision
         self._session = self._runner
         self._session.__enter__()
         self._transaction = self._session.begin_transaction()
@@ -151,7 +151,7 @@ class _WorkspaceSession(_WorkspaceQueryRunner):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        from graph_revision import finish_revision
+        from graph.graph_revision import finish_revision
         try:
             if exc_type is None:
                 # Internal read queries use POST too. Only graph writes advance the revision.

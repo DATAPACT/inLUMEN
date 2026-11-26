@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from llm_config import LLMConfig  # noqa: E402
+from llm.llm_config import LLMConfig  # noqa: E402
 from pipeline_agent.service import (  # noqa: E402
     PipelineEditorTurnCancelled,
     run_pipeline_editor_turn,

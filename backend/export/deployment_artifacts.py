@@ -8,19 +8,19 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from packaging.requirements import InvalidRequirement, Requirement
 
-import argo_bundle
+from export import argo_bundle
 from inlumen.contracts.artifact_runtime import ArtifactContractError, CONTRACT_ID, assign_output_ports, validate_connection_contract, validate_declaration
-from artifact_content import decode_artifact_content, verify_artifact_integrity
+from storage.artifact_content import decode_artifact_content, verify_artifact_integrity
 from inlumen.contracts.artifact_contract import ArtifactBinding, artifact_bindings
 from inlumen.contracts.connector_catalog import connector_definition
-from filesystem_runtime import filesystem_shell_component_source
+from export.filesystem_runtime import filesystem_shell_component_source
 from inlumen.contracts.node_parameters import normalize_secret_param_keys
 from inlumen.contracts.node_ports import normalize_node_ports
-from node_secrets import runtime_secret_name
-from runtime_environment import discover_runtime_environment, merge_runtime_environment
+from auth.node_secrets import runtime_secret_name
+from export.runtime_environment import discover_runtime_environment, merge_runtime_environment
 from inlumen.contracts.step_types import normalize_step_type
 from inlumen.contracts.subpipeline_reference import reusable_pipeline_nesting_error
-from workspace_storage import node_bucket_name
+from workspaces.workspace_storage import node_bucket_name
 from inlumen.contracts import artifact_runtime_source
 
 try:
@@ -2594,13 +2594,13 @@ def _parse_requirements_for_dagster_project(content: str, package_files=None) ->
 
 
 def _package_dependencies(payload, flow_id):
-    from artifact_content import decode_artifact_content
+    from storage.artifact_content import decode_artifact_content
     files = {item["filename"]: decode_artifact_content(item) for item in _deployment_files_for_step(payload, flow_id)}
     return _parse_requirements_for_dagster_project(files.get("requirements.txt", b""), files)
 
 
 def _pipeline_constraints(payload, steps):
-    from artifact_content import decode_artifact_content
+    from storage.artifact_content import decode_artifact_content
     from inlumen.contracts.task_package_contract import resolve_requirements
     constraints = []
     for step in steps:

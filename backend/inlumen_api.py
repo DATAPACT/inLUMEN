@@ -28,14 +28,14 @@ from inlumen.codegen.context import (
 from inlumen.contracts.artifact_runtime import ArtifactContractError
 from inlumen.contracts.task_package_contract import TASK_METADATA_FILENAME, parse_task_metadata
 from inlumen.contracts.task_package_contract import AUTHORING_GUIDE, EXAMPLE, TASK_SCHEMA, public_manifest, validate_package
-from task_packages import inspect_packages, task_package_folder, MAX_ARCHIVE, PLATFORM_FILES
-from application_llm import (
+from export.task_packages import inspect_packages, task_package_folder, MAX_ARCHIVE, PLATFORM_FILES
+from llm.application_llm import (
     APPLICATION_LLM_ID,
     application_llm_request_config,
     application_llm_settings,
     validate_application_llm_config,
 )
-from application_llm_store import ApplicationLLMConflict, save_application_llm
+from llm.application_llm_store import ApplicationLLMConflict, save_application_llm
 from analytics_api import (
     agentic_generate_deployment_bundle,
     agentic_generate_dagster,
@@ -47,8 +47,8 @@ from analytics_api import (
     agentic_pipeline_editor_reset,
     prepare_dagster_execution_bundle,
 )
-from attachment_validation import attachment_input_errors, read_attachment_probe
-from auth_middleware import (
+from storage.attachment_validation import attachment_input_errors, read_attachment_probe
+from auth.auth_middleware import (
     current_principal,
     current_workspace_id,
     is_application_admin,
@@ -57,12 +57,12 @@ from auth_middleware import (
     validate_auth_mode_configuration,
     validate_production_auth_configuration,
 )
-from chat_state import clear_state_from_disk, clear_workspace_chat_states
-from chatbot_config_store import load_chatbot_configs, save_chatbot_configs
-from codegen_runs import CodegenRunStore
-from deployment_artifacts import DeploymentArtifactValidationError
+from chat.chat_state import clear_state_from_disk, clear_workspace_chat_states
+from llm.chatbot_config_store import load_chatbot_configs, save_chatbot_configs
+from runs.codegen_runs import CodegenRunStore
+from export.deployment_artifacts import DeploymentArtifactValidationError
 from generators.routes import create_generator_blueprint
-from graph_client import dispatch_graph_request
+from graph.graph_client import dispatch_graph_request
 from local_api_client import LocalApiResponse
 from node_definitions import create_node_definitions_blueprint
 from inlumen.contracts.node_definitions.artifacts import (
@@ -70,48 +70,48 @@ from inlumen.contracts.node_definitions.artifacts import (
     configuration_hash,
     implementation_plan_from_data,
 )
-from node_secrets import (
+from auth.node_secrets import (
     clear_node_secrets,
     configured_node_secrets,
     delete_node_secret,
     normalize_parameter_name,
     set_node_secret,
 )
-from llm_credential_store import (
+from llm.llm_credential_store import (
     delete_llm_credential,
     has_llm_credential,
     save_llm_credential,
     get_llm_credential,
 )
-from object_client import dispatch_object_request
-from pipeline_runner_client import (
+from storage.object_client import dispatch_object_request
+from runs.pipeline_runner_client import (
     PipelineRunnerError,
     runner_raw_request,
     runner_raw_response,
     runner_request,
 )
-from provenance_provo import build_prov_o_jsonld, build_run_prov_o_jsonld, provenance_prov_o_filename
-from provenance_report import build_provenance_pdf, provenance_report_filename
+from provenance.provenance_provo import build_prov_o_jsonld, build_run_prov_o_jsonld, provenance_prov_o_filename
+from provenance.provenance_report import build_provenance_pdf, provenance_report_filename
 from public_api import create_public_api_blueprint
-from run_output_preview import build_preview
-from run_artifact_access import (
+from runs.run_output_preview import build_preview
+from runs.run_artifact_access import (
     RunArtifactReferenceError,
     object_reference,
     read_window,
     remove_run_artifacts,
     stream_object,
 )
-from runtime_environment import discover_runtime_environment, runtime_environment_from_files
+from export.runtime_environment import discover_runtime_environment, runtime_environment_from_files
 from runtime_config import add_cors_headers, get_service_port
 from inlumen.contracts.step_types import normalize_step_type
-from workspace_store import (
+from workspaces.workspace_store import (
     LOCAL_TENANT_ID,
     LOCAL_WORKSPACE_ID,
     WORKSPACE_HEADER,
     create_workspace,
     list_workspaces,
 )
-from workspace_storage import node_bucket_name, bucket_belongs_to_workspace
+from workspaces.workspace_storage import node_bucket_name, bucket_belongs_to_workspace
 
 
 INLUMEN_API_PORT = get_service_port("INLUMEN_API_PORT", 5000)
@@ -160,8 +160,8 @@ app.register_blueprint(create_node_definitions_blueprint())
 app.register_blueprint(create_generator_blueprint())
 from plugins.routes import create_plugins_blueprint
 app.register_blueprint(create_plugins_blueprint())
-from chat_routes import create_chat_blueprint
-from conversations import ConversationError, conversation_store
+from chat.chat_routes import create_chat_blueprint
+from chat.conversations import ConversationError, conversation_store
 from sqlalchemy.exc import SQLAlchemyError
 app.register_blueprint(create_chat_blueprint())
 app.add_url_rule(

@@ -10,8 +10,8 @@ from flask import Flask
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from auth_middleware import AuthValidationError  # noqa: E402
-from deployment_artifacts import build_dockerfile_artifacts  # noqa: E402
+from auth.auth_middleware import AuthValidationError  # noqa: E402
+from export.deployment_artifacts import build_dockerfile_artifacts  # noqa: E402
 from public_api import create_public_api_blueprint, generate_signed_url  # noqa: E402
 
 

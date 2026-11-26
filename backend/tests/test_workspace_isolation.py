@@ -1,10 +1,10 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from auth_middleware import validate_production_auth_configuration
-from neo4j_api import _scope_cypher, _validate_workspace_cypher, _workspace_label
-from workspace_storage import node_bucket_name
-from workspace_store import WorkspaceAccessDenied, resolve_principal
+from auth.auth_middleware import validate_production_auth_configuration
+from graph.neo4j_api import _scope_cypher, _validate_workspace_cypher, _workspace_label
+from workspaces.workspace_storage import node_bucket_name
+from workspaces.workspace_store import WorkspaceAccessDenied, resolve_principal
 
 
 class WorkspaceIsolationTests(unittest.TestCase):
@@ -37,7 +37,7 @@ class WorkspaceIsolationTests(unittest.TestCase):
 
 
     def test_label_check_requires_both_tokens_for_owned_labels(self):
-        from neo4j_api import _WorkspaceQueryRunner, _label_exists
+        from graph.neo4j_api import _WorkspaceQueryRunner, _label_exists
 
         workspace = "new-workspace"
         own_label = _workspace_label(workspace)
@@ -55,14 +55,14 @@ class WorkspaceIsolationTests(unittest.TestCase):
                 self.assertEqual(_label_exists(session, "PIPELINE"), expected)
 
     def test_empty_workspace_poll_skips_pipeline_query(self):
-        from neo4j_api import app, _WorkspaceQueryRunner, neo4j_get_pipeline_updated_at
+        from graph.neo4j_api import app, _WorkspaceQueryRunner, neo4j_get_pipeline_updated_at
 
         runner = Mock()
         runner.run.return_value.single.return_value = {
             "labels": ["PIPELINE", _workspace_label("other-workspace")]
         }
         session = _WorkspaceQueryRunner(runner, "new-workspace")
-        with app.test_request_context(), patch("neo4j_api.driver") as driver:
+        with app.test_request_context(), patch("graph.neo4j_api.driver") as driver:
             driver.session.return_value.__enter__.return_value = session
             response, status = neo4j_get_pipeline_updated_at.__wrapped__()
         self.assertEqual(status, 200)

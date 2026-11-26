@@ -6,7 +6,7 @@ from typing import Any
 
 from flask import Flask
 
-from auth_middleware import (
+from auth.auth_middleware import (
     INTERNAL_PREVIEW_CLEANUP_CAPABILITY,
     INTERNAL_PREVIEW_CLEANUP_ENVIRON_KEY,
     INTERNAL_WORKSPACE_ID_ENVIRON_KEY,
