@@ -11,7 +11,7 @@ import {
   type FilesAs,
 } from './portTypes';
 
-// Same cases as backend/tests/test_port_types.py, so both sides agree.
+// Same cases as packages/agents/tests/test_port_types.py, so both sides agree.
 describe('port type spec cases', () => {
   it.each(spec.cases.check)('checks $source -> $target', ({ source, target, result }) => {
     const issue = checkConnection(source, target);
