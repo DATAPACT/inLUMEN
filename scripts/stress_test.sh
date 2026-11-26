@@ -8,7 +8,7 @@ CALLER_DIR="$PWD"
 
 usage() {
   cat <<'HELP'
-Usage: bash scripts/stress-test.sh [options]
+Usage: bash scripts/stress_test.sh [options]
 
 Targets the deployed inLUMEN application by default. Live tests send paid LLM
 requests and clear the selected test workspaces. Isolated workspaces protect

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Build a disposable Dagster bundle and verify non-root, read-only execution.
-Run: PYTHONPATH=codegen codegen/.venv/bin/python scripts/test_runtime_container.py
+Run: PYTHONPATH=codegen codegen/.venv/bin/python scripts/check_runtime_container.py
 Requires Docker and network access for pinned Dagster dependencies.
 """
 import json, os, tempfile, shutil

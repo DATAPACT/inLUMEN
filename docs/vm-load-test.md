@@ -301,7 +301,7 @@ To rehearse direct application without the Review AI dialog, pass `--review-ai-c
 
 ### Bash launcher
 
-Run `bash scripts/stress-test.sh --help` from the repository root for all options.
+Run `bash scripts/stress_test.sh --help` from the repository root for all options.
 The launcher defaults to the deployed production app and realm, 39 users from
 the private participant roster, isolated rehearsal workspaces, one audio-session
 round, synchronized execution submissions, and Review AI off. File paths are
@@ -310,8 +310,8 @@ when invoked through an absolute path. Run it on a separate load-generator
 machine with Node.js, frontend dependencies and Playwright Chromium installed.
 
 ```sh
-bash scripts/stress-test.sh --users 2 --preflight
-bash scripts/stress-test.sh --users 39 \
+bash scripts/stress_test.sh --users 2 --preflight
+bash scripts/stress_test.sh --users 39 \
   --accounts frontend/loadtest/accounts.participants.local.json \
   --code-zip /path/pipeline-code.zip --audio-file /path/recording.wav \
   --ssh-host operator@vm --warm-models-script /path/on/vm/warm-models.py \
