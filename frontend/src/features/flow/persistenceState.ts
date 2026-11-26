@@ -4,6 +4,8 @@ let revision: string | null = null;
 let serial: Promise<unknown> = Promise.resolve();
 let generation = 0;
 let writeGeneration = 0;
+let sentWrites = 0;
+let writesInFlight = 0;
 let acknowledgedGraph: { signature: string; revision: string } | null = null;
 const listeners = new Set<() => void>();
 const publish = (next: PersistenceState) => { state = next; listeners.forEach((listener) => listener()); };
@@ -20,6 +22,7 @@ export const resetPersistence = () => {
   revision = null;
   acknowledgedGraph = null;
   serial = Promise.resolve();
+  writesInFlight = 0;
   publish({ pending: 0, error: null, conflict: false });
 };
 export const clearPersistenceError = () => publish({ ...state, error: null, conflict: false });
@@ -29,6 +32,12 @@ export const reportPersistenceError = (error: unknown) => {
 };
 export const persistenceEpoch = () => generation;
 export const graphReadTicket = () => `${generation}:${writeGeneration}`;
+// For "Reload saved graph": the user chose to drop the local edits, so only a
+// write that reached the server makes a concurrent read stale. A write that is
+// rejected locally while an error is shown (a queued autosave, for example)
+// sends nothing and must not abort the reload.
+export const graphRecoveryTicket = () => `${generation}:${sentWrites}`;
+export const hasWriteInFlight = () => writesInFlight > 0;
 const responseRevision = (response: Response) => {
   // Compression proxies may weaken HTTP ETags. The application revision is
   // independent of representation encoding and must survive that transformation.
@@ -82,6 +91,8 @@ export const graphWrite = (send: (revision: string | null) => Promise<Response>,
   const task = serial.then(async () => {
     if (epoch !== generation) throw new GraphSaveError('The workspace changed.', false, epoch);
     if (state.error) throw new GraphSaveError(state.error, state.conflict);
+    sentWrites += 1;
+    writesInFlight += 1;
     try {
       let response = await send(
         options.expectedRevision === undefined ? revision : options.expectedRevision,
@@ -132,6 +143,8 @@ export const graphWrite = (send: (revision: string | null) => Promise<Response>,
         : new GraphSaveError(error instanceof Error ? error.message : String(error), false, epoch);
       reportPersistenceError(failure);
       throw failure;
+    } finally {
+      if (epoch === generation) writesInFlight = Math.max(0, writesInFlight - 1);
     }
   }).finally(() => {
     if (epoch === generation) publish({ ...state, pending: Math.max(0, state.pending - 1) });

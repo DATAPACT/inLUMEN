@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-import { captureGraphRevision, getPersistenceState, graphWrite, resetPersistence, persistenceEpoch, rememberGraphRead, acknowledgeGraphRead } from './persistenceState';
+import { captureGraphRevision, getPersistenceState, graphReadTicket, graphRecoveryTicket, graphWrite, hasWriteInFlight, resetPersistence, persistenceEpoch, rememberGraphRead, acknowledgeGraphRead } from './persistenceState';
 
 beforeEach(resetPersistence);
 it('serializes writes and advances the acknowledged revision', async () => {
@@ -18,6 +18,29 @@ it('blocks further writes after a conflict until recovery', async () => {
   await expect(graphWrite(send)).rejects.toThrow('The saved graph has changed');
   expect(send).not.toHaveBeenCalled();
   expect(getPersistenceState().pending).toBe(0);
+});
+
+it('keeps a recovery read valid when a queued write is rejected without being sent', async () => {
+  await expect(graphWrite(async () => Response.json({ code: 'graph_conflict' }, { status: 409 }))).rejects.toThrow('The saved graph has changed');
+  const recovery = graphRecoveryTicket();
+  const background = graphReadTicket();
+  // For example the autosave timer firing while "Reload saved graph" reads the graph.
+  await expect(graphWrite(vi.fn())).rejects.toThrow('The saved graph has changed');
+  expect(graphRecoveryTicket()).toBe(recovery);
+  expect(graphReadTicket()).not.toBe(background);
+  expect(hasWriteInFlight()).toBe(false);
+});
+it('makes a recovery read stale when a write reaches the server', async () => {
+  const recovery = graphRecoveryTicket();
+  let respond: (response: Response) => void = () => undefined;
+  const write = graphWrite(() => new Promise<Response>((resolve) => { respond = resolve; }));
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(hasWriteInFlight()).toBe(true);
+  expect(graphRecoveryTicket()).not.toBe(recovery);
+  respond(new Response('{}', { headers: { ETag: '"2"' } }));
+  await write;
+  expect(hasWriteInFlight()).toBe(false);
 });
 
 it('ignores stale revisions and responses from previous workspaces', async () => {
