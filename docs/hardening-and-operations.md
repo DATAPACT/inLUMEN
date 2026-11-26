@@ -185,24 +185,25 @@ A disposable Dagster materialization smoke test verified the runtime UID and
 read-only filesystem. Run it explicitly with:
 
 ```sh
-PYTHONPATH=codegen codegen/.venv/bin/python scripts/test_runtime_container.py
+PYTHONPATH=codegen codegen/.venv/bin/python scripts/check_runtime_container.py
 ```
 
 PostgreSQL worker claims, cross-worker quotas and deletion markers are checked
-with `TEST_POSTGRES_URL=postgresql://... python scripts/test_postgres_workers.py runner`
+with `TEST_POSTGRES_URL=postgresql://... python scripts/check_postgres_workers.py runner`
 and the equivalent `codegen` command, always against a disposable database.
 
 Browser tests use mocked gateway responses; they do not certify a live Keycloak,
 storage and generated-execution deployment. CI runs both test categories.
 
-For AI evaluation, execute each intent in `evals/pipeline-intents.json` against
+For AI evaluation, execute each intent in
+`evals/pipeline-intents/inputs/pipeline-intents.json` against
 the candidate model in a disposable workspace. Record a JSON list with `id`,
 the persisted `graph`, measured `elapsed_seconds`, provider-reported `cost_usd`,
 and `execution_success` from the actual runner outcome. Then run:
 
 ```sh
-python scripts/evaluate_pipelines.py candidates.json \
-  --suite evals/pipeline-intents.json --output evaluation.json
+python evals/pipeline-intents/scripts/evaluate_pipelines.py candidates.json \
+  --suite evals/pipeline-intents/inputs/pipeline-intents.json --output evaluation.json
 ```
 
 Missing cases, required task/graph failures, unverified execution, and missing

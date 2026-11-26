@@ -2,7 +2,7 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'evals' / 'pipeline-intents' / 'scripts'))
 from evaluate_pipelines import evaluate
 
 

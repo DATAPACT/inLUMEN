@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const launcher = fileURLToPath(new URL('../../../scripts/stress-test.sh', import.meta.url));
+const launcher = fileURLToPath(new URL('../../../scripts/stress_test.sh', import.meta.url));
 
 test('Bash launcher resolves caller paths, protects participant workspaces and keeps preflight offline cache-free', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'inlumen bash '));

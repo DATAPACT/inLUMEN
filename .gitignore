@@ -90,3 +90,7 @@ frontend/loadtest/results/
 .env.deploy
 .env.deploy.next
 .deploy.lock
+
+# Evaluation outputs and model files stay out of git (see evals/README.md)
+evals/*/results/
+evals/*/models/

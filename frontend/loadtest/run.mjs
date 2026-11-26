@@ -26,7 +26,7 @@ try {
   } });
   if (values.help) {
     console.log('npm run stress -- --url https://inlumen.example.com --issuer https://identity.example.com/realms/inlumen --users 20 [--prompt-file prompt.txt] [--preflight] [--headed]\nFor design, extension, import and execution: --scenario audio-session --code-zip /path/pipeline-code.zip --audio-file /path/recording.wav [--rounds 1] [--ramp-seconds 30] [--timeout-seconds 180] [--run-timeout-seconds 1800] [--max-run-cpus 2] [--max-run-memory-gib 4] [--review-ai-changes false]');
-    console.log('Optional VM cache preparation before each live round: --warm-models-host operator@vm --warm-models-script /absolute/path/preparer.py (skipped during preflight). For the Bash launcher: bash scripts/stress-test.sh --help from the repository root.');
+    console.log('Optional VM cache preparation before each live round: --warm-models-host operator@vm --warm-models-script /absolute/path/preparer.py (skipped during preflight). For the Bash launcher: bash scripts/stress_test.sh --help from the repository root.');
   } else {
     const count = positiveInteger(values.users, 'users');
     const baseURL = validatedURL(values.url), issuer = validatedURL(values.issuer);
