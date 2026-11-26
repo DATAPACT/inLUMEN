@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { apiFetch } from '@/utils/apiFetch';
+import { apiFetch } from '@/lib/apiFetch';
 import {
   cancelPipelineRun,
   isActivePipelineRun,
@@ -9,7 +9,7 @@ import {
 } from '@/features/runs/pipelineRuns';
 
 
-vi.mock('@/utils/apiFetch', () => ({ apiFetch: vi.fn() }));
+vi.mock('@/lib/apiFetch', () => ({ apiFetch: vi.fn() }));
 
 const mockedFetch = vi.mocked(apiFetch);
 

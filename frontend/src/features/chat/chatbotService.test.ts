@@ -11,7 +11,7 @@ import {
   readSelectedChatbotConfigId,
   writeSelectedChatbotConfigId,
   type ChatbotConfig,
-} from "@/services/chatbotService";
+} from "@/features/chat/chatbotService";
 
 
 const completeConfig = (overrides: Partial<ChatbotConfig> = {}): ChatbotConfig => ({

@@ -4,7 +4,7 @@ import type {
   SubpipelineInterface,
   SubpipelineReference,
 } from "@/features/flow/subpipeline";
-import { apiFetch } from "@/utils/apiFetch";
+import { apiFetch } from "@/lib/apiFetch";
 
 export type ReusablePipelineSummary = {
   uid: string;

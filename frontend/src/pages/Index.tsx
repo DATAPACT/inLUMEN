@@ -1,13 +1,13 @@
-import { getWorkspaceStorage, type WorkspaceStorage } from '@/utils/workspaceStorage';
+import { getWorkspaceStorage, type WorkspaceStorage } from '@/lib/workspaceStorage';
 import React, { useState, useCallback, useEffect, useLayoutEffect, useRef, lazy, Suspense } from 'react';
-import { apiFetch } from '@/utils/apiFetch';
+import { apiFetch } from '@/lib/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
 import { cn } from '@/lib/utils';
 const Sidebar = lazy(() => import('@/components/Sidebar').then((module) => ({ default: module.Sidebar })));
-import type { PropertyNodeData } from '@/components/PropertiesPanel';
-const PropertiesPanel = lazy(() => import('@/components/PropertiesPanel').then((module) => ({ default: module.PropertiesPanel })));
+import type { PropertyNodeData } from '@/components/properties/PropertiesPanel';
+const PropertiesPanel = lazy(() => import('@/components/properties/PropertiesPanel').then((module) => ({ default: module.PropertiesPanel })));
 import { Toolbar } from '@/components/Toolbar';
-import { WrappedFlowCanvas, FlowCanvasRef } from '@/components/FlowCanvas';
+import { WrappedFlowCanvas, FlowCanvasRef } from '@/components/flow/FlowCanvas';
 import { ChatPanel } from '@/components/chat/ChatPanel';
 const GraphChangePreviewDialog = lazy(() => import('@/components/chat/GraphChangePreviewDialog').then((module) => ({ default: module.GraphChangePreviewDialog })));
 const VersionsPanel = lazy(() => import('@/components/versions/VersionsPanel').then((module) => ({ default: module.VersionsPanel })));
@@ -77,11 +77,11 @@ import {
   getDefaultChatbotConfig,
   readSelectedChatbotConfigId,
   writeSelectedChatbotConfigId
-} from '@/services/chatbotService';
-import { ChatbotConfigForm } from '@/components/ChatbotConfigForm';
-import { ApplicationLLMSettings } from '@/components/ApplicationLLMSettings';
+} from '@/features/chat/chatbotService';
+import { ChatbotConfigForm } from '@/components/settings/ChatbotConfigForm';
+import { ApplicationLLMSettings } from '@/components/settings/ApplicationLLMSettings';
 import { useAuthSession } from '@/context/authSession';
-import { canManageApplicationLLM } from '@/utils/applicationAdmin';
+import { canManageApplicationLLM } from '@/lib/applicationAdmin';
 
 const CHAT_SESSION_KEY = "chat-session-id";
 const CHAT_TRANSCRIPT_KEY = "inlumen-chat-transcript";

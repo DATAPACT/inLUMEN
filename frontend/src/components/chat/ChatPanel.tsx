@@ -9,7 +9,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Textarea } from '@/components/ui/textarea';
-import { ChatbotConfig, formatProviderLabel } from '@/services/chatbotService';
+import { ChatbotConfig, formatProviderLabel } from '@/features/chat/chatbotService';
 import { CanvasSyncStatus, ChatMessage } from '@/features/chat/chatTypes';
 import { sanitizeAssistantMessage } from '@/features/chat/messageSafety';
 import { cn } from '@/lib/utils';

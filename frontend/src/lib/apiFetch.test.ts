@@ -17,7 +17,7 @@ describe("apiFetch", () => {
     vi.stubEnv("VITE_AUTH_ENABLED", "false");
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     globalThis.fetch = fetchMock;
-    const { apiFetch, setAuthToken } = await import("@/utils/apiFetch");
+    const { apiFetch, setAuthToken } = await import("@/lib/apiFetch");
     const init = { method: "GET", headers: { Accept: "application/json" } };
 
     setAuthToken("token-that-must-not-be-sent");
@@ -30,7 +30,7 @@ describe("apiFetch", () => {
     vi.stubEnv("VITE_AUTH_ENABLED", "true");
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     globalThis.fetch = fetchMock;
-    const { apiFetch, setAuthToken } = await import("@/utils/apiFetch");
+    const { apiFetch, setAuthToken } = await import("@/lib/apiFetch");
 
     setAuthToken("sso-token");
     await apiFetch("https://example.test/pipelines", {
@@ -49,7 +49,7 @@ describe("apiFetch", () => {
     vi.stubEnv("VITE_AUTH_ENABLED", "true");
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     globalThis.fetch = fetchMock;
-    const { apiFetch, setActiveWorkspaceId } = await import("@/utils/apiFetch");
+    const { apiFetch, setActiveWorkspaceId } = await import("@/lib/apiFetch");
 
     setActiveWorkspaceId("workspace-123");
     await apiFetch("https://example.test/pipelines");
@@ -62,7 +62,7 @@ describe("apiFetch", () => {
 
 it('serializes Overview and reusable-catalog updates with canvas saves', async () => {
   vi.resetModules();
-  const { apiFetch } = await import('@/utils/apiFetch');
+  const { apiFetch } = await import('@/lib/apiFetch');
   const { captureGraphRevision, resetPersistence } = await import('@/features/flow/persistenceState');
   resetPersistence();
   captureGraphRevision(new Response('{}', { headers: { ETag: '"1"' } }));
@@ -124,7 +124,7 @@ it('does not freeze canvas saves when the upload form rejects an attachment', as
 
 it.each(['/api/reusable-pipelines', '/api/reusable-pipelines/attach'])('keeps reusable validation failures local to the form: %s', async (path) => {
   vi.resetModules();
-  const { apiFetch } = await import('@/utils/apiFetch');
+  const { apiFetch } = await import('@/lib/apiFetch');
   const { captureGraphRevision, resetPersistence, getPersistenceState } = await import('@/features/flow/persistenceState');
   resetPersistence();
   captureGraphRevision(new Response('{}', { headers: { ETag: '"10"' } }));
@@ -142,7 +142,7 @@ it.each(['/api/reusable-pipelines', '/api/reusable-pipelines/attach'])('keeps re
 it.each([false, true])('keeps authenticated saves and uploads synchronized through compressed responses (dedicated revision: %s)', async (dedicatedHeader) => {
   vi.resetModules();
   vi.stubEnv('VITE_AUTH_ENABLED', 'true');
-  const { apiFetch, setAuthToken, setActiveWorkspaceId } = await import('@/utils/apiFetch');
+  const { apiFetch, setAuthToken, setActiveWorkspaceId } = await import('@/lib/apiFetch');
   const { rememberGraphRead, acknowledgeGraphRead, persistenceEpoch, getPersistenceState } = await import('@/features/flow/persistenceState');
   setAuthToken('test-session');
   setActiveWorkspaceId('isolated-workspace');

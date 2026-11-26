@@ -1,5 +1,5 @@
 import coreManifest from "./core.generated.json";
-import { apiFetch } from "@/utils/apiFetch";
+import { apiFetch } from "@/lib/apiFetch";
 import { INLUMEN_API_URL } from "@/config/api";
 import {
   nodeDefinitionResponseSchema,

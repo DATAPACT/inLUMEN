@@ -3,11 +3,11 @@ import { createRoot } from "react-dom/client";
 import type { Node } from "reactflow";
 import { describe, expect, it, vi } from "vitest";
 
-import { apiFetch } from "@/utils/apiFetch";
+import { apiFetch } from "@/lib/apiFetch";
 
-vi.mock("@/utils/apiFetch", () => ({ apiFetch: vi.fn() }));
+vi.mock("@/lib/apiFetch", () => ({ apiFetch: vi.fn() }));
 
-import { PropertiesPanel, type PropertyNodeData } from "@/components/PropertiesPanel";
+import { PropertiesPanel, type PropertyNodeData } from "@/components/properties/PropertiesPanel";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 

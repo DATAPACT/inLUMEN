@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import type { ChatMessage } from './chatTypes';
 import { fetchConversation, mergeMessages } from './conversationService';
-import { startPolling } from '@/utils/polling';
+import { startPolling } from '@/lib/polling';
 
 export function useConversationSync(paused: boolean) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);

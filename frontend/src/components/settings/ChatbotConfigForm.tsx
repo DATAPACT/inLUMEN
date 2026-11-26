@@ -25,7 +25,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { OpenRouterModelCombobox } from "@/components/OpenRouterModelCombobox";
+import { OpenRouterModelCombobox } from "@/components/settings/OpenRouterModelCombobox";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import * as z from "zod";
@@ -36,11 +36,11 @@ import {
   createChatbotConfig,
   getDefaultChatbotConfig,
   updateChatbotConfig,
-} from "@/services/chatbotService";
+} from "@/features/chat/chatbotService";
 import {
   fetchOpenRouterModels,
   type OpenRouterModel,
-} from "@/services/openRouterModels";
+} from "@/features/chat/openRouterModels";
 import { toast } from "sonner";
 
 const providerValues = ["openrouter", "ollama_cloud", "custom"] as const;

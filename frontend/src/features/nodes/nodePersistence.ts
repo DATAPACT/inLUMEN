@@ -1,9 +1,9 @@
-import { apiFetch } from '@/utils/apiFetch';
+import { apiFetch } from '@/lib/apiFetch';
 import { INLUMEN_API_URL } from '@/config/api';
 import {
   buildCodegenLLMRequestConfig,
   ChatbotConfig,
-} from '@/services/chatbotService';
+} from '@/features/chat/chatbotService';
 import {
   getNodeFileName,
   NodeFileReference,

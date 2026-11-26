@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ChatbotConfigForm } from './ChatbotConfigForm';
-import { Button } from './ui/button';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from './ui/dialog';
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { INLUMEN_API_URL } from '@/config/api';
-import { apiFetch } from '@/utils/apiFetch';
-import { APPLICATION_LLM_ID, getDefaultChatbotConfig, type ChatbotConfig } from '@/services/chatbotService';
+import { apiFetch } from '@/lib/apiFetch';
+import { APPLICATION_LLM_ID, getDefaultChatbotConfig, type ChatbotConfig } from '@/features/chat/chatbotService';
 
 interface SharedSettings {
   config: (ChatbotConfig & { has_api_key?: boolean }) | null;

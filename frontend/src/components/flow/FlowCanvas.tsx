@@ -1,12 +1,12 @@
 import { GraphSaveStatus } from '@/components/flow/GraphSaveStatus';
-import { TaskPackageHelp } from '@/components/TaskPackageHelp';
+import { TaskPackageHelp } from '@/components/properties/TaskPackageHelp';
 import { checkTaskPackages, taskPackageFolder, taskDisplayName, taskConnections, copyExternalPrompt, pipelinePackageIssues, PackageImportError, importTaskPackages as commitTaskPackages, type PackageReport } from '@/features/flow/taskPackages';
 import { clearPersistenceError, reportPersistenceError, getPersistenceState, graphReadTicket, acknowledgeGraphRead, persistenceEpoch } from '@/features/flow/persistenceState';
-import { readStoredArray, releaseDraftProtection } from '@/utils/workspaceStorage';
-import { getWorkspaceStorage } from '@/utils/workspaceStorage';
-import { startPolling } from '@/utils/polling';
+import { readStoredArray, releaseDraftProtection } from '@/lib/workspaceStorage';
+import { getWorkspaceStorage } from '@/lib/workspaceStorage';
+import { startPolling } from '@/lib/polling';
 import React, { useState, useCallback, useRef, useEffect, forwardRef, useImperativeHandle, useMemo } from 'react';
-import { ChatbotConfig } from '@/services/chatbotService';
+import { ChatbotConfig } from '@/features/chat/chatbotService';
 import ReactFlow, {
   Node,
   Edge,
