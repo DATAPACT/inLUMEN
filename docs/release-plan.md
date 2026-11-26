@@ -1,60 +1,120 @@
-# Beta 5 release plan
+# Release plan and roadmap
 
-Reviewed 2026-09-16 after publishing Beta 5. Beta 4 is published at
-[`v1.0.0-beta.4`](https://github.com/DATAPACT/inLUMEN/releases/tag/v1.0.0-beta.4);
-preserve its tag and evidence. The [Beta 3 plan](beta3-release-plan.md) is retained
-for history.
+Reviewed 2026-11-26. This page says what the next release contains, what is
+planned after it, and what is not planned. Earlier plans are kept for history:
+[Beta 5](beta5-release-plan.md), [Beta 3](beta3-release-plan.md).
 
-## Accepted milestone
+> **Status: draft.** The Beta 6 scope, gates and title below are a proposal.
+> Nothing here is agreed until the open decisions at the end of the Beta 6
+> section are answered.
 
-[v1.0.0-beta.5 — Runtime code exchange](https://github.com/DATAPACT/inLUMEN/milestone/7).
-PR [#136](https://github.com/DATAPACT/inLUMEN/pull/136) merged on 2026-09-16 at
-`4b64b48de350f3e126eb261d5d040c092dbebe7b`; issue #103 is closed. The user
-confirmed acceptance after the code ZIP browser round-trip passed.
+## Where we are
 
-### #103 — Download code ZIP
+| | |
+|---|---|
+| Last release | [`v1.0.0-beta.5`](https://github.com/DATAPACT/inLUMEN/releases/tag/v1.0.0-beta.5), 2026-09-16 |
+| `main` since then | about 48 merged pull requests, no tag |
+| Deployed instance | follows `main`: every merge is deployed after its tests pass |
+| Agents library | `inlumen-agents` 1.0.0b6.dev6 on PyPI (development builds of Beta 6) |
 
-Add **Download code ZIP** beside **Upload code ZIP** in Library → Run → Runtime
-code. Export code attached to Task nodes into distinct, upload-compatible folders;
-retain the file bytes and names. Include the Task ID in folder names so equal Task
-labels stay distinct, and let the uploader match the exact exported folders before
-using its existing name matching. Do not export source data, pipeline design,
-reusable pipeline definitions, or credentials. No **Package** action appears in
-the top toolbar.
+The deployed instance is ahead of the last release. Beta 6 records, checks and
+tags what is already on `main`; it does not wait for new features.
 
-## Release gates
+## Beta 6 (proposed)
 
-Release checks apply to the final candidate source archive. The
-[release verification receipt](https://github.com/DATAPACT/inLUMEN/releases/download/v1.0.0-beta.5/release-verification.json)
-records the exact source SHA, test outcomes, compatibility limits, and checksums.
+Working title: **v1.0.0-beta.6 — Typed data flow, run outputs and plugins**.
+Date: not set.
 
-- [x] #103 implementation merged; unit and browser checks pass, including file
-  contents, source-data exclusion, ZIP placement, and successful uploader matching.
-- [x] User acceptance of #103 on 2026-09-16.
-- [x] User tested published Beta 5 and confirmed it is good enough for controlled
-  evaluation on 2026-09-16. This acceptance does not establish a 1.0 production
-  support commitment.
-- [x] Full regression suites, typecheck, lint, build, shared-file consistency,
-  database integration, Compose checks, and CI passed on final candidate
-  `dd0433e01264ef20e6fcfb99cde324a62a9931d3` in [CI run 35092341044](https://github.com/DATAPACT/inLUMEN/actions/runs/35092341044).
-- [x] Repeated the supported deterministic pipeline walkthrough on the
-  candidate; configuration checks passed and native Dagster execution returned
-  3 orders totaling 49.75.
-- [x] Built and inspected the final source archive and installation instructions;
-  recorded the candidate SHA, runtime versions, evidence, compatibility limits,
-  and checksums in the release receipt.
-- [x] Reviewed and published the prerelease tag and assets:
-  [`v1.0.0-beta.5`](https://github.com/DATAPACT/inLUMEN/releases/tag/v1.0.0-beta.5)
-  at `dd0433e01264ef20e6fcfb99cde324a62a9931d3`.
+### Scope: merged since Beta 5
 
-Implementation and current checks: [verification record](operations/beta5-verification.md).
-Release copy: [release notes](beta5-release-notes.md).
+| Area | What changed | Pull requests |
+|---|---|---|
+| Pipeline model | Typed ports, parallel branches, Parallel Map closed by Collect; multi-file Sources; one artifact per output port (artifact contract v4) | #153, #169, #170 |
+| Running pipelines | Run outputs stored with lineage and viewable in the app (compact, table and raw views); unchanged step results are reused and failed runs resume; run activity fixes | #152, #154, #155, #159, #189, #191 |
+| Export | Self-contained Argo Workflows bundle; portable Task packages | #144, #162, #164, #167 |
+| Plugins | Third-party tools with a REST API as Sources, Tasks or Destinations | #148, #156, #157, #160 |
+| Agents | Design and code generation published as the `inlumen-agents` library; a pipeline is designed in one tool call; graph change previews; step-level repairs in code generation | #141, #171, #174, #183, #184, #185 |
+| Interface | Inspector without plugin picker, compact palette groups, Run tab fixes | #168 |
+| Operations | Published container images, deploy to the VM on merge, weekly backup | #176, #177, #180 |
+| Maintenance | Code clean-up and folder structure (#182), faster CI, dependency audit | #165, #186, #187, #196 to #201, #203, #204 |
 
-## Remaining backlog
+Closed issues covered: #63, #72, #147, #150, #151, #158, #161, #182, #188, #190.
 
-Graph previews in #63 are the next scoped follow-up, with explicit accept/cancel
-and stale-revision behavior. #92 interactive tutorial and #77 UI refactoring remain
-uncommitted; split #77 into observable usability problems. #72 agent efficiency
-and #98 artifact-to-design remain exploratory. #59 README format and #9 compliance
-agents remain outside release completion criteria. A release candidate or stable
-1.0 requires its own agreed compatibility and support scope.
+### Open issues proposed as gates
+
+| Issue | Why it gates |
+|---|---|
+| #193 Design agent skips some delete requests | A plain request ("delete language detection") is answered without doing it |
+| #202 Flaky save-recovery browser test | Either the test or the app is wrong; if it is the app, edits can end in a save error |
+
+### Release gates
+
+Same gates as Beta 5, applied to the final candidate commit.
+
+- [ ] Gate issues closed.
+- [ ] Release notes written (`docs/beta6-release-notes.md`).
+- [ ] Verification record written (`docs/operations/beta6-verification.md`).
+- [ ] Compatibility statement: what a Beta 5 installation must do. Contract v4 needs regenerated exports (see [v3 to v4](migrations/artifact-contract-v3-to-v4.md)); whether saved Beta 5 pipelines open unchanged must be checked, not assumed.
+- [ ] `inlumen-agents` 1.0.0b6 released from the candidate commit (the application images install the library from the same commit).
+- [ ] Full regression suites, type check, lint, build, shared-file check, database integration and Compose checks pass in CI on the candidate.
+- [ ] The [deterministic walkthrough](prototype-quickstart.md) repeated on the candidate.
+- [ ] One generated pipeline per new area designed, run and exported on the deployed instance: typed ports with a Parallel Map, a plugin step, an Argo bundle.
+- [ ] Source archive, installation instructions and release receipt built and inspected.
+- [ ] User acceptance.
+- [ ] Prerelease tag and assets published.
+
+### Open decisions
+
+1. **Title and date** of Beta 6.
+2. **Gate list:** are #193 and #202 the right gates, and is anything missing?
+3. **Upgrade promise:** does Beta 6 certify an in-place upgrade from Beta 5, or stay "controlled evaluation, no upgrade guarantee" like Beta 5?
+4. **Library version:** should `inlumen-agents` 1.0.0b6 be released together with the application tag?
+
+## Next: after Beta 6
+
+Planned, not yet assigned to a release number.
+
+| Issue | Summary |
+|---|---|
+| #194 | Reject edits that cannot pass validation before the agent loop |
+| #195 | Reduce the cost of small edits: fewer calls and a smaller prompt |
+| #92 | Interactive tutorial (needs a specification first) |
+
+## Later: exploratory
+
+Direction only; no commitment.
+
+| Issue | Summary |
+|---|---|
+| #98 | Build a pipeline design from existing code or a deployment artifact |
+| #205 | Reduce duplication and split the largest files |
+
+## Outside release criteria
+
+#59 (README follows the template) and #9 (compliance agents, LexAlign
+integration) are reminders. They do not block any release.
+
+## Towards 1.0
+
+A release candidate or stable 1.0 needs its own agreed compatibility and support
+scope; none is defined yet. The README lists four expected KPIs. No measurement
+of them is recorded against a release so far:
+
+| KPI | Target in the README |
+|---|---|
+| Accuracy | Cosine similarity of at least 0.8 between generated and reference pipelines |
+| Usability | Mean SUS score of at least 80 |
+| Deployment success rate | More than 90% of generated pipeline designs executable |
+| Compliance by design | Expert-confirmed successful refinement for more than 90% of mutations (with LexAlign) |
+
+Deciding which of these must be measured before 1.0, and on what data, is the
+first step towards a 1.0 plan.
+
+## How this page is kept
+
+- Each release has one GitHub milestone named like its tag. Issues in "Next"
+  and "Later" sit in the milestones "Stabilization & workflow" and
+  "Exploration — Automation & integrations".
+- When a release is published, its section moves to a `betaN-release-plan.md`
+  page and this page is reviewed.
+- An issue without a milestone is not planned.
