@@ -22,8 +22,8 @@ tags what is already on `main`; it does not wait for new features.
 
 ## Beta 6 (proposed)
 
-Working title: **v1.0.0-beta.6 — Typed data flow, run outputs and plugins**.
-Date: not set.
+Working title: **v1.0.0-beta.6 — Typed data flow, run outputs and plugins**
+([milestone](https://github.com/DATAPACT/inLUMEN/milestone/8)). Date: not set.
 
 ### Scope: merged since Beta 5
 
