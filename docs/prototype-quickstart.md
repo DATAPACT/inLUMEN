@@ -8,21 +8,22 @@ design → save/reopen → run → inspect → download workflow.
 
 Use a fresh checkout on a controlled local evaluation machine with Docker
 Compose and a running Docker daemon. Initial builds require network access.
-Beta 5 is fresh-install-only; first read the
-[preservation limits](operations/beta3-compatibility.md) if you have existing data.
+Beta 6 does not certify an in-place upgrade; if you have existing data, first
+read the [compatibility statement](operations/beta6-compatibility.md) and the
+[preservation limits](operations/beta3-compatibility.md).
 Do not run these commands over an existing installation's storage. The default
 Compose file has fixed container/network names and ports, so a second simultaneous
 installation needs explicitly isolated names, ports and storage.
 
-Use the published `v1.0.0-beta.5` tag. Its accepted source SHA and checksums are
-listed in the [release](https://github.com/DATAPACT/inLUMEN/releases/tag/v1.0.0-beta.5).
+Use the published `v1.0.0-beta.6` tag. Its accepted source SHA and checksums are
+listed in the [release](https://github.com/DATAPACT/inLUMEN/releases/tag/v1.0.0-beta.6).
 For prepublication verification, substitute the exact candidate SHA. Run:
 
 ```sh
 # Use the published tag; release verification uses the exact candidate SHA.
-INLUMEN_REF=v1.0.0-beta.5
-git clone https://github.com/DATAPACT/inLUMEN.git inlumen-beta5
-cd inlumen-beta5
+INLUMEN_REF=v1.0.0-beta.6
+git clone https://github.com/DATAPACT/inLUMEN.git inlumen-beta6
+cd inlumen-beta6
 git checkout --detach "$INLUMEN_REF"
 git rev-parse HEAD
 python3 - <<'PYCONFIG'
@@ -185,6 +186,10 @@ with Docker Engine 29.7.2 and Dagster 1.13.12. The selected runtime profile was
 generated-bundle evidence, not a claim that the live UI walkthrough or full
 evaluation topology has passed.
 
+On November 26, 2026, the same check passed again for Beta 6 on an ARM64 host
+with Docker Engine 29.8.0; see the
+[Beta 6 verification](operations/beta6-verification.md).
+
 Record the candidate SHA, host/Docker versions, readiness result, saved version,
 run ID/status, downloaded output, and tested-snapshot checksum when performing
 the live walkthrough. Automated browser tests use a simulated gateway; the
@@ -200,4 +205,4 @@ for two-user Keycloak login, API isolation, and representative same-revision dat
 restoration. The [compatibility policy](operations/beta3-compatibility.md)
 describes fresh installation and preservation limits; no Beta 2 upgrade or
 concurrent-user capacity is certified. Beta 3 acceptance issue #129 is historical;
-Beta 5 release gates are recorded in the [Beta 5 release plan](beta5-release-plan.md).
+Beta 6 release gates are in the [release plan](release-plan.md).
