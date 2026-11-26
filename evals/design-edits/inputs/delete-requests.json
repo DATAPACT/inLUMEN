@@ -1,0 +1,24 @@
+{
+  "canvas": {
+    "nodes": [
+      {"id": "1", "type": "custom", "position": {"x": 150, "y": 150}, "data": {"type": "source", "label": "Scanned documents", "description": "Scanned pages uploaded by the user"}},
+      {"id": "2", "type": "custom", "position": {"x": 450, "y": 150}, "data": {"type": "task", "label": "OCR", "description": "Extract the text of each page"}},
+      {"id": "3", "type": "custom", "position": {"x": 750, "y": 150}, "data": {"type": "task", "label": "Language detection", "description": "Detect the language of the text"}},
+      {"id": "4", "type": "custom", "position": {"x": 1050, "y": 150}, "data": {"type": "task", "label": "Translation", "description": "Translate the text to English"}},
+      {"id": "5", "type": "custom", "position": {"x": 1350, "y": 150}, "data": {"type": "task", "label": "Summarizer", "description": "Write a short summary of the text"}},
+      {"id": "6", "type": "custom", "position": {"x": 1650, "y": 150}, "data": {"type": "destination", "label": "Summary report", "description": "Summaries saved as a report"}}
+    ],
+    "edges": [
+      {"id": "e1", "source": "1", "target": "2"},
+      {"id": "e2", "source": "2", "target": "3"},
+      {"id": "e3", "source": "3", "target": "4"},
+      {"id": "e4", "source": "4", "target": "5"},
+      {"id": "e5", "source": "5", "target": "6"}
+    ]
+  },
+  "requests": [
+    {"id": "delete-imperative", "request": "delete language detection", "deleted_label": "Language detection"},
+    {"id": "delete-indirect", "request": "I don't want OCR in this pipeline", "deleted_label": "OCR"},
+    {"id": "delete-take-out", "request": "take out the summarizer", "deleted_label": "Summarizer"}
+  ]
+}
