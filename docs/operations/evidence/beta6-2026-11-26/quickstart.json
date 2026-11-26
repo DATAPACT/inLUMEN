@@ -1,0 +1,24 @@
+{
+  "source_commit": "f309e5f509d23f16c15a8b6722be152581ee08cf",
+  "recorded_at": "2026-11-26",
+  "verification": "scripts/verify_quickstart.py --materialize",
+  "host": {
+    "docker_edition": "Docker Desktop 4.92.0",
+    "docker_engine": "29.8.0",
+    "architecture": "arm64"
+  },
+  "bundle": {
+    "deployment_bundle_schema": "inlumen.deployment-bundle@3",
+    "run_spec_schema": "inlumen.run-spec@4"
+  },
+  "execution": {
+    "engine": "Dagster native runner in Docker container",
+    "success": true,
+    "order_count": 3,
+    "total_amount": "49.75",
+    "run_id": "923c036c-b46e-4ad9-a3c5-caaf34f1b325",
+    "result_file": "outputs/node-result-summary-json/923c036c-b46e-4ad9-a3c5-caaf34f1b325/result/summary.json",
+    "result_sha256": "8448e5747c820c396122e490f98f4d887b676fecfa57f70129c0fc658aea0c60"
+  },
+  "scope": "Generated bundle build and sample execution only. This does not verify the live editor, an application deployment, or model-based generation."
+}

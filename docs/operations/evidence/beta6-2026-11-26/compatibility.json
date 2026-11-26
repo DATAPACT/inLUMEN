@@ -1,0 +1,135 @@
+{
+  "recorded_at": "2026-11-26",
+  "written_with": "v1.0.0-beta.5",
+  "read_with": "f309e5f509d23f16c15a8b6722be152581ee08cf",
+  "method": "Disposable PostgreSQL 17, Neo4j 5 and MinIO containers on a private Docker network. A Beta 5 backend wrote the data; the backend at the commit above was then started on the same stores. Authentication off.",
+  "database_schema": {
+    "check": "Beta 5 migrate.py, then migrate.py of the commit above on the same database; pg_dump --schema-only compared with a database created by the commit above alone",
+    "tables": 12,
+    "result": "identical"
+  },
+  "tables_created_at_run_time_since_beta5": [
+    "chat_conversations",
+    "chat_active_conversations",
+    "chat_turns",
+    "chat_messages",
+    "chat_cancel_requests",
+    "installed_plugins"
+  ],
+  "written_with_beta5": {
+    "phase": "write",
+    "sync": 200,
+    "save_version": 200,
+    "version": {
+      "uid": null,
+      "name": null
+    },
+    "get_graph": 200,
+    "graph": {
+      "nodes": 3,
+      "edges": 2,
+      "node_ids": [
+        "orders",
+        "result",
+        "summary"
+      ],
+      "edge_list": [
+        [
+          "orders",
+          "summary",
+          "data",
+          "input"
+        ],
+        [
+          "summary",
+          "result",
+          "output",
+          "data"
+        ]
+      ],
+      "node_data_sha256": "37750e738c53081700ddd8b536607d9734c8e3d1948674f3f172ede3dbcd3ea1"
+    },
+    "list_versions": 200,
+    "versions": [
+      {
+        "name": "saved-with-beta5",
+        "is_main": false,
+        "node_count": 3
+      }
+    ]
+  },
+  "read_with_candidate": {
+    "phase": "read",
+    "get_graph": 200,
+    "graph": {
+      "nodes": 3,
+      "edges": 2,
+      "node_ids": [
+        "orders",
+        "result",
+        "summary"
+      ],
+      "edge_list": [
+        [
+          "orders",
+          "summary",
+          "data",
+          "input"
+        ],
+        [
+          "summary",
+          "result",
+          "output",
+          "data"
+        ]
+      ],
+      "node_data_sha256": "37750e738c53081700ddd8b536607d9734c8e3d1948674f3f172ede3dbcd3ea1"
+    },
+    "list_versions": 200,
+    "versions": [
+      {
+        "name": "saved-with-beta5",
+        "is_main": false,
+        "node_count": 3
+      }
+    ],
+    "resave_loaded_graph": [
+      200,
+      {
+        "deleted_step_flow_ids": [],
+        "edge_count": 2,
+        "node_count": 3,
+        "ok": true,
+        "pipeline_uid": "6271eaf2-4786-4cee-9cf0-dd5b03e4ce3a",
+        "updated_at": "2026-11-26T22:34:58.597Z"
+      }
+    ],
+    "restore_version": 200,
+    "graph_after_restore": {
+      "nodes": 3,
+      "edges": 2,
+      "node_ids": [
+        "orders",
+        "result",
+        "summary"
+      ],
+      "edge_list": [
+        [
+          "orders",
+          "summary",
+          "data",
+          "input"
+        ],
+        [
+          "summary",
+          "result",
+          "output",
+          "data"
+        ]
+      ],
+      "node_data_sha256": "37750e738c53081700ddd8b536607d9734c8e3d1948674f3f172ede3dbcd3ea1"
+    },
+    "plugins": 200
+  },
+  "scope": "One three-step pipeline (examples/order-summary/pipeline.json) and one saved version. No attached files, node secrets, LLM settings, reusable pipelines, run history, or authenticated workspaces. Not a test of a full installation upgrade."
+}

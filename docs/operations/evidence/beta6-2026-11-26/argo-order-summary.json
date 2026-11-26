@@ -1,0 +1,35 @@
+{
+  "source_commit": "f309e5f509d23f16c15a8b6722be152581ee08cf",
+  "recorded_at": "2026-11-26",
+  "procedure": "docs/operations/argo-bundle-verification.md, sections 3 and 4, pipeline without reviewed models",
+  "host": {
+    "docker_engine": "29.8.0",
+    "architecture": "arm64",
+    "k3d": "v5.9.0",
+    "k3s": "v1.35.5-k3s1",
+    "argo_workflows": "v4.1.5"
+  },
+  "bundle": "Built offline from examples/order-summary with build_deployment_bundle_files(targets={'argo': True, 'dagster': False}); 28 files",
+  "workflow": {
+    "name": "inlumen-codegen-5m8js",
+    "status": "Succeeded",
+    "progress": "3/3",
+    "duration_seconds": 31,
+    "step_resources": {
+      "requests": {
+        "cpu": "1",
+        "memory": "1Gi"
+      },
+      "limits": {
+        "cpu": "1",
+        "memory": "1Gi"
+      }
+    }
+  },
+  "result": {
+    "object": "my-bucket/inlumen/output/20261126T223631Z/result/data/summary.json",
+    "sha256": "8448e5747c820c396122e490f98f4d887b676fecfa57f70129c0fc658aea0c60",
+    "matches_expected_summary": true
+  },
+  "scope": "Order-summary pipeline only. The bundle with reviewed models and the baked-model run (sections 2 and 5) were not repeated."
+}
