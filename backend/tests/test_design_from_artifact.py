@@ -416,3 +416,48 @@ def test_the_endpoint_asks_before_code_is_sent_and_builds_only_with_consent(monk
     built = post(consent="true", llm_config=config)
     assert built.status_code == 200, built.get_data(as_text=True)
     assert built.json["kind"] == "code-zip" and built.json["step_count"] == 3 and len(created) == 1
+
+
+def _positions(result):
+    return [(node["position"]["x"], node["position"]["y"]) for node in _pipeline(result)["nodes"]]
+
+
+def test_no_two_steps_share_a_position():
+    """A fan-out puts its branches in rows of their own, also for a design from code."""
+    pytest.importorskip("autogen_agentchat")
+    import asyncio
+
+    from export.design_from_artifact import _layout, design_from_code_zip
+
+    def create(**step):
+        from autogen_core import FunctionCall
+        from autogen_core.models import CreateResult, RequestUsage
+
+        return CreateResult(
+            finish_reason="function_calls",
+            content=[FunctionCall(id=f"call-{step['label']}", name="create_steps",
+                                  arguments=json.dumps({"params": json.dumps(step)}))],
+            usage=RequestUsage(prompt_tokens=100, completion_tokens=10), cached=False,
+        )
+
+    model = _scripted_model(
+        _create_steps(SENSOR_STEPS),
+        # Two more outputs of the same task: the store alone would stack all three.
+        create(type="destination", label="Rejected", description="rejected_rows.csv", after_flow_id="2", allow_fan_out=True),
+        create(type="destination", label="Report", description="report.json", after_flow_id="2", allow_fan_out=True),
+        _text("Done."),
+    )
+    result = asyncio.run(design_from_code_zip(_zip(CODE_ZIP), model=model, filename="sensor.zip"))
+    assert result["step_count"] == 5 and result["connection_count"] == 4
+    positions = _positions(result)
+    assert len(set(positions)) == 5
+    # The three outputs share a column and are at least one row apart.
+    last_column = sorted(y for x, y in positions if x == max(x for x, _ in positions))
+    assert len(last_column) == 3 and all(b - a >= 200 for a, b in zip(last_column, last_column[1:]))
+
+    for result in (design_from_bundle_manifest(_manifest()), design_from_artifact(ARGO_DAG.encode(), filename="t.yaml")):
+        assert len(set(_positions(result))) == result["step_count"]
+
+    # Children follow the rows of their parents.
+    rows = _layout(["a", "b", "c", "d"], {"c": {"b"}, "d": {"a"}})
+    assert rows["d"]["y"] < rows["c"]["y"] and rows["a"]["y"] < rows["b"]["y"]

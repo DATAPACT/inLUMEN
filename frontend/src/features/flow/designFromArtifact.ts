@@ -49,32 +49,6 @@ export function needsModelConsent(answer: ArtifactAnswer): answer is CodeZipCons
   return (answer as CodeZipConsentRequest).needs_model === true;
 }
 
-/** The question shown before any file of a code ZIP is sent to the model. */
-export function codeZipConsentText(request: CodeZipConsentRequest, modelName: string): string {
-  const shown = request.files_to_send.slice(0, 12).map(
-    (file) => `  ${file.path}${file.part === 'whole file' ? '' : ` (${file.part})`}`,
-  );
-  const more = request.files_to_send.length - shown.length;
-  const lines = [
-    'This ZIP holds code, not an inLUMEN bundle or an Argo workflow.',
-    `To build a design from it, these ${request.files_to_send.length} file(s) are sent to the model ${modelName}:`,
-    '',
-    ...shown,
-    ...(more > 0 ? [`  and ${more} more`] : []),
-    '',
-  ];
-  if (request.files_not_sent.length > 0) {
-    lines.push(`${request.files_not_sent.length} other file(s) are not sent.`);
-  }
-  lines.push(
-    'Of a CSV or TSV file only the first line is sent. Nothing is executed.',
-    'The import replaces the current canvas.',
-    '',
-    'Send these files and build the design?',
-  );
-  return lines.join('\n');
-}
-
 type DesignOptions = { consent?: boolean; llmConfig?: LLMRequestConfig };
 
 export async function designFromArtifact(file: File, options: DesignOptions = {}): Promise<ArtifactAnswer> {

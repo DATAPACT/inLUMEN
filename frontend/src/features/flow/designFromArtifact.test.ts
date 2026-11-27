@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { apiFetch } from "@/lib/apiFetch";
 import {
-  artifactKindLabel, codeZipConsentText, designFromArtifact, IMPORT_ACCEPT, isArtifactFile, isArtifactJson,
+  artifactKindLabel, designFromArtifact, IMPORT_ACCEPT, isArtifactFile, isArtifactJson,
   needsModelConsent, type ArtifactDesign, type CodeZipConsentRequest,
 } from "./designFromArtifact";
 import type { LLMRequestConfig } from "@/features/chat/chatbotService";
@@ -82,13 +82,6 @@ describe("design from a deployment artifact", () => {
     const firstBody = (vi.mocked(apiFetch).mock.calls[0][1] as RequestInit).body as FormData;
     expect(firstBody.get("consent")).toBeNull();
     expect(firstBody.get("llm_config")).toBeNull();
-
-    const question = codeZipConsentText(request, "openrouter / openai/gpt-oss-120b");
-    expect(question).toContain("openrouter / openai/gpt-oss-120b");
-    expect(question).toContain("sensor_pipeline/main.py");
-    expect(question).toContain("sensor_readings.csv (first line only)");
-    expect(question).toContain("1 other file(s) are not sent");
-    expect(question).toContain("replaces the current canvas");
 
     vi.mocked(apiFetch).mockResolvedValueOnce(response(200, {
       kind: "code-zip", project: {}, notes: [], step_count: 5, connection_count: 4,

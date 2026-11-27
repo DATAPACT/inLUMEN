@@ -64,8 +64,9 @@ A ZIP without a bundle manifest and without an Argo workflow file is read as
 code. A design cannot be read from code by rule, so the design agent infers
 it with the model that is selected in the chat.
 
-Before anything is sent, a question lists the files that the model would
-read. Only after you agree are they sent:
+Before anything is sent, a dialog names the model and lists the files that it
+would read, with what is sent of each. Only after **Send and build design**
+are they sent:
 
 - **Read whole** (up to 60,000 characters each, 200,000 in total, 60 files):
   `.py`, `.r`, `.sql`, `.sh`, `.md`, `.rst`, `.txt`, `.toml`, `.cfg`, `.ini`,
@@ -78,6 +79,11 @@ read. Only after you agree are they sent:
 The agent is asked for one Source per input dataset, one Task per processing
 stage that the code or its documentation names, and one Destination per
 output. If its first design does not pass validation, it gets one more turn.
+
+The finished design is laid out from left to right in the order of its
+connections, each step in a row of its own, and the view is fitted to it. A
+short message reports the number of steps and connections; **Details** opens
+the model's summary of how the code maps to the steps.
 
 What to expect:
 

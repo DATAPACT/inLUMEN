@@ -66,7 +66,8 @@ import {
   type NormalizedGraph,
 } from '@/features/flow/flowGraph';
 import { createProjectDocument, projectDocumentToGraph } from '@/features/flow/projectIr';
-import { artifactKindLabel, codeZipConsentText, designFromArtifact, isArtifactFile, isArtifactJson, needsModelConsent, type ArtifactDesign } from '@/features/flow/designFromArtifact';
+import { artifactKindLabel, designFromArtifact, isArtifactFile, isArtifactJson, needsModelConsent, type ArtifactDesign, type CodeZipConsentRequest } from '@/features/flow/designFromArtifact';
+import { CodeImportConsentDialog, ImportSummaryDialog } from './ArtifactImportDialogs';
 import {
   effectiveGenerationStatus,
   GENERATION_TERMINAL_STATUSES,
@@ -565,6 +566,10 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const generationCancelRequestedRef = useRef(false);
   const handledGenerationRunsRef = useRef(new Set<string>());
   const [isScriptGenerationOpen, setIsScriptGenerationOpen] = useState(false);
+  // Import of a ZIP of code: the question before files are sent, and the summary afterwards.
+  const [codeImport, setCodeImport] = useState<{ file: File; request: CodeZipConsentRequest } | null>(null);
+  const [codeImportBusy, setCodeImportBusy] = useState(false);
+  const [importSummary, setImportSummary] = useState<ArtifactDesign | null>(null);
   const [isValidationOpen, setIsValidationOpen] = useState(false);
   const [scriptGenerationPrompt, setScriptGenerationPrompt] = useState("");
   const [scriptGenerationMode, setScriptGenerationMode] =
@@ -1963,82 +1968,93 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     setIsScriptGenerationOpen(false);
   };
 
+  const reportImportError = (error: unknown) => {
+    console.error('Error importing flow:', error);
+    toast.error('Failed to import flow', {
+      description: error instanceof Error && error.message
+        ? error.message
+        : 'There was an error importing your pipeline',
+    });
+  };
+
+  // Puts an imported design on the canvas. ``artifact`` is set when the
+  // backend built it from a bundle, an Argo workflow or a ZIP of code.
+  const applyImportedDesign = async (flowData: unknown, artifact: ArtifactDesign | null) => {
+    const normalizedImport = projectDocumentToGraph(flowData);
+    const importedNodes = normalizedImport.nodes;
+    const importedEdges = normalizedImport.edges;
+    pushHistorySnapshot();
+    onCanvasEdited?.();
+    markLocalWrite(1200); // avoid immediate poll-refresh
+    await rebuildBackendFromFlow(importedNodes, importedEdges);
+    setNodes(importedNodes);
+    setEdges(importedEdges);
+    nodeId = getNextNumericNodeId(importedNodes, 1);
+    requestGraphViewportFit(); // show the whole imported design
+    if (artifact) {
+      toast.success(`Design imported from ${artifactKindLabel(artifact.kind)}`, {
+        description: `${artifact.step_count} steps and ${artifact.connection_count} connections.`
+          + (artifact.kind === 'code-zip' ? ' Inferred by the model: check each step.' : ''),
+        action: { label: 'Details', onClick: () => setImportSummary(artifact) },
+        duration: 12000,
+      });
+    } else {
+      toast.success('Project JSON imported', {
+        description: 'The Pipeline IR was migrated and the design state was reconstructed.',
+      });
+    }
+  };
+
   const importFlow = async (e: React.ChangeEvent<HTMLInputElement>) => {
     try {
       const file = e.target.files?.[0];
       if (!file) return;
-      // A bundle ZIP, a bundle manifest or an Argo workflow is turned into
-      // Project JSON by the backend; a Project JSON file is read here.
-      let artifact: ArtifactDesign | null = null;
-      let flowData: unknown;
-      const fromArtifact = async (): Promise<ArtifactDesign | null> => {
-        const answer = await designFromArtifact(file);
-        if (!needsModelConsent(answer)) return answer;
-        // A ZIP of code: the design is inferred by the model, so the user
-        // sees which files would be sent and decides first.
-        if (!activeChatbotConfig) {
-          throw new Error('This ZIP holds code. Choose a model in Settings to build a design from it.');
-        }
-        const modelName = [activeChatbotConfig.provider, activeChatbotConfig.model].filter(Boolean).join(' / ');
-        if (!window.confirm(codeZipConsentText(answer, modelName))) return null;
-        const importing = toast.loading('Reading the code with the model…');
-        try {
-          const design = await designFromArtifact(file, {
-            consent: true,
-            llmConfig: buildLLMRequestConfig(activeChatbotConfig),
-          });
-          if (needsModelConsent(design)) throw new Error('The design was not built.');
-          return design;
-        } finally {
-          toast.dismiss(importing);
-        }
-      };
-      if (isArtifactFile(file)) {
-        artifact = await fromArtifact();
-        if (!artifact) return;
-        flowData = artifact.project;
-      } else {
+      // A bundle ZIP, a bundle manifest, an Argo workflow or a ZIP of code is
+      // turned into Project JSON by the backend; Project JSON is read here.
+      let flowData: unknown = null;
+      let fromBackend = isArtifactFile(file);
+      if (!fromBackend) {
         flowData = JSON.parse(await file.text());
-        if (isArtifactJson(flowData)) {
-          artifact = await fromArtifact();
-          if (!artifact) return;
-          flowData = artifact.project;
-        }
+        fromBackend = isArtifactJson(flowData);
       }
-      const normalizedImport = projectDocumentToGraph(flowData);
-      const importedNodes = normalizedImport.nodes;
-      const importedEdges = normalizedImport.edges;
-      pushHistorySnapshot();
-      onCanvasEdited?.();
-      markLocalWrite(1200); // avoid immediate poll-refresh
-      await rebuildBackendFromFlow(importedNodes, importedEdges);
-      setNodes(importedNodes);
-      setEdges(importedEdges);
-      nodeId = getNextNumericNodeId(importedNodes, 1);
-      if (artifact) {
-        toast.success(`Design imported from ${artifactKindLabel(artifact.kind)}`, {
-          description: [
-            `${artifact.step_count} steps and ${artifact.connection_count} connections.`,
-            ...(artifact.kind === 'code-zip'
-              ? artifact.notes.map((note) => (note.length > 320 ? `${note.slice(0, 317)}…` : note))
-              : artifact.notes.slice(1)),
-          ].join(' '),
-          duration: 20000,
-        });
-      } else {
-        toast.success('Project JSON imported', {
-          description: 'The Pipeline IR was migrated and the design state was reconstructed.',
-        });
+      if (!fromBackend) {
+        await applyImportedDesign(flowData, null);
+        return;
       }
+      const answer = await designFromArtifact(file);
+      if (!needsModelConsent(answer)) {
+        await applyImportedDesign(answer.project, answer);
+        return;
+      }
+      // A ZIP of code: the design is inferred by the model, so the user sees
+      // which files would be sent and decides first (CodeImportConsentDialog).
+      if (!activeChatbotConfig) {
+        throw new Error('This ZIP holds code. Choose a model in Settings to build a design from it.');
+      }
+      setCodeImport({ file, request: answer });
     } catch (error) {
-      console.error('Error importing flow:', error);
-      toast.error('Failed to import flow', {
-        description: error instanceof Error && error.message
-          ? error.message
-          : 'There was an error importing your pipeline',
-      });
+      reportImportError(error);
     } finally {
       if (e.target) e.target.value = '';
+    }
+  };
+
+  const confirmCodeImport = async () => {
+    if (!codeImport || !activeChatbotConfig) return;
+    setCodeImportBusy(true);
+    try {
+      const design = await designFromArtifact(codeImport.file, {
+        consent: true,
+        llmConfig: buildLLMRequestConfig(activeChatbotConfig),
+      });
+      if (needsModelConsent(design)) throw new Error('The design was not built.');
+      setCodeImport(null);
+      await applyImportedDesign(design.project, design);
+    } catch (error) {
+      setCodeImport(null);
+      reportImportError(error);
+    } finally {
+      setCodeImportBusy(false);
     }
   };
 
@@ -2217,6 +2233,15 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           className="bg-card/70 border border-border rounded-md"
         />
 
+        <CodeImportConsentDialog
+          request={codeImport?.request ?? null}
+          fileName={codeImport?.file.name ?? ''}
+          modelName={[activeChatbotConfig?.provider, activeChatbotConfig?.model].filter(Boolean).join(' / ')}
+          busy={codeImportBusy}
+          onConfirm={confirmCodeImport}
+          onCancel={() => setCodeImport(null)}
+        />
+        <ImportSummaryDialog design={importSummary} onClose={() => setImportSummary(null)} />
         <FlowCanvasActionsPanel
           fileInputRef={fileInputRef}
           onSave={openSaveVersionDialog}

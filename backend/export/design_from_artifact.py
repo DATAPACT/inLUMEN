@@ -50,8 +50,17 @@ class ArtifactError(ValueError):
 
 # ----------------------------------------------------------------- shared
 
+COLUMN_WIDTH = 340.0
+ROW_HEIGHT = 200.0
+
+
 def _layout(ids: list[str], parents: dict[str, set[str]]) -> dict[str, dict[str, float]]:
-    """Left-to-right positions: a step sits one column after its last parent."""
+    """Left-to-right positions without overlap.
+
+    A step sits one column after its last parent. Inside a column the steps
+    follow the rows of their parents, so connections cross as little as a
+    simple layout allows, and each step gets a row of its own.
+    """
     depth: dict[str, int] = {}
 
     def level(node: str, trail: frozenset[str] = frozenset()) -> int:
@@ -59,21 +68,38 @@ def _layout(ids: list[str], parents: dict[str, set[str]]) -> dict[str, dict[str,
             return depth[node]
         if node in trail:  # a cycle; the validation notes report it
             return 0
-        known = [parent for parent in parents.get(node, ()) if parent in parents or parent in ids]
+        known = [parent for parent in parents.get(node, ()) if parent in ids]
         depth[node] = 1 + max((level(parent, trail | {node}) for parent in known), default=-1)
         return depth[node]
 
     columns: dict[int, list[str]] = defaultdict(list)
     for node in ids:
         columns[level(node)].append(node)
+    rows: dict[str, float] = {}
     positions = {}
-    for column, members in columns.items():
-        for row, node in enumerate(members):
-            positions[node] = {
-                "x": 150.0 + 300.0 * column,
-                "y": 150.0 + 180.0 * (row - (len(members) - 1) / 2),
-            }
+    for column in sorted(columns):
+        members = columns[column]
+
+        def parent_row(node: str) -> float:
+            known = [rows[parent] for parent in parents.get(node, ()) if parent in rows]
+            return sum(known) / len(known) if known else float(members.index(node))
+
+        ordered = sorted(members, key=lambda node: (parent_row(node), members.index(node)))
+        for index, node in enumerate(ordered):
+            rows[node] = index - (len(ordered) - 1) / 2
+            positions[node] = {"x": 150.0 + COLUMN_WIDTH * column, "y": 300.0 + ROW_HEIGHT * rows[node]}
     return positions
+
+
+def _relayout(graph: dict) -> None:
+    """Give every step of a canvas graph a position from :func:`_layout`."""
+    ids = [str(node.get("id")) for node in graph.get("nodes") or []]
+    parents: dict[str, set[str]] = defaultdict(set)
+    for edge in graph.get("edges") or []:
+        parents[str(edge.get("target"))].add(str(edge.get("source")))
+    positions = _layout(ids, parents)
+    for node in graph.get("nodes") or []:
+        node["position"] = positions[str(node.get("id"))]
 
 
 def _result(kind: str, graph: dict, name: str, description: str, notes: list[str]) -> dict[str, Any]:
@@ -613,6 +639,14 @@ async def design_from_code_zip(data: bytes, *, model: Any, filename: str = "") -
         )
     except ValueError as exc:
         raise ArtifactError(f"The model built no design from this code: {exc}") from None
+    # The agent places steps one tool call at a time, which can put branches on
+    # top of each other. The finished design is laid out as a whole.
+    from inlumen.contracts.project_ir import project_document as _project_document
+
+    _relayout(design.graph)
+    design.project = _project_document(
+        design.graph, name=design.project["project"]["name"], description=design.project["project"]["description"]
+    )
     notes = [
         "The design was inferred from the code by the model. It is the model's reading of the code, "
         "not a guaranteed description: check each step against the code.",
