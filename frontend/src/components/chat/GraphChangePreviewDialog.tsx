@@ -32,15 +32,6 @@ type GraphChangePreviewDialogProps = {
   isApplying?: boolean;
   onApply: () => void;
   onDiscard: () => void;
-  /** Texts for a proposal that does not come from the assistant, such as an import. */
-  title?: string;
-  description?: string;
-  /** Shown above the change summary: what the source of the proposal said or left out. */
-  notes?: string[];
-  /** One more way out, such as building the proposal again. */
-  secondaryAction?: { label: string; onClick: () => void; busy?: boolean };
-  /** The proposal replaces the whole canvas, so it can be applied even without a difference. */
-  replacesCanvas?: boolean;
 };
 
 type ChangeItem = { id: string; label: string };
@@ -159,11 +150,6 @@ export const GraphChangePreviewDialog = ({
   isApplying = false,
   onApply,
   onDiscard,
-  title = "Review proposed graph",
-  description = "Your saved pipeline is unchanged. Review the proposal, then apply it or discard it.",
-  notes = [],
-  secondaryAction,
-  replacesCanvas = false,
 }: GraphChangePreviewDialogProps) => {
   const changes = useMemo(() => buildChanges(baseline, proposal), [baseline, proposal]);
   const nodeIds = useMemo(() => new Set([
@@ -213,10 +199,12 @@ export const GraphChangePreviewDialog = ({
       >
         <DialogHeader className="shrink-0 border-b border-border px-6 py-4 pr-12">
           <div className="flex flex-wrap items-center gap-2">
-            <DialogTitle>{title}</DialogTitle>
+            <DialogTitle>Review proposed graph</DialogTitle>
             <Badge variant="outline" className="border-emerald-500/40 text-emerald-600">Preview</Badge>
           </div>
-          <DialogDescription>{description}</DialogDescription>
+          <DialogDescription>
+            Your saved pipeline is unchanged. Review the proposal, then apply it or discard it.
+          </DialogDescription>
           {stale && (
             <p role="alert" className="mt-2 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
               <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
@@ -270,18 +258,8 @@ export const GraphChangePreviewDialog = ({
             </div>
             <ScrollArea className="min-h-0 flex-1">
               <div className="space-y-5 px-4 py-4">
-                {notes.length > 0 && (
-                  <section className="space-y-1.5" data-testid="proposal-notes">
-                    <h3 className="text-xs font-semibold">About this proposal</h3>
-                    <ul className="space-y-1.5">
-                      {notes.map((note, index) => (
-                        <li key={index} className="rounded-md border border-border bg-muted/30 px-2.5 py-2 text-xs leading-5 text-muted-foreground">{note}</li>
-                      ))}
-                    </ul>
-                  </section>
-                )}
                 {totalChanges === 0 ? (
-                  <p className="text-xs leading-5 text-muted-foreground">The proposal does not change any steps or connections.</p>
+                  <p className="text-xs leading-5 text-muted-foreground">The assistant did not change any steps or connections.</p>
                 ) : (
                   <>
                     <ChangeSection title="New steps" items={changes.addedNodes} tone="green" icon={<Plus className="h-3.5 w-3.5" />} />
@@ -308,13 +286,7 @@ export const GraphChangePreviewDialog = ({
 
         <DialogFooter className="shrink-0 gap-2 border-t border-border px-6 py-3">
           <Button variant="outline" onClick={onDiscard} disabled={isApplying}>Discard proposal</Button>
-          {secondaryAction && (
-            <Button variant="outline" onClick={secondaryAction.onClick} disabled={isApplying || secondaryAction.busy}>
-              <RefreshCw className={cn("h-4 w-4", secondaryAction.busy && "animate-spin")} />
-              {secondaryAction.label}
-            </Button>
-          )}
-          <Button onClick={onApply} disabled={isApplying || stale || secondaryAction?.busy || (totalChanges === 0 && !replacesCanvas)}>
+          <Button onClick={onApply} disabled={isApplying || stale || totalChanges === 0}>
             {isApplying ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
             {isApplying ? "Applying…" : "Apply to canvas"}
           </Button>

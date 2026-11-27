@@ -59,7 +59,13 @@ describe("code import consent dialog", () => {
     expect(rows.find((row) => row.includes("main.py"))).toContain("whole file");
     expect(rows.find((row) => row.includes("sensor_readings.csv"))).toContain("first line only");
     expect(text()).toContain("1 other file is not sent");
-    expect(text()).toContain("The import replaces the current canvas.");
+    // An empty canvas loses nothing, so there is no warning.
+    expect(text()).not.toContain("replaces");
+  });
+
+  it("says how many steps the design replaces and that Undo brings them back", async () => {
+    await showDialog({ replacedSteps: 4 });
+    expect(text()).toContain("The design replaces the 4 steps on the canvas. Undo brings them back.");
   });
 
   it("sends only on the confirm button and can be cancelled", async () => {
@@ -73,7 +79,7 @@ describe("code import consent dialog", () => {
 
   it("locks both buttons while the model reads the code", async () => {
     await showDialog({ busy: true });
-    expect(button(/Reading the code/).disabled).toBe(true);
+    expect(button(/Building the design/).disabled).toBe(true);
     expect(button(/^Cancel$/).disabled).toBe(true);
   });
 

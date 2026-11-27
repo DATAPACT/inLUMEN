@@ -12,23 +12,10 @@ read as before. The others are turned into a design by the backend:
 An inLUMEN bundle is the ZIP that inLUMEN's own export produces; it holds a
 `bundle-manifest.json`. Any other ZIP with code files is a ZIP of code.
 
-An import replaces the canvas. Nothing in the file is executed.
-
-## Review before the canvas is replaced
-
-When the canvas already holds steps, an import of any kind, Project JSON
-included, is first shown as a proposal: the imported design, what it adds and
-removes compared with the canvas, and the notes on what the file did not say.
-Nothing changes until **Apply to canvas**; **Discard proposal** leaves the
-canvas as it was.
-
-A design that the model inferred from a ZIP of code is always shown as a
-proposal, also on an empty canvas, because the model can read the same code
-differently each time. **Import again** asks the model for a new design of the
-same ZIP without asking for the files again.
-
-A bundle, an Argo workflow or a Project JSON file imported into an empty
-canvas is applied at once.
+The import replaces the canvas, like a Project JSON import. If the canvas
+held steps, the message after the import has an **Undo** button that brings
+them back; the Undo button of the toolbar does the same. Nothing in the file
+is executed.
 
 ## inLUMEN bundle
 
@@ -98,8 +85,8 @@ design does not pass validation, the message says why.
 ## ZIP of code
 
 A ZIP without a bundle manifest and without an Argo workflow file is read as
-code. A design cannot be read from code by rule, so the design agent infers
-it with the model that is selected in the chat.
+code. A design cannot be read from code by rule, so the model that is
+selected in the chat infers it.
 
 Before anything is sent, a dialog names the model and lists the files that it
 would read, with what is sent of each. Only after **Send and build design**
@@ -113,13 +100,16 @@ are they sent:
   folders (names that start with a dot, such as `.env`), and the folders
   `__pycache__`, `node_modules`, `site-packages`, `dist`, `build`.
 
-The agent is asked for one Source per input dataset, one Task per processing
+The model is asked for one Source per input dataset, one Task per processing
 stage that the code or its documentation names, and one Destination per
-output. If its first design does not pass validation, it gets one more turn.
+output. It answers with the whole design in one reply, and inLUMEN creates the
+steps from that reply under the same rules as for the chat. This takes a few
+seconds. A design that is rejected or does not pass validation is sent back
+with the reason, at most twice.
 
 The finished design is laid out from left to right in the order of its
-connections, each step in a row of its own. After it is applied, the view is
-fitted to it and a short message reports the number of steps and connections; **Details** opens
+connections, each step in a row of its own, and the view is fitted to it. A
+short message reports the number of steps and connections; **Details** opens
 the model's summary of how the code maps to the steps.
 
 What to expect:
@@ -153,5 +143,5 @@ Limits: 50 MiB for a ZIP, 5 MiB for a manifest or workflow file, 500 steps,
 
 Dagster projects and other workflow formats are not read by rule; inside a
 ZIP they are treated as code. A design inferred from a ZIP of code gets no
-code or data attached (#222). Argo conditions and loops are not turned into
-steps (#224).
+code or data attached. Follow-up issues: a preview before the canvas is
+replaced (#223), and Argo conditions and loops as steps (#224).

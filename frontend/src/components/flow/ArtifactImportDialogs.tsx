@@ -33,12 +33,14 @@ type ConsentProps = {
   fileName: string;
   modelName: string;
   busy: boolean;
+  /** Steps on the canvas that the import replaces. */
+  replacedSteps?: number;
   onConfirm: () => void;
   onCancel: () => void;
 };
 
 /** Asks before the files of a code ZIP are sent to the model. */
-export function CodeImportConsentDialog({ request, fileName: zipName, modelName, busy, onConfirm, onCancel }: ConsentProps) {
+export function CodeImportConsentDialog({ request, fileName: zipName, modelName, busy, replacedSteps = 0, onConfirm, onCancel }: ConsentProps) {
   const sent = request?.files_to_send ?? [];
   const notSent = request?.files_not_sent ?? [];
   return (
@@ -98,17 +100,19 @@ export function CodeImportConsentDialog({ request, fileName: zipName, modelName,
             <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
             Nothing is executed. Of a table only the first line is sent, for the column names.
           </li>
-          <li className="flex items-start gap-2">
-            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
-            The import replaces the current canvas.
-          </li>
+          {replacedSteps > 0 && (
+            <li className="flex items-start gap-2" data-testid="code-import-replaces">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
+              The design replaces the {replacedSteps} step{replacedSteps === 1 ? '' : 's'} on the canvas. Undo brings them back.
+            </li>
+          )}
         </ul>
 
         <DialogFooter>
           <Button variant="outline" onClick={onCancel} disabled={busy}>Cancel</Button>
           <Button onClick={onConfirm} disabled={busy || sent.length === 0}>
             {busy
-              ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Reading the code…</>
+              ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Building the design…</>
               : <><Sparkles className="mr-2 h-4 w-4" /> Send and build design</>}
           </Button>
         </DialogFooter>

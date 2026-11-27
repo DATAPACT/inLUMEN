@@ -28,10 +28,6 @@ test('editor recovers from a conflicting save and remains keyboard accessible', 
     name: 'pipeline.json', mimeType: 'application/json',
     buffer: Buffer.from(JSON.stringify({ nodes: [], edges: [] })),
   });
-  // The canvas holds a step, so the import is shown as a proposal first.
-  await expect(page.getByText('Review the imported design')).toBeVisible();
-  expect(writes).toHaveLength(0);
-  await page.getByRole('button', { name: 'Apply to canvas' }).click();
   await expect(page.getByText('Couldn’t save', { exact: true })).toBeVisible();
   expect(writes[0].revision).toBe('"1"');
   const download = page.waitForEvent('download');

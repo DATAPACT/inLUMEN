@@ -661,7 +661,7 @@ def design_from_artifact(data: bytes, *, filename: str = "") -> dict[str, Any]:
 
 
 async def design_from_code_zip(data: bytes, *, model: Any, filename: str = "") -> dict[str, Any]:
-    """Let the design agent infer the design of a ZIP of code.
+    """Let the model infer the design of a ZIP of code, in one call.
 
     Sends the files that :func:`code_files_from_zip` selects to ``model``.
     Call it only after the user agreed to that.
@@ -684,7 +684,7 @@ async def design_from_code_zip(data: bytes, *, model: Any, filename: str = "") -
         )
     except ValueError as exc:
         raise ArtifactError(f"The model built no design from this code: {exc}") from None
-    # The agent places steps one tool call at a time, which can put branches on
+    # The steps are placed one at a time as they are created, which can put branches on
     # top of each other. The finished design is laid out as a whole.
     from inlumen.contracts.project_ir import project_document as _project_document
 
