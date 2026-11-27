@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .context import _assistant_message_from_result, _build_agent_task, is_read_only_pipeline_request
-from .guardrails import _build_graph_sync_guardrail, _guardrail_repair_task
+from .guardrails import EditWarnings, _build_graph_sync_guardrail, _guardrail_repair_task
 
 
 class GraphAccess(Protocol):
@@ -31,7 +31,8 @@ class DesignTurn:
 
     ``sync`` is the guardrail verdict: ``guardrail_passed``, ``status``
     (``"invalid"`` when the graph failed validation), ``graph_changed``,
-    ``validation_errors`` and a ``message``.
+    ``validation_errors`` and a ``message``. ``declined_edit`` lists why an
+    edit was undone because it is not valid alone; the graph is then unchanged.
     """
 
     assistant_message: str
@@ -71,22 +72,43 @@ async def run_design_turn(
     after_graph, after_error = await _read_graph(graph)
     sync = _build_graph_sync_guardrail(visible_before_graph, after_graph, user_message, after_error)
 
+    async def put_back() -> tuple[dict | None, str | None]:
+        """Undo the turn's changes: in the store, or only in the result."""
+        if not restore_read_only_changes:
+            return deepcopy(visible_before_graph), None
+        if not isinstance(visible_before_graph, dict):
+            raise RuntimeError("No pre-turn graph snapshot is available to undo the change.")
+        try:
+            await graph.restore_graph(visible_before_graph)
+            return deepcopy(visible_before_graph), None
+        except Exception as exc:
+            return after_graph, str(exc)
+
     # Informational requests must never turn model paraphrasing or an accidental
     # tool write into a real edit or a Review AI proposal.
     if is_read_only_pipeline_request(user_message) and sync.get("graph_changed"):
-        if restore_read_only_changes:
-            if not isinstance(visible_before_graph, dict):
-                raise RuntimeError("No pre-turn graph snapshot is available for a read-only request.")
-            try:
-                await graph.restore_graph(visible_before_graph)
-                after_graph = deepcopy(visible_before_graph)
-                after_error = None
-            except Exception as exc:
-                after_error = str(exc)
-        else:
-            after_graph = deepcopy(visible_before_graph)
-            after_error = None
+        after_graph, after_error = await put_back()
         sync = _build_graph_sync_guardrail(visible_before_graph, after_graph, user_message, after_error)
+
+    # The turn's only change is an edit that the agent was told is not valid
+    # alone (see EditWarnings). A repair round could only put the removed part
+    # back, so the edit is undone here and the agent's explanation is the answer.
+    warnings = getattr(team, "edit_warnings", None)
+    if (
+        not sync["guardrail_passed"]
+        and sync.get("status") == "invalid"
+        and not after_error
+        and isinstance(warnings, EditWarnings)
+        and warnings.is_the_only_change(visible_before_graph, after_graph)
+    ):
+        issues = list(warnings.issues)
+        after_graph, after_error = await put_back()
+        sync = _build_graph_sync_guardrail(visible_before_graph, after_graph, user_message, after_error)
+        if not after_error:
+            sync["declined_edit"] = issues
+            note = "The pipeline was left unchanged. On its own, this edit is not valid: " + "; ".join(issues)
+            assistant_message = f"{assistant_message}\n\n{note}" if assistant_message else note
+        return DesignTurn(assistant_message, after_graph, sync)
 
     repaired = False
     if not sync["guardrail_passed"] and sync.get("status") == "invalid" and not after_error:

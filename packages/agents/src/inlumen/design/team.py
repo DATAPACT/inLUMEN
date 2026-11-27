@@ -14,6 +14,7 @@ from autogen_core.tools import FunctionTool
 
 from inlumen.contracts.node_definitions import NodeDefinitionRegistry
 
+from .guardrails import EditWarnings
 from .prompt import PIPELINE_EDITOR_DESCRIPTION, PIPELINE_EDITOR_SYSTEM_MESSAGE
 from .store import GraphStore
 from .tools import build_pipeline_editor_tools, pipeline_palette
@@ -146,9 +147,12 @@ def build_design_team(
     Pipeline writes share ordering and flow-id state, so the model client must
     not make parallel tool calls.
     """
+    edit_warnings = EditWarnings()
     tools = [
         TolerantFunctionTool(tool, store)
-        for tool in build_pipeline_editor_tools(store, node_definitions=node_definitions)
+        for tool in build_pipeline_editor_tools(
+            store, node_definitions=node_definitions, edit_warnings=edit_warnings
+        )
     ]
     system_message = PIPELINE_EDITOR_SYSTEM_MESSAGE + (
         "\n\nPIPELINE COMPONENTS PALETTE (authoritative; what list_pipeline_components returns)\n"
@@ -165,4 +169,7 @@ def build_design_team(
         max_tool_iterations=max_tool_iterations,
         reflect_on_tool_use=True,
     )
-    return ProviderAwareGroupChat([editor], max_turns=1, model_client=model_client)
+    team = ProviderAwareGroupChat([editor], max_turns=1, model_client=model_client)
+    # Read by run_design_turn to tell a declined edit from an unfinished one.
+    team.edit_warnings = edit_warnings
+    return team

@@ -1,0 +1,351 @@
+{
+  "canvas": {
+    "nodes": [
+      {
+        "id": "1",
+        "type": "custom",
+        "position": {
+          "x": 0.0,
+          "y": 0.0
+        },
+        "data": {
+          "label": "Invoice PDFs",
+          "description": "Invoice files uploaded by the user",
+          "type": "source",
+          "template_label": "Custom",
+          "ports": {
+            "inputs": [],
+            "outputs": [
+              {
+                "id": "data",
+                "name": "data",
+                "type": "any",
+                "required": true,
+                "description": "Source data."
+              }
+            ]
+          },
+          "template": {
+            "id": "core.source",
+            "name": "Custom"
+          }
+        }
+      },
+      {
+        "id": "2",
+        "type": "custom",
+        "position": {
+          "x": 300.0,
+          "y": 0.0
+        },
+        "data": {
+          "label": "For each invoice",
+          "description": "Process one invoice at a time",
+          "type": "flow",
+          "template_label": "Parallel Map",
+          "ports": {
+            "inputs": [
+              {
+                "id": "items",
+                "name": "items",
+                "type": "any[]",
+                "required": true,
+                "description": "Items to process concurrently."
+              }
+            ],
+            "outputs": [
+              {
+                "id": "item",
+                "name": "item",
+                "type": "any",
+                "required": true,
+                "description": "One item supplied to the mapped branch."
+              }
+            ]
+          },
+          "template": {
+            "id": "core.flow",
+            "name": "Parallel Map"
+          }
+        }
+      },
+      {
+        "id": "3",
+        "type": "custom",
+        "position": {
+          "x": 600.0,
+          "y": 0.0
+        },
+        "data": {
+          "label": "Extract fields",
+          "description": "Extract supplier, date and total",
+          "type": "task",
+          "template_label": "Task",
+          "ports": {
+            "inputs": [
+              {
+                "id": "input",
+                "name": "input",
+                "type": "any",
+                "required": true,
+                "description": "Task input."
+              }
+            ],
+            "outputs": [
+              {
+                "id": "output",
+                "name": "output",
+                "type": "any",
+                "required": true,
+                "description": "Task output."
+              }
+            ]
+          },
+          "template": {
+            "id": "core.task",
+            "name": "Task"
+          }
+        }
+      },
+      {
+        "id": "4",
+        "type": "custom",
+        "position": {
+          "x": 900.0,
+          "y": 0.0
+        },
+        "data": {
+          "label": "Collect invoices",
+          "description": "Gather the extracted invoices",
+          "type": "flow",
+          "template_label": "Collect",
+          "ports": {
+            "inputs": [
+              {
+                "id": "item",
+                "name": "item",
+                "type": "any",
+                "required": true,
+                "description": "One per-item result of the Parallel Map this Collect closes."
+              }
+            ],
+            "outputs": [
+              {
+                "id": "items",
+                "name": "items",
+                "type": "any[]",
+                "required": true,
+                "description": "Every per-item result, gathered into one collection."
+              }
+            ]
+          },
+          "template": {
+            "id": "core.flow",
+            "name": "Collect"
+          }
+        }
+      },
+      {
+        "id": "5",
+        "type": "custom",
+        "position": {
+          "x": 1200.0,
+          "y": 0.0
+        },
+        "data": {
+          "label": "Summarize",
+          "description": "Compute totals per supplier",
+          "type": "task",
+          "template_label": "Task",
+          "ports": {
+            "inputs": [
+              {
+                "id": "input",
+                "name": "input",
+                "type": "any",
+                "required": true,
+                "description": "Task input."
+              }
+            ],
+            "outputs": [
+              {
+                "id": "output",
+                "name": "output",
+                "type": "any",
+                "required": true,
+                "description": "Task output."
+              }
+            ]
+          },
+          "template": {
+            "id": "core.task",
+            "name": "Task"
+          }
+        }
+      },
+      {
+        "id": "6",
+        "type": "custom",
+        "position": {
+          "x": 1500.0,
+          "y": 0.0
+        },
+        "data": {
+          "label": "Report",
+          "description": "Totals saved as a report",
+          "type": "destination",
+          "template_label": "Custom",
+          "ports": {
+            "inputs": [
+              {
+                "id": "data",
+                "name": "data",
+                "type": "any",
+                "required": true,
+                "description": "Data to deliver."
+              }
+            ],
+            "outputs": []
+          },
+          "template": {
+            "id": "core.destination",
+            "name": "Custom"
+          }
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "reactflow__edge-1-data-2-items",
+        "source": "1",
+        "sourceHandle": "data",
+        "target": "2",
+        "targetHandle": "items"
+      },
+      {
+        "id": "reactflow__edge-2-item-3-input",
+        "source": "2",
+        "sourceHandle": "item",
+        "target": "3",
+        "targetHandle": "input"
+      },
+      {
+        "id": "reactflow__edge-3-output-4-item",
+        "source": "3",
+        "sourceHandle": "output",
+        "target": "4",
+        "targetHandle": "item"
+      },
+      {
+        "id": "reactflow__edge-4-items-5-input",
+        "source": "4",
+        "sourceHandle": "items",
+        "target": "5",
+        "targetHandle": "input"
+      },
+      {
+        "id": "reactflow__edge-5-output-6-data",
+        "source": "5",
+        "sourceHandle": "output",
+        "target": "6",
+        "targetHandle": "data"
+      }
+    ]
+  },
+  "requests": [
+    {
+      "id": "disconnect-1",
+      "kind": "disconnect",
+      "expect": "declined",
+      "request": "disconnect Extract fields from Collect invoices"
+    },
+    {
+      "id": "disconnect-2",
+      "kind": "disconnect",
+      "expect": "declined",
+      "request": "remove the connection between Invoice PDFs and For each invoice"
+    },
+    {
+      "id": "disconnect-3",
+      "kind": "disconnect",
+      "expect": "declined",
+      "request": "unlink Summarize and Report"
+    },
+    {
+      "id": "disconnect-4",
+      "kind": "disconnect",
+      "expect": "declined",
+      "request": "disconnect Collect invoices from Summarize"
+    },
+    {
+      "id": "disconnect-5",
+      "kind": "disconnect",
+      "expect": "declined",
+      "request": "cut the link from For each invoice to Extract fields"
+    },
+    {
+      "id": "disconnect-6",
+      "kind": "disconnect",
+      "expect": "declined",
+      "request": "Summarize should no longer feed Report"
+    },
+    {
+      "id": "disconnect-7",
+      "kind": "disconnect",
+      "expect": "declined",
+      "request": "detach the source from the map step"
+    },
+    {
+      "id": "flow-1",
+      "kind": "flow",
+      "expect": "declined",
+      "request": "change Collect invoices to a Parallel Map"
+    },
+    {
+      "id": "flow-2",
+      "kind": "flow",
+      "expect": "declined",
+      "request": "switch the For each invoice step to Collect"
+    },
+    {
+      "id": "flow-3",
+      "kind": "flow",
+      "expect": "declined",
+      "request": "switch Collect invoices to a Condition with the expression value.total > 0 and change nothing else"
+    },
+    {
+      "id": "destination-1",
+      "kind": "delete",
+      "expect": "declined",
+      "request": "remove the last step"
+    },
+    {
+      "id": "compound-1",
+      "kind": "compound",
+      "expect": "changed",
+      "removed": [
+        "Summarize"
+      ],
+      "added": 0,
+      "request": "disconnect Summarize from Report, delete Summarize and connect Collect invoices to Report"
+    },
+    {
+      "id": "compound-2",
+      "kind": "compound",
+      "expect": "changed",
+      "removed": [],
+      "added": 1,
+      "request": "disconnect Collect invoices from Summarize and put a new task called Validate totals between them"
+    },
+    {
+      "id": "compound-3",
+      "kind": "compound",
+      "expect": "changed",
+      "removed": [
+        "Summarize"
+      ],
+      "added": 1,
+      "request": "replace Summarize with a task called Aggregate by month"
+    }
+  ]
+}

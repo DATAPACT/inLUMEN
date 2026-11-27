@@ -298,6 +298,33 @@ def _requested_topology_errors(graph: dict | None, user_message: str) -> list[st
     return errors
 
 
+class EditWarnings:
+    """The latest edit that, taken alone, left the pipeline invalid.
+
+    The editing tools fill it in; the turn reads it. When that edit is the only
+    change of the turn and the agent stops there, it was told why the edit is
+    not valid and chose to explain. The edit is then undone without a repair
+    round. A turn with more changes keeps its repair round.
+    """
+
+    def __init__(self) -> None:
+        self.before: dict | None = None
+        self.after: dict | None = None
+        self.issues: list[str] = []
+
+    def note(self, before: dict, after: dict, issues: list[str]) -> None:
+        self.before, self.after, self.issues = before, after, list(issues)
+
+    def is_the_only_change(self, turn_start: dict | None, turn_end: dict | None) -> bool:
+        """True when the turn went from its start to its end by this edit alone."""
+        if not all(isinstance(g, dict) for g in (self.before, self.after, turn_start, turn_end)):
+            return False
+        return (
+            _graph_signature(self.before) == _graph_signature(turn_start)
+            and _graph_signature(self.after) == _graph_signature(turn_end)
+        )
+
+
 def _new_graph_validation_errors(
     before_graph: dict | None,
     after_graph: dict | None,

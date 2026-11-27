@@ -19,7 +19,11 @@ from inlumen.contracts.node_ports import (
     ports_json,
     ports_json_for_template,
 )
-from inlumen.contracts.pipeline_graph_validation import FLOW_EXPRESSION_PATTERN, validate_pipeline_graph
+from inlumen.contracts.pipeline_graph_validation import (
+    FLOW_EXPRESSION_PATTERN,
+    validate_pipeline_graph,
+    validation_issue_messages,
+)
 from inlumen.contracts.plugin_manifest import default_parameters as plugin_default_parameters
 from inlumen.contracts.plugin_manifest import secret_parameter_names as plugin_secret_names
 from inlumen.contracts.plugins import (
@@ -38,6 +42,7 @@ from inlumen.contracts.subpipeline_reference import (
     reusable_pipeline_nesting_error,
 )
 
+from .guardrails import EditWarnings, _new_graph_validation_errors
 from .contract import (
     COMPONENT_DEFINITION_IDS,
     require_agent_step_type,
@@ -119,8 +124,13 @@ def build_pipeline_editor_tools(
     store: GraphStore,
     *,
     node_definitions: NodeDefinitionRegistry | None = None,
+    edit_warnings: EditWarnings | None = None,
 ) -> list[Any]:
-    """Build request-scoped tools that change the design pipeline in ``store``."""
+    """Build request-scoped tools that change the design pipeline in ``store``.
+
+    ``edit_warnings`` receives the latest edit that left the pipeline invalid
+    on its own, so the turn can tell when the agent stopped there.
+    """
 
     @contextmanager
     def _tool_call(name: str):
@@ -169,6 +179,36 @@ def build_pipeline_editor_tools(
         return ValueError(
             f"{error}. Nothing was {verb}: the graph was put back as it was."
             f"{extra} Fix that entry and send the whole list again."
+        )
+
+    async def _with_validity_note(text: str, before: Any) -> str:
+        """Add to a tool result what the edit, taken alone, made invalid.
+
+        Removing a connection or a step, or switching a Flow behavior, is often
+        one half of a compound edit, so the edit is kept. The note tells the
+        agent to finish the edit or to stop and explain, without trying to
+        repair a request that cannot be valid alone.
+        """
+        after = await _snapshot() if isinstance(before, dict) else None
+        if not isinstance(after, dict) or not after.get("nodes"):
+            return text
+        try:
+            issues = validation_issue_messages(_new_graph_validation_errors(before, after))
+        except Exception:
+            return text
+        if not issues:
+            return text
+        if edit_warnings is not None:
+            edit_warnings.note(before, after, issues)
+        return (
+            f"{text}\nNOTE: the pipeline is not valid at this point: "
+            + "; ".join(issues)
+            + ". If the user's request names further steps (a new connection, a new or "
+            "deleted step, the matching Collect), this is expected: carry out the rest "
+            "of the request now, one tool call at a time. Only if the request asked for "
+            "this single edit and nothing else: make no more tool calls, do not put the "
+            "removed part back, and tell the user that the edit was not applied, why, "
+            "and what would make it valid."
         )
 
     async def overview() -> str:
@@ -1126,13 +1166,14 @@ def build_pipeline_editor_tools(
         """
         try:
             data = json.loads(params)
+            before = await _snapshot()
             result = await store.disconnect_steps(*(
                 _required_id(data, name, "disconnect_steps")
                 for name in ("source_flow_id", "target_flow_id", "source_port", "target_port")
             ))
             if returned_no_rows(result):
                 raise ValueError("No connection matched all four identifiers")
-            return repr(result)
+            return await _with_validity_note(repr(result), before)
         except Exception as exc:
             raise RuntimeError(f"disconnect_steps failed: {exc}") from exc
 
@@ -1177,6 +1218,7 @@ def build_pipeline_editor_tools(
                         "value.is_valid == true"
                     )
                 _require_condition_expression(expression)
+            before = await _snapshot()
             result = await store.configure_flow_step(FlowConfiguration(
                 flow_id=flow_id,
                 behavior=behavior,
@@ -1185,7 +1227,7 @@ def build_pipeline_editor_tools(
                 input_port=default_input_port_id("flow", behavior),
                 default_output_port={"Condition": "when_true", "Collect": "items"}.get(behavior, "item"),
             ))
-            return repr(result)
+            return await _with_validity_note(repr(result), before)
         except Exception as exc:
             raise RuntimeError(f"configure_flow_step failed: {exc}") from exc
 
@@ -1455,6 +1497,7 @@ def build_pipeline_editor_tools(
                 step_uid = await _step_uid_for_flow_id(flow_id) or ""
                 if not step_uid:
                     raise ValueError("No design-pipeline step matched the supplied flow_id")
+            before = await _snapshot()
             result = await store.delete_step(step_uid)
             if returned_no_rows(result):
                 # A model may put the snapshot id in step_uid; accept that too.
@@ -1462,7 +1505,7 @@ def build_pipeline_editor_tools(
                 result = await store.delete_step(resolved) if resolved else result
             if returned_no_rows(result):
                 raise ValueError("No design-pipeline step matched the supplied identifier")
-            return repr(result)
+            return await _with_validity_note(repr(result), before)
         except Exception as exc:
             raise RuntimeError(f"delete_step failed: {exc}") from exc
 
