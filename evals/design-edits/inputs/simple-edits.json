@@ -1,0 +1,324 @@
+{
+  "canvas": {
+    "nodes": [
+      {
+        "id": "1",
+        "type": "custom",
+        "position": {
+          "x": 150,
+          "y": 150
+        },
+        "data": {
+          "type": "source",
+          "label": "Scanned documents",
+          "description": "Scanned pages uploaded by the user"
+        }
+      },
+      {
+        "id": "2",
+        "type": "custom",
+        "position": {
+          "x": 450,
+          "y": 150
+        },
+        "data": {
+          "type": "task",
+          "label": "OCR",
+          "description": "Extract the text of each page"
+        }
+      },
+      {
+        "id": "3",
+        "type": "custom",
+        "position": {
+          "x": 750,
+          "y": 150
+        },
+        "data": {
+          "type": "task",
+          "label": "Language detection",
+          "description": "Detect the language of the text"
+        }
+      },
+      {
+        "id": "4",
+        "type": "custom",
+        "position": {
+          "x": 1050,
+          "y": 150
+        },
+        "data": {
+          "type": "task",
+          "label": "Translation",
+          "description": "Translate the text to English"
+        }
+      },
+      {
+        "id": "5",
+        "type": "custom",
+        "position": {
+          "x": 1350,
+          "y": 150
+        },
+        "data": {
+          "type": "task",
+          "label": "Summarizer",
+          "description": "Write a short summary of the text"
+        }
+      },
+      {
+        "id": "6",
+        "type": "custom",
+        "position": {
+          "x": 1650,
+          "y": 150
+        },
+        "data": {
+          "type": "destination",
+          "label": "Summary report",
+          "description": "Summaries saved as a report"
+        }
+      },
+      {
+        "id": "7",
+        "type": "custom",
+        "position": {
+          "x": 1650,
+          "y": 400
+        },
+        "data": {
+          "type": "destination",
+          "label": "Archive",
+          "description": "Long-term storage of processed text"
+        }
+      },
+      {
+        "id": "8",
+        "type": "custom",
+        "position": {
+          "x": 1350,
+          "y": 400
+        },
+        "data": {
+          "type": "destination",
+          "label": "Translation log",
+          "description": "Log of translated documents"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e1",
+        "source": "1",
+        "sourceHandle": "data",
+        "target": "2",
+        "targetHandle": "input"
+      },
+      {
+        "id": "e2",
+        "source": "2",
+        "sourceHandle": "output",
+        "target": "3",
+        "targetHandle": "input"
+      },
+      {
+        "id": "e3",
+        "source": "3",
+        "sourceHandle": "output",
+        "target": "4",
+        "targetHandle": "input"
+      },
+      {
+        "id": "e4",
+        "source": "4",
+        "sourceHandle": "output",
+        "target": "5",
+        "targetHandle": "input"
+      },
+      {
+        "id": "e5",
+        "source": "5",
+        "sourceHandle": "output",
+        "target": "6",
+        "targetHandle": "data"
+      }
+    ]
+  },
+  "requests": [
+    {
+      "id": "delete-1",
+      "kind": "delete",
+      "request": "delete language detection",
+      "removed": [
+        "Language detection"
+      ],
+      "added": 0
+    },
+    {
+      "id": "delete-2",
+      "kind": "delete",
+      "request": "I don't want OCR in this pipeline",
+      "removed": [
+        "OCR"
+      ],
+      "added": 0
+    },
+    {
+      "id": "delete-3",
+      "kind": "delete",
+      "request": "take out the summarizer",
+      "removed": [
+        "Summarizer"
+      ],
+      "added": 0
+    },
+    {
+      "id": "delete-4",
+      "kind": "delete",
+      "request": "remove the translation step",
+      "removed": [
+        "Translation"
+      ],
+      "added": 0
+    },
+    {
+      "id": "delete-5",
+      "kind": "delete",
+      "request": "drop the archive",
+      "removed": [
+        "Archive"
+      ],
+      "added": 0
+    },
+    {
+      "id": "delete-6",
+      "kind": "delete",
+      "request": "get rid of the step that detects the language",
+      "removed": [
+        "Language detection"
+      ],
+      "added": 0
+    },
+    {
+      "id": "delete-7",
+      "kind": "delete",
+      "request": "the translation log is not needed, remove it",
+      "removed": [
+        "Translation log"
+      ],
+      "added": 0
+    },
+    {
+      "id": "delete-8",
+      "kind": "delete",
+      "request": "Remove step 5",
+      "removed": [
+        "Summarizer"
+      ],
+      "added": 0
+    },
+    {
+      "id": "clear-1",
+      "kind": "clear",
+      "request": "clear the canvas",
+      "cleared": true
+    },
+    {
+      "id": "clear-2",
+      "kind": "clear",
+      "request": "delete everything",
+      "cleared": true
+    },
+    {
+      "id": "clear-3",
+      "kind": "clear",
+      "request": "remove all steps, I want to start over",
+      "cleared": true
+    },
+    {
+      "id": "connect-1",
+      "kind": "connect",
+      "request": "connect Translation to Archive",
+      "removed": [],
+      "added": 0,
+      "connected": [
+        "Translation",
+        "Archive"
+      ]
+    },
+    {
+      "id": "connect-2",
+      "kind": "connect",
+      "request": "link the summarizer to the archive",
+      "removed": [],
+      "added": 0,
+      "connected": [
+        "Summarizer",
+        "Archive"
+      ]
+    },
+    {
+      "id": "connect-3",
+      "kind": "connect",
+      "request": "feed the Translation output into Translation log",
+      "removed": [],
+      "added": 0,
+      "connected": [
+        "Translation",
+        "Translation log"
+      ]
+    },
+    {
+      "id": "connect-4",
+      "kind": "connect",
+      "request": "Archive should receive the OCR text",
+      "removed": [],
+      "added": 0,
+      "connected": [
+        "OCR",
+        "Archive"
+      ]
+    },
+    {
+      "id": "other-1",
+      "kind": "other",
+      "request": "add a keyword extraction task after Translation",
+      "removed": [],
+      "added": 1
+    },
+    {
+      "id": "other-2",
+      "kind": "other",
+      "request": "delete OCR and the summarizer",
+      "removed": [
+        "OCR",
+        "Summarizer"
+      ],
+      "added": 0
+    },
+    {
+      "id": "other-3",
+      "kind": "other",
+      "request": "replace Summarizer with a task called Key points",
+      "removed": [
+        "Summarizer"
+      ],
+      "added": 1
+    },
+    {
+      "id": "other-4",
+      "kind": "other",
+      "request": "what does this pipeline do?",
+      "removed": [],
+      "added": 0,
+      "unchanged": true
+    },
+    {
+      "id": "other-5",
+      "kind": "other",
+      "request": "insert a spell check between OCR and Language detection",
+      "removed": [],
+      "added": 1
+    }
+  ]
+}

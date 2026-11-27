@@ -33,12 +33,24 @@ class DesignTurn:
     (``"invalid"`` when the graph failed validation), ``graph_changed``,
     ``validation_errors`` and a ``message``. ``declined_edit`` lists why an
     edit was undone because it is not valid alone; the graph is then unchanged.
+    ``fast_edit`` names the action when the request was a plain delete, clear
+    or connect carried out without the full agent.
     """
 
     assistant_message: str
     graph: dict | None
     sync: dict[str, Any]
     repaired: bool = False
+
+
+def _fast_edit_of(team: Any) -> Any:
+    """The team's FastEdit, or None (a team built elsewhere, or no design extra)."""
+    try:
+        from .fast_edit import FastEdit
+    except ImportError:
+        return None
+    fast = getattr(team, "fast_edit", None)
+    return fast if isinstance(fast, FastEdit) else None
 
 
 async def _read_graph(graph: GraphAccess) -> tuple[dict | None, str | None]:
@@ -67,6 +79,21 @@ async def run_design_turn(
     ``restore_read_only_changes``; otherwise the change is only discarded from
     the result, e.g. in a throwaway preview workspace).
     """
+    # A plain delete, clear or connect is carried out with one small model call
+    # (see fast_edit). It is judged by the same guardrail as the agent's result;
+    # when it does not pass, it is undone and the full agent takes the request.
+    fast = _fast_edit_of(team)
+    outcome = await fast.try_edit(user_message, visible_before_graph) if fast else None
+    if outcome is not None:
+        fast_graph, fast_error = await _read_graph(graph)
+        sync = _build_graph_sync_guardrail(visible_before_graph, fast_graph, user_message, fast_error)
+        if sync["guardrail_passed"] and sync.get("graph_changed"):
+            sync["fast_edit"] = outcome.action
+            await fast.remember(user_message, outcome)
+            return DesignTurn(outcome.message, fast_graph, sync)
+        if not await fast.undo():
+            raise RuntimeError("A quick edit failed validation and could not be undone.")
+
     result = await team.run(task=_build_agent_task(user_message, canvas_graph, agent_graph))
     assistant_message = _assistant_message_from_result(result)
     after_graph, after_error = await _read_graph(graph)
