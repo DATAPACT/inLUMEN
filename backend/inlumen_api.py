@@ -29,7 +29,7 @@ from inlumen.contracts.artifact_runtime import ArtifactContractError
 from inlumen.contracts.task_package_contract import TASK_METADATA_FILENAME, parse_task_metadata
 from inlumen.contracts.task_package_contract import AUTHORING_GUIDE, EXAMPLE, TASK_SCHEMA, public_manifest, validate_package
 from export.task_packages import inspect_packages, task_package_folder, MAX_ARCHIVE, PLATFORM_FILES
-from export.design_from_artifact import ArtifactError, MAX_ARTIFACT_BYTES, design_from_artifact
+from export.design_from_artifact import ArtifactError, MAX_ARTIFACT_BYTES, design_from_artifact, design_from_code_zip
 from llm.application_llm import (
     APPLICATION_LLM_ID,
     application_llm_request_config,
@@ -2963,23 +2963,55 @@ def pipeline_task_packages(action):
 @app.route("/api/pipeline/design-from-artifact", methods=["POST", "OPTIONS"])
 @require_auth
 def pipeline_design_from_artifact():
-    """Read a deployment artifact and return its design as Project JSON.
+    """Read a deployment artifact or a ZIP of code and return its design as Project JSON.
 
     Nothing is stored or executed: the canvas imports the returned document
-    in the same way as a Project JSON file.
+    in the same way as a Project JSON file. A bundle and an Argo workflow are
+    read without a model. For a ZIP of code the first answer only lists the
+    files the model would read; the design is built when the request is sent
+    again with ``consent=true`` and the ``llm_config`` to use.
     """
     if request.method == "OPTIONS":
         return _preflight_response()
     upload = request.files.get("file")
     if upload is None:
-        return _json_error(400, "A bundle ZIP or an Argo Workflows file is required")
+        return _json_error(400, "A bundle ZIP, an Argo Workflows file or a ZIP of code is required")
     data = upload.stream.read(MAX_ARTIFACT_BYTES + 1)
+    filename = upload.filename or ""
     try:
-        return jsonify(design_from_artifact(data, filename=upload.filename or "")), 200
+        result = design_from_artifact(data, filename=filename)
+        if not result.get("needs_model") or request.form.get("consent") != "true":
+            return jsonify(result), 200
     except ArtifactError as exc:
         return _json_error(422, "This file cannot be turned into a design", str(exc))
     except Exception:
         return _json_error(500, "The design could not be built from this file")
+
+    # The user agreed to send the listed files of a code ZIP to the model.
+    from async_runtime import run_async
+    from llm.llm_config import llm_config_from_payload, select_model_client
+
+    llm_config = None
+    try:
+        raw_config = json.loads(request.form.get("llm_config") or "null")
+        if not isinstance(raw_config, dict):
+            return _json_error(400, "Choose a model in Settings before importing a ZIP of code")
+        llm_config = llm_config_from_payload({"llm_config": raw_config})
+        model_client = select_model_client(llm_config, parallel_tool_calls=False)
+    except ValueError as exc:
+        return _json_error(400, "The model configuration is not valid", str(exc))
+    try:
+        return jsonify(run_async(design_from_code_zip(data, model=model_client, filename=filename))), 200
+    except ArtifactError as exc:
+        return _json_error(422, "This file cannot be turned into a design", str(exc))
+    except Exception as exc:
+        from inlumen.llm_requests import provider_error
+
+        error = provider_error(exc, secrets=(getattr(llm_config, "api_key", ""),))
+        if error is not None:
+            return _json_error(error.status_code, str(error), {"code": error.code, "param": error.param})
+        # Internal exception strings may contain provider responses or credentials.
+        return _json_error(502, "The model did not return a design for this code")
 
 
 @app.route("/api/pipeline/task-packages/download", methods=["GET"])

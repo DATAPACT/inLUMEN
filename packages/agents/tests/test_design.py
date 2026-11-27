@@ -715,3 +715,36 @@ def test_create_steps_sets_the_pipeline_name_but_never_its_version():
     pipeline = asyncio.run(store.get_graph())["pipeline"]
     assert (pipeline["name"], pipeline["version"]) == ("Renamed", version)
 
+
+
+def test_design_from_code_builds_a_design_and_repairs_it_once():
+    """Issue #98: the agent reads code files; an invalid first design gets one more turn."""
+    from inlumen.design.from_code import CodeFile, code_task, design_from_code
+
+    files = [CodeFile("main.py", "def run(i, o):\n    ...\n"), CodeFile("data/in.csv", "a,b", "first line only")]
+    task = code_task(files, ["model.bin"])
+    assert "===== main.py (whole file) =====" in task and "===== data/in.csv (first line only) =====" in task
+    assert "- model.bin" in task and task.index("Build the pipeline design") == 0
+
+    steps = [
+        {"type": "source", "label": "Input", "description": "Reads in.csv"},
+        {"type": "task", "label": "Run", "description": "run() in main.py"},
+    ]
+    model = _scripted(
+        _call("create_steps", steps=steps),
+        _reply("Input feeds Run."),
+        # The first design has no destination; the repair turn adds one.
+        _call("create_steps", type="destination", label="Output", description="Writes the result"),
+        _reply("Input feeds Run, which writes Output."),
+    )
+    result = asyncio.run(design_from_code(files, model=model, name="Example"))
+
+    assert result.repaired and result.validation_errors == []
+    assert [n["data"]["label"] for n in sorted(result.graph["nodes"], key=lambda n: n["id"])] == ["Input", "Run", "Output"]
+    assert result.message == "Input feeds Run, which writes Output."
+    assert result.project["project"]["name"] == "Example" and len(result.requests) == 4
+
+    with pytest.raises(ValueError, match="created no step|cannot"):
+        asyncio.run(design_from_code(files, model=_scripted(_reply("I cannot read this."))))
+    with pytest.raises(ValueError, match="No code"):
+        asyncio.run(design_from_code([], model=_scripted()))
