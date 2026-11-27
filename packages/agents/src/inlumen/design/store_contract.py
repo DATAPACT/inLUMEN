@@ -238,6 +238,10 @@ async def run_scenario(store: GraphStore, name: str) -> tuple[list[Any], dict]:
 
 
 def _decode(text: str) -> Any:
+    # An edit that is not valid alone returns its rows followed by a note.
+    rows, separator, note = text.partition("\nNOTE: ")
+    if separator:
+        return {"result": _decode(rows), "note": note}
     try:
         value = ast.literal_eval(text)
     except (ValueError, SyntaxError):

@@ -157,6 +157,111 @@ def test_design_deletes_a_step_with_the_id_from_the_snapshot():
     assert result.usage["requests"] == 2
 
 
+def _four_step_canvas() -> dict:
+    return {
+        "nodes": [
+            {"id": "10", "type": "custom", "position": {"x": 0, "y": 0}, "data": {
+                "type": "source", "label": "Documents", "description": "Scanned documents"}},
+            {"id": "20", "type": "custom", "position": {"x": 300, "y": 0}, "data": {
+                "type": "task", "label": "OCR", "description": "Extract the text"}},
+            {"id": "30", "type": "custom", "position": {"x": 600, "y": 0}, "data": {
+                "type": "task", "label": "Language detection", "description": "Detect the language"}},
+            {"id": "40", "type": "custom", "position": {"x": 900, "y": 0}, "data": {
+                "type": "destination", "label": "Report", "description": "Text report"}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "10", "sourceHandle": "data", "target": "20", "targetHandle": "input"},
+            {"id": "e2", "source": "20", "sourceHandle": "output", "target": "30", "targetHandle": "input"},
+            {"id": "e3", "source": "30", "sourceHandle": "output", "target": "40", "targetHandle": "data"},
+        ],
+    }
+
+
+def _edge_pairs(graph: dict) -> list[tuple[str, str]]:
+    return sorted((e["source"], e["target"]) for e in graph["edges"])
+
+
+def test_an_edit_that_is_not_valid_alone_is_undone_without_a_repair_round():
+    """Issue #194: a lone disconnect gets its explanation in two model calls."""
+    canvas = _four_step_canvas()
+    model = _scripted(
+        _call("disconnect_steps", source_flow_id="20", target_flow_id="30",
+              source_port="output", target_port="input"),
+        _reply("Language detection would have no input, so I did not disconnect it."),
+    )
+    result = asyncio.run(design("disconnect OCR from language detection", model=model, graph=canvas))
+
+    assert result.usage["requests"] == 2
+    assert not result.repaired
+    assert result.accepted and not result.sync["graph_changed"], result.sync
+    assert result.sync["declined_edit"]
+    assert _edge_pairs(result.graph) == [("10", "20"), ("20", "30"), ("30", "40")]
+    assert result.message.startswith("Language detection would have no input")
+    assert "The pipeline was left unchanged" in result.message
+    assert result.sync["declined_edit"][0] in result.message
+
+
+def test_the_note_tells_the_agent_what_the_edit_broke():
+    store = InMemoryGraphStore(_four_step_canvas())
+    tools = {tool.__name__: tool for tool in build_pipeline_editor_tools(store)}
+    answer = asyncio.run(tools["disconnect_steps"](json.dumps({
+        "source_flow_id": "20", "target_flow_id": "30", "source_port": "output", "target_port": "input"})))
+    assert "NOTE: the pipeline is not valid at this point" in answer
+    # A delete that the chain absorbs is valid, so it carries no note.
+    answer = asyncio.run(tools["delete_step"](json.dumps({"flow_id": "20"})))
+    assert "NOTE" not in answer
+
+
+def test_removing_the_only_destination_is_declined():
+    canvas = _four_step_canvas()
+    model = _scripted(
+        _call("delete_step", flow_id="40"),
+        _reply("A pipeline needs a destination, so I kept Report."),
+    )
+    result = asyncio.run(design("remove the last step", model=model, graph=canvas))
+
+    assert result.usage["requests"] == 2 and not result.repaired
+    assert result.sync["declined_edit"] and not result.sync["graph_changed"]
+    assert len(result.graph["nodes"]) == 4
+
+
+def test_a_compound_edit_with_a_disconnect_is_kept():
+    """The disconnect is invalid alone, but the later edits make the result valid."""
+    canvas = _four_step_canvas()
+    model = _scripted(
+        _call("disconnect_steps", source_flow_id="20", target_flow_id="30",
+              source_port="output", target_port="input"),
+        _call("delete_step", flow_id="30"),
+        _call("connect_steps", source_flow_id="20", target_flow_id="40"),
+        _reply("OCR now feeds Report directly."),
+    )
+    result = asyncio.run(design(
+        "disconnect OCR from language detection, remove language detection and connect OCR to Report",
+        model=model, graph=canvas))
+
+    assert result.accepted and result.sync["graph_changed"], result.sync
+    assert "declined_edit" not in result.sync
+    assert _edge_pairs(result.graph) == [("10", "20"), ("20", "40")]
+    assert "left unchanged" not in result.message
+
+
+def test_an_invalid_edit_after_other_changes_still_gets_the_repair_round():
+    canvas = _four_step_canvas()
+    model = _scripted(
+        _call("delete_step", flow_id="20"),
+        _call("disconnect_steps", source_flow_id="30", target_flow_id="40",
+              source_port="output", target_port="data"),
+        _reply("Done."),
+        _call("connect_steps", source_flow_id="30", target_flow_id="40"),
+        _reply("OCR is removed and Language detection feeds Report again."),
+    )
+    result = asyncio.run(design("remove OCR and tidy up", model=model, graph=canvas))
+
+    assert result.repaired and result.accepted, result.sync
+    assert "declined_edit" not in result.sync
+    assert _edge_pairs(result.graph) == [("10", "30"), ("30", "40")]
+
+
 def test_design_rejects_an_invalid_result_and_keeps_the_starting_graph():
     # A Source with nothing after it is incomplete; the repair round does nothing.
     model = _scripted(
