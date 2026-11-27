@@ -52,27 +52,43 @@ run.
 Because of the two fixes, `20683d5` is no longer the candidate. The candidate
 checks at the end of this page are repeated on the commit that contains them.
 
-## Not done yet
+## Published candidate (2026-11-27)
 
-- The generated-pipeline check **on the deployed instance**. It was done on a
-  local stack instead (see above).
+Beta 6 was published as a prerelease at [`v1.0.0-beta.6`](https://github.com/DATAPACT/inLUMEN/releases/tag/v1.0.0-beta.6) on commit
+`f61689b1f753787a21caee6072a9535458b79043` (merge of PR
+[#211](https://github.com/DATAPACT/inLUMEN/pull/211)). On that commit:
+
+- **CI**: all 12 jobs of the Test suite passed
+  ([run](https://github.com/DATAPACT/inLUMEN/actions/runs/45914738062)); the
+  container images were built and the deployment to the VM succeeded.
+- **Deterministic quickstart** (`scripts/verify_quickstart.py --materialize`):
+  3 orders, total 49.75; the result has the same checksum as the expected
+  summary.
+- **Argo order-summary bundle** on a local k3d cluster (Argo Workflows v4.1.5):
+  succeeded, 3 of 3 steps, same result checksum.
+- **Source archive**: built with `git archive` from the commit (794 entries,
+  SHA-256 `c38f9682e71054eace916da6a3ed3937c20f196fe6eb3a9c50c312df9cc8f13e`).
+  The five images build from the extracted archive; the nginx configuration
+  test, the shared-file check and both Compose configurations pass.
+- **Release files**: after publication the assets were downloaded again and all
+  checksums in `SHA256SUMS` matched. Every repository link in the release notes
+  and the installation instructions resolves at the tag.
+- **User acceptance**: 2026-11-27.
+
+The release files were inspected locally before the tag; no draft release was
+created first. The full record is `release-verification.json` in the release.
+
+## Not done
+
+- The generated-pipeline check **on the deployed instance**, and its repetition
+  after PR #211 was merged. It was done on a local stack with the two fixes
+  applied (see above).
 - The Argo bundle with reviewed models, and the run with models included in the
   image ([Argo bundle release check](argo-bundle-verification.md), sections 2
   and 5).
-- `inlumen-agents` 1.0.0b6 on PyPI.
-- Source archive, installation instructions and release receipt.
-- User acceptance, tag and release assets.
-
-## Final candidate gates
-
-Before publishing, on the final merged candidate:
-
-- Full CI: backend, agents library, codegen, runner, graph isolation, frontend,
-  browser tests, shared-file consistency and Compose checks.
-- Deterministic quickstart repeated; result JSON and checksum recorded.
-- Candidate SHA, source archive SHA-256, installation guide and release receipt.
-- Review of the draft release before the prerelease tag is created. A published
-  tag is not moved.
+- `inlumen-agents` 1.0.0b6 on PyPI: built and checked, not published on the
+  release date.
+- The walkthrough of the installation instructions by hand in the browser.
 
 ## Limits
 

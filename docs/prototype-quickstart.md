@@ -205,4 +205,4 @@ for two-user Keycloak login, API isolation, and representative same-revision dat
 restoration. The [compatibility policy](operations/beta3-compatibility.md)
 describes fresh installation and preservation limits; no Beta 2 upgrade or
 concurrent-user capacity is certified. Beta 3 acceptance issue #129 is historical;
-Beta 6 release gates are in the [release plan](release-plan.md).
+Beta 6 release gates are in the [Beta 6 release plan](beta6-release-plan.md).
