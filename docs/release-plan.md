@@ -23,8 +23,8 @@ Beta 7. The issues below are the candidates for it.
 - The generated-pipeline check of Beta 6 was done on a local stack. It was not
   repeated on the deployed instance.
 - Run containers are not on the Compose network, so the offline plugin example
-  in [Plugins](plugins.md) (`http://mock-tool:8099`) is unreachable from a run.
-  No issue is open for this yet.
+  in [Plugins](plugins.md) (`http://mock-tool:8099`) is unreachable from a run
+  (#213, planned below).
 
 ## Next: after Beta 6
 
@@ -34,6 +34,7 @@ Planned, not yet assigned to a release number.
 |---|---|
 | #194 | Reject edits that cannot pass validation before the agent loop |
 | #195 | Reduce the cost of small edits: fewer calls and a smaller prompt |
+| #213 | Offline plugin example is unreachable from a pipeline run |
 | #92 | Interactive tutorial (needs a specification first) |
 
 ## Later: exploratory
