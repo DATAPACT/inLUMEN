@@ -1,0 +1,466 @@
+"""Build a pipeline design from a deployment artifact (issue #98).
+
+Two artifacts are read, both without a model:
+
+- an inLUMEN deployment bundle (the ZIP, or its ``bundle-manifest.json``),
+  whose manifest lists the steps, their ports and the connections;
+- an Argo Workflows file of any origin, whose tasks and dependencies become
+  steps and connections.
+
+The result is a Project JSON document, which the canvas already imports, and
+a list of plain-language notes on what the artifact did not say. Nothing is
+executed and no file of the artifact is written anywhere.
+"""
+from __future__ import annotations
+
+import io
+import json
+import re
+import zipfile
+from collections import defaultdict
+from typing import Any
+
+from inlumen.contracts.node_ports import normalize_node_ports
+from inlumen.contracts.pipeline_graph_validation import validate_pipeline_graph, validation_issue_messages
+from inlumen.contracts.project_ir import project_document
+
+MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
+MAX_DOCUMENT_BYTES = 5 * 1024 * 1024
+MAX_STEPS = 500
+BUNDLE_MANIFEST = "bundle-manifest.json"
+BUNDLE_SCHEMA_PREFIX = "inlumen.deployment-bundle@"
+ARGO_KINDS = {"Workflow", "WorkflowTemplate", "ClusterWorkflowTemplate", "CronWorkflow"}
+_STEP_KINDS = {"source", "task", "destination", "flow", "subpipeline"}
+
+
+class ArtifactError(ValueError):
+    """The file is not an artifact this module can read; the message is for the user."""
+
+
+# ----------------------------------------------------------------- shared
+
+def _layout(ids: list[str], parents: dict[str, set[str]]) -> dict[str, dict[str, float]]:
+    """Left-to-right positions: a step sits one column after its last parent."""
+    depth: dict[str, int] = {}
+
+    def level(node: str, trail: frozenset[str] = frozenset()) -> int:
+        if node in depth:
+            return depth[node]
+        if node in trail:  # a cycle; the validation notes report it
+            return 0
+        known = [parent for parent in parents.get(node, ()) if parent in parents or parent in ids]
+        depth[node] = 1 + max((level(parent, trail | {node}) for parent in known), default=-1)
+        return depth[node]
+
+    columns: dict[int, list[str]] = defaultdict(list)
+    for node in ids:
+        columns[level(node)].append(node)
+    positions = {}
+    for column, members in columns.items():
+        for row, node in enumerate(members):
+            positions[node] = {
+                "x": 150.0 + 300.0 * column,
+                "y": 150.0 + 180.0 * (row - (len(members) - 1) / 2),
+            }
+    return positions
+
+
+def _result(kind: str, graph: dict, name: str, description: str, notes: list[str]) -> dict[str, Any]:
+    report = validate_pipeline_graph(graph) if graph["nodes"] else {"issues": []}
+    for message in validation_issue_messages(report):
+        notes.append(f"The design does not pass validation yet: {message}")
+    return {
+        "kind": kind,
+        "project": project_document(graph, name=name, description=description),
+        "notes": notes,
+        "step_count": len(graph["nodes"]),
+        "connection_count": len(graph["edges"]),
+    }
+
+
+def _edge(source: str, source_port: str, target: str, target_port: str) -> dict[str, str]:
+    return {
+        "id": f"{source}:{source_port}->{target}:{target_port}",
+        "source": source, "sourceHandle": source_port,
+        "target": target, "targetHandle": target_port,
+    }
+
+
+# ----------------------------------------------------------------- bundle
+
+def design_from_bundle_manifest(manifest: Any, *, name: str = "") -> dict[str, Any]:
+    """The design recorded in an inLUMEN ``bundle-manifest.json``."""
+    if not isinstance(manifest, dict) or not str(manifest.get("schema_version") or "").startswith(BUNDLE_SCHEMA_PREFIX):
+        raise ArtifactError("This is not an inLUMEN bundle manifest (schema_version inlumen.deployment-bundle).")
+    raw_nodes = [node for node in manifest.get("nodes") or [] if isinstance(node, dict) and node.get("flow_id")]
+    if not raw_nodes:
+        raise ArtifactError("The bundle manifest lists no steps.")
+    if len(raw_nodes) > MAX_STEPS:
+        raise ArtifactError(f"The bundle has more than {MAX_STEPS} steps.")
+    order = [str(item) for item in manifest.get("node_order") or []]
+    raw_nodes.sort(key=lambda node: order.index(str(node["flow_id"])) if str(node["flow_id"]) in order else len(order))
+    ids = [str(node["flow_id"]) for node in raw_nodes]
+    if len(set(ids)) != len(ids):
+        raise ArtifactError("The bundle manifest lists a step id twice.")
+
+    edges, parents, dropped = [], defaultdict(set), 0
+    for connection in manifest.get("connections") or []:
+        if not isinstance(connection, dict):
+            continue
+        source, target = str(connection.get("source") or ""), str(connection.get("target") or "")
+        if source not in ids or target not in ids:
+            dropped += 1
+            continue
+        edges.append(_edge(source, str(connection.get("source_port") or ""), target, str(connection.get("target_port") or "")))
+        parents[target].add(source)
+
+    positions = _layout(ids, parents)
+    nodes, unknown_kinds = [], []
+    for node in raw_nodes:
+        flow_id = str(node["flow_id"])
+        kind = str(node.get("type") or "").strip().lower()
+        if kind not in _STEP_KINDS:
+            unknown_kinds.append(str(node.get("label") or flow_id))
+            kind = "task"
+        data: dict[str, Any] = {
+            "type": kind,
+            "label": str(node.get("label") or flow_id),
+            "description": str(node.get("description") or ""),
+            "ports": normalize_node_ports(node.get("ports"), kind),
+        }
+        if node.get("template"):
+            data["template_label"] = str(node["template"])
+        nodes.append({"id": flow_id, "type": "custom", "position": positions[flow_id], "data": data})
+
+    notes = [
+        "The design was rebuilt from the bundle manifest: steps, port names and types, and connections.",
+        "Step descriptions, parameters, code and data files are not in the manifest. "
+        "Attach code afterwards with Upload code ZIP; the bundle keeps it under nodes/.",
+    ]
+    if dropped:
+        notes.append(f"{dropped} connection(s) named a step that is not in the manifest and were left out.")
+    if unknown_kinds:
+        notes.append("Steps of an unknown type were imported as Tasks: " + ", ".join(unknown_kinds) + ".")
+    targets = [engine for engine, used in (manifest.get("targets") or {}).items() if used]
+    description = "Imported from an inLUMEN deployment bundle" + (f" ({', '.join(sorted(targets))})." if targets else ".")
+    return _result("inlumen-bundle", {"nodes": nodes, "edges": edges}, name or "Imported bundle", description, notes)
+
+
+def _manifest_from_zip(data: bytes) -> Any:
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise ArtifactError("The ZIP file cannot be read.") from None
+    with archive:
+        candidates = [
+            info for info in archive.infolist()
+            if not info.is_dir()
+            and info.filename.replace("\\", "/").split("/")[-1] == BUNDLE_MANIFEST
+            and info.filename.replace("\\", "/").count("/") <= 1
+        ]
+        if not candidates:
+            raise ArtifactError(
+                f"The ZIP holds no {BUNDLE_MANIFEST} at its top level, so it is not an inLUMEN deployment bundle."
+            )
+        info = min(candidates, key=lambda item: item.filename.count("/"))
+        if info.file_size > MAX_DOCUMENT_BYTES:
+            raise ArtifactError("The bundle manifest is too large.")
+        if info.flag_bits & 0x1:
+            raise ArtifactError("The ZIP is encrypted.")
+        with archive.open(info) as handle:
+            raw = handle.read(MAX_DOCUMENT_BYTES + 1)
+    if len(raw) > MAX_DOCUMENT_BYTES:
+        raise ArtifactError("The bundle manifest is too large.")
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ArtifactError("The bundle manifest is not valid JSON.") from None
+
+
+# ------------------------------------------------------------------- argo
+
+_TASK_REFERENCE = re.compile(
+    r"\{\{\s*(?:tasks|steps)\.([A-Za-z0-9_.-]+?)\.outputs\.(?:(artifacts|parameters)\.([A-Za-z0-9_.-]+)|result)\b"
+)
+_DEPENDS_SUFFIX = re.compile(
+    r"\.(Succeeded|Failed|Errored|Skipped|Omitted|Daemoned|AnySucceeded|AllFailed)\b"
+)
+
+
+def _humanize(name: str) -> str:
+    words = re.sub(r"[-_.]+", " ", name).strip()
+    return words[:1].upper() + words[1:] if words else name
+
+
+def _slug(value: str, fallback: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_]+", "_", value).strip("_")
+    return slug or fallback
+
+
+def _references(value: Any) -> list[tuple[str, str, str]]:
+    """Every ``{{tasks.X.outputs...}}`` in a value: (task, argument name, output name)."""
+    found: list[tuple[str, str, str]] = []
+
+    def walk(item: Any, argument: str) -> None:
+        if isinstance(item, dict):
+            label = str(item.get("name") or argument) if ("from" in item or "value" in item) else argument
+            for child in item.values():
+                walk(child, label)
+        elif isinstance(item, list):
+            for child in item:
+                walk(child, argument)
+        elif isinstance(item, str):
+            for match in _TASK_REFERENCE.finditer(item):
+                found.append((match.group(1), argument, match.group(3) or "result"))
+
+    walk(value, "")
+    return found
+
+
+def _what_runs(template: dict | None) -> str:
+    """One sentence on what a leaf template runs, from its own fields only."""
+    if not isinstance(template, dict):
+        return ""
+    for field in ("container", "script"):
+        body = template.get(field)
+        if isinstance(body, dict):
+            parts = []
+            if body.get("image"):
+                parts.append(f"image {body['image']}")
+            command = [str(item) for item in (body.get("command") or [])[:4]]
+            if command:
+                parts.append("command " + " ".join(command)[:120])
+            return f"Runs a {field} (" + ", ".join(parts) + ")." if parts else f"Runs a {field}."
+    for field, text in (
+        ("resource", "Creates or changes a Kubernetes resource."),
+        ("suspend", "Pauses the workflow."),
+        ("http", "Calls an HTTP endpoint."),
+        ("plugin", "Runs an executor plugin."),
+        ("containerSet", "Runs a set of containers."),
+        ("data", "Transforms data."),
+    ):
+        if field in template:
+            return text
+    return ""
+
+
+def _argo_tasks(spec: dict, notes: list[str]) -> tuple[list[dict], dict[str, dict]]:
+    templates = {
+        str(item.get("name")): item
+        for item in spec.get("templates") or []
+        if isinstance(item, dict) and item.get("name")
+    }
+    entry_name = str(spec.get("entrypoint") or "")
+    entry = templates.get(entry_name)
+    if entry is None:
+        if isinstance(spec.get("workflowTemplateRef"), dict):
+            raise ArtifactError(
+                "This workflow only refers to a WorkflowTemplate "
+                f"({spec['workflowTemplateRef'].get('name')}). Import that template file instead."
+            )
+        # A WorkflowTemplate may have no entrypoint: use its only DAG or steps template.
+        composite = [item for item in templates.values() if "dag" in item or "steps" in item]
+        if len(composite) == 1:
+            entry = composite[0]
+        elif len(templates) == 1:
+            entry = next(iter(templates.values()))
+        else:
+            raise ArtifactError("The workflow names no entrypoint template, and more than one could be meant.")
+        notes.append(f"No entrypoint was named; the template “{entry.get('name')}” was used.")
+
+    tasks: list[dict] = []
+    if isinstance(entry.get("dag"), dict):
+        for task in entry["dag"].get("tasks") or []:
+            if isinstance(task, dict) and task.get("name"):
+                tasks.append({**task, "_explicit": set(str(item) for item in task.get("dependencies") or [])})
+    elif isinstance(entry.get("steps"), list):
+        previous: list[str] = []
+        for group in entry["steps"]:
+            members = [step for step in (group if isinstance(group, list) else [group]) if isinstance(step, dict) and step.get("name")]
+            for step in members:
+                tasks.append({**step, "_explicit": set(previous)})
+            previous = [str(step["name"]) for step in members] or previous
+    else:
+        tasks.append({"name": entry.get("name") or "step", "template": entry.get("name"), "_explicit": set()})
+        notes.append("The entrypoint is a single template, so the design has one step.")
+    return tasks, templates
+
+
+def design_from_argo_workflow(document: Any, *, name: str = "") -> dict[str, Any]:
+    """Steps and connections of one Argo Workflows document (already parsed)."""
+    if not isinstance(document, dict) or document.get("kind") not in ARGO_KINDS:
+        raise ArtifactError("This is not an Argo Workflow, WorkflowTemplate or CronWorkflow.")
+    spec = document.get("spec") if isinstance(document.get("spec"), dict) else {}
+    if document["kind"] == "CronWorkflow":
+        spec = spec.get("workflowSpec") if isinstance(spec.get("workflowSpec"), dict) else {}
+    notes: list[str] = []
+    tasks, templates = _argo_tasks(spec, notes)
+    if not tasks:
+        raise ArtifactError("The workflow's entrypoint has no tasks.")
+    if len(tasks) > MAX_STEPS:
+        raise ArtifactError(f"The workflow has more than {MAX_STEPS} tasks.")
+    names = [str(task["name"]) for task in tasks]
+    if len(set(names)) != len(names):
+        raise ArtifactError("The workflow lists a task name twice.")
+    ids = {task_name: str(index) for index, task_name in enumerate(names, start=1)}
+
+    # Who feeds whom: named data references first, then plain ordering.
+    links: dict[str, dict[str, tuple[str, str]]] = {}
+    conditional, looped, nested, by_reference = [], [], [], []
+    for task in tasks:
+        task_name = str(task["name"])
+        incoming: dict[str, tuple[str, str]] = {}
+        for source, argument, output in _references({key: task.get(key) for key in ("arguments", "when", "withParam", "withItems")}):
+            if source in ids and source != task_name:
+                incoming.setdefault(source, (argument, output))
+        ordering = set(task["_explicit"])
+        if isinstance(task.get("depends"), str):
+            expression = _DEPENDS_SUFFIX.sub("", task["depends"])
+            ordering |= {token for token in re.findall(r"[A-Za-z0-9_.-]+", expression) if token in ids}
+        for source in sorted(ordering, key=names.index):
+            if source in ids and source != task_name:
+                incoming.setdefault(source, ("", ""))
+        links[task_name] = incoming
+        if task.get("when"):
+            conditional.append(task_name)
+        if any(key in task for key in ("withItems", "withParam", "withSequence")):
+            looped.append(task_name)
+        template = templates.get(str(task.get("template") or ""))
+        if isinstance(template, dict) and ("dag" in template or "steps" in template):
+            nested.append(task_name)
+        if task.get("templateRef"):
+            by_reference.append(task_name)
+
+    children: dict[str, set[str]] = defaultdict(set)
+    for task_name, incoming in links.items():
+        for source in incoming:
+            children[source].add(task_name)
+
+    def kind_of(task_name: str) -> str:
+        if len(names) == 1:
+            return "task"
+        if not links[task_name] and children[task_name]:
+            return "source"
+        if links[task_name] and not children[task_name]:
+            return "destination"
+        return "task"
+
+    kinds = {task_name: kind_of(task_name) for task_name in names}
+    default_in = {"task": "input", "destination": "data"}
+    default_out = {"source": "data", "task": "output"}
+
+    edges, input_ports = [], {}
+    for task_name in names:
+        incoming = links[task_name]
+        kind = kinds[task_name]
+        ports: list[dict[str, Any]] = []
+        used: set[str] = set()
+        for source, (argument, _output) in incoming.items():
+            if len(incoming) == 1 and not argument:
+                port_id = default_in.get(kind, "input")
+            else:
+                port_id = _slug(argument or source, "input")
+            while port_id in used:
+                port_id += "_2"
+            used.add(port_id)
+            ports.append({"id": port_id, "name": argument or _humanize(source), "type": "any", "required": True, "description": ""})
+            edges.append(_edge(ids[source], default_out.get(kinds[source], "output"), ids[task_name], port_id))
+        input_ports[task_name] = ports
+
+    positions = _layout([ids[item] for item in names], {ids[key]: {ids[source] for source in value} for key, value in links.items()})
+    nodes = []
+    for task in tasks:
+        task_name = str(task["name"])
+        kind = kinds[task_name]
+        template = templates.get(str(task.get("template") or ""))
+        sentences = [f"Argo task “{task_name}”."]
+        if task_name in nested:
+            sentences.append(f"Runs the nested template “{task.get('template')}”, which has its own tasks.")
+        elif task_name in by_reference:
+            reference = task["templateRef"] if isinstance(task["templateRef"], dict) else {}
+            sentences.append(f"Runs the template “{reference.get('template')}” of “{reference.get('name')}”.")
+        elif _what_runs(template):
+            sentences.append(_what_runs(template))
+        if task.get("when"):
+            sentences.append(f"Runs only when: {str(task['when'])[:200]}")
+        if task_name in looped:
+            sentences.append("Runs once for each item of a list.")
+        ports: dict[str, Any] = {}
+        if kind != "source" and input_ports[task_name]:
+            ports["inputs"] = input_ports[task_name]
+        nodes.append({
+            "id": ids[task_name], "type": "custom", "position": positions[ids[task_name]],
+            "data": {
+                "type": kind, "label": _humanize(task_name), "description": " ".join(sentences),
+                "ports": normalize_node_ports(ports, kind),
+            },
+        })
+
+    notes.insert(0, "The design was built from the workflow's tasks and their dependencies. "
+                    "A task without a predecessor became a Source, one without a successor a Destination.")
+    notes.append("Port types, parameters, code and data are not read from the workflow; every port has the type “any”.")
+    if conditional:
+        notes.append("Conditions (when) are kept as text in the step description, not as Condition steps: " + ", ".join(conditional) + ".")
+    if looped:
+        notes.append("Loops (withItems, withParam, withSequence) are kept as text, not as Parallel Map and Collect: " + ", ".join(looped) + ".")
+    if nested:
+        notes.append("Nested workflows were kept as one step each: " + ", ".join(nested) + ".")
+    if by_reference:
+        notes.append("Tasks that use a template from another file were kept as one step each: " + ", ".join(by_reference) + ".")
+    if spec.get("onExit"):
+        notes.append(f"The exit handler “{spec['onExit']}” is not part of the design.")
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    workflow_name = str(metadata.get("name") or metadata.get("generateName") or "").rstrip("-")
+    description = f"Imported from the Argo {document['kind']}" + (f" “{workflow_name}”." if workflow_name else ".")
+    return _result("argo-workflow", {"nodes": nodes, "edges": edges}, name or _humanize(workflow_name) or "Imported workflow", description, notes)
+
+
+def _argo_document(text: str) -> dict:
+    import yaml
+
+    try:
+        documents = [item for item in yaml.safe_load_all(text) if isinstance(item, dict)]
+    except yaml.YAMLError:
+        raise ArtifactError("The file is not valid YAML or JSON.") from None
+    workflows = [item for item in documents if item.get("kind") in ARGO_KINDS]
+    if not workflows:
+        raise ArtifactError(
+            "The file holds no Argo Workflow, WorkflowTemplate or CronWorkflow. "
+            "Supported files: an inLUMEN bundle ZIP, its bundle-manifest.json, or an Argo Workflows file."
+        )
+    return workflows[0] if len(workflows) == 1 else {**workflows[0], "_others": len(workflows) - 1}
+
+
+# ------------------------------------------------------------------ entry
+
+def design_from_artifact(data: bytes, *, filename: str = "") -> dict[str, Any]:
+    """Recognize the artifact in ``data`` and return its design.
+
+    Returns ``{"kind", "project", "notes", "step_count", "connection_count"}``.
+    Raises :class:`ArtifactError` with a message for the user otherwise.
+    """
+    if not data:
+        raise ArtifactError("The file is empty.")
+    if len(data) > MAX_ARTIFACT_BYTES:
+        raise ArtifactError("The file is larger than 50 MiB.")
+    stem = re.sub(r"\.(zip|ya?ml|json)$", "", filename.replace("\\", "/").split("/")[-1], flags=re.IGNORECASE)
+    if data[:4] == b"PK\x03\x04":
+        return design_from_bundle_manifest(_manifest_from_zip(data), name=_humanize(stem))
+    if len(data) > MAX_DOCUMENT_BYTES:
+        raise ArtifactError("The file is too large to be a workflow file or a bundle manifest.")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ArtifactError("The file is neither a ZIP nor a text file.") from None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict) and str(parsed.get("schema_version") or "").startswith(BUNDLE_SCHEMA_PREFIX):
+        return design_from_bundle_manifest(parsed, name=_humanize(stem))
+    document = _argo_document(text)
+    others = document.pop("_others", 0)
+    result = design_from_argo_workflow(document)
+    if others:
+        result["notes"].append(f"The file holds {others} more workflow document(s); only the first was imported.")
+    return result
