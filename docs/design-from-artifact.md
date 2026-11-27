@@ -12,8 +12,23 @@ read as before. The others are turned into a design by the backend:
 An inLUMEN bundle is the ZIP that inLUMEN's own export produces; it holds a
 `bundle-manifest.json`. Any other ZIP with code files is a ZIP of code.
 
-The import replaces the canvas, like a Project JSON import. Nothing in the
-file is executed.
+An import replaces the canvas. Nothing in the file is executed.
+
+## Review before the canvas is replaced
+
+When the canvas already holds steps, an import of any kind, Project JSON
+included, is first shown as a proposal: the imported design, what it adds and
+removes compared with the canvas, and the notes on what the file did not say.
+Nothing changes until **Apply to canvas**; **Discard proposal** leaves the
+canvas as it was.
+
+A design that the model inferred from a ZIP of code is always shown as a
+proposal, also on an empty canvas, because the model can read the same code
+differently each time. **Import again** asks the model for a new design of the
+same ZIP without asking for the files again.
+
+A bundle, an Argo workflow or a Project JSON file imported into an empty
+canvas is applied at once.
 
 ## inLUMEN bundle
 
@@ -103,8 +118,8 @@ stage that the code or its documentation names, and one Destination per
 output. If its first design does not pass validation, it gets one more turn.
 
 The finished design is laid out from left to right in the order of its
-connections, each step in a row of its own, and the view is fitted to it. A
-short message reports the number of steps and connections; **Details** opens
+connections, each step in a row of its own. After it is applied, the view is
+fitted to it and a short message reports the number of steps and connections; **Details** opens
 the model's summary of how the code maps to the steps.
 
 What to expect:
@@ -138,5 +153,5 @@ Limits: 50 MiB for a ZIP, 5 MiB for a manifest or workflow file, 500 steps,
 
 Dagster projects and other workflow formats are not read by rule; inside a
 ZIP they are treated as code. A design inferred from a ZIP of code gets no
-code or data attached. Follow-up issues: a preview before the canvas is
-replaced (#223), and Argo conditions and loops as steps (#224).
+code or data attached (#222). Argo conditions and loops are not turned into
+steps (#224).

@@ -69,6 +69,9 @@ import { createProjectDocument, projectDocumentToGraph } from '@/features/flow/p
 import { artifactKindLabel, designFromArtifact, isArtifactFile, isArtifactJson, needsModelConsent, type ArtifactDesign, type CodeZipConsentRequest } from '@/features/flow/designFromArtifact';
 import { CodeImportConsentDialog, ImportSummaryDialog } from './ArtifactImportDialogs';
 import { attachBundleFiles } from '@/features/flow/bundleAttachments';
+import { GraphChangePreviewDialog } from '@/components/chat/GraphChangePreviewDialog';
+import { importNeedsReview, importReviewNotes, type ImportReview } from '@/features/flow/importReview';
+
 import {
   effectiveGenerationStatus,
   GENERATION_TERMINAL_STATUSES,
@@ -571,6 +574,10 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
   const [codeImport, setCodeImport] = useState<{ file: File; request: CodeZipConsentRequest } | null>(null);
   const [codeImportBusy, setCodeImportBusy] = useState(false);
   const [importSummary, setImportSummary] = useState<ArtifactDesign | null>(null);
+  // An imported design waits here until the user applies or discards it.
+  const [importReview, setImportReview] = useState<ImportReview | null>(null);
+  const [isApplyingImport, setIsApplyingImport] = useState(false);
+  const [isImportingAgain, setIsImportingAgain] = useState(false);
   const [isValidationOpen, setIsValidationOpen] = useState(false);
   const [scriptGenerationPrompt, setScriptGenerationPrompt] = useState("");
   const [scriptGenerationMode, setScriptGenerationMode] =
@@ -2028,6 +2035,73 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     }
   };
 
+  // An import replaces the canvas. When there is something to lose, or when
+  // the model inferred the design (its result varies), the design is shown as
+  // a proposal first; an empty canvas takes a rule-based import directly.
+  const proposeImportedDesign = async (
+    flowData: unknown,
+    artifact: ArtifactDesign | null,
+    afterSave?: () => Promise<string[]>,
+    codeFile?: File,
+  ) => {
+    const proposal = projectDocumentToGraph(flowData);
+    if (!importNeedsReview(nodes.length, artifact)) {
+      await applyImportedDesign(flowData, artifact, afterSave);
+      return;
+    }
+    setImportReview({
+      flowData, artifact, afterSave, codeFile,
+      baseline: { nodes, edges },
+      proposal: { nodes: proposal.nodes, edges: proposal.edges },
+    });
+  };
+
+  const applyImportReview = async () => {
+    if (!importReview) return;
+    setIsApplyingImport(true);
+    try {
+      await applyImportedDesign(importReview.flowData, importReview.artifact, importReview.afterSave);
+    } catch (error) {
+      reportImportError(error);
+    } finally {
+      // Also after a failed save: the dialog must not cover the save status,
+      // which offers to download the draft or reload the saved graph.
+      setImportReview(null);
+      setIsApplyingImport(false);
+    }
+  };
+
+  const discardImportReview = () => {
+    setImportReview(null);
+    toast.info('Import discarded', { description: 'Your canvas was left unchanged.' });
+  };
+
+  // Ask the model again for the design of the same ZIP of code. The user has
+  // already agreed to send these files.
+  const importCodeAgain = async () => {
+    const codeFile = importReview?.codeFile;
+    if (!codeFile || !activeChatbotConfig) return;
+    setIsImportingAgain(true);
+    try {
+      const design = await designFromArtifact(codeFile, {
+        consent: true,
+        llmConfig: buildLLMRequestConfig(activeChatbotConfig),
+      });
+      if (needsModelConsent(design)) throw new Error('The design was not built.');
+      const proposal = projectDocumentToGraph(design.project);
+      setImportReview((current) => current && {
+        ...current,
+        flowData: design.project,
+        artifact: design,
+        proposal: { nodes: proposal.nodes, edges: proposal.edges },
+      });
+    } catch (error) {
+      reportImportError(error);
+    } finally {
+      setIsImportingAgain(false);
+    }
+  };
+
   const importFlow = async (e: React.ChangeEvent<HTMLInputElement>) => {
     try {
       const file = e.target.files?.[0];
@@ -2041,14 +2115,14 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         fromBackend = isArtifactJson(flowData);
       }
       if (!fromBackend) {
-        await applyImportedDesign(flowData, null);
+        await proposeImportedDesign(flowData, null);
         return;
       }
       const answer = await designFromArtifact(file);
       if (!needsModelConsent(answer)) {
         // A bundle ZIP also holds the Task code and the Source data of its design.
         const fromBundleZip = answer.kind === 'inlumen-bundle' && /\.zip$/i.test(file.name);
-        await applyImportedDesign(
+        await proposeImportedDesign(
           answer.project,
           answer,
           fromBundleZip ? async () => (await attachBundleFiles(file)).notes : undefined,
@@ -2077,8 +2151,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         llmConfig: buildLLMRequestConfig(activeChatbotConfig),
       });
       if (needsModelConsent(design)) throw new Error('The design was not built.');
+      const codeFile = codeImport.file;
       setCodeImport(null);
-      await applyImportedDesign(design.project, design);
+      await proposeImportedDesign(design.project, design, undefined, codeFile);
     } catch (error) {
       setCodeImport(null);
       reportImportError(error);
@@ -2271,6 +2346,23 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           onCancel={() => setCodeImport(null)}
         />
         <ImportSummaryDialog design={importSummary} onClose={() => setImportSummary(null)} />
+        {importReview && (
+          <GraphChangePreviewDialog
+            open
+            baseline={importReview.baseline}
+            proposal={importReview.proposal}
+            isApplying={isApplyingImport}
+            onApply={() => { void applyImportReview(); }}
+            onDiscard={discardImportReview}
+            title={`Review the imported design${importReview.artifact ? ` (from ${artifactKindLabel(importReview.artifact.kind)})` : ''}`}
+            description="Applying it replaces the current canvas. Nothing has changed yet: review the design, then apply it or discard it."
+            notes={importReviewNotes(importReview)}
+            secondaryAction={importReview.codeFile
+              ? { label: 'Import again', onClick: () => { void importCodeAgain(); }, busy: isImportingAgain }
+              : undefined}
+            replacesCanvas
+          />
+        )}
         <FlowCanvasActionsPanel
           fileInputRef={fileInputRef}
           onSave={openSaveVersionDialog}
