@@ -44,6 +44,14 @@ def _reply(text: str) -> CreateResult:
     )
 
 
+def _route(**choice) -> CreateResult:
+    """The fast-edit router's reply: one JSON object."""
+    return _reply(json.dumps(choice))
+
+
+OTHER = {"action": "other"}
+
+
 def _scripted(*results: CreateResult) -> ReplayChatCompletionClient:
     return ReplayChatCompletionClient(list(results), model_info=MODEL_INFO)
 
@@ -144,6 +152,7 @@ def test_design_deletes_a_step_with_the_id_from_the_snapshot():
         ],
     }
     model = _scripted(
+        _route(**OTHER),
         _call("delete_step", flow_id="30"),
         _reply("I removed Language detection; OCR now feeds Report."),
     )
@@ -154,7 +163,7 @@ def test_design_deletes_a_step_with_the_id_from_the_snapshot():
     assert [n["data"]["label"] for n in sorted(result.graph["nodes"], key=lambda n: n["id"])] == [
         "Documents", "OCR", "Report"]
     assert [(e["source"], e["target"]) for e in result.graph["edges"]] == [("10", "20"), ("20", "40")]
-    assert result.usage["requests"] == 2
+    assert result.usage["requests"] == 3  # the router, the tool call, the reply
 
 
 def _four_step_canvas() -> dict:
@@ -185,13 +194,14 @@ def test_an_edit_that_is_not_valid_alone_is_undone_without_a_repair_round():
     """Issue #194: a lone disconnect gets its explanation in two model calls."""
     canvas = _four_step_canvas()
     model = _scripted(
+        _route(**OTHER),
         _call("disconnect_steps", source_flow_id="20", target_flow_id="30",
               source_port="output", target_port="input"),
         _reply("Language detection would have no input, so I did not disconnect it."),
     )
     result = asyncio.run(design("disconnect OCR from language detection", model=model, graph=canvas))
 
-    assert result.usage["requests"] == 2
+    assert result.usage["requests"] == 3  # the router, the tool call, the explanation
     assert not result.repaired
     assert result.accepted and not result.sync["graph_changed"], result.sync
     assert result.sync["declined_edit"]
@@ -215,12 +225,14 @@ def test_the_note_tells_the_agent_what_the_edit_broke():
 def test_removing_the_only_destination_is_declined():
     canvas = _four_step_canvas()
     model = _scripted(
+        # The router takes it for a plain delete; the tool's note sends it on.
+        _route(action="delete_step", flow_id="40"),
         _call("delete_step", flow_id="40"),
         _reply("A pipeline needs a destination, so I kept Report."),
     )
     result = asyncio.run(design("remove the last step", model=model, graph=canvas))
 
-    assert result.usage["requests"] == 2 and not result.repaired
+    assert result.usage["requests"] == 3 and not result.repaired
     assert result.sync["declined_edit"] and not result.sync["graph_changed"]
     assert len(result.graph["nodes"]) == 4
 
@@ -229,6 +241,7 @@ def test_a_compound_edit_with_a_disconnect_is_kept():
     """The disconnect is invalid alone, but the later edits make the result valid."""
     canvas = _four_step_canvas()
     model = _scripted(
+        _route(**OTHER),
         _call("disconnect_steps", source_flow_id="20", target_flow_id="30",
               source_port="output", target_port="input"),
         _call("delete_step", flow_id="30"),
@@ -248,6 +261,7 @@ def test_a_compound_edit_with_a_disconnect_is_kept():
 def test_an_invalid_edit_after_other_changes_still_gets_the_repair_round():
     canvas = _four_step_canvas()
     model = _scripted(
+        _route(**OTHER),
         _call("delete_step", flow_id="20"),
         _call("disconnect_steps", source_flow_id="30", target_flow_id="40",
               source_port="output", target_port="data"),
@@ -260,6 +274,113 @@ def test_an_invalid_edit_after_other_changes_still_gets_the_repair_round():
     assert result.repaired and result.accepted, result.sync
     assert "declined_edit" not in result.sync
     assert _edge_pairs(result.graph) == [("10", "30"), ("30", "40")]
+
+
+def test_a_plain_delete_takes_one_small_model_call():
+    """Issue #195: the router names the step, code deletes it."""
+    result = asyncio.run(design(
+        "delete language detection",
+        model=_scripted(_route(action="delete_step", flow_id="30")),
+        graph=_four_step_canvas(),
+    ))
+
+    assert result.accepted and result.sync["fast_edit"] == "delete_step", result.sync
+    assert result.usage["requests"] == 1
+    assert _edge_pairs(result.graph) == [("10", "20"), ("20", "40")]
+    assert result.message == "I removed “Language detection” and connected the step before it to the step after it."
+
+
+def test_a_plain_clear_takes_one_small_model_call():
+    result = asyncio.run(design(
+        "clear the canvas", model=_scripted(_route(action="delete_all_steps")), graph=_four_step_canvas(),
+    ))
+
+    assert result.accepted and result.sync["fast_edit"] == "delete_all_steps"
+    assert result.graph["nodes"] == [] and result.usage["requests"] == 1
+    assert result.message == "I removed all 4 steps. The canvas is empty."
+
+
+def test_the_router_prompt_is_small_and_holds_no_tool_descriptions():
+    seen = []
+
+    class Spy(ReplayChatCompletionClient):
+        async def create(self, messages, **kwargs):
+            seen.append(messages)
+            return await super().create(messages, **kwargs)
+
+    model = Spy([_route(action="delete_step", flow_id="30")], model_info=MODEL_INFO)
+    asyncio.run(design("delete language detection", model=model, graph=_four_step_canvas()))
+
+    text = "".join(str(message.content) for message in seen[0])
+    assert len(text) < 3500, len(text)
+    assert "create_steps" not in text and "Language detection" in text
+
+
+@pytest.mark.parametrize("choice", [
+    {"action": "delete_step", "flow_id": "99"},          # an id that is not on the canvas
+    {"action": "delete_step"},                             # no id
+    {"action": "connect_steps", "source_flow_id": "20", "target_flow_id": "20"},
+    {"action": "rename_step", "flow_id": "30"},            # not one of the three actions
+])
+def test_an_unusable_router_reply_goes_to_the_full_agent(choice):
+    model = _scripted(
+        _route(**choice),
+        _call("delete_step", flow_id="30"),
+        _reply("I removed Language detection."),
+    )
+    result = asyncio.run(design("delete language detection", model=model, graph=_four_step_canvas()))
+
+    assert result.accepted and "fast_edit" not in result.sync
+    assert result.usage["requests"] == 3
+    assert result.message == "I removed Language detection."
+
+
+def test_a_quick_edit_that_fails_validation_is_undone_before_the_agent_runs():
+    """A second connection into the destination's only input is not valid."""
+    model = _scripted(
+        _route(action="connect_steps", source_flow_id="20", target_flow_id="40"),
+        _reply("Report already receives Language detection, so I did not add a second input."),
+    )
+    result = asyncio.run(design("connect OCR to Report", model=model, graph=_four_step_canvas()))
+
+    assert "fast_edit" not in result.sync
+    assert not result.sync["graph_changed"]
+    assert _edge_pairs(result.graph) == [("10", "20"), ("20", "30"), ("30", "40")]
+    assert result.message.startswith("Report already receives")
+
+
+def test_questions_and_new_designs_skip_the_router(monkeypatch):
+    # A question about the canvas: the only model call is the agent's answer.
+    result = asyncio.run(design(
+        "describe the current pipeline", model=_scripted(_reply("Four steps.")), graph=_four_step_canvas(),
+    ))
+    assert result.usage["requests"] == 1 and result.message == "Four steps."
+
+    # Switched off: the request goes straight to the agent.
+    monkeypatch.setenv("INLUMEN_DESIGN_FAST_EDITS", "0")
+    model = _scripted(_call("delete_step", flow_id="30"), _reply("Removed."))
+    result = asyncio.run(design("delete language detection", model=model, graph=_four_step_canvas()))
+    assert result.usage["requests"] == 2 and "fast_edit" not in result.sync
+
+
+def test_a_quick_edit_is_added_to_the_agents_chat_memory():
+    from inlumen.design.team import build_design_team
+    from inlumen.design.turn import run_design_turn
+
+    async def scenario():
+        store = InMemoryGraphStore(_four_step_canvas())
+        before = store.graph()
+        team = build_design_team(_scripted(_route(action="delete_step", flow_id="30")), store)
+        turn = await run_design_turn(
+            user_message="delete language detection", team=team, graph=store,
+            canvas_graph=before, agent_graph=before, visible_before_graph=before,
+        )
+        state = await team.save_state()
+        return turn, json.dumps(state)
+
+    turn, state = asyncio.run(scenario())
+    assert turn.sync["fast_edit"] == "delete_step"
+    assert "delete language detection" in state and "I removed" in state
 
 
 def test_design_rejects_an_invalid_result_and_keeps_the_starting_graph():

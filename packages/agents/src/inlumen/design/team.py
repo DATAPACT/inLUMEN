@@ -14,6 +14,7 @@ from autogen_core.tools import FunctionTool
 
 from inlumen.contracts.node_definitions import NodeDefinitionRegistry
 
+from .fast_edit import FastEdit, agent_memory_writer
 from .guardrails import EditWarnings
 from .prompt import PIPELINE_EDITOR_DESCRIPTION, PIPELINE_EDITOR_SYSTEM_MESSAGE
 from .store import GraphStore
@@ -172,4 +173,11 @@ def build_design_team(
     team = ProviderAwareGroupChat([editor], max_turns=1, model_client=model_client)
     # Read by run_design_turn to tell a declined edit from an unfinished one.
     team.edit_warnings = edit_warnings
+    # Read by run_design_turn: a plain delete, clear or connect in one small call.
+    team.fast_edit = FastEdit(
+        model_client,
+        store,
+        {tool.name: tool for tool in tools},
+        remember=agent_memory_writer(editor),
+    )
     return team
