@@ -4,43 +4,31 @@ This module deliberately knows nothing about Dagster, node schemas, or user
 code.  A runner prepares a fresh ``input`` directory for each node, executes
 the node with the two public environment variables, then inventories the
 resulting output directory for the orchestration layer.
+
+The hand-off itself lives in ``filesystem_handoff``, whose source is shipped
+in exported bundles. The functions here are its typed entry points for the
+control plane and the tests, so both run the code that a bundle runs.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
-import mimetypes
-import os
-import re
 import shutil
-import tempfile
 from pathlib import Path
 from typing import Iterable
 
 from inlumen.contracts import artifact_runtime_source
 
+from export import filesystem_handoff as handoff
+
 
 PIPELINE_INPUT_DIR = "PIPELINE_INPUT_DIR"
 PIPELINE_OUTPUT_DIR = "PIPELINE_OUTPUT_DIR"
-_DIRECT_PARAMETER_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_RESERVED_PARAMETER_ENVIRONMENT = {
-    PIPELINE_INPUT_DIR,
-    PIPELINE_OUTPUT_DIR,
-    "PIPELINE_PARAMS_JSON",
-}
 
 
 def direct_parameter_environment_name(key: object) -> str:
     """Return the direct Task environment name for a safe parameter key."""
-    name = str(key).strip()
-    if (
-        not _DIRECT_PARAMETER_NAME.fullmatch(name)
-        or name in _RESERVED_PARAMETER_ENVIRONMENT
-        or name.startswith(("PIPELINE_", "INLUMEN_"))
-    ):
-        return ""
-    return name
+    return handoff._direct_parameter_environment_name(key)
 
 
 def parameter_environment(parameters: dict[object, object]) -> dict[str, str]:
@@ -79,61 +67,6 @@ def task_environment(input_dir: Path | str, output_dir: Path | str) -> dict[str,
     }
 
 
-def _copy_entry(source: Path, destination: Path) -> None:
-    if source.is_symlink():
-        # Inputs are materialized rather than linked so a Task cannot follow a
-        # link out of the workspace after staging has completed.
-        source = source.resolve(strict=True)
-    if source.is_dir():
-        shutil.copytree(source, destination, dirs_exist_ok=True)
-    else:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-
-
-def _same_file_contents(first: Path, second: Path) -> bool:
-    """Compare files exactly with bounded memory."""
-    if first.stat().st_size != second.stat().st_size:
-        return False
-    with first.open("rb") as first_handle, second.open("rb") as second_handle:
-        while True:
-            first_chunk = first_handle.read(1024 * 1024)
-            second_chunk = second_handle.read(1024 * 1024)
-            if first_chunk != second_chunk:
-                return False
-            if not first_chunk:
-                return True
-
-
-def _remove_path(path: Path) -> None:
-    if path.is_symlink() or path.is_file():
-        path.unlink(missing_ok=True)
-    elif path.exists():
-        shutil.rmtree(path)
-
-
-def _publish_staged_directory(staging: Path, destination: Path) -> None:
-    """Publish a complete staging directory without exposing partial contents."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    previous: Path | None = None
-    if destination.exists() or destination.is_symlink():
-        previous = Path(tempfile.mkdtemp(
-            prefix=f".{destination.name}.previous-",
-            dir=destination.parent,
-        ))
-        previous.rmdir()
-        os.replace(destination, previous)
-    try:
-        os.replace(staging, destination)
-    except Exception:
-        if previous is not None and (previous.exists() or previous.is_symlink()):
-            os.replace(previous, destination)
-        raise
-    else:
-        if previous is not None:
-            _remove_path(previous)
-
-
 def stage_input_directories(
     source_directories: Iterable[Path | str],
     input_dir: Path | str,
@@ -144,43 +77,9 @@ def stage_input_directories(
     different artifacts to the same path: silently picking one would make the
     pipeline nondeterministic.
     """
-    destination_root = Path(input_dir)
-    destination_root.parent.mkdir(parents=True, exist_ok=True)
-    staging_root = Path(tempfile.mkdtemp(
-        prefix=f".{destination_root.name}.staging-",
-        dir=destination_root.parent,
-    ))
-
-    owners: dict[Path, Path] = {}
-    try:
-        for raw_source in source_directories:
-            source_root = Path(raw_source)
-            if not source_root.is_dir():
-                continue
-            for source in sorted(source_root.rglob("*"), key=lambda item: item.as_posix()):
-                if source.is_dir():
-                    continue
-                relative = source.relative_to(source_root)
-                # Compatibility metadata from older bundle versions is not an
-                # artifact and must not leak into the next Task workspace.
-                if relative.as_posix() in {"input_manifest.json", "output_manifest.json"}:
-                    continue
-                destination = staging_root / relative
-                existing = owners.get(relative)
-                if existing is not None:
-                    if _same_file_contents(source, existing):
-                        continue
-                    raise RuntimeError(
-                        "Upstream artifacts collide at "
-                        f"{relative.as_posix()!r}; add a Task that merges or renames them."
-                    )
-                _copy_entry(source, destination)
-                owners[relative] = source
-        _publish_staged_directory(staging_root, destination_root)
-    except Exception:
-        _remove_path(staging_root)
-        raise
-    return destination_root
+    destination = Path(input_dir)
+    handoff._stage_inputs(source_directories, destination)
+    return destination
 
 
 def stage_input_bindings(
@@ -195,48 +94,9 @@ def stage_input_bindings(
     Artifact-owned relative paths are preserved and collisions fail loudly.
     A binding with empty ports is reserved for a Source node's run input.
     """
-    destination_root = Path(input_dir)
-    destination_root.parent.mkdir(parents=True, exist_ok=True)
-    staging_root = Path(tempfile.mkdtemp(
-        prefix=f".{destination_root.name}.staging-",
-        dir=destination_root.parent,
-    ))
-
-    owners: dict[Path, Path] = {}
-    try:
-        for binding in bindings:
-            source_root = Path(str(binding.get("source_dir") or ""))
-            source_port = str(binding.get("source_port") or "").strip()
-            if source_port:
-                source_root = source_root / source_port
-            if not source_root.is_dir():
-                if binding.get("required", True):
-                    raise RuntimeError(
-                        f"Required upstream artifact port is missing: {source_root}."
-                    )
-                continue
-            for source in sorted(source_root.rglob("*"), key=lambda item: item.as_posix()):
-                if not source.is_file():
-                    continue
-                relative = source.relative_to(source_root)
-                if relative.as_posix() in {"input_manifest.json", "output_manifest.json", ".gitkeep"}:
-                    continue
-                destination = staging_root / relative
-                existing = owners.get(relative)
-                if existing is not None:
-                    if _same_file_contents(source, existing):
-                        continue
-                    raise RuntimeError(
-                        "Upstream artifacts collide at "
-                        f"{relative.as_posix()!r}; add a Task that merges or renames them."
-                    )
-                _copy_entry(source, destination)
-                owners[relative] = source
-        _publish_staged_directory(staging_root, destination_root)
-    except Exception:
-        _remove_path(staging_root)
-        raise
-    return destination_root
+    destination = Path(input_dir)
+    handoff._stage_input_bindings(bindings, destination)
+    return destination
 
 
 def normalize_single_output_port(
@@ -250,36 +110,7 @@ def normalize_single_output_port(
     exits so downstream routing remains internal to the orchestrator.  A legacy
     Task with several output ports must write each result into its port folder.
     """
-    root = Path(output_dir)
-    ports = [str(port).strip() for port in output_ports if str(port).strip()]
-    root.mkdir(parents=True, exist_ok=True)
-    declared = set(ports)
-    root_entries = [
-        path
-        for path in sorted(root.iterdir(), key=lambda item: item.as_posix())
-        if path.name not in declared and path.name != ".gitkeep"
-    ]
-    if not root_entries:
-        return []
-    if len(ports) != 1:
-        names = ", ".join(path.name for path in root_entries)
-        raise RuntimeError(
-            "Task wrote artifacts outside declared output-port directories: "
-            f"{names}. With several output ports, write each result into "
-            "its port folder or declare the outputs in inlumen.task.json."
-        )
-    port_root = root / ports[0]
-    port_root.mkdir(parents=True, exist_ok=True)
-    moved: list[str] = []
-    for source in root_entries:
-        destination = port_root / source.name
-        if destination.exists():
-            raise RuntimeError(
-                f"Legacy root output {source.name!r} collides with {ports[0]!r} output."
-            )
-        shutil.move(str(source), str(destination))
-        moved.append(source.name)
-    return moved
+    return handoff._normalize_single_output_port(Path(output_dir), output_ports)
 
 
 def prepare_workspace(
@@ -296,28 +127,9 @@ def prepare_workspace(
     return input_dir, output_dir
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def validate_output_ports(output_dir: Path | str, required_ports: Iterable[str]) -> None:
     """Require an artifact from each required producer output before success."""
-    for port in required_ports:
-        root = Path(output_dir) / port
-        if not any(
-            path.is_file() and path.name not in {
-                ".gitkeep", "input_manifest.json", "output_manifest.json"
-            }
-            for path in root.rglob("*")
-        ):
-            raise RuntimeError(
-                f"Required output port {port!r} contains no artifacts. "
-                "The node must write output files to PIPELINE_OUTPUT_DIR before completing."
-            )
+    handoff._validate_output_ports(Path(output_dir), required_ports)
 
 
 def discover_artifacts(output_dir: Path | str) -> list[dict[str, object]]:
@@ -327,32 +139,23 @@ def discover_artifacts(output_dir: Path | str) -> list[dict[str, object]]:
     input/output schema and is never required from user code.
     """
     root = Path(output_dir)
-    if not root.is_dir():
-        return []
-    artifacts: list[dict[str, object]] = []
-    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
-        if not path.is_file():
-            continue
-        artifacts.append(
-            {
-                "path": path.relative_to(root).as_posix(),
-                "size_bytes": path.stat().st_size,
-                "sha256": _sha256(path),
-                "content_type": mimetypes.guess_type(path.name)[0]
-                or "application/octet-stream",
-            }
-        )
-    return artifacts
+    return handoff._artifacts(root) if root.is_dir() else []
 
 
 def filesystem_shell_component_source() -> str:
     """Return the self-contained Dagster component shipped in an export.
 
     Generated bundles must run independently of the control-plane package, so
-    the small runtime implementation is emitted as source rather than imported
-    from this module.
+    the runtime is emitted as source: the artifact runtime, the component's
+    imports, the hand-off helpers of ``filesystem_handoff`` and the component.
     """
-    return artifact_runtime_source() + '\n' + r'''import hashlib
+    return (
+        artifact_runtime_source() + '\n'
+        + _COMPONENT_IMPORTS + handoff.shipped_source() + _SHELL_COMMAND_SOURCE
+    )
+
+
+_COMPONENT_IMPORTS = '''import hashlib
 import json
 import mimetypes
 import os
@@ -370,277 +173,10 @@ from pathlib import Path
 import dagster as dg
 
 
-_DIRECT_PARAMETER_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_RESERVED_PARAMETER_ENVIRONMENT = {
-    "PIPELINE_INPUT_DIR",
-    "PIPELINE_OUTPUT_DIR",
-    "PIPELINE_PARAMS_JSON",
-}
+'''
 
 
-def _direct_parameter_environment_name(key):
-    name = str(key).strip()
-    if (
-        not _DIRECT_PARAMETER_NAME.fullmatch(name)
-        or name in _RESERVED_PARAMETER_ENVIRONMENT
-        or name.startswith(("PIPELINE_", "INLUMEN_"))
-    ):
-        return ""
-    return name
-
-
-def _same_file_contents(first, second):
-    if first.stat().st_size != second.stat().st_size:
-        return False
-    with first.open("rb") as first_handle, second.open("rb") as second_handle:
-        while True:
-            first_chunk = first_handle.read(1024 * 1024)
-            second_chunk = second_handle.read(1024 * 1024)
-            if first_chunk != second_chunk:
-                return False
-            if not first_chunk:
-                return True
-
-
-def _remove_path(path):
-    if path.is_symlink() or path.is_file():
-        path.unlink(missing_ok=True)
-    elif path.exists():
-        shutil.rmtree(path)
-
-
-def _publish_staged_directory(staging, destination):
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    previous = None
-    if destination.exists() or destination.is_symlink():
-        previous = Path(tempfile.mkdtemp(
-            prefix=f".{destination.name}.previous-",
-            dir=destination.parent,
-        ))
-        previous.rmdir()
-        os.replace(destination, previous)
-    try:
-        os.replace(staging, destination)
-    except Exception:
-        if previous is not None and (previous.exists() or previous.is_symlink()):
-            os.replace(previous, destination)
-        raise
-    else:
-        if previous is not None:
-            _remove_path(previous)
-
-
-def _stage_inputs(source_dirs, input_dir):
-    input_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging_dir = Path(tempfile.mkdtemp(
-        prefix=f".{input_dir.name}.staging-",
-        dir=input_dir.parent,
-    ))
-    owners = {}
-    try:
-        for source_root in source_dirs:
-            source_root = Path(source_root)
-            if not source_root.is_dir():
-                continue
-            for source in sorted(source_root.rglob("*"), key=lambda item: item.as_posix()):
-                if not source.is_file():
-                    continue
-                relative = source.relative_to(source_root)
-                if relative.as_posix() in {"input_manifest.json", "output_manifest.json"}:
-                    continue
-                destination = staging_dir / relative
-                existing = owners.get(relative)
-                if existing is not None:
-                    if _same_file_contents(source, existing):
-                        continue
-                    raise RuntimeError(
-                        f"Upstream artifacts collide at {relative.as_posix()!r}; "
-                        "add a Task that merges or renames them."
-                    )
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
-                owners[relative] = source
-        _publish_staged_directory(staging_dir, input_dir)
-    except Exception:
-        _remove_path(staging_dir)
-        raise
-
-
-def _stage_input_bindings(bindings, input_dir):
-    input_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging_dir = Path(tempfile.mkdtemp(
-        prefix=f".{input_dir.name}.staging-",
-        dir=input_dir.parent,
-    ))
-    owners = {}
-    try:
-        for binding in bindings:
-            source_root = Path(str(binding.get("source_dir") or ""))
-            source_port = str(binding.get("source_port") or "").strip()
-            if source_port:
-                source_root = source_root / source_port
-            if not source_root.is_dir():
-                if binding.get("required", True):
-                    raise RuntimeError(
-                        f"Required upstream artifact port is missing: {source_root}."
-                    )
-                continue
-            for source in sorted(source_root.rglob("*"), key=lambda item: item.as_posix()):
-                if not source.is_file():
-                    continue
-                relative = source.relative_to(source_root)
-                if relative.as_posix() in {
-                    "input_manifest.json", "output_manifest.json", ".gitkeep"
-                }:
-                    continue
-                destination = staging_dir / relative
-                existing = owners.get(relative)
-                if existing is not None:
-                    if _same_file_contents(source, existing):
-                        continue
-                    raise RuntimeError(
-                        f"Upstream artifacts collide at {relative.as_posix()!r}; "
-                        "add a Task that merges or renames them."
-                    )
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
-                owners[relative] = source
-        _publish_staged_directory(staging_dir, input_dir)
-    except Exception:
-        _remove_path(staging_dir)
-        raise
-
-
-def _normalize_single_output_port(output_dir, output_ports):
-    ports = [str(port).strip() for port in output_ports if str(port).strip()]
-    output_dir.mkdir(parents=True, exist_ok=True)
-    declared = set(ports)
-    root_entries = [
-        path for path in sorted(output_dir.iterdir(), key=lambda item: item.as_posix())
-        if path.name not in declared and path.name != ".gitkeep"
-    ]
-    if not root_entries:
-        return []
-    if len(ports) != 1:
-        names = ", ".join(path.name for path in root_entries)
-        raise RuntimeError(
-            "Task wrote artifacts outside declared output-port directories: " + names
-            + ". With several output ports, write each result into its port "
-            "folder or declare the outputs in inlumen.task.json."
-        )
-    port_root = output_dir / ports[0]
-    port_root.mkdir(parents=True, exist_ok=True)
-    moved = []
-    for source in root_entries:
-        destination = port_root / source.name
-        if destination.exists():
-            raise RuntimeError(
-                f"Legacy root output {source.name!r} collides with {ports[0]!r} output."
-            )
-        shutil.move(str(source), str(destination))
-        moved.append(source.name)
-    return moved
-
-
-def _sha256(path):
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _artifacts(output_dir):
-    results = []
-    for path in sorted(output_dir.rglob("*"), key=lambda item: item.as_posix()):
-        if path.is_file():
-            results.append({
-                "path": path.relative_to(output_dir).as_posix(),
-                "size_bytes": path.stat().st_size,
-                "sha256": _sha256(path),
-                "content_type": mimetypes.guess_type(path.name)[0]
-                    or "application/octet-stream",
-            })
-    return results
-
-
-STEP_RECEIPT = ".inlumen-step.json"
-
-
-def _input_digest(input_dir):
-    """Content digest of everything staged for a step, independent of timing."""
-    digest = hashlib.sha256(b"inlumen.step-input@1\0")
-    for item in _artifacts(Path(input_dir)) if Path(input_dir).is_dir() else []:
-        digest.update(item["path"].encode("utf-8") + b"\0" + item["sha256"].encode() + b"\0")
-    return digest.hexdigest()
-
-
-def _step_cache_context(output_dir_attribute, input_dir):
-    """Return this step's cache keys and, when staged, a reusable earlier result.
-
-    The platform stages candidate results under INLUMEN_STEP_CACHE_DIR with a
-    keys.json naming each step's code key; the input key is computed here,
-    after inputs are staged.
-    """
-    root = os.environ.get("INLUMEN_STEP_CACHE_DIR", "").strip()
-    if not root:
-        return {}
-    node_dir = Path(str(output_dir_attribute)).name
-    try:
-        keys = json.loads((Path(root) / "keys.json").read_text(encoding="utf-8")).get(node_dir) or {}
-    except (OSError, ValueError):
-        return {}
-    if not keys.get("cacheable") or not keys.get("static_key"):
-        return {}
-    context = {"static_key": str(keys["static_key"]), "input_digest": _input_digest(input_dir), "cached": False}
-    hit = Path(root) / node_dir / context["input_digest"] / "files"
-    if keys.get("lookup") and hit.is_dir():
-        context["hit"] = hit
-    return context
-
-
-def _write_step_receipt(root, asset_key, started_at, input_dir, bindings, artifacts, cache=None):
-    """Record what a step read and published, for lineage and caching.
-
-    The receipt sits next to the published ports; the platform reads it after
-    the run and never hands it to downstream steps.
-    """
-    connections = [
-        {key: str(item.get(key) or "") for key in (
-            "source_node", "source_port", "connection_id", "target_port", "filename",
-        )}
-        for item in bindings or []
-        if isinstance(item, dict)
-    ]
-    atomic_json(Path(root) / STEP_RECEIPT, {
-        "schema_version": "inlumen.step-receipt@1",
-        "asset_key": asset_key,
-        "status": "succeeded",
-        "started_at": started_at,
-        "finished_at": time.time(),
-        "connections": connections,
-        "inputs": _artifacts(Path(input_dir)) if Path(input_dir).is_dir() else [],
-        "outputs": [item for item in artifacts if item["path"] != STEP_RECEIPT],
-        **{key: value for key, value in (cache or {}).items() if key != "hit"},
-    })
-
-
-def _validate_output_ports(output_dir, required_ports):
-    for port in required_ports:
-        root = output_dir / port
-        if not any(
-            path.is_file() and path.name not in {
-                ".gitkeep", "input_manifest.json", "output_manifest.json"
-            }
-            for path in root.rglob("*")
-        ):
-            raise RuntimeError(
-                f"Required output port {port!r} contains no artifacts. "
-                "The node must write output files to PIPELINE_OUTPUT_DIR before completing."
-            )
-
-
-class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
+_SHELL_COMMAND_SOURCE = r'''class ShellCommand(dg.Component, dg.Model, dg.Resolvable):
     asset_key: str
     data_contract: dict = {}
     artifact_bindings: list[dict] = []

@@ -176,6 +176,24 @@ class FilesystemRuntimeTest(unittest.TestCase):
             self.assertTrue((staged / "cities.csv").is_file())
             self.assertFalse((staged / "input").exists())
 
+    def test_bundles_ship_the_helpers_that_these_tests_run(self):
+        """The functions under test are the shipped ones, not a second copy."""
+        from export import filesystem_handoff, filesystem_runtime
+
+        shipped = filesystem_handoff.shipped_source()
+        self.assertTrue(shipped.startswith("_DIRECT_PARAMETER_NAME = "))
+        self.assertIn(shipped, filesystem_shell_component_source())
+        # This module's own imports stay out of the bundle.
+        self.assertNotIn("SHIPPED_FROM", shipped)
+        self.assertNotIn("from inlumen.contracts.artifact_runtime import", shipped)
+        for name in ("_stage_inputs", "_stage_input_bindings", "_normalize_single_output_port",
+                     "_artifacts", "_validate_output_ports", "_write_step_receipt"):
+            self.assertIn(f"\ndef {name}(", shipped)
+            self.assertTrue(callable(getattr(filesystem_handoff, name)))
+        # The typed entry points hold no implementation of their own.
+        source = Path(filesystem_runtime.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("def _same_file_contents", source)
+
     def test_parameters_are_available_by_their_exact_safe_names(self):
         environment = parameter_environment({"QUESTION": "When is support available?"})
         self.assertEqual("When is support available?", environment["QUESTION"])
