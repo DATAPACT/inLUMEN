@@ -149,8 +149,38 @@ about 6 MB of a 70 KB result.
 **Offline example.** `docker compose --profile plugins-demo up -d mock-tool`
 starts a local "Text Anonymizer" (API key `demo-key`). Add
 `examples/plugins/text-anonymizer.plugin.json` in **Add plugin** and use it like
-any other tool. Without Docker run `python examples/plugins/mock_tool_server.py`
-and change the definition's `base_url` to `http://localhost:8099/tools/text-anonymizer`.
+any other tool. To run the tool on the host instead, start
+`python examples/plugins/mock_tool_server.py` and change the definition's
+`base_url` to `http://host.docker.internal:8099/tools/text-anonymizer` (Docker
+Desktop). `localhost` does not work: in a run it names the run's own container.
+
+## Tools on a private address
+
+A plugin is called from two places: **Check endpoint** calls it from the
+backend, and a pipeline run calls it from the run's own container. A run
+container is kept apart from the application's services, so it is not on the
+Compose network. A tool with a public address is reachable from both. A tool
+that is only reachable by a Docker service name is not: the check passes and
+the run fails with "is unreachable".
+
+To make such a tool reachable from runs, attach it to the Docker network
+`inlumen_tools` as well. Runs join this network when it exists. The name is set
+by `INLUMEN_RUN_TOOL_NETWORK` on the code generation service; when the network
+does not exist, runs use Docker's default network as before.
+
+```yaml
+services:
+  my-tool:
+    networks: [datapact_network, inlumen_tools]
+networks:
+  datapact_network: {external: true}
+  inlumen_tools: {name: inlumen_tools}
+```
+
+The example `mock-tool` service is set up this way. Do not attach the
+database, the object storage or the code generation service to `inlumen_tools`:
+every container on it can be reached by generated pipeline code. Exported Argo
+and Dagster bundles run outside inLUMEN and need their own route to the tool.
 
 ## Built-in plugins
 
