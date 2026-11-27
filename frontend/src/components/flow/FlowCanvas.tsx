@@ -66,6 +66,7 @@ import {
   type NormalizedGraph,
 } from '@/features/flow/flowGraph';
 import { createProjectDocument, projectDocumentToGraph } from '@/features/flow/projectIr';
+import { artifactKindLabel, designFromArtifact, isArtifactFile, isArtifactJson, type ArtifactDesign } from '@/features/flow/designFromArtifact';
 import {
   effectiveGenerationStatus,
   GENERATION_TERMINAL_STATUSES,
@@ -1966,8 +1967,20 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     try {
       const file = e.target.files?.[0];
       if (!file) return;
-      const text = await file.text();
-      const flowData = JSON.parse(text);
+      // A bundle ZIP, a bundle manifest or an Argo workflow is turned into
+      // Project JSON by the backend; a Project JSON file is read here.
+      let artifact: ArtifactDesign | null = null;
+      let flowData: unknown;
+      if (isArtifactFile(file)) {
+        artifact = await designFromArtifact(file);
+        flowData = artifact.project;
+      } else {
+        flowData = JSON.parse(await file.text());
+        if (isArtifactJson(flowData)) {
+          artifact = await designFromArtifact(file);
+          flowData = artifact.project;
+        }
+      }
       const normalizedImport = projectDocumentToGraph(flowData);
       const importedNodes = normalizedImport.nodes;
       const importedEdges = normalizedImport.edges;
@@ -1978,13 +1991,25 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       setNodes(importedNodes);
       setEdges(importedEdges);
       nodeId = getNextNumericNodeId(importedNodes, 1);
-      toast.success('Project JSON imported', {
-        description: 'The Pipeline IR was migrated and the design state was reconstructed.',
-      });
+      if (artifact) {
+        toast.success(`Design imported from ${artifactKindLabel(artifact.kind)}`, {
+          description: [
+            `${artifact.step_count} steps and ${artifact.connection_count} connections.`,
+            ...artifact.notes.slice(1),
+          ].join(' '),
+          duration: 20000,
+        });
+      } else {
+        toast.success('Project JSON imported', {
+          description: 'The Pipeline IR was migrated and the design state was reconstructed.',
+        });
+      }
     } catch (error) {
       console.error('Error importing flow:', error);
       toast.error('Failed to import flow', {
-        description: 'There was an error importing your pipeline',
+        description: error instanceof Error && error.message
+          ? error.message
+          : 'There was an error importing your pipeline',
       });
     } finally {
       if (e.target) e.target.value = '';

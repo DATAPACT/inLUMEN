@@ -29,6 +29,7 @@ from inlumen.contracts.artifact_runtime import ArtifactContractError
 from inlumen.contracts.task_package_contract import TASK_METADATA_FILENAME, parse_task_metadata
 from inlumen.contracts.task_package_contract import AUTHORING_GUIDE, EXAMPLE, TASK_SCHEMA, public_manifest, validate_package
 from export.task_packages import inspect_packages, task_package_folder, MAX_ARCHIVE, PLATFORM_FILES
+from export.design_from_artifact import ArtifactError, MAX_ARTIFACT_BYTES, design_from_artifact
 from llm.application_llm import (
     APPLICATION_LLM_ID,
     application_llm_request_config,
@@ -2957,6 +2958,28 @@ def pipeline_task_packages(action):
         return _json_error(422, "Invalid Task package", str(exc))
     except Exception as exc:
         return _json_error(502, "Package import failed; previous packages remain active", str(exc))
+
+
+@app.route("/api/pipeline/design-from-artifact", methods=["POST", "OPTIONS"])
+@require_auth
+def pipeline_design_from_artifact():
+    """Read a deployment artifact and return its design as Project JSON.
+
+    Nothing is stored or executed: the canvas imports the returned document
+    in the same way as a Project JSON file.
+    """
+    if request.method == "OPTIONS":
+        return _preflight_response()
+    upload = request.files.get("file")
+    if upload is None:
+        return _json_error(400, "A bundle ZIP or an Argo Workflows file is required")
+    data = upload.stream.read(MAX_ARTIFACT_BYTES + 1)
+    try:
+        return jsonify(design_from_artifact(data, filename=upload.filename or "")), 200
+    except ArtifactError as exc:
+        return _json_error(422, "This file cannot be turned into a design", str(exc))
+    except Exception:
+        return _json_error(500, "The design could not be built from this file")
 
 
 @app.route("/api/pipeline/task-packages/download", methods=["GET"])
