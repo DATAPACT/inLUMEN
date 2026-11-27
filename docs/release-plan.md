@@ -40,7 +40,7 @@ Direction only; no commitment.
 | Issue | Summary |
 |---|---|
 | #205 | Reduce duplication and split the largest files (first item done in #219) |
-| #222 | Attach code and data when a design is imported from a bundle or a code ZIP |
+| #222 | Attach code and data when a design is imported from a bundle or a code ZIP (done for a bundle; open for a code ZIP) |
 | #223 | Show an imported design as a proposal before it replaces the canvas |
 | #224 | Map Argo conditions and loops to Condition and Parallel Map steps on import |
 

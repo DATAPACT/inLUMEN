@@ -125,8 +125,13 @@ def _edge(source: str, source_port: str, target: str, target_port: str) -> dict[
 
 # ----------------------------------------------------------------- bundle
 
-def design_from_bundle_manifest(manifest: Any, *, name: str = "") -> dict[str, Any]:
-    """The design recorded in an inLUMEN ``bundle-manifest.json``."""
+def design_from_bundle_manifest(manifest: Any, *, name: str = "", run_spec: Any = None) -> dict[str, Any]:
+    """The design recorded in an inLUMEN ``bundle-manifest.json``.
+
+    ``run_spec`` is the bundle's ``run-spec.json`` when it is at hand: it adds
+    the parameters of each step. The values of sensitive parameters are never
+    in a bundle; their names are reported in a note.
+    """
     if not isinstance(manifest, dict) or not str(manifest.get("schema_version") or "").startswith(BUNDLE_SCHEMA_PREFIX):
         raise ArtifactError("This is not an inLUMEN bundle manifest (schema_version inlumen.deployment-bundle).")
     raw_nodes = [node for node in manifest.get("nodes") or [] if isinstance(node, dict) and node.get("flow_id")]
@@ -151,6 +156,17 @@ def design_from_bundle_manifest(manifest: Any, *, name: str = "") -> dict[str, A
         edges.append(_edge(source, str(connection.get("source_port") or ""), target, str(connection.get("target_port") or "")))
         parents[target].add(source)
 
+    parameters: dict[str, dict] = {}
+    secrets: dict[str, list[str]] = {}
+    for item in (run_spec.get("nodes") if isinstance(run_spec, dict) else None) or []:
+        if not isinstance(item, dict) or str(item.get("id")) not in ids:
+            continue
+        if isinstance(item.get("parameters"), dict) and item["parameters"]:
+            parameters[str(item["id"])] = dict(item["parameters"])
+        names = [str(name) for name in item.get("secret_parameters") or [] if isinstance(name, (str, int))]
+        if names:
+            secrets[str(item["id"])] = names
+
     positions = _layout(ids, parents)
     nodes, unknown_kinds = [], []
     for node in raw_nodes:
@@ -167,13 +183,22 @@ def design_from_bundle_manifest(manifest: Any, *, name: str = "") -> dict[str, A
         }
         if node.get("template"):
             data["template_label"] = str(node["template"])
+        if parameters.get(flow_id):
+            data["param"] = parameters[flow_id]
         nodes.append({"id": flow_id, "type": "custom", "position": positions[flow_id], "data": data})
 
+    labels = {str(node["flow_id"]): str(node.get("label") or node["flow_id"]) for node in raw_nodes}
     notes = [
-        "The design was rebuilt from the bundle manifest: steps, port names and types, and connections.",
-        "Step descriptions, parameters, code and data files are not in the manifest. "
-        "Attach code afterwards with Upload code ZIP; the bundle keeps it under nodes/.",
+        "The design was rebuilt from the bundle: steps, port names and types, and connections"
+        + (", with the parameters of the steps." if isinstance(run_spec, dict) else "."),
+        "Step descriptions are not in a bundle. The code of the Tasks and the data of the Sources are "
+        "in the bundle ZIP, under nodes/ and inputs/.",
     ]
+    if secrets:
+        notes.append(
+            "Sensitive parameters are not in a bundle. Enter them again for: "
+            + "; ".join(f"{labels[key]} ({', '.join(names)})" for key, names in secrets.items()) + "."
+        )
     if dropped:
         notes.append(f"{dropped} connection(s) named a step that is not in the manifest and were left out.")
     if unknown_kinds:
@@ -203,6 +228,24 @@ def _read_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo, limit: int) ->
 
 def _member_path(info: zipfile.ZipInfo) -> str:
     return info.filename.replace("\\", "/")
+
+
+def _run_spec_from_zip(archive: zipfile.ZipFile) -> Any | None:
+    """The ``run-spec.json`` beside the bundle manifest, or None."""
+    manifests = [
+        _member_path(info) for info in archive.infolist()
+        if not info.is_dir() and _member_path(info).split("/")[-1] == BUNDLE_MANIFEST and _member_path(info).count("/") <= 1
+    ]
+    if not manifests:
+        return None
+    folder = min(manifests, key=lambda path: path.count("/")).rsplit(BUNDLE_MANIFEST, 1)[0]
+    for info in archive.infolist():
+        if _member_path(info) == folder + "run-spec.json" and info.file_size <= MAX_DOCUMENT_BYTES:
+            try:
+                return json.loads(_read_member(archive, info, MAX_DOCUMENT_BYTES).decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                return None
+    return None
 
 
 def _manifest_from_zip(archive: zipfile.ZipFile) -> Any | None:
@@ -570,7 +613,9 @@ def design_from_artifact(data: bytes, *, filename: str = "") -> dict[str, Any]:
         with _open_zip(data) as archive:
             manifest = _manifest_from_zip(archive)
             if manifest is not None:
-                return design_from_bundle_manifest(manifest, name=_humanize(stem))
+                return design_from_bundle_manifest(
+                    manifest, name=_humanize(stem), run_spec=_run_spec_from_zip(archive)
+                )
             argo = _argo_in_zip(archive)
             if argo is not None:
                 path, document, others = argo

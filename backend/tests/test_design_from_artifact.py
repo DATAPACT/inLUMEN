@@ -106,7 +106,7 @@ def test_a_bundle_manifest_gives_back_steps_ports_and_connections():
     # Steps are laid out left to right in the order of the connections.
     xs = [nodes[key]["position"]["x"] for key in "12345"]
     assert xs == sorted(xs) and len(set(xs)) == 5
-    assert any("code and data files are not in the manifest" in note for note in result["notes"])
+    assert any("under nodes/ and inputs/" in note for note in result["notes"])
 
 
 def test_a_bundle_zip_is_read_without_extracting_its_code():
@@ -461,3 +461,27 @@ def test_no_two_steps_share_a_position():
     # Children follow the rows of their parents.
     rows = _layout(["a", "b", "c", "d"], {"c": {"b"}, "d": {"a"}})
     assert rows["d"]["y"] < rows["c"]["y"] and rows["a"]["y"] < rows["b"]["y"]
+
+
+def test_a_bundle_zip_gives_back_parameters_and_names_missing_secrets():
+    run_spec = {"schema_version": "inlumen.run-spec@4", "nodes": [
+        {"id": "3", "parameters": {"threshold": 2, "language": "en"}, "secret_parameters": ["API_KEY"]},
+        {"id": "5", "parameters": {"filename": "totals.json"}, "secret_parameters": []},
+        {"id": "1", "parameters": {}, "secret_parameters": []},
+        {"id": "99", "parameters": {"ignored": True}},
+    ]}
+    for folder in ("", "my-bundle/"):
+        data = _zip({folder + "bundle-manifest.json": json.dumps(_manifest()), folder + "run-spec.json": json.dumps(run_spec)})
+        result = design_from_artifact(data, filename="invoices.zip")
+        nodes = {node["id"]: node for node in _pipeline(result)["nodes"]}
+        assert nodes["3"]["parameters"] == {"threshold": 2, "language": "en"}
+        assert nodes["5"]["parameters"] == {"filename": "totals.json"}
+        assert nodes["1"]["parameters"] == {} and nodes["2"]["parameters"] == {}
+        notes = " ".join(result["notes"])
+        assert "with the parameters of the steps" in notes
+        assert "Enter them again for: Extract (API_KEY)." in notes
+
+    # Without a run specification the design still comes back, without parameters.
+    plain = design_from_artifact(_zip({"bundle-manifest.json": json.dumps(_manifest())}), filename="invoices.zip")
+    assert all(node["parameters"] == {} for node in _pipeline(plain)["nodes"])
+    assert "Sensitive parameters" not in " ".join(plain["notes"])

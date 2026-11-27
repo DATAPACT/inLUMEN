@@ -19,11 +19,33 @@ file is executed.
 
 The manifest (`inlumen.deployment-bundle@…`) is read from the top level of the
 ZIP, or from one folder below it. Step types, templates (for example Parallel
-Map and Collect), ports and connections come back as they were exported.
+Map and Collect), ports and connections come back as they were exported. The
+parameters of the steps are read from the `run-spec.json` beside the manifest.
 
-Not in the manifest, and therefore not restored: step descriptions,
-parameters, code and data files. The code is in the bundle under `nodes/`;
-attach it afterwards with **Upload code ZIP**.
+When the file is the bundle ZIP, the canvas then attaches what the bundle
+holds for the steps:
+
+- **Task code.** The files of each Task under `nodes/<folder>/` are checked
+  and imported in the same way as **Upload code ZIP**. A Task whose code fails
+  that check is left without code, and the message says why.
+- **Source data.** The files of each Source under `inputs/<folder>/` are
+  attached as its input files.
+
+A bundle that was exported from inLUMEN and imported again can be run without
+attaching anything by hand.
+
+Not attached or not restored:
+
+- the code of Sources, Destinations and Flow steps, and the files
+  `node-manifest.json`, `validation-report.json`, `inlumen_item_runner.py`
+  and Dockerfiles: the platform writes them again at Build Bundle;
+- input files in subfolders of a Source's input folder;
+- step descriptions, which are not in a bundle;
+- the values of sensitive parameters, which are never in a bundle. The
+  message names the steps that need them again.
+
+From a `bundle-manifest.json` alone, without the ZIP, only the design comes
+back.
 
 ## Argo Workflows
 
@@ -115,6 +137,6 @@ Limits: 50 MiB for a ZIP, 5 MiB for a manifest or workflow file, 500 steps,
 ## Not covered
 
 Dagster projects and other workflow formats are not read by rule; inside a
-ZIP they are treated as code. Follow-up issues: attaching the code and data of
-a ZIP to the steps (#222), a preview before the canvas is replaced (#223), and
-Argo conditions and loops as steps (#224).
+ZIP they are treated as code. A design inferred from a ZIP of code gets no
+code or data attached. Follow-up issues: a preview before the canvas is
+replaced (#223), and Argo conditions and loops as steps (#224).
