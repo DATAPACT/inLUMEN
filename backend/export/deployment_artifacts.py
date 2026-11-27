@@ -1788,6 +1788,9 @@ def _build_codegen_argo_workflow_object(
             annotations["inlumen.ai/configuration-hash"] = dockerfile["configuration_hash"]
         if step.get("label"):
             annotations["inlumen.ai/label"] = step["label"]
+        if _clean_string(step.get("template")):
+            # Read back by the Argo import: for a Flow step it names the behavior.
+            annotations["inlumen.ai/template"] = _clean_string(step.get("template"))
         if plugin_endpoint:
             plugin = adapter["plugin"]
             annotations["inlumen.ai/plugin"] = (
@@ -2061,6 +2064,8 @@ def build_argo_workflow_object(
         }
         if step.get("label"):
             annotations["inlumen.ai/label"] = step["label"]
+        if _clean_string(step.get("template")):
+            annotations["inlumen.ai/template"] = _clean_string(step.get("template"))
         if dockerfile.get("dockerfile_filename"):
             annotations["inlumen.ai/dockerfile"] = dockerfile["dockerfile_filename"]
 

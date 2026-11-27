@@ -20,8 +20,13 @@ import zipfile
 from collections import defaultdict
 from typing import Any
 
-from inlumen.contracts.node_ports import normalize_node_ports
-from inlumen.contracts.pipeline_graph_validation import validate_pipeline_graph, validation_issue_messages
+from inlumen.contracts.node_ports import normalize_node_ports, ports_for_template
+from inlumen.contracts.pipeline_graph_validation import (
+    FLOW_BEHAVIORS,
+    FLOW_EXPRESSION_PATTERN,
+    validate_pipeline_graph,
+    validation_issue_messages,
+)
 from inlumen.contracts.project_ir import project_document
 
 MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
@@ -406,6 +411,65 @@ def _what_runs(template: dict | None) -> str:
     return ""
 
 
+_LOOP_KEYS = ("withItems", "withParam", "withSequence")
+_WHEN_COMPARISON = re.compile(
+    r"^\s*\{\{\s*(?:tasks|steps)\.[A-Za-z0-9_.-]+?\.outputs\.(?:result|parameters\.([A-Za-z_][A-Za-z0-9_]*))\s*\}\}"
+    r"\s*(==|!=|>=|<=|>|<)\s*(.+?)\s*$"
+)
+
+
+def _condition_expression(when: str) -> str:
+    """The inLUMEN condition for an Argo ``when``.
+
+    Only one comparison of one task output with a literal can be translated;
+    anything else gives "" and the original text stays in the description.
+    """
+    match = _WHEN_COMPARISON.match(when)
+    if not match:
+        return ""
+    parameter, operator, literal = match.groups()
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", literal) and literal not in {"true", "false", "null"}:
+        literal = f'"{literal}"'  # a bare word is a string in Argo
+    expression = f"value{'.' + parameter if parameter else ''} {operator} {literal}"
+    return expression if FLOW_EXPRESSION_PATTERN.fullmatch(expression) else ""
+
+
+def _template_tasks(template: dict) -> list[dict] | None:
+    """The tasks of a ``dag`` or ``steps`` template, each with the tasks it is ordered after."""
+    tasks: list[dict] = []
+    if isinstance(template.get("dag"), dict):
+        for task in template["dag"].get("tasks") or []:
+            if isinstance(task, dict) and task.get("name"):
+                tasks.append({**task, "_explicit": set(str(item) for item in task.get("dependencies") or [])})
+        return tasks
+    if isinstance(template.get("steps"), list):
+        previous: list[str] = []
+        for group in template["steps"]:
+            members = [step for step in (group if isinstance(group, list) else [group]) if isinstance(step, dict) and step.get("name")]
+            for step in members:
+                tasks.append({**step, "_explicit": set(previous)})
+            previous = [str(step["name"]) for step in members] or previous
+        return tasks
+    return None
+
+
+def _incoming(task: dict, known: list[str]) -> dict[str, tuple[str, str]]:
+    """Who feeds a task, by the names of its own scope: named data references first, then plain ordering."""
+    task_name = str(task["name"])
+    incoming: dict[str, tuple[str, str]] = {}
+    for source, argument, output in _references({key: task.get(key) for key in ("arguments", "when", "withParam", "withItems")}):
+        if source in known and source != task_name:
+            incoming.setdefault(source, (argument, output))
+    ordering = set(task["_explicit"])
+    if isinstance(task.get("depends"), str):
+        expression = _DEPENDS_SUFFIX.sub("", task["depends"])
+        ordering |= {token for token in re.findall(r"[A-Za-z0-9_.-]+", expression) if token in known}
+    for source in sorted(ordering & set(known), key=known.index):
+        if source != task_name:
+            incoming.setdefault(source, ("", ""))
+    return incoming
+
+
 def _argo_tasks(spec: dict, notes: list[str]) -> tuple[list[dict], dict[str, dict]]:
     templates = {
         str(item.get("name")): item
@@ -430,26 +494,419 @@ def _argo_tasks(spec: dict, notes: list[str]) -> tuple[list[dict], dict[str, dic
             raise ArtifactError("The workflow names no entrypoint template, and more than one could be meant.")
         notes.append(f"No entrypoint was named; the template “{entry.get('name')}” was used.")
 
-    tasks: list[dict] = []
-    if isinstance(entry.get("dag"), dict):
-        for task in entry["dag"].get("tasks") or []:
-            if isinstance(task, dict) and task.get("name"):
-                tasks.append({**task, "_explicit": set(str(item) for item in task.get("dependencies") or [])})
-    elif isinstance(entry.get("steps"), list):
-        previous: list[str] = []
-        for group in entry["steps"]:
-            members = [step for step in (group if isinstance(group, list) else [group]) if isinstance(step, dict) and step.get("name")]
-            for step in members:
-                tasks.append({**step, "_explicit": set(previous)})
-            previous = [str(step["name"]) for step in members] or previous
-    else:
-        tasks.append({"name": entry.get("name") or "step", "template": entry.get("name"), "_explicit": set()})
+    tasks = _template_tasks(entry)
+    if tasks is None:
+        tasks = [{"name": entry.get("name") or "step", "template": entry.get("name"), "_explicit": set()}]
         notes.append("The entrypoint is a single template, so the design has one step.")
     return tasks, templates
 
 
+def _expanded(tasks: list[dict], templates: dict[str, dict]) -> tuple[list[dict], list[str]]:
+    """Every task with a unique name and its resolved inputs; nested templates opened one level.
+
+    A task that runs a ``dag`` or ``steps`` template is replaced by the tasks
+    of that template: its inputs go to the first of them and its consumers
+    read from the last. A nested task with a condition or a loop stays one
+    step, because the condition or loop applies to the whole of it.
+    """
+    names = [str(task["name"]) for task in tasks]
+    if len(set(names)) != len(names):
+        raise ArtifactError("The workflow lists a task name twice.")
+    outer = {str(task["name"]): _incoming(task, names) for task in tasks}
+    stands_for: dict[str, list[str]] = {}  # an outer name -> the steps its consumers read from
+    inner_of: dict[str, tuple[list[dict], dict[str, dict]]] = {}
+    expanded: list[str] = []
+    for task in tasks:
+        task_name = str(task["name"])
+        template = templates.get(str(task.get("template") or ""))
+        inner = _template_tasks(template) if isinstance(template, dict) else None
+        if inner and not task.get("when") and not any(key in task for key in _LOOP_KEYS):
+            inner_names = [str(item["name"]) for item in inner]
+            if len(set(inner_names)) == len(inner_names):
+                links = {str(item["name"]): _incoming(item, inner_names) for item in inner}
+                fed = {source for incoming in links.values() for source in incoming}
+                stands_for[task_name] = [f"{task_name}/{item}" for item in inner_names if item not in fed]
+                inner_of[task_name] = (inner, links)
+                expanded.append(task_name)
+                continue
+        stands_for[task_name] = [task_name]
+
+    def resolved(incoming: dict[str, tuple[str, str]]) -> dict[str, tuple[str, str]]:
+        return {unique: link for source, link in incoming.items() for unique in stands_for[source]}
+
+    records: list[dict] = []
+    for task in tasks:
+        task_name = str(task["name"])
+        if task_name not in inner_of:
+            records.append({"task": task, "name": task_name, "incoming": resolved(outer[task_name]), "parent": ""})
+            continue
+        inner, links = inner_of[task_name]
+        for item in inner:
+            own = {f"{task_name}/{source}": link for source, link in links[str(item["name"])].items()}
+            # The first tasks of the nested template read what the nested task reads.
+            records.append({
+                "task": item, "name": f"{task_name}/{item['name']}",
+                "incoming": own or resolved(outer[task_name]), "parent": task_name,
+            })
+    return records, expanded
+
+
+def _is_inlumen_export(tasks: list[dict], templates: dict[str, dict]) -> bool:
+    return any(_annotation(templates.get(str(task.get("template") or "")), "flow-id") for task in tasks)
+
+
+def _annotation(template: dict | None, key: str) -> str:
+    metadata = template.get("metadata") if isinstance(template, dict) else None
+    annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
+    return str(annotations.get(f"inlumen.ai/{key}") or "").strip() if isinstance(annotations, dict) else ""
+
+
+def _port_ids(template: dict, side: str, prefix: str) -> dict[str, str]:
+    """Argo artifact name -> inLUMEN port id, read from the path the export gives each port."""
+    block = template.get(side) if isinstance(template.get(side), dict) else {}
+    found: dict[str, str] = {}
+    for artifact in block.get("artifacts") or []:
+        if isinstance(artifact, dict) and str(artifact.get("path") or "").startswith(prefix):
+            port_id = str(artifact["path"])[len(prefix):]
+            if port_id and "/" not in port_id:
+                found[str(artifact.get("name") or "")] = port_id
+    return found
+
+
+def _flow_behavior(template: dict, inputs: set[str], outputs: set[str], parameters: dict) -> str:
+    """Condition, Parallel Map or Collect for an exported Flow step, or "" when the file does not say."""
+    named = _annotation(template, "template")
+    if named in FLOW_BEHAVIORS:
+        return named
+    if outputs & {"when_true", "when_false"} or "value" in inputs or "expression" in parameters:
+        return "Condition"
+    if "item" in outputs or "items" in inputs or {"max_concurrency", "failure_policy"} & set(parameters):
+        return "Parallel Map"
+    if "items" in outputs or "item" in inputs:
+        return "Collect"
+    return ""
+
+
+def _design_from_inlumen_argo(tasks: list[dict], templates: dict[str, dict], notes: list[str]) -> dict:
+    """The design of a workflow that inLUMEN exported, read from what the export recorded."""
+    steps: dict[str, dict] = {}  # Argo task name -> step
+    skipped: list[str] = []
+    for task in tasks:
+        template = templates.get(str(task.get("template") or "")) or {}
+        flow_id = _annotation(template, "flow-id")
+        if not flow_id or flow_id in {step["id"] for step in steps.values()}:
+            skipped.append(str(task["name"]))
+            continue
+        container = template.get("container") if isinstance(template.get("container"), dict) else {}
+        env = {
+            str(item.get("name")): item["value"]
+            for item in container.get("env") or []
+            if isinstance(item, dict) and isinstance(item.get("value"), str)
+        }
+        try:
+            parameters = json.loads(env.get("INLUMEN_PARAMS_JSON") or "{}")
+        except ValueError:
+            parameters = {}
+        kind = _annotation(template, "type").lower()
+        steps[str(task["name"])] = {
+            "id": flow_id, "task": task, "template": template,
+            "kind": kind if kind in _STEP_KINDS else "task",
+            "label": _annotation(template, "label") or _humanize(str(task["name"])),
+            "description": env.get("INLUMEN_STEP_DESCRIPTION", ""),
+            "parameters": parameters if isinstance(parameters, dict) else {},
+            "inputs": _port_ids(template, "inputs", "/inlumen/staging/"),
+            "outputs": _port_ids(template, "outputs", "/inlumen/outputs/"),
+        }
+    for step in steps.values():
+        step["behavior"] = (
+            _flow_behavior(step["template"], set(step["inputs"].values()), set(step["outputs"].values()), step["parameters"])
+            if step["kind"] == "flow" else _annotation(step["template"], "template")
+        )
+
+    # Files exported before the behavior was recorded: a Flow step after a
+    # Parallel Map that nothing else identifies is the Collect that closes it.
+    def after_map(task_name: str, trail: frozenset[str] = frozenset()) -> bool:
+        for parent in steps[task_name]["task"].get("dependencies") or []:
+            parent = str(parent)
+            if parent not in steps or parent in trail:
+                continue
+            behavior = steps[parent]["behavior"]
+            if behavior == "Parallel Map" or (behavior != "Collect" and after_map(parent, trail | {task_name})):
+                return True
+        return False
+
+    for task_name, step in steps.items():
+        if step["kind"] == "flow" and not step["behavior"] and after_map(task_name):
+            step["behavior"] = "Collect"
+
+    def default_port(step: dict, side: str) -> str:
+        ports = ports_for_template(None, step["kind"], step["behavior"])[side]
+        return str(ports[0]["id"]) if ports else ("input" if side == "inputs" else "output")
+
+    edges: list[dict] = []
+    guessed_branches: list[str] = []
+    branch_count: dict[str, int] = defaultdict(int)
+    extra_inputs: dict[str, list[str]] = defaultdict(list)
+    for task_name, step in steps.items():
+        task = step["task"]
+        bound: set[str] = set()
+        arguments = task.get("arguments") if isinstance(task.get("arguments"), dict) else {}
+        for artifact in arguments.get("artifacts") or []:
+            match = _TASK_REFERENCE.search(str(artifact.get("from") or "")) if isinstance(artifact, dict) else None
+            if not match or match.group(1) not in steps or match.group(1) == task_name:
+                continue
+            source = steps[match.group(1)]
+            name = str(artifact.get("name") or "")
+            edges.append(_edge(
+                source["id"], source["outputs"].get(match.group(3) or "", (match.group(3) or "output").replace("-", "_")),
+                step["id"], step["inputs"].get(name, name.replace("-", "_")),
+            ))
+            bound.add(match.group(1))
+        # An export without generated code records the order only, not the ports.
+        unbound = [str(item) for item in task.get("dependencies") or [] if str(item) in steps and str(item) not in bound]
+        for source_name in unbound:
+            source = steps[source_name]
+            source_port = default_port(source, "outputs")
+            if source["behavior"] == "Condition":
+                source_port = "when_true" if branch_count[source_name] == 0 else "when_false"
+                branch_count[source_name] += 1
+                if source["label"] not in guessed_branches:
+                    guessed_branches.append(source["label"])
+            target_port = default_port(step, "inputs")
+            if len(unbound) + len(bound) > 1 and step["kind"] != "flow":
+                target_port = _slug(source["label"].lower(), "input")
+                extra_inputs[task_name].append(target_port)
+            edges.append(_edge(source["id"], source_port, step["id"], target_port))
+
+    nodes, unknown_flows = [], []
+    for task_name, step in steps.items():
+        kind = step["kind"]
+        if kind == "flow":
+            ports = ports_for_template(None, kind, step["behavior"])
+            if not step["behavior"]:
+                unknown_flows.append(step["label"])
+        else:
+            def listed(ids: list[str]) -> list[dict[str, Any]]:
+                return [{"id": item, "name": item, "type": "any", "required": True, "description": ""} for item in ids]
+
+            declared: dict[str, Any] = {}
+            inputs = list(dict.fromkeys([*step["inputs"].values(), *extra_inputs[task_name]]))
+            if inputs:
+                declared["inputs"] = listed(inputs)
+            if step["outputs"]:
+                declared["outputs"] = listed(list(step["outputs"].values()))
+            ports = normalize_node_ports(declared, kind)
+        data: dict[str, Any] = {"type": kind, "label": step["label"], "description": step["description"], "ports": ports}
+        if step["behavior"]:
+            data["template_label"] = step["behavior"]
+        if step["parameters"]:
+            data["param"] = step["parameters"]
+        nodes.append({"id": step["id"], "type": "custom", "position": {"x": 0.0, "y": 0.0}, "data": data})
+
+    notes.insert(0, "This workflow was exported by inLUMEN. The steps, their types, labels, descriptions and "
+                    "parameters, and the connections were read back from it.")
+    notes.append("Port types, sensitive parameters, code and data are not in a workflow file. "
+                 "Import the bundle ZIP to get the code and data as well.")
+    if guessed_branches:
+        notes.append("The file does not say which branch of a Condition a step follows. The first step after it was "
+                     "connected to “when true” and the second to “when false”: " + ", ".join(guessed_branches) + ".")
+    if unknown_flows:
+        notes.append("The file does not say whether these Flow steps are a Condition, a Parallel Map or a Collect: "
+                     + ", ".join(unknown_flows) + ".")
+    if skipped:
+        notes.append("Tasks that are not steps of the design were left out: " + ", ".join(skipped) + ".")
+    return {"nodes": nodes, "edges": edges}
+
+
+def _design_from_foreign_argo(tasks: list[dict], templates: dict[str, dict], notes: list[str]) -> dict:
+    """The design of a workflow of any origin, from its tasks, dependencies, conditions and loops."""
+    records, expanded = _expanded(tasks, templates)
+    if len(records) > MAX_STEPS:
+        raise ArtifactError(f"The workflow has more than {MAX_STEPS} tasks.")
+    names = [record["name"] for record in records]
+    links = {record["name"]: record["incoming"] for record in records}
+    children: dict[str, set[str]] = defaultdict(set)
+    for task_name, incoming in links.items():
+        for source in incoming:
+            children[source].add(task_name)
+
+    def referenced(record: dict, key: str) -> list[str]:
+        """The predecessors that a field of the task names, in this task's resolved inputs."""
+        prefix = f"{record['parent']}/" if record["parent"] else ""
+        found = []
+        for source, _argument, _output in _references(record["task"].get(key)):
+            for unique in links[record["name"]]:
+                if unique == prefix + source or unique.startswith(f"{source}/"):
+                    found.append(unique)
+        return found
+
+    # First pass: which steps each task becomes, and where its consumers read from.
+    counter = 0
+
+    def next_id() -> str:
+        nonlocal counter
+        counter += 1
+        return str(counter)
+
+    plans: dict[str, dict] = {}
+    conditions_kept, untranslated, nested, by_reference = [], [], [], []
+    for record in records:
+        task, task_name, incoming = record["task"], record["name"], links[record["name"]]
+        when = str(task.get("when") or "").strip()
+        looped = any(key in task for key in _LOOP_KEYS)
+        map_source = None
+        if looped and incoming:
+            map_source = (referenced(record, "withParam") or [s for s, (a, _o) in incoming.items() if not a] or list(incoming))[0]
+        condition_source = None
+        if when:
+            candidates = referenced(record, "when") or (list(incoming) if len(incoming) == 1 else [])
+            # Inside a loop the condition is checked for each item, which a Condition before the loop cannot do.
+            if candidates and "{{item" not in when and (not looped or candidates[0] == map_source):
+                condition_source = candidates[0]
+            else:
+                conditions_kept.append(task_name)
+        kind = "task"
+        if len(names) > 1 and not looped:
+            if not incoming and children[task_name]:
+                kind = "source"
+            elif incoming and not children[task_name]:
+                kind = "destination"
+        plan = {
+            "kind": kind, "when": when, "looped": looped,
+            "condition_source": condition_source, "map_source": map_source,
+            "items": next_id() if looped and not incoming else "",
+            "condition": next_id() if condition_source else "",
+            "map": next_id() if looped else "",
+            "id": next_id(),
+            "collect": next_id() if looped else "",
+        }
+        plan["exit"] = (plan["collect"], "items") if looped else (plan["id"], {"source": "data"}.get(kind, "output"))
+        plans[task_name] = plan
+        template = templates.get(str(task.get("template") or ""))
+        if isinstance(template, dict) and ("dag" in template or "steps" in template):
+            nested.append(task_name)
+        if task.get("templateRef"):
+            by_reference.append(task_name)
+
+    def node(node_id: str, kind: str, label: str, description: str, ports: dict, behavior: str = "", param: dict | None = None) -> dict:
+        data: dict[str, Any] = {"type": kind, "label": label, "description": description, "ports": ports}
+        if behavior:
+            data["template_label"] = behavior
+        if param:
+            data["param"] = param
+        return {"id": node_id, "type": "custom", "position": {"x": 0.0, "y": 0.0}, "data": data}
+
+    def flow(node_id: str, behavior: str, label: str, description: str, param: dict | None = None) -> dict:
+        return node(node_id, "flow", label, description, ports_for_template(None, "flow", behavior), behavior, param)
+
+    # Second pass: the steps and their connections.
+    nodes, edges = [], []
+    for record in records:
+        task, task_name, incoming = record["task"], record["name"], links[record["name"]]
+        plan = plans[task_name]
+        kind, label = plan["kind"], _humanize(str(task["name"]))
+        quoted = f"Argo task “{task['name']}”" + (f" of the nested task “{record['parent']}”" if record["parent"] else "")
+        loop_text = next((f"{key}: {json.dumps(task[key], ensure_ascii=False)[:200]}" for key in _LOOP_KEYS if key in task), "")
+
+        if plan["items"]:
+            nodes.append(node(plan["items"], "source", f"{label} items",
+                              f"The list that {quoted} runs over ({loop_text}).", normalize_node_ports(None, "source")))
+            edges.append(_edge(plan["items"], "data", plan["map"], "items"))
+        if plan["condition"]:
+            expression = _condition_expression(plan["when"])
+            if not expression:
+                untranslated.append(task_name)
+            nodes.append(flow(
+                plan["condition"], "Condition", f"{label}?",
+                f"Condition of {quoted}: {plan['when'][:300]}"
+                + ("" if expression else " This expression could not be translated; enter it for this step."),
+                {"expression": expression} if expression else None,
+            ))
+        if plan["map"]:
+            nodes.append(flow(plan["map"], "Parallel Map", f"For each item of {label}",
+                              f"Runs {quoted} once for each item ({loop_text})."))
+
+        ports: list[dict[str, Any]] = []
+        used: set[str] = set()
+
+        def input_port(source: str, argument: str) -> str:
+            if len(incoming) <= 1 and not argument:
+                port_id = {"task": "input", "destination": "data"}.get(kind, "input")
+            else:
+                port_id = _slug(argument or source.split("/")[-1], "input")
+            while port_id in used:
+                port_id += "_2"
+            used.add(port_id)
+            ports.append({"id": port_id, "name": argument or _humanize(source.split("/")[-1]), "type": "any", "required": True, "description": ""})
+            return port_id
+
+        if plan["items"]:
+            edges.append(_edge(plan["map"], "item", plan["id"], input_port("item", "")))
+        for source, (argument, _output) in incoming.items():
+            start = plans[source]["exit"]
+            port_id = input_port(source, argument)
+            if source == plan["condition_source"]:
+                edges.append(_edge(*start, plan["condition"], "value"))
+                start = (plan["condition"], "when_true")
+            if source == plan["map_source"]:
+                edges.append(_edge(*start, plan["map"], "items"))
+                start = (plan["map"], "item")
+            edges.append(_edge(*start, plan["id"], port_id))
+
+        template = templates.get(str(task.get("template") or ""))
+        sentences = [quoted + "."]
+        if task_name in nested:
+            sentences.append(f"Runs the nested template “{task.get('template')}”, which has its own tasks.")
+        elif task_name in by_reference:
+            reference = task["templateRef"] if isinstance(task["templateRef"], dict) else {}
+            sentences.append(f"Runs the template “{reference.get('template')}” of “{reference.get('name')}”.")
+        elif _what_runs(template):
+            sentences.append(_what_runs(template))
+        if task_name in conditions_kept:
+            sentences.append(f"Runs only when: {plan['when'][:200]}")
+        declared: dict[str, Any] = {"inputs": ports} if kind != "source" and ports else {}
+        nodes.append(node(plan["id"], kind, label, " ".join(sentences), normalize_node_ports(declared, kind)))
+        if plan["collect"]:
+            nodes.append(flow(plan["collect"], "Collect", f"Collect {label} results",
+                              f"Gathers the results of {quoted} for all items."))
+            edges.append(_edge(plan["id"], "output", plan["collect"], "item"))
+
+    notes.insert(0, "The design was built from the workflow's tasks and their dependencies. "
+                    "A task without a predecessor became a Source, one without a successor a Destination.")
+    notes.append("Port types, parameters, code and data are not read from the workflow; every port has the type “any”.")
+    with_condition = [name for name, plan in plans.items() if plan["condition"]]
+    if with_condition:
+        notes.append("A Condition step was placed before each task with a condition (when): " + ", ".join(with_condition)
+                     + ". Argo skips such a task when the condition is false, so the “when false” output is not connected.")
+    if untranslated:
+        notes.append("These conditions are not one comparison of a task output with a value, so the original text is "
+                     "in the description of the Condition and its expression is empty: " + ", ".join(untranslated) + ".")
+    if conditions_kept:
+        notes.append("These conditions do not test the output of one earlier task, or are checked for each item of a "
+                     "loop, and were kept as text in the step description: " + ", ".join(conditions_kept) + ".")
+    looped_names = [name for name, plan in plans.items() if plan["looped"]]
+    if looped_names:
+        notes.append("Each loop (withItems, withParam, withSequence) became Parallel Map, the task and Collect: "
+                     + ", ".join(looped_names) + ". The concurrency and the failure policy are not set.")
+    if expanded:
+        notes.append("Nested workflows were opened into their own tasks: " + ", ".join(expanded) + ".")
+    if nested:
+        notes.append("These nested workflows were kept as one step each (a nested workflow with a condition or a loop, "
+                     "or inside another nested workflow): " + ", ".join(nested) + ".")
+    if by_reference:
+        notes.append("Tasks that use a template from another file were kept as one step each: " + ", ".join(by_reference) + ".")
+    return {"nodes": nodes, "edges": edges}
+
+
 def design_from_argo_workflow(document: Any, *, name: str = "") -> dict[str, Any]:
-    """Steps and connections of one Argo Workflows document (already parsed)."""
+    """Steps and connections of one Argo Workflows document (already parsed).
+
+    A workflow that inLUMEN exported records the type, label, description,
+    parameters and ports of each step, and these are read back. For a
+    workflow of any other origin the tasks become steps, a ``when`` becomes a
+    Condition, a loop becomes Parallel Map and Collect, and a nested template
+    is opened one level.
+    """
     if not isinstance(document, dict) or document.get("kind") not in ARGO_KINDS:
         raise ArtifactError("This is not an Argo Workflow, WorkflowTemplate or CronWorkflow.")
     spec = document.get("spec") if isinstance(document.get("spec"), dict) else {}
@@ -461,120 +918,19 @@ def design_from_argo_workflow(document: Any, *, name: str = "") -> dict[str, Any
         raise ArtifactError("The workflow's entrypoint has no tasks.")
     if len(tasks) > MAX_STEPS:
         raise ArtifactError(f"The workflow has more than {MAX_STEPS} tasks.")
-    names = [str(task["name"]) for task in tasks]
-    if len(set(names)) != len(names):
-        raise ArtifactError("The workflow lists a task name twice.")
-    ids = {task_name: str(index) for index, task_name in enumerate(names, start=1)}
-
-    # Who feeds whom: named data references first, then plain ordering.
-    links: dict[str, dict[str, tuple[str, str]]] = {}
-    conditional, looped, nested, by_reference = [], [], [], []
-    for task in tasks:
-        task_name = str(task["name"])
-        incoming: dict[str, tuple[str, str]] = {}
-        for source, argument, output in _references({key: task.get(key) for key in ("arguments", "when", "withParam", "withItems")}):
-            if source in ids and source != task_name:
-                incoming.setdefault(source, (argument, output))
-        ordering = set(task["_explicit"])
-        if isinstance(task.get("depends"), str):
-            expression = _DEPENDS_SUFFIX.sub("", task["depends"])
-            ordering |= {token for token in re.findall(r"[A-Za-z0-9_.-]+", expression) if token in ids}
-        for source in sorted(ordering, key=names.index):
-            if source in ids and source != task_name:
-                incoming.setdefault(source, ("", ""))
-        links[task_name] = incoming
-        if task.get("when"):
-            conditional.append(task_name)
-        if any(key in task for key in ("withItems", "withParam", "withSequence")):
-            looped.append(task_name)
-        template = templates.get(str(task.get("template") or ""))
-        if isinstance(template, dict) and ("dag" in template or "steps" in template):
-            nested.append(task_name)
-        if task.get("templateRef"):
-            by_reference.append(task_name)
-
-    children: dict[str, set[str]] = defaultdict(set)
-    for task_name, incoming in links.items():
-        for source in incoming:
-            children[source].add(task_name)
-
-    def kind_of(task_name: str) -> str:
-        if len(names) == 1:
-            return "task"
-        if not links[task_name] and children[task_name]:
-            return "source"
-        if links[task_name] and not children[task_name]:
-            return "destination"
-        return "task"
-
-    kinds = {task_name: kind_of(task_name) for task_name in names}
-    default_in = {"task": "input", "destination": "data"}
-    default_out = {"source": "data", "task": "output"}
-
-    edges, input_ports = [], {}
-    for task_name in names:
-        incoming = links[task_name]
-        kind = kinds[task_name]
-        ports: list[dict[str, Any]] = []
-        used: set[str] = set()
-        for source, (argument, _output) in incoming.items():
-            if len(incoming) == 1 and not argument:
-                port_id = default_in.get(kind, "input")
-            else:
-                port_id = _slug(argument or source, "input")
-            while port_id in used:
-                port_id += "_2"
-            used.add(port_id)
-            ports.append({"id": port_id, "name": argument or _humanize(source), "type": "any", "required": True, "description": ""})
-            edges.append(_edge(ids[source], default_out.get(kinds[source], "output"), ids[task_name], port_id))
-        input_ports[task_name] = ports
-
-    positions = _layout([ids[item] for item in names], {ids[key]: {ids[source] for source in value} for key, value in links.items()})
-    nodes = []
-    for task in tasks:
-        task_name = str(task["name"])
-        kind = kinds[task_name]
-        template = templates.get(str(task.get("template") or ""))
-        sentences = [f"Argo task “{task_name}”."]
-        if task_name in nested:
-            sentences.append(f"Runs the nested template “{task.get('template')}”, which has its own tasks.")
-        elif task_name in by_reference:
-            reference = task["templateRef"] if isinstance(task["templateRef"], dict) else {}
-            sentences.append(f"Runs the template “{reference.get('template')}” of “{reference.get('name')}”.")
-        elif _what_runs(template):
-            sentences.append(_what_runs(template))
-        if task.get("when"):
-            sentences.append(f"Runs only when: {str(task['when'])[:200]}")
-        if task_name in looped:
-            sentences.append("Runs once for each item of a list.")
-        ports: dict[str, Any] = {}
-        if kind != "source" and input_ports[task_name]:
-            ports["inputs"] = input_ports[task_name]
-        nodes.append({
-            "id": ids[task_name], "type": "custom", "position": positions[ids[task_name]],
-            "data": {
-                "type": kind, "label": _humanize(task_name), "description": " ".join(sentences),
-                "ports": normalize_node_ports(ports, kind),
-            },
-        })
-
-    notes.insert(0, "The design was built from the workflow's tasks and their dependencies. "
-                    "A task without a predecessor became a Source, one without a successor a Destination.")
-    notes.append("Port types, parameters, code and data are not read from the workflow; every port has the type “any”.")
-    if conditional:
-        notes.append("Conditions (when) are kept as text in the step description, not as Condition steps: " + ", ".join(conditional) + ".")
-    if looped:
-        notes.append("Loops (withItems, withParam, withSequence) are kept as text, not as Parallel Map and Collect: " + ", ".join(looped) + ".")
-    if nested:
-        notes.append("Nested workflows were kept as one step each: " + ", ".join(nested) + ".")
-    if by_reference:
-        notes.append("Tasks that use a template from another file were kept as one step each: " + ", ".join(by_reference) + ".")
+    if _is_inlumen_export(tasks, templates):
+        graph = _design_from_inlumen_argo(tasks, templates, notes)
+    else:
+        graph = _design_from_foreign_argo(tasks, templates, notes)
+    if len(graph["nodes"]) > MAX_STEPS:
+        raise ArtifactError(f"The design would have more than {MAX_STEPS} steps.")
+    _relayout(graph)
     if spec.get("onExit"):
         notes.append(f"The exit handler “{spec['onExit']}” is not part of the design.")
     metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
     workflow_name = str(metadata.get("name") or metadata.get("generateName") or "").rstrip("-")
     description = f"Imported from the Argo {document['kind']}" + (f" “{workflow_name}”." if workflow_name else ".")
-    return _result("argo-workflow", {"nodes": nodes, "edges": edges}, name or _humanize(workflow_name) or "Imported workflow", description, notes)
+    return _result("argo-workflow", graph, name or _humanize(workflow_name) or "Imported workflow", description, notes)
 
 
 def _argo_document(text: str) -> dict:
