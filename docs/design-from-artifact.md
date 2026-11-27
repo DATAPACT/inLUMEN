@@ -143,5 +143,5 @@ Limits: 50 MiB for a ZIP, 5 MiB for a manifest or workflow file, 500 steps,
 
 Dagster projects and other workflow formats are not read by rule; inside a
 ZIP they are treated as code. A design inferred from a ZIP of code gets no
-code or data attached. Follow-up issues: a preview before the canvas is
-replaced (#223), and Argo conditions and loops as steps (#224).
+code or data attached. Follow-up issue: Argo conditions and loops as steps
+(#224).
