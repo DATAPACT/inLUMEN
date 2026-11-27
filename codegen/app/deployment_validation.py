@@ -194,6 +194,28 @@ def deployment_execution_progress(execution_id: str) -> dict[str, Any]:
     return payload
 
 
+def _run_tool_network(client) -> str | None:
+    """Name of the Docker network that a pipeline run joins, if there is one.
+
+    A run starts on Docker's default network, apart from the application's own
+    services. A tool that is only reachable on a private Docker network (a
+    plugin deployed next to inLUMEN) joins the network named by
+    INLUMEN_RUN_TOOL_NETWORK; the run then joins it too. The network is
+    optional: when it is unset or does not exist, the run keeps the default.
+    """
+    name = os.getenv("INLUMEN_RUN_TOOL_NETWORK", "").strip()
+    if not name:
+        return None
+    try:
+        found = client.networks.list(names=[name])
+    except DockerException:
+        return None
+    # Docker matches names as substrings; only the exact network counts.
+    if any(getattr(network, "name", None) == name for network in found):
+        return name
+    return None
+
+
 def _isolated_runtime_environment(
     runtime_secrets: dict[str, str] | None,
     *,
@@ -792,6 +814,7 @@ def _isolated_dagster_execution(
                 else {}
             ),
         }
+        tool_network = _run_tool_network(client)
         container = client.containers.run(
             image.id,
             command=["python", "-c", _materialize_script() if materialize else _validation_script()],
@@ -812,6 +835,7 @@ def _isolated_dagster_execution(
             stdout=True,
             stderr=True,
             labels={"inlumen.codegen.run_id": execution_id},
+            **({"network": tool_network} if tool_network else {}),
         )
         _set_deployment_progress(
             execution_id,

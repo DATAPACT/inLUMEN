@@ -55,6 +55,52 @@ class IsolatedRuntimeEnvironmentTest(unittest.TestCase):
             self.assertEqual(client.containers.run.call_args.kwargs["environment"]["OMP_NUM_THREADS"], "2")
             self.assertFalse(controller._active)
 
+    def _run_with_tool_network(self, setting, existing):
+        from app.deployment_validation import _isolated_dagster_execution
+        from inlumen.codegen.resource_policy import GIB, ResourceAdmissionController
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            (root / "bundle-manifest.json").write_text("{}")
+            project = root / "dagster"
+            project.mkdir()
+            (project / "Dockerfile").write_text("FROM python:3.11-slim\n")
+            (project / "requirements.txt").write_text("")
+            client = mock.Mock()
+            client.info.return_value = {"NCPU": 8, "MemTotal": 30 * GIB}
+            client.images.build.return_value = (mock.Mock(id="built-image"), [])
+            networks = []
+            for name in existing:
+                network = mock.Mock()
+                network.name = name
+                networks.append(network)
+            client.networks.list.return_value = networks
+            container = client.containers.run.return_value
+            container.wait.return_value = {"StatusCode": 0}
+            container.logs.return_value = b""
+            controller = ResourceAdmissionController(max_active_runs=2)
+            environment = {"INLUMEN_RUN_TOOL_NETWORK": setting}
+            with mock.patch.dict(os.environ, environment), \
+                 mock.patch("app.deployment_validation.docker.from_env", return_value=client), \
+                 mock.patch("app.deployment_validation.RESOURCE_ADMISSION", controller):
+                report = _isolated_dagster_execution(
+                    project, execution_id="tool-network", timeout_seconds=60, runtime_secrets=None
+                )
+            self.assertTrue(report["ok"], report)
+            return client.containers.run.call_args.kwargs
+
+    def test_run_joins_the_tool_network_when_it_exists(self):
+        kwargs = self._run_with_tool_network("inlumen_tools", ["inlumen_tools"])
+        self.assertEqual(kwargs["network"], "inlumen_tools")
+
+    def test_run_keeps_the_default_network_without_a_tool_network(self):
+        # Unset, missing, and a network whose name only contains the setting.
+        self.assertNotIn("network", self._run_with_tool_network("", ["inlumen_tools"]))
+        self.assertNotIn("network", self._run_with_tool_network("inlumen_tools", []))
+        self.assertNotIn(
+            "network", self._run_with_tool_network("inlumen_tools", ["other_inlumen_tools_2"])
+        )
+
     def test_read_only_runtime_has_writable_cache_locations(self):
         environment = _isolated_runtime_environment(
             {"API_TOKEN": "secret"},

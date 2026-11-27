@@ -184,6 +184,8 @@ services:
       CODEGEN_DEPENDENCY_INSTALL_TIMEOUT_SECONDS: ${CODEGEN_DEPENDENCY_INSTALL_TIMEOUT_SECONDS:-600}
       # Dagster workers create persistent per-workspace caches on demand.
       INLUMEN_MODEL_STORE_VOLUME: ${INLUMEN_MODEL_STORE_VOLUME:-inlumen_model_store}
+      # Runs join this Docker network when it exists; see docs/plugins.md.
+      INLUMEN_RUN_TOOL_NETWORK: ${INLUMEN_RUN_TOOL_NETWORK:-inlumen_tools}
       CODEGEN_INPUT_FILE_BASE_URL: http://backend:5000/api/files/content
       CODEGEN_INPUT_FILE_ALLOW_INSECURE_HTTP: "true"
       CODEGEN_INPUT_FILE_MAX_BYTES: ${CODEGEN_INPUT_FILE_MAX_BYTES:-52428800}
