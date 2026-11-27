@@ -68,6 +68,7 @@ import {
 import { createProjectDocument, projectDocumentToGraph } from '@/features/flow/projectIr';
 import { artifactKindLabel, designFromArtifact, isArtifactFile, isArtifactJson, needsModelConsent, type ArtifactDesign, type CodeZipConsentRequest } from '@/features/flow/designFromArtifact';
 import { CodeImportConsentDialog, ImportSummaryDialog } from './ArtifactImportDialogs';
+import { attachBundleFiles } from '@/features/flow/bundleAttachments';
 import {
   effectiveGenerationStatus,
   GENERATION_TERMINAL_STATUSES,
@@ -1979,7 +1980,12 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
 
   // Puts an imported design on the canvas. ``artifact`` is set when the
   // backend built it from a bundle, an Argo workflow or a ZIP of code.
-  const applyImportedDesign = async (flowData: unknown, artifact: ArtifactDesign | null) => {
+  const applyImportedDesign = async (
+    flowData: unknown,
+    artifact: ArtifactDesign | null,
+    // Runs once the design is saved; returns notes on what it attached.
+    afterSave?: () => Promise<string[]>,
+  ) => {
     const normalizedImport = projectDocumentToGraph(flowData);
     const importedNodes = normalizedImport.nodes;
     const importedEdges = normalizedImport.edges;
@@ -1991,11 +1997,28 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     setEdges(importedEdges);
     nodeId = getNextNumericNodeId(importedNodes, 1);
     requestGraphViewportFit(); // show the whole imported design
+    let attached = '';
+    if (artifact && afterSave) {
+      const attaching = toast.loading('Attaching the code and data of the bundle…');
+      try {
+        const notes = await afterSave();
+        attached = notes[0] ? ` ${notes[0]}` : '';
+        artifact = { ...artifact, notes: [...notes, ...artifact.notes] };
+        // The attachments changed the saved graph; show them on the canvas.
+        await syncFromBackend();
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : 'unknown error';
+        artifact = { ...artifact, notes: [`The code and data of the bundle were not attached (${reason}).`, ...artifact.notes] };
+      } finally {
+        toast.dismiss(attaching);
+      }
+    }
     if (artifact) {
+      const summary = artifact;
       toast.success(`Design imported from ${artifactKindLabel(artifact.kind)}`, {
         description: `${artifact.step_count} steps and ${artifact.connection_count} connections.`
-          + (artifact.kind === 'code-zip' ? ' Inferred by the model: check each step.' : ''),
-        action: { label: 'Details', onClick: () => setImportSummary(artifact) },
+          + (artifact.kind === 'code-zip' ? ' Inferred by the model: check each step.' : attached),
+        action: { label: 'Details', onClick: () => setImportSummary(summary) },
         duration: 12000,
       });
     } else {
@@ -2023,7 +2046,13 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       }
       const answer = await designFromArtifact(file);
       if (!needsModelConsent(answer)) {
-        await applyImportedDesign(answer.project, answer);
+        // A bundle ZIP also holds the Task code and the Source data of its design.
+        const fromBundleZip = answer.kind === 'inlumen-bundle' && /\.zip$/i.test(file.name);
+        await applyImportedDesign(
+          answer.project,
+          answer,
+          fromBundleZip ? async () => (await attachBundleFiles(file)).notes : undefined,
+        );
         return;
       }
       // A ZIP of code: the design is inferred by the model, so the user sees
