@@ -10,7 +10,7 @@ plans are kept for history: [Beta 6](beta6-release-plan.md),
 | | |
 |---|---|
 | Last release | [`v1.0.0-beta.6`](https://github.com/DATAPACT/inLUMEN/releases/tag/v1.0.0-beta.6), 2026-11-27, at `f61689b` |
-| `main` since then | documentation only |
+| `main` since then | pipeline runs can reach plugin tools on a private Docker network (#213, fixed by #215); documentation |
 | Deployed instance | follows `main`: every merge is deployed after its tests pass |
 | Agents library | `inlumen-agents` 1.0.0b6 is built from the release commit but not yet on PyPI; the latest version there is 1.0.0b6.dev6 |
 
@@ -22,9 +22,6 @@ Beta 7. The issues below are the candidates for it.
 - Publish `inlumen-agents` 1.0.0b6 to PyPI.
 - The generated-pipeline check of Beta 6 was done on a local stack. It was not
   repeated on the deployed instance.
-- Run containers are not on the Compose network, so the offline plugin example
-  in [Plugins](plugins.md) (`http://mock-tool:8099`) is unreachable from a run
-  (#213, planned below).
 
 ## Next: after Beta 6
 
@@ -34,7 +31,6 @@ Planned, not yet assigned to a release number.
 |---|---|
 | #194 | Reject edits that cannot pass validation before the agent loop |
 | #195 | Reduce the cost of small edits: fewer calls and a smaller prompt |
-| #213 | Offline plugin example is unreachable from a pipeline run |
 | #92 | Interactive tutorial (needs a specification first) |
 
 ## Later: exploratory
