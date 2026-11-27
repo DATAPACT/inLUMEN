@@ -105,7 +105,7 @@ export const FlowCanvasActionsPanel = ({
         variant="ghost"
         className="flex h-7 items-center gap-1 px-2"
         onClick={onImportClick}
-        title="Import Project JSON, an inLUMEN bundle ZIP, or an Argo Workflows file"
+        title="Import Project JSON, an inLUMEN bundle ZIP, an Argo Workflows file, or a ZIP of code"
       >
         <Upload className="h-3.5 w-3.5" />
         Import

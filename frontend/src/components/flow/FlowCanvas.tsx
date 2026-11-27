@@ -6,7 +6,7 @@ import { readStoredArray, releaseDraftProtection } from '@/lib/workspaceStorage'
 import { getWorkspaceStorage } from '@/lib/workspaceStorage';
 import { startPolling } from '@/lib/polling';
 import React, { useState, useCallback, useRef, useEffect, forwardRef, useImperativeHandle, useMemo } from 'react';
-import { ChatbotConfig } from '@/features/chat/chatbotService';
+import { ChatbotConfig, buildLLMRequestConfig } from '@/features/chat/chatbotService';
 import ReactFlow, {
   Node,
   Edge,
@@ -66,7 +66,7 @@ import {
   type NormalizedGraph,
 } from '@/features/flow/flowGraph';
 import { createProjectDocument, projectDocumentToGraph } from '@/features/flow/projectIr';
-import { artifactKindLabel, designFromArtifact, isArtifactFile, isArtifactJson, type ArtifactDesign } from '@/features/flow/designFromArtifact';
+import { artifactKindLabel, codeZipConsentText, designFromArtifact, isArtifactFile, isArtifactJson, needsModelConsent, type ArtifactDesign } from '@/features/flow/designFromArtifact';
 import {
   effectiveGenerationStatus,
   GENERATION_TERMINAL_STATUSES,
@@ -1971,13 +1971,37 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       // Project JSON by the backend; a Project JSON file is read here.
       let artifact: ArtifactDesign | null = null;
       let flowData: unknown;
+      const fromArtifact = async (): Promise<ArtifactDesign | null> => {
+        const answer = await designFromArtifact(file);
+        if (!needsModelConsent(answer)) return answer;
+        // A ZIP of code: the design is inferred by the model, so the user
+        // sees which files would be sent and decides first.
+        if (!activeChatbotConfig) {
+          throw new Error('This ZIP holds code. Choose a model in Settings to build a design from it.');
+        }
+        const modelName = [activeChatbotConfig.provider, activeChatbotConfig.model].filter(Boolean).join(' / ');
+        if (!window.confirm(codeZipConsentText(answer, modelName))) return null;
+        const importing = toast.loading('Reading the code with the model…');
+        try {
+          const design = await designFromArtifact(file, {
+            consent: true,
+            llmConfig: buildLLMRequestConfig(activeChatbotConfig),
+          });
+          if (needsModelConsent(design)) throw new Error('The design was not built.');
+          return design;
+        } finally {
+          toast.dismiss(importing);
+        }
+      };
       if (isArtifactFile(file)) {
-        artifact = await designFromArtifact(file);
+        artifact = await fromArtifact();
+        if (!artifact) return;
         flowData = artifact.project;
       } else {
         flowData = JSON.parse(await file.text());
         if (isArtifactJson(flowData)) {
-          artifact = await designFromArtifact(file);
+          artifact = await fromArtifact();
+          if (!artifact) return;
           flowData = artifact.project;
         }
       }
@@ -1995,7 +2019,9 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
         toast.success(`Design imported from ${artifactKindLabel(artifact.kind)}`, {
           description: [
             `${artifact.step_count} steps and ${artifact.connection_count} connections.`,
-            ...artifact.notes.slice(1),
+            ...(artifact.kind === 'code-zip'
+              ? artifact.notes.map((note) => (note.length > 320 ? `${note.slice(0, 317)}…` : note))
+              : artifact.notes.slice(1)),
           ].join(' '),
           duration: 20000,
         });

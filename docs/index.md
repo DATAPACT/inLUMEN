@@ -14,7 +14,7 @@ installation and use.
 
 - [Plugins](./plugins.md)
 - [Portable Task packages](./task-packages.md)
-- [Design from a deployment artifact](./design-from-artifact.md): import an inLUMEN bundle or an Argo workflow as a design
+- [Design from a deployment artifact or from code](./design-from-artifact.md): import an inLUMEN bundle, an Argo workflow or a ZIP of code as a design
 - [Pipeline run outputs and lineage](./operations/run-artifacts.md)
 - [Authenticated uploads and codegen inputs](./operations/authenticated-file-inputs.md)
 - [Argo bundle release check](./operations/argo-bundle-verification.md)

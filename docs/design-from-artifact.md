@@ -1,16 +1,19 @@
-# Design from a deployment artifact
+# Design from a deployment artifact or from code
 
-**Import** on the canvas accepts three kinds of file. A Project JSON file is
-read as before. The other two are turned into a design by the backend, without
-a model:
+**Import** on the canvas accepts four kinds of file. A Project JSON file is
+read as before. The others are turned into a design by the backend:
 
-| File | What becomes the design |
-|---|---|
-| inLUMEN deployment bundle (`.zip`), or its `bundle-manifest.json` | The steps, port names and types, and connections listed in the manifest |
-| Argo Workflows file (`.yaml`, `.yml`, or JSON) of any origin | One step per task of the entrypoint, one connection per dependency |
+| File | What becomes the design | Model |
+|---|---|---|
+| inLUMEN deployment bundle (`.zip`), or its `bundle-manifest.json` | The steps, port names and types, and connections listed in the manifest | not used |
+| Argo Workflows file (`.yaml`, `.yml`, or JSON) of any origin, also inside a ZIP | One step per task of the entrypoint, one connection per dependency | not used |
+| ZIP of code (for example a Python script with its README) | The steps that the model reads from the code | used, after you agree |
+
+An inLUMEN bundle is the ZIP that inLUMEN's own export produces; it holds a
+`bundle-manifest.json`. Any other ZIP with code files is a ZIP of code.
 
 The import replaces the canvas, like a Project JSON import. Nothing in the
-file is executed, and only the bundle manifest is read from a ZIP.
+file is executed.
 
 ## inLUMEN bundle
 
@@ -55,16 +58,56 @@ documents, the first is imported. A `Workflow` that only refers to a
 After the import, a message lists what the file did not say. If the resulting
 design does not pass validation, the message says why.
 
+## ZIP of code
+
+A ZIP without a bundle manifest and without an Argo workflow file is read as
+code. A design cannot be read from code by rule, so the design agent infers
+it with the model that is selected in the chat.
+
+Before anything is sent, a question lists the files that the model would
+read. Only after you agree are they sent:
+
+- **Read whole** (up to 60,000 characters each, 200,000 in total, 60 files):
+  `.py`, `.r`, `.sql`, `.sh`, `.md`, `.rst`, `.txt`, `.toml`, `.cfg`, `.ini`,
+  `.yaml`, `.yml`, `.json`, and files named `Dockerfile`, `Makefile`, `README`.
+- **First line only**: `.csv` and `.tsv` files, for the column names.
+- **Never read**, only listed by name: every other file, hidden files and
+  folders (names that start with a dot, such as `.env`), and the folders
+  `__pycache__`, `node_modules`, `site-packages`, `dist`, `build`.
+
+The agent is asked for one Source per input dataset, one Task per processing
+stage that the code or its documentation names, and one Destination per
+output. If its first design does not pass validation, it gets one more turn.
+
+What to expect:
+
+- The design is the model's reading of the code. Check each step against the
+  code. Two imports of the same ZIP can give different designs, for example
+  one Task or three for the same function.
+- No code or data is attached to the steps.
+- The first line of a table is sent as it is. If a table has no header row,
+  that line is data.
+- Do not import code that you may not share with the provider of the selected
+  model.
+
 ## API
 
 `POST /api/pipeline/design-from-artifact` with a multipart `file`. The answer
-holds `kind` (`inlumen-bundle` or `argo-workflow`), `project` (Project JSON),
-`notes`, `step_count` and `connection_count`. A file that is neither kind is
-answered with status 422 and the reason. The endpoint stores nothing.
+holds `kind` (`inlumen-bundle`, `argo-workflow` or `code-zip`), `project`
+(Project JSON), `notes`, `step_count` and `connection_count`. A file of no
+supported kind is answered with status 422 and the reason. The endpoint
+stores nothing.
 
-Limits: 50 MiB for a ZIP, 5 MiB for a manifest or workflow file, 500 steps.
+For a ZIP of code the first answer holds no design: `needs_model` is true and
+`files_to_send` and `files_not_sent` list the files. Send the request again
+with the form fields `consent=true` and `llm_config` (JSON) to build the
+design.
+
+Limits: 50 MiB for a ZIP, 5 MiB for a manifest or workflow file, 500 steps,
+4096 ZIP entries.
 
 ## Not covered
 
-Building a design from a ZIP of code files, from a Dagster project, or from
-other workflow formats is not implemented. See issue #98.
+Dagster projects and other workflow formats are not read by rule; inside a
+ZIP they are treated as code. Attaching the code of a ZIP to the steps is not
+implemented. See issue #98.
