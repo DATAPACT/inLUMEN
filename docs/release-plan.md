@@ -10,7 +10,7 @@ plans are kept for history: [Beta 6](beta6-release-plan.md),
 | | |
 |---|---|
 | Last release | [`v1.0.0-beta.6`](https://github.com/DATAPACT/inLUMEN/releases/tag/v1.0.0-beta.6), 2026-11-27, at `f61689b` |
-| `main` since then | pipeline runs can reach plugin tools on a private Docker network (#213, fixed by #215); documentation |
+| `main` since then | design from a bundle, an Argo workflow or a ZIP of code (#98); plain edits in one small model call (#218) and invalid single edits answered without a repair round (#217); plugin tools on a private Docker network (#215); one copy of the filesystem hand-off (#219) |
 | Deployed instance | follows `main`: every merge is deployed after its tests pass |
 | Agents library | `inlumen-agents` 1.0.0b6 is built from the release commit but not yet on PyPI; the latest version there is 1.0.0b6.dev6 |
 
@@ -29,8 +29,8 @@ Planned, not yet assigned to a release number.
 
 | Issue | Summary |
 |---|---|
-| #194 | Reject edits that cannot pass validation before the agent loop |
-| #195 | Reduce the cost of small edits: fewer calls and a smaller prompt |
+| #194 | Reject edits that cannot pass validation before the agent loop (first part done in #217; a Flow behaviour switch can still take many model calls) |
+| #195 | Reduce the cost of small edits: fewer calls and a smaller prompt (plain edits done in #218; the full agent's prompt is unchanged) |
 | #92 | Interactive tutorial (needs a specification first) |
 
 ## Later: exploratory
@@ -39,8 +39,13 @@ Direction only; no commitment.
 
 | Issue | Summary |
 |---|---|
-| #98 | Build a pipeline design from existing code or a deployment artifact |
-| #205 | Reduce duplication and split the largest files |
+| #205 | Reduce duplication and split the largest files (first item done in #219) |
+| #222 | Attach code and data when a design is imported from a bundle or a code ZIP |
+| #223 | Show an imported design as a proposal before it replaces the canvas |
+| #224 | Map Argo conditions and loops to Condition and Parallel Map steps on import |
+
+#98 (a design from existing code or a deployment artifact) was closed by #220
+and #221; #222 to #224 are its follow-ups.
 
 ## Outside release criteria
 

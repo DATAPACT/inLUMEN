@@ -115,5 +115,6 @@ Limits: 50 MiB for a ZIP, 5 MiB for a manifest or workflow file, 500 steps,
 ## Not covered
 
 Dagster projects and other workflow formats are not read by rule; inside a
-ZIP they are treated as code. Attaching the code of a ZIP to the steps is not
-implemented. See issue #98.
+ZIP they are treated as code. Follow-up issues: attaching the code and data of
+a ZIP to the steps (#222), a preview before the canvas is replaced (#223), and
+Argo conditions and loops as steps (#224).
