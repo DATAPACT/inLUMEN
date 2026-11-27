@@ -1,0 +1,91 @@
+{
+  "recorded_at": "2026-11-27",
+  "where": "Local development stack (Docker Compose, authentication off) running the source of commit 20683d557b81b2865d1a1ce931b37a93ed83d8e3, later with the two fixes of this change. Not the deployed instance.",
+  "model": "openai/gpt-oss-120b through OpenRouter, for pipeline design and code generation",
+  "parallel_map_pipeline": {
+    "request": "Source with several text files, Parallel Map, word count per file, Collect, merge into one JSON, JSON Destination",
+    "design": "6 steps proposed by the design agent in the chat, previewed and applied",
+    "code_generation": {
+      "run": "100132e9",
+      "packages": 2,
+      "model_requests": 4,
+      "tokens": 54306,
+      "all_steps_validated": true
+    },
+    "inputs": {
+      "a.txt": 9,
+      "b.txt": 11,
+      "c.txt": 7
+    },
+    "runs": [
+      {
+        "run_id": "b4c64a0b5e0d46eab0e73cb5bf4fdd20",
+        "code": "20683d5",
+        "status": "failed",
+        "error": "Artifact size mismatch for nodes/node-3-word-count/node-manifest.json: expected 3889, got 3750"
+      },
+      {
+        "run_id": "8deac82f4ccb461f955c208d344f1a10",
+        "code": "20683d5 with a size-only fix",
+        "status": "failed",
+        "error": "Artifact checksum mismatch for nodes/node-3-word-count/node-manifest.json"
+      },
+      {
+        "run_id": "712e7e06f0b2410a8b90d013f6f85239",
+        "code": "with the manifest fix",
+        "status": "succeeded",
+        "outputs": 18,
+        "result": {
+          "total_word_count": 27,
+          "per_file": {
+            "a.txt": 9,
+            "b.txt": 11,
+            "c.txt": 7
+          }
+        }
+      }
+    ],
+    "argo_export": [
+      {
+        "code": "20683d5",
+        "result": "bundle validated, workflow stayed in ImagePullBackOff: image inlumen/pipeline:d6692c5120a6 is not built by the bundle"
+      },
+      {
+        "code": "with the exporter fix",
+        "workflow": "inlumen-codegen-m6fjd",
+        "status": "Succeeded",
+        "progress": "6/6",
+        "result_object": "my-bucket/inlumen/output/20261126T235745Z/step-6/data/merge_summary.json",
+        "total_word_count": 27,
+        "environment": {
+          "k3d": "v5.9.0",
+          "k3s": "v1.35.5-k3s1",
+          "argo_workflows": "v4.1.5"
+        }
+      }
+    ]
+  },
+  "plugin_pipeline": {
+    "request": "Source with one text file, Text Anonymizer plugin, JSON Destination",
+    "design": "3 steps proposed by the design agent; the plugin step has typed ports Text in, Object out",
+    "plugin": "examples/plugins/text-anonymizer.plugin.json with the mock tool of examples/plugins/mock_tool_server.py",
+    "runs": [
+      {
+        "run_id": "ca50014a92254cc1a2778af690613a3d",
+        "status": "failed",
+        "error": "Plugin 'Text Anonymizer' is unreachable at http://mock-tool:8099/tools/text-anonymizer: Name or service not known",
+        "cause": "Run containers are not on the Compose network, so the hostname of the documented offline example does not resolve from a run."
+      },
+      {
+        "run_id": "fb50037d0f0c4c4ba71c2f3dd80c306f",
+        "status": "succeeded",
+        "base_url": "http://host.docker.internal:8099/tools/text-anonymizer (mock tool served on the host)",
+        "result": {
+          "removed": 3
+        }
+      }
+    ],
+    "argo_export": "not done"
+  },
+  "scope": "Two pipelines on a local stack with one model. The input text used invented contact details. Not a test of the deployed instance, of authentication, or of the real third-party plugins."
+}

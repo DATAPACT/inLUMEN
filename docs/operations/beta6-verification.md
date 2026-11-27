@@ -25,11 +25,37 @@ the candidate checks at the end are repeated on that commit before the tag.
   from Beta 5 were opened with the checked commit; see the
   [compatibility statement](beta6-compatibility.md).
 
+## Generated pipelines (2026-11-27)
+
+Two pipelines were designed with the chat agent, generated, run and exported on
+a local stack running commit `20683d5`, with `openai/gpt-oss-120b`. The record is
+in [the evidence file](evidence/beta6-2026-11-27/generated-pipelines.json).
+
+| Pipeline | Design and code generation | Run | Argo export |
+|---|---|---|---|
+| Source with three text files → Parallel Map → word count → Collect → merge → Destination | 6 steps, all validated | **Failed on `20683d5`**; succeeded with the fix below (total 27 words, as expected) | **Unrunnable on `20683d5`**; 6 of 6 steps succeeded with the fix below |
+| Source → Text Anonymizer plugin → Destination | 3 steps, plugin step with typed ports | Succeeded, 3 identifiers removed, with the mock tool served on the host | Not done |
+
+Two defects were found and fixed with this record:
+
+- A pipeline with a Parallel Map could not run from the application. Lifting a
+  step into the map rewrites its `node-manifest.json` but kept the stored size
+  and checksum, so the run bundle failed its integrity check.
+- The Argo export of such a pipeline used the old workflow, which names an image
+  the bundle never builds; the workflow stayed in `ImagePullBackOff`.
+
+One limit was found and not fixed: run containers are not on the Compose
+network, so the offline plugin example in [Plugins](../plugins.md)
+(`http://mock-tool:8099`) passes **Check endpoint** but is unreachable from a
+run.
+
+Because of the two fixes, `20683d5` is no longer the candidate. The candidate
+checks at the end of this page are repeated on the commit that contains them.
+
 ## Not done yet
 
-- One generated pipeline per new area designed, run and exported **on the
-  deployed instance**: typed ports with a Parallel Map, a plugin step, an Argo
-  bundle. The checks above use the supplied example and no language model.
+- The generated-pipeline check **on the deployed instance**. It was done on a
+  local stack instead (see above).
 - The Argo bundle with reviewed models, and the run with models included in the
   image ([Argo bundle release check](argo-bundle-verification.md), sections 2
   and 5).
