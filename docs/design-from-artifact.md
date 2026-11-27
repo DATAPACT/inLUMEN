@@ -66,16 +66,56 @@ Read: `Workflow`, `WorkflowTemplate`, `ClusterWorkflowTemplate` and
 - The step description says what the task runs (image and command), taken
   from its template.
 
-Kept as text in the description, not as steps of their own:
+Conditions, loops and nested workflows:
 
-- conditions (`when`) are not turned into Condition steps;
-- loops (`withItems`, `withParam`, `withSequence`) are not turned into Parallel
-  Map and Collect;
-- a nested `dag` or `steps` template, and a template from another file
-  (`templateRef`), stay one step.
+- **Condition (`when`).** A Condition step is placed before the task, between
+  it and the task whose output the condition tests. One comparison of one
+  task output with a value is translated: `{{tasks.check.outputs.result}} ==
+  heads` becomes `value == "heads"`, and `…outputs.parameters.rows}} > 100`
+  becomes `value.rows > 100`. Any other condition still gets a Condition step,
+  with the original text in its description and an empty expression to fill
+  in. Argo skips a task whose condition is false, so the "when false" output
+  is not connected.
+- **Loop (`withItems`, `withParam`, `withSequence`).** The task becomes
+  Parallel Map, the task, and Collect. The task that `withParam` names feeds
+  the Parallel Map. A loop over a fixed list or a sequence has no step that
+  produces the list, so a Source stands for it. The concurrency and the
+  failure policy are not set.
+- **Nested `dag` or `steps` template.** It is opened one level: its tasks
+  become steps, the first of them read what the nested task read, and the
+  consumers of the nested task read from the last of them.
 
-Not read: port types (every port has the type "any"), parameters, exit
-handlers, and the code inside the images. When a file holds several workflow
+Kept as one step or as text:
+
+- a condition on something that is not the output of one earlier task (a
+  workflow parameter, for example), or a condition inside a loop, which Argo
+  checks for each item: the text is in the step description;
+- a nested template that has a condition or a loop of its own, or that sits
+  inside another nested template;
+- a template from another file (`templateRef`).
+
+inLUMEN allows a step inside a loop to read only from the loop. When a looped
+Argo task also reads from another task, the import keeps that connection and
+the message says that the design does not pass validation yet.
+
+### A workflow that inLUMEN exported
+
+inLUMEN writes each step, Flow steps included, as one Argo task and records
+the step in annotations (`inlumen.ai/flow-id`, `inlumen.ai/type`,
+`inlumen.ai/label`, `inlumen.ai/template`). When these are present, the import
+reads the design back from them instead of guessing from the structure: step
+types, labels, descriptions, parameters and the connections, so a Parallel
+Map, a Collect and a Condition come back as they were. A bundle with
+generated code also records the port names, and these come back too. A
+workflow exported without generated code records the order only: the ports
+get their default names, and the first step after a Condition is connected to
+"when true" and the second to "when false".
+
+The bundle ZIP holds more than its `workflow.yaml` (port types, code and
+data), so import the ZIP when you have it.
+
+Not read from a workflow of other origin: port types (every port has the type
+"any"), parameters, exit handlers, and the code inside the images. When a file holds several workflow
 documents, the first is imported. A `Workflow` that only refers to a
 `WorkflowTemplate` cannot be imported; import the template file.
 
@@ -143,5 +183,4 @@ Limits: 50 MiB for a ZIP, 5 MiB for a manifest or workflow file, 500 steps,
 
 Dagster projects and other workflow formats are not read by rule; inside a
 ZIP they are treated as code. A design inferred from a ZIP of code gets no
-code or data attached. Follow-up issue: Argo conditions and loops as steps
-(#224).
+code or data attached.

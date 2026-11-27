@@ -41,10 +41,10 @@ Direction only; no commitment.
 |---|---|
 | #205 | Reduce duplication and split the largest files (first item done in #219) |
 | #222 | Attach code and data when a design is imported from a bundle or a code ZIP (done for a bundle; open for a code ZIP) |
-| #224 | Map Argo conditions and loops to Condition and Parallel Map steps on import |
 
 #98 (a design from existing code or a deployment artifact) was closed by #220
-and #221; #222 to #224 are its follow-ups.
+and #221. Of its follow-ups, #224 (Argo conditions and loops) is done and
+#223 (a preview before the import) was not planned; #222 is still open.
 
 ## Outside release criteria
 
