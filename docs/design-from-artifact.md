@@ -12,8 +12,10 @@ read as before. The others are turned into a design by the backend:
 An inLUMEN bundle is the ZIP that inLUMEN's own export produces; it holds a
 `bundle-manifest.json`. Any other ZIP with code files is a ZIP of code.
 
-The import replaces the canvas, like a Project JSON import. Nothing in the
-file is executed.
+The import replaces the canvas, like a Project JSON import. If the canvas
+held steps, the message after the import has an **Undo** button that brings
+them back; the Undo button of the toolbar does the same. Nothing in the file
+is executed.
 
 ## inLUMEN bundle
 
@@ -83,8 +85,8 @@ design does not pass validation, the message says why.
 ## ZIP of code
 
 A ZIP without a bundle manifest and without an Argo workflow file is read as
-code. A design cannot be read from code by rule, so the design agent infers
-it with the model that is selected in the chat.
+code. A design cannot be read from code by rule, so the model that is
+selected in the chat infers it.
 
 Before anything is sent, a dialog names the model and lists the files that it
 would read, with what is sent of each. Only after **Send and build design**
@@ -98,9 +100,12 @@ are they sent:
   folders (names that start with a dot, such as `.env`), and the folders
   `__pycache__`, `node_modules`, `site-packages`, `dist`, `build`.
 
-The agent is asked for one Source per input dataset, one Task per processing
+The model is asked for one Source per input dataset, one Task per processing
 stage that the code or its documentation names, and one Destination per
-output. If its first design does not pass validation, it gets one more turn.
+output. It answers with the whole design in one reply, and inLUMEN creates the
+steps from that reply under the same rules as for the chat. This takes a few
+seconds. A design that is rejected or does not pass validation is sent back
+with the reason, at most twice.
 
 The finished design is laid out from left to right in the order of its
 connections, each step in a row of its own, and the view is fitted to it. A

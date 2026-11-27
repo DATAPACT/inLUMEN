@@ -717,34 +717,47 @@ def test_create_steps_sets_the_pipeline_name_but_never_its_version():
 
 
 
-def test_design_from_code_builds_a_design_and_repairs_it_once():
-    """Issue #98: the agent reads code files; an invalid first design gets one more turn."""
-    from inlumen.design.from_code import CodeFile, code_task, design_from_code
+def test_design_from_code_builds_a_design_in_one_call_and_repairs_it():
+    """Issue #98: one model reply holds the whole design; code builds it."""
+    from inlumen.design.from_code import CodeFile, code_files_text, design_from_code
 
     files = [CodeFile("main.py", "def run(i, o):\n    ...\n"), CodeFile("data/in.csv", "a,b", "first line only")]
-    task = code_task(files, ["model.bin"])
-    assert "===== main.py (whole file) =====" in task and "===== data/in.csv (first line only) =====" in task
-    assert "- model.bin" in task and task.index("Build the pipeline design") == 0
+    text = code_files_text(files, ["model.bin"])
+    assert "===== main.py (whole file) =====" in text and "===== data/in.csv (first line only) =====" in text
+    assert "- model.bin" in text
 
-    steps = [
-        {"type": "source", "label": "Input", "description": "Reads in.csv"},
-        {"type": "task", "label": "Run", "description": "run() in main.py"},
+    source = {"id": "input", "type": "source", "label": "Input", "description": "Reads in.csv"}
+    run = {"id": "run", "type": "task", "label": "Run", "description": "run() in main.py", "after": "input"}
+    outputs = [
+        {"id": "out", "type": "destination", "label": "Output", "description": "Writes the result", "after": "run"},
+        # A second consumer of the same step needs no flag from the model.
+        {"id": "log", "type": "destination", "label": "Log", "description": "Writes the log", "after": "run"},
     ]
-    model = _scripted(
-        _call("create_steps", steps=steps),
-        _reply("Input feeds Run."),
-        # The first design has no destination; the repair turn adds one.
-        _call("create_steps", type="destination", label="Output", description="Writes the result"),
-        _reply("Input feeds Run, which writes Output."),
-    )
-    result = asyncio.run(design_from_code(files, model=model, name="Example"))
+    valid = json.dumps({"summary": "Input feeds Run, which writes Output and Log.", "steps": [source, run, *outputs]})
 
-    assert result.repaired and result.validation_errors == []
-    assert [n["data"]["label"] for n in sorted(result.graph["nodes"], key=lambda n: n["id"])] == ["Input", "Run", "Output"]
-    assert result.message == "Input feeds Run, which writes Output."
-    assert result.project["project"]["name"] == "Example" and len(result.requests) == 4
+    result = asyncio.run(design_from_code(files, model=_scripted(_reply(f"```json\n{valid}\n```")), name="Example"))
+    assert not result.repaired and result.validation_errors == [] and len(result.requests) == 1
+    assert [n["data"]["label"] for n in sorted(result.graph["nodes"], key=lambda n: n["id"])] == ["Input", "Run", "Output", "Log"]
+    assert len(result.graph["edges"]) == 3
+    assert result.message == "Input feeds Run, which writes Output and Log."
+    assert result.project["project"]["name"] == "Example"
 
-    with pytest.raises(ValueError, match="created no step|cannot"):
-        asyncio.run(design_from_code(files, model=_scripted(_reply("I cannot read this."))))
+    # A reply that is no design, then a design without an output, then a valid one.
+    model = _scripted(_reply("Here is the design."), _reply(json.dumps({"steps": [source, run]})), _reply(valid))
+    result = asyncio.run(design_from_code(files, model=model))
+    assert result.repaired and result.validation_errors == [] and len(result.requests) == 3
+    assert len(result.graph["nodes"]) == 4
+
+    # No repair left: the design that could be built comes back with its errors.
+    model = _scripted(_reply(json.dumps({"summary": "Short.", "steps": [source, run]})))
+    result = asyncio.run(design_from_code(files, model=model, max_repairs=0))
+    assert result.validation_errors and len(result.graph["nodes"]) == 2 and result.message == "Short."
+
+    # A step that the tool rejects is not built at all.
+    broken = json.dumps({"steps": [source, {**run, "after": "missing"}]})
+    with pytest.raises(ValueError, match="rejected"):
+        asyncio.run(design_from_code(files, model=_scripted(_reply(broken)), max_repairs=0))
+    with pytest.raises(ValueError, match="not one JSON object"):
+        asyncio.run(design_from_code(files, model=_scripted(_reply("I cannot read this.")), max_repairs=0))
     with pytest.raises(ValueError, match="No code"):
         asyncio.run(design_from_code([], model=_scripted()))

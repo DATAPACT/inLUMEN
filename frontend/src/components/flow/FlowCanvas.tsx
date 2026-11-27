@@ -1989,6 +1989,14 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     const normalizedImport = projectDocumentToGraph(flowData);
     const importedNodes = normalizedImport.nodes;
     const importedEdges = normalizedImport.edges;
+    // The import replaces the canvas at once; the toast offers the way back.
+    const replacedSteps = nodes.length;
+    const undoImport = replacedSteps > 0
+      ? { label: 'Undo', onClick: () => { void undoGraphChange(); } }
+      : undefined;
+    const replaced = replacedSteps > 0
+      ? ` It replaced ${replacedSteps} step${replacedSteps === 1 ? '' : 's'}.`
+      : '';
     pushHistorySnapshot();
     onCanvasEdited?.();
     markLocalWrite(1200); // avoid immediate poll-refresh
@@ -2017,13 +2025,17 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       const summary = artifact;
       toast.success(`Design imported from ${artifactKindLabel(artifact.kind)}`, {
         description: `${artifact.step_count} steps and ${artifact.connection_count} connections.`
-          + (artifact.kind === 'code-zip' ? ' Inferred by the model: check each step.' : attached),
+          + (artifact.kind === 'code-zip' ? ' Inferred by the model: check each step.' : attached)
+          + replaced,
         action: { label: 'Details', onClick: () => setImportSummary(summary) },
+        cancel: undoImport,
         duration: 12000,
       });
     } else {
       toast.success('Project JSON imported', {
-        description: 'The Pipeline IR was migrated and the design state was reconstructed.',
+        description: 'The Pipeline IR was migrated and the design state was reconstructed.' + replaced,
+        cancel: undoImport,
+        duration: undoImport ? 12000 : undefined,
       });
     }
   };
@@ -2267,6 +2279,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
           fileName={codeImport?.file.name ?? ''}
           modelName={[activeChatbotConfig?.provider, activeChatbotConfig?.model].filter(Boolean).join(' / ')}
           busy={codeImportBusy}
+          replacedSteps={nodes.length}
           onConfirm={confirmCodeImport}
           onCancel={() => setCodeImport(null)}
         />
