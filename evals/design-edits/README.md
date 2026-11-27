@@ -20,6 +20,13 @@ canvas. It calls a real model, so it is run by hand, not in CI.
   change the canvas. The report counts model calls and repair rounds per kind;
   `--kind` runs one kind only.
 
+- `inputs/simple-edits.json` and `scripts/run_simple_edits.py`: eight delete,
+  three clear and four connect requests on an eight-step canvas, plus five
+  other requests (add, insert, replace, two deletes at once, a question) that
+  the quick path must hand to the full agent (issue #195). The report counts
+  model calls and prompt tokens per kind. Run it again with
+  `INLUMEN_DESIGN_FAST_EDITS=0` to compare with the full agent alone.
+
 ## How to run
 
 With an environment that has `inlumen-agents[design]` installed (for example
@@ -75,3 +82,27 @@ The target of issue #194, at most two model calls for all of these requests,
 is met for 30 of 33. "Change Collect invoices to a Parallel Map" still took 4
 and 15 calls in two of three runs: the agent made several edits, so the turn
 was not a single edit and kept its repair round.
+
+## Simple edits, 27 Nov 2026
+
+`openai/gpt-oss-120b` through OpenRouter, low reasoning. "Full agent" is the
+same code with `INLUMEN_DESIGN_FAST_EDITS=0`.
+
+Where the prompt of one full-agent call goes (six-step canvas, about 7,400
+tokens): rules 2,800, tool descriptions 3,300 (`create_steps` alone 1,040),
+request and canvas 1,070, component palette 220.
+
+| Kind | Full agent: calls, prompt tokens, time | Quick path: calls, prompt tokens, time | Correct with the quick path |
+|---|---|---|---|
+| Delete (8 requests) | 3 calls, about 24,400, 1.6 to 2.4 s | 1 call, about 710, 0.3 to 0.6 s | 24 of 24 |
+| Clear (3) | 2 calls, about 14,200, 1.1 s | 1 call, about 710, 0.3 to 0.4 s | 9 of 9 |
+| Connect (4) | 3 calls, 21,500 to 25,500, 1.6 to 1.8 s | 1 call, about 710, 0.4 to 0.5 s | 12 of 12 |
+| Other (5) | 1 to 6 calls | one more call of about 710 tokens | 15 of 15 |
+
+The full agent was run once per request for the first three rows (15 of 15
+correct) and four times for the other requests (20 of 20 correct); the quick
+path three times. Asked 20 times about the five other requests, the router
+answered "other" 20 times.
+
+Not measured: the self-hosted model, default reasoning, requests in other
+languages, and how often real requests are plain edits.
