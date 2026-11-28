@@ -967,11 +967,6 @@ def validate_dockerfile_artifacts(
         for step in (steps or [])
         if isinstance(step, dict)
     }
-    steps_by_id = {
-        _clean_string(step.get("flow_id")): step
-        for step in (steps or [])
-        if isinstance(step, dict)
-    }
     seen_ids: set[str] = set()
 
     for idx, artifact in enumerate(dockerfiles):
@@ -3878,11 +3873,6 @@ def build_dagster_project_files(
                 ],
             )
 
-        requirements_content = _deployment_file_content(
-            dockerfiles_payload,
-            step_id,
-            "requirements.txt",
-        )
         aggregate_requirements.extend(
             _package_dependencies(dockerfiles_payload, step_id)
         )
@@ -3998,11 +3988,6 @@ def build_dagster_project_files(
             f"../nodes/{node_dir}/{entrypoint_filename}"
             if bundle_layout
             else f"src/inlumen_dagster_project/scripts/{asset_name}/{entrypoint_filename}"
-        )
-        context_path = (
-            f"../nodes/{node_dir}/node-manifest.json"
-            if bundle_layout
-            else f"src/inlumen_dagster_project/artifacts/nodes/{_sanitize_fragment(step_id, 'step')}/node-manifest.json"
         )
         secret_parameter_names = _runtime_secret_parameters(step, dockerfiles_payload)
         runtime_environment = _runtime_environment_for_step(

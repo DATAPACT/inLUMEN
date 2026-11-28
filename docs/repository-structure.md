@@ -24,7 +24,7 @@ The entry points and cross-cutting helpers stay at the root of `backend/`; every
 
 | Package | Contents |
 |---|---|
-| root | `inlumen_api.py` (the gateway app and entry point), `analytics_api.py`, `public_api.py`, `migrate.py`, `dev_runner.py`, and the helpers every area uses (`runtime_config`, `observability`, `async_runtime`, `local_api_client`, `run_artifact_names`) |
+| root | `inlumen_api.py` (the gateway app and entry point), `analytics_api.py`, `public_api.py`, `migrate.py`, `dev_runner.py`, and the helpers every area uses (`runtime_config`, `flask_setup`, `async_runtime`, `local_api_client`, `run_artifact_names`) |
 | `auth/` | Authentication, permissions and encrypted secrets |
 | `workspaces/` | Workspace records, storage scoping and queries |
 | `storage/` | MinIO access, the object API and file validation |

@@ -87,6 +87,36 @@ is met for 30 of 33. "Change Collect invoices to a Parallel Map" still took 4
 and 15 calls in two of three runs: the agent made several edits, so the turn
 was not a single edit and kept its repair round.
 
+Since then the rule covers that case: when the turn ends invalid and every
+change in it was an edit that carried the note, all of these edits are undone
+without a repair round. A turn with one change that carried no note keeps its
+repair round. Scripted tests in `packages/agents/tests/test_design.py` cover
+both.
+
+One run on 28 Nov 2026 (same model and settings, 14 requests, `main` at
+`8f40894` against the extended rule):
+
+| Kind | `main`: model calls | Extended rule: model calls |
+|---|---|---|
+| Disconnect (7) | 3 in 7 of 7 | 3 in 6 of 7; 4 in one |
+| Remove the only destination (1) | 3 | 3 |
+| Flow behavior switch (3) | 2, 3, 3 | 14, 5, 3 |
+| Compound (3, must change the canvas) | 5, 5, 4; 3 of 3 correct | 5, 5, 4; 3 of 3 correct |
+
+All 14 requests ended as expected in both runs. One run does not show a
+gain from the extended rule:
+
+- In the request with 5 calls ("switch the For each invoice step to
+  Collect") the agent made several edits, the turn undid them and no repair
+  round ran. This is the case the rule was written for.
+- In the request with 14 calls ("change Collect invoices to a Parallel
+  Map") a repair round still ran. On `main` the agent declined the same
+  request in 2 calls in this run, and took 4 and 15 calls in two runs of
+  27 Nov. The number of calls for this request varies between runs more
+  than between the two versions.
+- A lone disconnect took 3 calls on both versions on this day, not 2 as on
+  27 Nov, with no repair round.
+
 ## Simple edits, 27 Nov 2026
 
 `openai/gpt-oss-120b` through OpenRouter, low reasoning. "Full agent" is the
