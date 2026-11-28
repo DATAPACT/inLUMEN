@@ -276,6 +276,136 @@ def test_an_invalid_edit_after_other_changes_still_gets_the_repair_round():
     assert _edge_pairs(result.graph) == [("10", "30"), ("30", "40")]
 
 
+def _map_collect_canvas() -> dict:
+    """Invoices -> For each invoice (Parallel Map) -> Extract -> Collect invoices -> Summarize -> Report."""
+    steps = [
+        ("1", "source", "Invoice PDFs", None), ("2", "flow", "For each invoice", "Parallel Map"),
+        ("3", "task", "Extract fields", None), ("4", "flow", "Collect invoices", "Collect"),
+        ("5", "task", "Summarize", None), ("6", "destination", "Report", None),
+    ]
+    links = [("1", "data", "2", "items"), ("2", "item", "3", "input"), ("3", "output", "4", "item"),
+             ("4", "items", "5", "input"), ("5", "output", "6", "data")]
+    return {
+        "nodes": [
+            {"id": flow_id, "type": "custom", "position": {"x": 300 * index, "y": 0}, "data": {
+                "type": kind, "label": label, "description": label,
+                **({"template_label": behavior} if behavior else {})}}
+            for index, (flow_id, kind, label, behavior) in enumerate(steps)
+        ],
+        "edges": [
+            {"id": f"e{index}", "source": source, "sourceHandle": source_port,
+             "target": target, "targetHandle": target_port}
+            for index, (source, source_port, target, target_port) in enumerate(links)
+        ],
+    }
+
+
+def _behaviors(graph: dict) -> dict[str, str]:
+    return {n["id"]: n["data"]["template_label"] for n in graph["nodes"] if n["data"]["type"] == "flow"}
+
+
+def test_several_edits_that_are_each_not_valid_alone_are_undone_without_a_repair_round():
+    """Issue #194: a Flow behavior switch tried through two edits gets no repair round."""
+    canvas = _map_collect_canvas()
+    model = _scripted(
+        _route(**OTHER),
+        _call("configure_flow_step", flow_id="4", behavior="Parallel Map"),
+        _call("configure_flow_step", flow_id="2", behavior="Collect"),
+        _reply("A Parallel Map needs a Collect after it, so I did not switch Collect invoices."),
+    )
+    result = asyncio.run(design("Change Collect invoices to a Parallel Map", model=model, graph=canvas))
+
+    assert result.usage["requests"] == 4  # the router, two tool calls, the explanation
+    assert not result.repaired
+    assert result.accepted and not result.sync["graph_changed"], result.sync
+    assert _behaviors(result.graph) == {"2": "Parallel Map", "4": "Collect"}
+    assert len(result.graph["edges"]) == 5
+    # The reasons of both edits are reported, each one once.
+    declined = result.sync["declined_edit"]
+    assert any("never reaches a Collect" in issue for issue in declined)
+    assert any("does not close a Parallel Map" in issue for issue in declined)
+    assert len(declined) == len(set(declined))
+    assert result.message.startswith("A Parallel Map needs a Collect")
+    assert "The pipeline was left unchanged. None of the 2 edits is valid on its own" in result.message
+
+
+def test_two_disconnects_that_are_each_not_valid_alone_are_undone():
+    canvas = _four_step_canvas()
+    model = _scripted(
+        _route(**OTHER),
+        _call("disconnect_steps", source_flow_id="20", target_flow_id="30",
+              source_port="output", target_port="input"),
+        _call("disconnect_steps", source_flow_id="30", target_flow_id="40",
+              source_port="output", target_port="data"),
+        _reply("Both steps would lose their input, so I kept the connections."),
+    )
+    result = asyncio.run(design("isolate language detection", model=model, graph=canvas))
+
+    assert result.usage["requests"] == 4 and not result.repaired
+    assert len(result.sync["declined_edit"]) == 2 and not result.sync["graph_changed"]
+    assert _edge_pairs(result.graph) == [("10", "20"), ("20", "30"), ("30", "40")]
+
+
+def test_a_valid_change_among_edits_that_are_not_valid_alone_keeps_the_repair_round():
+    """One change that carried no note is enough: the turn is not undone as a whole."""
+    canvas = _four_step_canvas()
+    model = _scripted(
+        _route(**OTHER),
+        _call("disconnect_steps", source_flow_id="30", target_flow_id="40",
+              source_port="output", target_port="data"),
+        _call("delete_step", flow_id="20"),  # valid alone: the chain absorbs it
+        _call("disconnect_steps", source_flow_id="10", target_flow_id="30",
+              source_port="data", target_port="input"),
+        _reply("Done."),
+        _call("connect_steps", source_flow_id="10", target_flow_id="30"),
+        _call("connect_steps", source_flow_id="30", target_flow_id="40"),
+        _reply("OCR is removed; Documents feeds Language detection, which feeds Report."),
+    )
+    result = asyncio.run(design("remove OCR and tidy up", model=model, graph=canvas))
+
+    assert result.repaired and result.accepted, result.sync
+    assert "declined_edit" not in result.sync
+    assert "left unchanged" not in result.message
+    assert _edge_pairs(result.graph) == [("10", "30"), ("30", "40")]
+
+
+def test_disconnect_matches_the_default_ports_of_a_connection_saved_without_handles():
+    """The graph shows default port ids for such a connection, so they must select it."""
+    canvas = _four_step_canvas()
+    for edge in canvas["edges"]:
+        del edge["sourceHandle"], edge["targetHandle"]
+    store = InMemoryGraphStore(canvas)
+    shown = {(e["source"], e["sourceHandle"], e["target"], e["targetHandle"]) for e in store.graph()["edges"]}
+    assert ("20", "output", "30", "input") in shown
+
+    # Port ids that are not the defaults of the two steps select nothing.
+    assert json.loads(asyncio.run(store.disconnect_steps("20", "30", "when_true", "input"))) == []
+    assert json.loads(asyncio.run(store.disconnect_steps("20", "30", "output", "data"))) == []
+    assert _edge_pairs(store.graph()) == [("10", "20"), ("20", "30"), ("30", "40")]
+
+    removed = json.loads(asyncio.run(store.disconnect_steps("20", "30", "output", "input")))
+    assert removed[0]["disconnected"]["deleted_connection_count"] == 1
+    assert asyncio.run(store.disconnect_steps("30", "40", "output", "data")) != "[]"  # Destination: data
+    assert _edge_pairs(store.graph()) == [("10", "20")]
+
+
+def test_a_lone_disconnect_is_declined_on_a_canvas_saved_without_handles():
+    canvas = _four_step_canvas()
+    for edge in canvas["edges"]:
+        del edge["sourceHandle"], edge["targetHandle"]
+    model = _scripted(
+        _route(**OTHER),
+        _call("disconnect_steps", source_flow_id="20", target_flow_id="30",
+              source_port="output", target_port="input"),
+        _reply("Language detection would have no input, so I did not disconnect it."),
+    )
+    result = asyncio.run(design("disconnect OCR from language detection", model=model, graph=canvas))
+
+    assert result.usage["requests"] == 3 and not result.repaired
+    assert result.sync["declined_edit"] and not result.sync["graph_changed"]
+    assert _edge_pairs(result.graph) == [("10", "20"), ("20", "30"), ("30", "40")]
+
+
 def test_a_plain_delete_takes_one_small_model_call():
     """Issue #195: the router names the step, code deletes it."""
     result = asyncio.run(design(

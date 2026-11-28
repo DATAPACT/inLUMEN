@@ -703,9 +703,14 @@ class InMemoryGraphStore:
             target = self._step(pipeline, flow_id=target_flow_id)
             if not source or not target:
                 continue
+            # A connection saved without handles has no port ids. It stands for
+            # the default ports of its two steps, which is what the graph shows
+            # for it, so it is matched by these ids.
+            default_source, default_target = _default_output_port(source), _default_input_port(target)
             matched = [
                 flow for flow in self._between(source, target)
-                if (flow["source_port"] or "") == source_port and (flow["target_port"] or "") == target_port
+                if source_port == (flow["source_port"] or default_source)
+                and target_port == (flow["target_port"] or default_target)
             ]
             if not matched:
                 return _rows([])
