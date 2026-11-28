@@ -211,6 +211,42 @@ describe('tour', () => {
     expect(document.activeElement).toBe(reopen);
   });
 
+  it('gives the focus to the Help button when the element that started the tour is gone', async () => {
+    window.localStorage.setItem(TOUR_SEEN_KEY, 'yes');
+    const help = addTarget('help', { left: 900, top: 10, width: 60, height: 30 });
+    await mount();
+    const reopen = document.querySelector<HTMLButtonElement>('#reopen')!;
+    const starter = document.createElement('button');
+    starter.addEventListener('click', () => reopen.click());
+    document.body.append(starter);
+    starter.focus();
+    await act(async () => starter.click());
+    starter.remove();
+    await press('Escape');
+    expect(dialog()).toBeNull();
+    expect(document.activeElement).toBe(help);
+    help.remove();
+  });
+
+  it('gives the focus to the Help button when the tour was started from a window that is closing', async () => {
+    window.localStorage.setItem(TOUR_SEEN_KEY, 'yes');
+    const help = addTarget('help', { left: 900, top: 10, width: 60, height: 30 });
+    await mount();
+    const reopen = document.querySelector<HTMLButtonElement>('#reopen')!;
+    const closing = document.createElement('div');
+    closing.setAttribute('data-state', 'closed');
+    const starter = document.createElement('button');
+    starter.addEventListener('click', () => reopen.click());
+    closing.append(starter);
+    document.body.append(closing);
+    starter.focus();
+    await act(async () => starter.click());
+    await press('Escape');
+    expect(document.activeElement).toBe(help);
+    closing.remove();
+    help.remove();
+  });
+
   it('keeps the focus inside the pop-up', async () => {
     await mount();
     await press('Tab');

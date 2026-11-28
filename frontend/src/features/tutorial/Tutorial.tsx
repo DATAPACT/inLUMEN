@@ -51,8 +51,12 @@ export function Tutorial({ open, onClose, steps = TOUR_STEPS }: TutorialProps) {
     setIndex(0);
     previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     return () => {
+      // The Help window closes when the tour starts from it, so its button is
+      // gone, or still inside the closing window: the focus then goes to the
+      // Help button of the header.
       const previous = previousFocusRef.current;
-      if (previous?.isConnected) previous.focus();
+      const usable = previous?.isConnected && !previous.closest('[data-state="closed"]');
+      (usable ? previous : document.querySelector<HTMLElement>('[data-tour="help"]'))?.focus();
     };
   }, [open]);
 
