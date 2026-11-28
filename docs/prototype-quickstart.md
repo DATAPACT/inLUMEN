@@ -65,6 +65,15 @@ Compose commands from its root and retain its filename/checksum; `git` commands
 require a checkout. No local Node installation is required for the container
 workflow; native frontend development requires Node 22.12+ and `npm ci`.
 
+## Guided tour
+
+On first use the app opens a short tour of the main parts of the workspace:
+the component library, the canvas, the chat, the inspector, Save, Import and
+JSON export, the Run tab, and Help. Use **Next** and **Back** to move through
+it, or **Skip** (or the Escape key) to close it. It opens by itself only once
+per browser. To open it again, click **Help** in the header and then
+**Start the tour**.
+
 ## Import, attach, and save
 
 1. On an empty evaluation canvas, use **Import** to select

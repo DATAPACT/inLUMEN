@@ -299,30 +299,68 @@ def _requested_topology_errors(graph: dict | None, user_message: str) -> list[st
 
 
 class EditWarnings:
-    """The latest edit that, taken alone, left the pipeline invalid.
+    """The edits of a turn that, each taken alone, left the pipeline invalid.
 
-    The editing tools fill it in; the turn reads it. When that edit is the only
-    change of the turn and the agent stops there, it was told why the edit is
-    not valid and chose to explain. The edit is then undone without a repair
-    round. A turn with more changes keeps its repair round.
+    The editing tools fill it in; the turn reads it. An edit is flagged when it
+    adds a validation error to the graph it started from, and the agent is told
+    so in the tool result. When the turn ends invalid and every change in it
+    was such an edit, the agent was told each time why the edit is not valid
+    and still stopped. These edits are then undone without a repair round. A
+    turn that also made a change that was not flagged keeps its repair round.
+
+    ``before``, ``after`` and ``issues`` describe the latest flagged edit.
     """
 
     def __init__(self) -> None:
-        self.before: dict | None = None
-        self.after: dict | None = None
-        self.issues: list[str] = []
+        self._edits: list[tuple[dict, dict, list[str]]] = []
+
+    @property
+    def before(self) -> dict | None:
+        return self._edits[-1][0] if self._edits else None
+
+    @property
+    def after(self) -> dict | None:
+        return self._edits[-1][1] if self._edits else None
+
+    @property
+    def issues(self) -> list[str]:
+        return list(self._edits[-1][2]) if self._edits else []
 
     def note(self, before: dict, after: dict, issues: list[str]) -> None:
-        self.before, self.after, self.issues = before, after, list(issues)
+        self._edits.append((before, after, list(issues)))
+
+    def flagged_edits_between(
+        self, turn_start: dict | None, turn_end: dict | None,
+    ) -> list[tuple[dict, dict, list[str]]]:
+        """The flagged edits that alone lead from the turn's start to its end.
+
+        They are the last edits noted, each one starting from the graph that
+        the one before it left, the first one from ``turn_start`` and the last
+        one ending at ``turn_end``. The list is empty when there is no such
+        run: an unflagged change lies between two of them, before the first or
+        after the last. Flagged edits made before the graph was last equal to
+        ``turn_start`` are not part of the run; the agent took them back.
+
+        Graphs are compared by signature, so a change that the signature does
+        not record (a step position) is not seen.
+        """
+        if not self._edits or not isinstance(turn_start, dict) or not isinstance(turn_end, dict):
+            return []
+        start = _graph_signature(turn_start)
+        index = len(self._edits) - 1
+        if _graph_signature(self._edits[index][1]) != _graph_signature(turn_end):
+            return []
+        while True:
+            reached = _graph_signature(self._edits[index][0])
+            if reached == start:
+                return self._edits[index:]
+            if index == 0 or _graph_signature(self._edits[index - 1][1]) != reached:
+                return []
+            index -= 1
 
     def is_the_only_change(self, turn_start: dict | None, turn_end: dict | None) -> bool:
-        """True when the turn went from its start to its end by this edit alone."""
-        if not all(isinstance(g, dict) for g in (self.before, self.after, turn_start, turn_end)):
-            return False
-        return (
-            _graph_signature(self.before) == _graph_signature(turn_start)
-            and _graph_signature(self.after) == _graph_signature(turn_end)
-        )
+        """True when the turn went from its start to its end by one flagged edit."""
+        return len(self.flagged_edits_between(turn_start, turn_end)) == 1
 
 
 def _new_graph_validation_errors(

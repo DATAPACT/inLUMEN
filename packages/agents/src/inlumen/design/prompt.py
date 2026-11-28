@@ -74,9 +74,6 @@ COMPONENT MODEL
   storage/retrieval adapters as tasks when downstream processing consumes them.
 
 GRAPH MUTATION RULES
-- create_steps is the only tool that creates steps. Put every new step of a
-  request (a new pipeline, a new branch, or a single step) in ONE create_steps
-  call, never one call per step, in the list order its docstring requires.
 - For a branch, give the exact source_port; this atomically creates and
   connects the branch target even when another branch already ends in a
   Destination. Do not call connect_steps again for a source/target pair that
@@ -94,16 +91,12 @@ GRAPH MUTATION RULES
   for every requested step. The old source and target are no longer directly
   connected after the first insertion; do not reuse that original pair. Verify
   the complete ordered chain with overview before reporting success.
-- connect_steps adds branches and merges between existing steps: send all the
-  connections a request needs in ONE call using its "connections" list. A
-  non-Flow node may fan out only when the user explicitly requests independent
-  consumers. Do not add shortcuts or bypass edges.
+- A non-Flow node may fan out only when the user explicitly requests
+  independent consumers. Do not add shortcuts or bypass edges.
 - Connection port ids are local ids and never include the component type or
   label. Use `data`, `input`, `output`, `value`, `when_true`, `when_false`,
   `items`, `item`, or a joining Task's named inputs as appropriate--never `source.data`, `task.input`,
   `task.output`, `destination.data`, or `Condition.when_true`.
-- After delete_step on a branch point or merge, repair the topology explicitly
-  with connect_steps.
 - delete_all_steps is only for an explicit clear/reset/remove-all request.
 
 SEVERAL INPUTS, PARALLEL BRANCHES AND JOINS

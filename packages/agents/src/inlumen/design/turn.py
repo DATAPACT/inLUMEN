@@ -31,8 +31,9 @@ class DesignTurn:
 
     ``sync`` is the guardrail verdict: ``guardrail_passed``, ``status``
     (``"invalid"`` when the graph failed validation), ``graph_changed``,
-    ``validation_errors`` and a ``message``. ``declined_edit`` lists why an
-    edit was undone because it is not valid alone; the graph is then unchanged.
+    ``validation_errors`` and a ``message``. ``declined_edit`` lists why the
+    edits of the turn were undone: each is not valid alone and the turn made no
+    other change; the graph is then unchanged.
     ``fast_edit`` names the action when the request was a plain delete, clear
     or connect carried out without the full agent.
     """
@@ -117,23 +118,31 @@ async def run_design_turn(
         after_graph, after_error = await put_back()
         sync = _build_graph_sync_guardrail(visible_before_graph, after_graph, user_message, after_error)
 
-    # The turn's only change is an edit that the agent was told is not valid
-    # alone (see EditWarnings). A repair round could only put the removed part
-    # back, so the edit is undone here and the agent's explanation is the answer.
+    # The turn ended invalid and every change in it was an edit that the agent
+    # was told is not valid alone (see EditWarnings). A repair round could only
+    # put the removed parts back, so the edits are undone here and the agent's
+    # explanation is the answer. One unflagged change keeps the repair round.
     warnings = getattr(team, "edit_warnings", None)
-    if (
-        not sync["guardrail_passed"]
+    flagged = (
+        warnings.flagged_edits_between(visible_before_graph, after_graph)
+        if not sync["guardrail_passed"]
         and sync.get("status") == "invalid"
         and not after_error
         and isinstance(warnings, EditWarnings)
-        and warnings.is_the_only_change(visible_before_graph, after_graph)
-    ):
-        issues = list(warnings.issues)
+        else []
+    )
+    if flagged:
+        issues = list(dict.fromkeys(issue for _, _, edit_issues in flagged for issue in edit_issues))
         after_graph, after_error = await put_back()
         sync = _build_graph_sync_guardrail(visible_before_graph, after_graph, user_message, after_error)
         if not after_error:
             sync["declined_edit"] = issues
-            note = "The pipeline was left unchanged. On its own, this edit is not valid: " + "; ".join(issues)
+            reason = (
+                "On its own, this edit is not valid: "
+                if len(flagged) == 1
+                else f"None of the {len(flagged)} edits is valid on its own: "
+            )
+            note = "The pipeline was left unchanged. " + reason + "; ".join(issues)
             assistant_message = f"{assistant_message}\n\n{note}" if assistant_message else note
         return DesignTurn(assistant_message, after_graph, sync)
 

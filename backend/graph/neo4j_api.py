@@ -15,7 +15,7 @@ import tempfile
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
-from runtime_config import add_cors_headers, get_neo4j_settings
+from runtime_config import get_neo4j_settings
 from inlumen.contracts.step_types import normalize_step_type
 from inlumen.contracts.node_ports import (
     normalize_node_ports,
@@ -48,7 +48,7 @@ NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD = get_neo4j_settings()
 graph_data = []
 
 app = Flask(__name__)
-from observability import install_request_observability
+from flask_setup import install_cors, install_request_observability
 install_request_observability(app)
 
 _base_driver = GraphDatabase.driver(
@@ -1372,10 +1372,10 @@ def _provenance_context_from_payload(data: dict) -> dict:
     }
 
 
-# Apply the CORS function to all routes using the after_request decorator
-@app.after_request
-def apply_cors(response):
-    return add_cors_headers(response, request.headers.get("Origin"))
+# Registered here, after graph_revision_headers, so that it runs before that
+# hook. The 409 response that graph_revision_headers builds on a conflict
+# therefore carries no CORS headers, as before.
+install_cors(app)
 
 # Adds a pipeline step into Neo4J:
 @app.route('/neo4j_add_node', methods=['POST'])

@@ -25,7 +25,7 @@ try:
         _cli_task_contract,
         _cli_task_launcher_source,
         _control_flow_main_source,
-        _managed_adapter_main_source,
+        _managed_adapter_main_source_v2,
         _managed_adapter_runtime,
         _inferred_system_packages_from_python_source,
         _task_capability_contract,
@@ -315,13 +315,13 @@ class DeploymentAgentsTest(unittest.TestCase):
             output_dir = root / "outputs"
             output_dir.mkdir()
             namespace = {"__name__": "managed_adapter_test"}
-            generated_source = _managed_adapter_main_source(
+            generated_source = _managed_adapter_main_source_v2(
                 {"kind": "source", "label": "PDF Knowledge Source"}
             )
             compile(generated_source, "managed-adapter-main.py", "exec")
             exec(generated_source, namespace)
 
-            outputs = namespace["_source_outputs"](
+            namespace["_copy_source_files"](
                 [
                     {
                         "filename": pdf_path.name,
@@ -346,7 +346,7 @@ class DeploymentAgentsTest(unittest.TestCase):
             )
             self.assertEqual(
                 {"knowledge.pdf", "questions.json"},
-                {item["filename"] for item in outputs},
+                {path.name for path in output_dir.iterdir()},
             )
 
     @unittest.skipIf(
