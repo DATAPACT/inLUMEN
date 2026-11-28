@@ -157,13 +157,13 @@ describe("input files of a ZIP of code", () => {
 
   it("attaches each named file to its Source as data, under its own name", async () => {
     const { attachSourceFiles } = await import("./bundleAttachments");
-    const upload = vi.fn(async () => ({}));
+    const upload = vi.fn(async (_nodeId: string, _file: File, _role?: string) => ({}));
     const notes = await attachSourceFiles(await codeZip(), [
       { node_id: "1", label: "Readings", path: "sensor/sample_input/readings.csv" },
       { node_id: "2", label: "Labels", path: "sensor/sample_input/labels.csv" },
     ], upload as never);
 
-    expect(upload.mock.calls.map(([nodeId, file, role]) => [nodeId, (file as File).name, role])).toEqual([
+    expect(upload.mock.calls.map(([nodeId, file, role]) => [nodeId, file.name, role])).toEqual([
       ["1", "readings.csv", "data"],
       ["2", "labels.csv", "data"],
     ]);
