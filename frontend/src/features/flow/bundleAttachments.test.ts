@@ -145,3 +145,48 @@ describe("bundle attachments", () => {
     expect(result.dataFiles).toBe(2);
   });
 });
+
+describe("input files of a ZIP of code", () => {
+  const codeZip = async () => {
+    const archive = new JSZip();
+    archive.file("sensor/main.py", "def run(): ...");
+    archive.file("sensor/sample_input/readings.csv", "timestamp,temperature\n1,18.2\n");
+    archive.file("sensor/sample_input/labels.csv", "id,label\n");
+    return archive.generateAsync({ type: "blob" });
+  };
+
+  it("attaches each named file to its Source as data, under its own name", async () => {
+    const { attachSourceFiles } = await import("./bundleAttachments");
+    const upload = vi.fn(async (_nodeId: string, _file: File, _role?: string) => ({}));
+    const notes = await attachSourceFiles(await codeZip(), [
+      { node_id: "1", label: "Readings", path: "sensor/sample_input/readings.csv" },
+      { node_id: "2", label: "Labels", path: "sensor/sample_input/labels.csv" },
+    ], upload as never);
+
+    expect(upload.mock.calls.map(([nodeId, file, role]) => [nodeId, file.name, role])).toEqual([
+      ["1", "readings.csv", "data"],
+      ["2", "labels.csv", "data"],
+    ]);
+    expect(notes).toEqual(["2 input files were attached: readings.csv to Readings, labels.csv to Labels."]);
+  });
+
+  it("names a file that is missing or refused and still attaches the others", async () => {
+    const { attachSourceFiles } = await import("./bundleAttachments");
+    const upload = vi.fn(async (nodeId: string) => {
+      if (nodeId === "2") throw new Error("file type not allowed");
+      return {};
+    });
+    const notes = await attachSourceFiles(await codeZip(), [
+      { node_id: "1", label: "Readings", path: "sensor/sample_input/readings.csv" },
+      { node_id: "2", label: "Labels", path: "sensor/sample_input/labels.csv" },
+      { node_id: "3", label: "Gone", path: "sensor/gone.csv" },
+    ], upload as never);
+
+    expect(notes).toEqual([
+      "1 input file was attached: readings.csv to Readings.",
+      "Labels: labels.csv was not attached (file type not allowed).",
+      "Gone: gone.csv was not attached (the file is not in the ZIP).",
+    ]);
+    expect(await attachSourceFiles(await codeZip(), [], upload as never)).toEqual([]);
+  });
+});

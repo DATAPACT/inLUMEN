@@ -631,6 +631,48 @@ def _positions(result):
     return [(node["position"]["x"], node["position"]["y"]) for node in _pipeline(result)["nodes"]]
 
 
+def test_a_code_zip_names_the_input_file_of_a_source_only_when_the_zip_holds_it():
+    """Issue #222: the canvas attaches these files; the paths are the model's words and are checked."""
+    pytest.importorskip("autogen_agentchat")
+    import asyncio
+
+    from export.design_from_artifact import design_from_code_zip
+
+    def design(*sources):
+        steps = [{"id": f"s{index}", "type": "source", "label": f"Source {index}", "description": "x", **extra}
+                 for index, extra in enumerate(sources, start=1)]
+        steps.append({"id": "run", "type": "task", "label": "Run", "description": "run()", "after": "s1",
+                      "inputs": [f"s{index}" for index in range(1, len(sources) + 1)], "target_port": "s1",
+                      "file": "sensor/README.md"})
+        steps.append({"id": "out", "type": "destination", "label": "Out", "description": "x", "after": "run"})
+        connections = [{"source": f"s{index}", "target": "run", "target_port": f"s{index}"} for index in range(2, len(sources) + 1)]
+        model = _scripted_model(_text(json.dumps({"summary": "Done.", "steps": steps, "connections": connections})))
+        return asyncio.run(design_from_code_zip(_zip(CODE_ZIP), model=model, filename="sensor.zip"))
+
+    result = design(
+        {"file": "./sensor/sample_input/readings.csv"},   # in the ZIP
+        {"file": "sensor/model.bin"},                     # not read by the model, but a file of the ZIP
+        {"file": "sensor/.env"},                          # hidden: never attached
+        {"file": "sensor/missing.csv"},                   # not in the ZIP
+        {"file": "../outside.csv"},
+        {},                                                # the model named no file
+        {"file": "sample_input/readings.csv"},            # without the top folder: one file ends with it
+        {"file": "main.py"},                              # a file of the ZIP, whatever it holds
+        {"file": "env"},
+    )
+    assert result["source_files"] == [
+        {"node_id": "1", "label": "Source 1", "path": "sensor/sample_input/readings.csv"},
+        {"node_id": "2", "label": "Source 2", "path": "sensor/model.bin"},
+        {"node_id": "7", "label": "Source 7", "path": "sensor/sample_input/readings.csv"},
+        {"node_id": "8", "label": "Source 8", "path": "sensor/main.py"},
+    ]
+    note = next(note for note in result["notes"] if "not a file of the ZIP that can be attached" in note)
+    assert "Source 3 (sensor/.env)" in note and "Source 4 (sensor/missing.csv)" in note and "Source 5" in note
+    assert "Source 6" not in note and "Run" not in note  # a file on a Task is not taken
+    assert "Source 9 (env)" in note  # an ending must be a whole path part, and hidden files never match
+    assert any("No code was attached to the Tasks" in note for note in result["notes"])
+
+
 def test_no_two_steps_share_a_position():
     """A fan-out puts its branches in rows of their own, also for a design from code."""
     pytest.importorskip("autogen_agentchat")

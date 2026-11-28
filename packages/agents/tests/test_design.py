@@ -726,7 +726,7 @@ def test_design_from_code_builds_a_design_in_one_call_and_repairs_it():
     assert "===== main.py (whole file) =====" in text and "===== data/in.csv (first line only) =====" in text
     assert "- model.bin" in text
 
-    source = {"id": "input", "type": "source", "label": "Input", "description": "Reads in.csv"}
+    source = {"id": "input", "type": "source", "label": "Input", "description": "Reads in.csv", "file": "data/in.csv"}
     run = {"id": "run", "type": "task", "label": "Run", "description": "run() in main.py", "after": "input"}
     outputs = [
         {"id": "out", "type": "destination", "label": "Output", "description": "Writes the result", "after": "run"},
@@ -741,6 +741,12 @@ def test_design_from_code_builds_a_design_in_one_call_and_repairs_it():
     assert len(result.graph["edges"]) == 3
     assert result.message == "Input feeds Run, which writes Output and Log."
     assert result.project["project"]["name"] == "Example"
+    # The input file that the model names for a Source comes back under the Source's id;
+    # a "file" on another kind of step is not taken.
+    source_id = next(n["id"] for n in result.graph["nodes"] if n["data"]["label"] == "Input")
+    assert result.source_files == {source_id: "data/in.csv"}
+    with_task_file = json.dumps({"steps": [source, {**run, "file": "main.py"}, *outputs]})
+    assert asyncio.run(design_from_code(files, model=_scripted(_reply(with_task_file)))).source_files == {source_id: "data/in.csv"}
 
     # A reply that is no design, then a design without an output, then a valid one.
     model = _scripted(_reply("Here is the design."), _reply(json.dumps({"steps": [source, run]})), _reply(valid))

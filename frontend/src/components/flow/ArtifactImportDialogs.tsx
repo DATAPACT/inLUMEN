@@ -1,4 +1,4 @@
-import { AlertTriangle, Ban, CheckCircle2, FileCode2, FileText, Loader2, ShieldCheck, Sparkles, Table2 } from 'lucide-react';
+import { AlertTriangle, Ban, CheckCircle2, Database, FileCode2, FileText, Loader2, ShieldCheck, Sparkles, Table2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -99,6 +99,10 @@ export function CodeImportConsentDialog({ request, fileName: zipName, modelName,
           <li className="flex items-start gap-2">
             <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
             Nothing is executed. Of a table only the first line is sent, for the column names.
+          </li>
+          <li className="flex items-start gap-2">
+            <Database className="mt-0.5 h-3.5 w-3.5 shrink-0 text-sky-500" />
+            An input file that the design names for a Source is attached to it. It is stored in inLUMEN, not sent to the model.
           </li>
           {replacedSteps > 0 && (
             <li className="flex items-start gap-2" data-testid="code-import-replaces">

@@ -47,6 +47,7 @@ MAX_CODE_TOTAL_CHARS = 200_000
 MAX_CODE_FILES = 60
 MAX_ZIP_ENTRIES = 4096
 MAX_TABLE_HEADER_CHARS = 400
+MAX_SOURCE_FILE_BYTES = 50 * 1024 * 1024
 
 
 class ArtifactError(ValueError):
@@ -1028,6 +1029,7 @@ async def design_from_code_zip(data: bytes, *, model: Any, filename: str = "") -
         raise ArtifactError("The file is larger than 50 MiB.")
     with _open_zip(data) as archive:
         code = code_files_from_zip(archive)
+        sizes = {_member_path(info): info.file_size for info in archive.infolist() if not info.is_dir()}
     if not code["has_code"]:
         raise ArtifactError("The ZIP holds no code file.")
     stem = re.sub(r"\.zip$", "", filename.replace("\\", "/").split("/")[-1], flags=re.IGNORECASE)
@@ -1058,8 +1060,40 @@ async def design_from_code_zip(data: bytes, *, model: Any, filename: str = "") -
     notes.append(
         f"{len(code['send'])} file(s) were read"
         + (f"; {len(code['listed'])} other file(s) were not read." if code["listed"] else ".")
-        + " No code or data was attached to the steps."
+        + " No code was attached to the Tasks: the code of the ZIP is not in inLUMEN's Task format."
     )
+    # The input file that the model named for a Source is attached by the canvas.
+    # The path is the model's word, so only a visible file of this ZIP counts.
+    labels = {str(node["id"]): str(node["data"].get("label") or node["id"]) for node in design.graph["nodes"]}
+    kinds = {str(node["id"]): str(node["data"].get("type") or "") for node in design.graph["nodes"]}
+    def is_hidden(path: str) -> bool:
+        return any(part.startswith(".") or part.lower() in SKIPPED_FOLDERS for part in path.split("/"))
+
+    attachable = [path for path, size in sizes.items() if not is_hidden(path) and 0 < size <= MAX_SOURCE_FILE_BYTES]
+
+    def in_zip(named: str) -> str:
+        """The file of the ZIP that a named path means: itself, or the only file whose path ends with it."""
+        named = re.sub(r"^(\./)+", "", named.replace("\\", "/")).strip("/")
+        if not named or ".." in named.split("/"):
+            return ""
+        if named in attachable:
+            return named
+        # The model often leaves out the top folder of the ZIP.
+        endings = [path for path in attachable if path.endswith("/" + named)]
+        return endings[0] if len(endings) == 1 else ""
+
+    source_files, not_found = [], []
+    for node_id, named in design.source_files.items():
+        if kinds.get(node_id) != "source":
+            continue
+        path = in_zip(named)
+        if path:
+            source_files.append({"node_id": node_id, "label": labels[node_id], "path": path})
+        else:
+            not_found.append(f"{labels[node_id]} ({named})")
+    if not_found:
+        notes.append("The input file named for these Sources is not a file of the ZIP that can be attached: "
+                     + "; ".join(not_found) + ".")
     notes += [f"The design does not pass validation yet: {item}" for item in design.validation_errors]
     return {
         "kind": "code-zip",
@@ -1068,4 +1102,5 @@ async def design_from_code_zip(data: bytes, *, model: Any, filename: str = "") -
         "step_count": len(design.graph["nodes"]),
         "connection_count": len(design.graph["edges"]),
         "model_calls": len(design.requests),
+        "source_files": source_files,
     }
