@@ -39,13 +39,12 @@ from pipeline_agent.cancellation import (
     run_cancellable_pipeline_turn,
 )
 from pipeline_agent.service import PipelineEditorTurnCancelled, run_pipeline_editor_turn
-from runtime_config import add_cors_headers
 from workspaces.workspace_storage import node_bucket_name
 from workspaces.workspace_store import WORKSPACE_HEADER
 
 app = Flask(__name__)
 app.register_blueprint(create_chat_blueprint())
-from observability import install_request_observability
+from flask_setup import install_cors, install_request_observability
 install_request_observability(app)
 
 CODEGEN_SERVICE_URL = os.getenv(
@@ -57,9 +56,7 @@ DEPLOYMENT_VALIDATION_TIMEOUT_SECONDS = int(
 )
 
 
-@app.after_request
-def apply_cors(response):
-    return add_cors_headers(response, request.headers.get("Origin"))
+install_cors(app)
 
 
 def _preflight_response():
@@ -510,8 +507,6 @@ def agentic_generate_deployment_bundle():
 def agentic_generate_version_yamls():
     if request.method == "OPTIONS":
         return _preflight_response()
-
-    data = request.get_json(silent=True) or {}
 
     try:
         versions = run_async(fetch_pipeline_versions(
