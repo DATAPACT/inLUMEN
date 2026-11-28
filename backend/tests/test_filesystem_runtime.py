@@ -1,4 +1,3 @@
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,17 +8,13 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from export.filesystem_runtime import (  # noqa: E402
-    PIPELINE_INPUT_DIR,
-    PIPELINE_OUTPUT_DIR,
     discover_artifacts,
     direct_parameter_environment_name,
     filesystem_shell_component_source,
     parameter_environment,
-    prepare_workspace,
     normalize_single_output_port,
     stage_input_bindings,
     stage_input_directories,
-    task_environment,
 )
 
 
@@ -80,15 +75,10 @@ class FilesystemRuntimeTest(unittest.TestCase):
             (source / "nested").mkdir()
             (source / "nested" / "input.txt").write_text("input", encoding="utf-8")
 
-            input_dir, output_dir = prepare_workspace(root / "workspace", [source])
+            input_dir = stage_input_directories([source], root / "workspace" / "input")
+            output_dir = root / "workspace" / "output"
+            output_dir.mkdir()
             self.assertEqual("input", (input_dir / "nested" / "input.txt").read_text())
-            self.assertEqual(
-                {
-                    PIPELINE_INPUT_DIR: str(input_dir.resolve()),
-                    PIPELINE_OUTPUT_DIR: str(output_dir.resolve()),
-                },
-                task_environment(input_dir, output_dir),
-            )
 
             (output_dir / "result.json").write_text("{}", encoding="utf-8")
             artifacts = discover_artifacts(output_dir)
@@ -201,6 +191,12 @@ class FilesystemRuntimeTest(unittest.TestCase):
         self.assertEqual("QUESTION", direct_parameter_environment_name("QUESTION"))
         self.assertEqual("", direct_parameter_environment_name("question-text"))
         self.assertEqual("", direct_parameter_environment_name("PIPELINE_INPUT_DIR"))
+
+    def test_shipped_component_builds_the_parameter_environment_with_the_tested_helper(self):
+        source = filesystem_shell_component_source()
+        self.assertIn("env.update(_parameter_environment(self.parameters))", source)
+        self.assertEqual(1, source.count('environment["PIPELINE_PARAMS_JSON"] ='))
+        self.assertNotIn('env["PIPELINE_PARAMS_JSON"]', source)
 
 
 if __name__ == "__main__":

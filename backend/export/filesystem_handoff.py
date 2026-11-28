@@ -50,6 +50,33 @@ def _direct_parameter_environment_name(key):
     return name
 
 
+def _parameter_environment(parameters):
+    """Environment variables that carry the configured parameters of a Task.
+
+    A parameter named QUESTION is available as os.getenv("QUESTION"). The
+    prefixed names remain available for older generated Task code.
+    """
+    normalized = {
+        str(key): value for key, value in parameters.items()
+        if str(key).strip() and str(key) not in {"model_plan", "output_artifacts"}
+    }
+    environment = {}
+    if normalized:
+        environment["PIPELINE_PARAMS_JSON"] = json.dumps(
+            normalized, ensure_ascii=False, sort_keys=True
+        )
+    for key, value in sorted(normalized.items()):
+        prefixed_name = "PIPELINE_PARAM_" + "".join(
+            char if char.isalnum() else "_" for char in key.upper()
+        ).strip("_")
+        if prefixed_name != "PIPELINE_PARAM_":
+            environment[prefixed_name] = str(value)
+        direct_name = _direct_parameter_environment_name(key)
+        if direct_name:
+            environment[direct_name] = str(value)
+    return environment
+
+
 def _same_file_contents(first, second):
     if first.stat().st_size != second.stat().st_size:
         return False
