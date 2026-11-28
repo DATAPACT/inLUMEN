@@ -27,6 +27,10 @@ canvas. It calls a real model, so it is run by hand, not in CI.
   model calls and prompt tokens per kind. Run it again with
   `INLUMEN_DESIGN_FAST_EDITS=0` to compare with the full agent alone.
 
+- `scripts/measure_prompt.py`: reports the size of one request of the full
+  agent by part (rules, component palette, each tool, request and canvas) on
+  the six-step canvas. It calls no model and needs no key.
+
 ## How to run
 
 With an environment that has `inlumen-agents[design]` installed (for example
@@ -136,3 +140,66 @@ answered "other" 20 times.
 
 Not measured: the self-hosted model, default reasoning, requests in other
 languages, and how often real requests are plain edits.
+
+## Size of the full agent's prompt, 28 Nov 2026
+
+`scripts/measure_prompt.py`, request "delete language detection" on the
+six-step canvas of `inputs/delete-requests.json`. Tokens of tiktoken's
+`o200k_base` encoding; no model was called. "Before" is `main` at `8f40894`.
+
+| Part | Before | After |
+|---|---|---|
+| Rules in the system prompt | 2,805 | 2,696 |
+| Component palette | 235 | 235 |
+| Tool descriptions (14 tools) | 3,308 | 3,233 |
+| of which `create_steps` | 1,041 | 976 |
+| of which `connect_steps` | 488 | 478 |
+| Request and canvas | 1,070 | 616 |
+| of which copies of the canvas (453 each) | 2 | 1 |
+| Total of one call | 7,418 | 6,780 |
+
+One call is 638 tokens (9%) smaller. What changed:
+
+- The canvas is sent once when the stored graph holds the same steps and
+  connections as the visible canvas (save time and positions are not
+  compared). When they differ, or no canvas came with the request, both
+  snapshots are sent as before.
+- `create_steps`: a more compact JSON example with the same four steps, and
+  shorter wording. Every field is still named.
+- `connect_steps`: a shorter JSON example. Its port-id paragraph now also
+  names the label prefix and the named inputs of a joining Task, so its size
+  hardly changes.
+- Two rules were removed from the system prompt because a tool description
+  states them: `create_steps` is the only tool that creates steps and takes
+  them in one call; after deleting a branch point or merge, reconnect with
+  `connect_steps`. The port-id rule stays in the system prompt: a backend
+  test requires it there.
+
+Limits. The count is an estimate: a provider adds a few tokens per message
+and per tool and may use another tokenizer. The snapshot holds a save time,
+so the request part varies by about two tokens between runs. Whether the
+visible canvas and the stored graph give the same snapshot in the deployed
+application (Neo4j store) was not checked; if they differ there, both are
+still sent and that part of the saving does not apply.
+
+### Check with a real model, 28 Nov 2026
+
+`openai/gpt-oss-120b` through OpenRouter, low reasoning, one run of each
+script on `main` at `8f40894` and on the shorter prompt. The run used the
+first version of the shorter prompt, whose `create_steps` example had three
+steps; the fourth step was put back afterwards (46 tokens), so the final
+text is closer to `main` than the measured one.
+
+| Check | `main` | Shorter prompt |
+|---|---|---|
+| `run_simple_edits.py`, quick path on | 20 of 20 correct | 20 of 20 correct |
+| `run_simple_edits.py`, `INLUMEN_DESIGN_FAST_EDITS=0` | 20 of 20 correct, 449,056 prompt tokens | 20 of 20 correct, 361,184 prompt tokens |
+| `run_edits_not_valid_alone.py` | 14 of 14 correct | 14 of 14 correct |
+
+With the full agent alone, the 20 requests used 20% fewer prompt tokens in
+total. This total also depends on the number of model calls, which varies
+between runs, so one run does not separate the two effects. Prompt tokens
+per call, read from the requests that took the same number of calls in both
+runs (a lone disconnect, three calls): about 4,950 on `main` and 4,490 on
+the shorter prompt, as reported by the provider. `run_delete_requests.py`
+was not run.

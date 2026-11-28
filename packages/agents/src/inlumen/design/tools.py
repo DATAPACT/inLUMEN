@@ -815,32 +815,27 @@ def build_pipeline_editor_tools(
         """Creates or configures a port-aware connection between two existing steps.
 
         params JSON:
-        {
-          "source_flow_id": "source step flow_id",
-          "target_flow_id": "target step flow_id",
-          "source_port": "optional exact output port id",
-          "target_port": "optional exact input port id",
-          "allow_fan_out": false
-        }
+        {"source_flow_id": "source step flow_id", "target_flow_id": "target step flow_id",
+         "source_port": "optional exact output port id",
+         "target_port": "optional exact input port id", "allow_fan_out": false}
         To add several connections, send them all in ONE call instead of one
         call per connection:
         {"connections": [
           {"source_flow_id": "2", "target_flow_id": "5", "target_port": "orders"},
-          {"source_flow_id": "4", "target_flow_id": "6", "source_port": "when_false"}
-        ]}
+          {"source_flow_id": "4", "target_flow_id": "6", "source_port": "when_false"}]}
         They are applied in list order and the call is all-or-nothing: if one
         is rejected, the graph is put back as it was and the error names it.
 
-        Port ids never include a component-type prefix. Standard exact ids are:
-        Source output `data`; Task input `input` and output `output`; Destination
-        input `data`; Condition input `value` and outputs `when_true`/`when_false`;
-        Parallel Map input `items` and output `item`; Collect input `item` and
-        output `items`. When a side exposes exactly
-        one port, its port field may be omitted and will be inferred.
-        Subpipeline handles are the public port ids returned by create_steps.
-        For compatibility, type-prefixed aliases such as task.output are
-        normalized only when they resolve to a real port, and input/output
-        aliases are mapped to the pinned Subpipeline's primary public ports.
+        Port ids are local ids and never include a component type or label
+        prefix (never `task.output` or `Condition.when_true`). Exact ids: Source
+        output `data`; Task input `input`, output `output`, or the named inputs
+        of a joining Task; Destination input `data`; Condition input `value`,
+        outputs `when_true`/`when_false`; Parallel Map input `items`, output
+        `item`; Collect input `item`, output `items`; Subpipeline: the public
+        port ids returned by create_steps. A side with exactly one port may omit
+        its port field. Type-prefixed aliases are accepted only when they
+        resolve to a real port, and input/output map to a Subpipeline's primary
+        public ports.
         Calling this for an existing source/target pair updates that connection's
         handles. Use it to add every non-linear branch.
         Flow steps may fan out by design. A non-Flow step may only gain a second
@@ -891,48 +886,43 @@ def build_pipeline_editor_tools(
         """Creates STEPs (one or many) and their connections in one call.
 
         This is the only tool that creates steps. Send every step a request
-        needs in ONE call: a whole new pipeline, a new branch, or a single step.
+        needs in ONE call, never one call per step: a whole new pipeline, a new
+        branch, or a single step.
 
         params JSON:
-        {
-          "pipeline": {"name": "Order pricing", "description": "1-2 sentences"},
-          "steps": [
-            {"id": "orders", "type": "source", "label": "...", "description": "..."},
-            {"id": "check", "type": "flow", "template": "Condition", "label": "...",
-             "description": "...", "expression": "value.is_valid == true", "after": "orders"},
-            {"id": "price", "type": "task", "label": "...", "description": "...",
-             "after": "check", "source_port": "when_true"},
-            {"id": "rejected", "type": "destination", "label": "...", "description": "...",
-             "after": "check", "source_port": "when_false"}
-          ],
-          "connections": [
-            {"source": "orders", "target": "join", "target_port": "orders"}
-          ]
-        }
+        {"pipeline": {"name": "Order pricing", "description": "1-2 sentences"},
+         "steps": [
+          {"id": "orders", "type": "source", "label": "...", "description": "..."},
+          {"id": "check", "type": "flow", "template": "Condition", "label": "...",
+           "description": "...", "expression": "value.is_valid == true", "after": "orders"},
+          {"id": "price", "type": "task", "label": "...", "description": "...",
+           "after": "check", "source_port": "when_true"},
+          {"id": "rejected", "type": "destination", "label": "...", "description": "...",
+           "after": "check", "source_port": "when_false"}],
+         "connections": [{"source": "orders", "target": "join", "target_port": "orders"}]}
         "pipeline" is optional: give it when you design or rebuild a pipeline,
-        to set its name and a fresh description of the complete behavior in the
-        same call. Omit it when you only add steps to an existing design.
+        to set its name and a fresh description of the complete behavior. Omit
+        it when you only add steps to an existing design.
 
         Step fields:
-          "type": "source|task|destination|flow|subpipeline" (required)
-          "label", "description": what the step does
-          "template": for a Flow "Condition", "Parallel Map" or "Collect"; or an
+          type: source|task|destination|flow|subpipeline (required)
+          label, description: what the step does
+          template: for a Flow "Condition", "Parallel Map" or "Collect"; or an
             installed plugin template (plugin:<id>) for a step of the plugin's type
-          "expression": required for a Condition, e.g. "value.is_valid == true"
-            (compares value or value.field with a literal)
-          "id": a local name for the step in this call (letters first, e.g.
-            "clean_orders"), used by "after" and "connections"
-          "after": the id of an EARLIER step in this list that this step follows
-          "after_flow_id": the flow_id of a step that already exists, instead of
-            "after"
-          "source_port": the predecessor's output; required when it has several
+          expression: required for a Condition; compares value or value.field
+            with a literal
+          id: a local name in this call (letters first, e.g. "clean_orders"),
+            used by after and connections
+          after: the id of an EARLIER step in this list that this step follows
+          after_flow_id: the flow_id of an existing step, instead of after
+          source_port: the predecessor's output; required when it has several
             (a Condition's when_true / when_false)
-          "target_port": the input of this step the predecessor feeds
-          "inputs": ["customers", "orders"] named inputs of a Task that joins
+          target_port: the input of this step the predecessor feeds
+          inputs: ["customers", "orders"] named inputs of a Task that joins
             branches; each input receives exactly one connection
-          "allow_fan_out": true only when a non-Flow predecessor must feed a
+          allow_fan_out: true only when a non-Flow predecessor must feed a
             second independent consumer
-          "reusable_pipeline_name" or "reusable_pipeline_uid": required for a
+          reusable_pipeline_name or reusable_pipeline_uid: required for a
             Subpipeline; the saved pipeline is pinned and its public port ids
             are returned
         A Source never follows another step: give it neither "after" nor
@@ -942,22 +932,22 @@ def build_pipeline_editor_tools(
         metadata, and never create configuration nodes.
 
         ORDER MATTERS: steps are created in list order and each one is placed
-        on the canvas to the right of its predecessor, so list them from
-        ingress to delivery, every step after the step it follows. List all
-        Sources in top-to-bottom order, a Condition's when_true target before
-        its when_false target, and a joining Task after the branches it joins.
+        to the right of its predecessor, so list them from ingress to delivery,
+        every step after the step it follows: all Sources in top-to-bottom
+        order, a Condition's when_true target before its when_false target, and
+        a joining Task after the branches it joins.
 
-        "connections" is optional and adds the extra edges a single predecessor
-        cannot express: the other inputs of a joining Task, or a branch merging
-        back. "source"/"target" are ids from this call or existing flow_ids;
-        ports and allow_fan_out work as in connect_steps. Do not repeat an edge
-        already created through "after".
+        "connections" is optional and adds the edges a single predecessor cannot
+        express: the other inputs of a joining Task, or a branch merging back.
+        "source"/"target" are ids from this call or existing flow_ids; ports and
+        allow_fan_out work as in connect_steps. Do not repeat an edge already
+        created through "after".
 
         The call is all-or-nothing: if any step or connection is rejected, the
         graph is put back as it was and the error names the failing entry.
         Returns each new step's flow_id next to its id, and under "overview"
-        the complete graph after the call (the same rows the overview tool
-        returns), so no separate overview call is needed to verify it.
+        the complete graph after the call (the same rows as the overview tool),
+        so no separate overview call is needed.
         """
         try:
             data = json.loads(params)
