@@ -1418,7 +1418,7 @@ export function PropertiesPanel({
   );
 
   return (
-    <div className={cn("w-full border-l border-border bg-card text-card-foreground flex flex-col h-full", className)}>
+    <div data-tour="inspector" className={cn("w-full border-l border-border bg-card text-card-foreground flex flex-col h-full", className)}>
       <div className="p-4 border-b border-border">
         <div className="flex items-center justify-between">
           <div className="min-w-0">

@@ -74,7 +74,7 @@ export const ChatPanel = ({
       : 'border-amber-500/25 bg-amber-500/10 text-amber-600';
 
   return (
-    <div className="flex h-full flex-col overflow-hidden border-l border-border bg-card/95 text-card-foreground">
+    <div data-tour="chat" className="flex h-full flex-col overflow-hidden border-l border-border bg-card/95 text-card-foreground">
       <div className="border-b border-border px-3 py-3">
         <div className="flex items-start gap-2">
           <div className="min-w-0 flex-1">
