@@ -27,6 +27,10 @@ canvas. It calls a real model, so it is run by hand, not in CI.
   model calls and prompt tokens per kind. Run it again with
   `INLUMEN_DESIGN_FAST_EDITS=0` to compare with the full agent alone.
 
+- `scripts/measure_prompt.py`: reports the size of one request of the full
+  agent by part (rules, component palette, each tool, request and canvas) on
+  the six-step canvas. It calls no model and needs no key.
+
 ## How to run
 
 With an environment that has `inlumen-agents[design]` installed (for example
@@ -106,3 +110,45 @@ answered "other" 20 times.
 
 Not measured: the self-hosted model, default reasoning, requests in other
 languages, and how often real requests are plain edits.
+
+## Size of the full agent's prompt, 28 Nov 2026
+
+`scripts/measure_prompt.py`, request "delete language detection" on the
+six-step canvas of `inputs/delete-requests.json`. Tokens of tiktoken's
+`o200k_base` encoding; no model was called. "Before" is `main` at `8f40894`.
+
+| Part | Before | After |
+|---|---|---|
+| Rules in the system prompt | 2,805 | 2,616 |
+| Component palette | 235 | 235 |
+| Tool descriptions (14 tools) | 3,308 | 3,187 |
+| of which `create_steps` | 1,041 | 930 |
+| of which `connect_steps` | 488 | 478 |
+| Request and canvas | 1,070 | 616 |
+| of which copies of the canvas (453 each) | 2 | 1 |
+| Total of one call | 7,418 | 6,654 |
+
+One call is 764 tokens (10%) smaller. What changed:
+
+- The canvas is sent once when the stored graph holds the same steps and
+  connections as the visible canvas (save time and positions are not
+  compared). When they differ, or no canvas came with the request, both
+  snapshots are sent as before.
+- `create_steps`: a shorter JSON example (three steps, not four) and shorter
+  wording. Every field is still named.
+- `connect_steps`: a shorter JSON example; it now holds the port-id rule that
+  was also in the system prompt, so its size hardly changes.
+- Three rules were removed from the system prompt because a tool description
+  states them: `create_steps` is the only tool that creates steps and takes
+  them in one call; port ids are local and carry no type or label prefix;
+  after deleting a branch point or merge, reconnect with `connect_steps`.
+
+Limits. The count is an estimate: a provider adds a few tokens per message
+and per tool and may use another tokenizer. The snapshot holds a save time,
+so the request part varies by about two tokens between runs. The effect on the agent's
+behaviour was not measured with a real model: `run_simple_edits.py` (with
+`INLUMEN_DESIGN_FAST_EDITS=0`, so that the full agent takes every request),
+`run_edits_not_valid_alone.py` and `run_delete_requests.py` were not run on
+the shorter prompt. Whether the visible canvas and the stored graph give the
+same snapshot in the deployed application (Neo4j store) was not checked
+either; if they differ there, both are still sent and nothing is saved.

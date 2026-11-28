@@ -387,6 +387,24 @@ def _pipeline_metadata_for_agent_context(graph: dict | None) -> dict:
     }
 
 
+def _same_design(canvas: dict, backend: dict) -> bool:
+    """Whether two agent snapshots show the same steps and connections.
+
+    The save time and the canvas positions are not compared: they are storage
+    and layout details, and the canvas snapshot, which is the one kept, holds
+    the positions the user sees.
+    """
+
+    def content(snapshot: dict) -> tuple[list, list]:
+        nodes = [
+            {key: value for key, value in node.items() if key not in {"x", "y"}}
+            for node in snapshot.get("nodes") or []
+        ]
+        return nodes, list(snapshot.get("edges") or [])
+
+    return content(canvas) == content(backend)
+
+
 def _build_agent_task(
     user_message: str,
     canvas_graph: dict | None,
@@ -396,14 +414,28 @@ def _build_agent_task(
         _pipeline_metadata_for_agent_context(backend_graph)
         or _pipeline_metadata_for_agent_context(canvas_graph)
     )
+    canvas = _graph_for_agent_context(canvas_graph)
+    backend = _graph_for_agent_context(backend_graph)
+    if _same_design(canvas, backend):
+        # The stored graph was reconciled to the canvas before the turn, so the
+        # two snapshots are normally the same. It is then sent once.
+        snapshots = (
+            "CURRENT VISIBLE CANVAS SNAPSHOT (authoritative UI state; the backend "
+            "graph in Neo4j holds the same steps and connections):\n"
+            f"{json.dumps(canvas, ensure_ascii=False)}\n\n"
+        )
+    else:
+        snapshots = (
+            "CURRENT VISIBLE CANVAS SNAPSHOT (authoritative UI state):\n"
+            f"{json.dumps(canvas, ensure_ascii=False)}\n\n"
+            "CURRENT BACKEND GRAPH SNAPSHOT (Neo4j state after canvas reconciliation):\n"
+            f"{json.dumps(backend, ensure_ascii=False)}\n\n"
+        )
     return (
         f"{user_message}\n\n"
         "CURRENT PIPELINE METADATA (name, active version, and description):\n"
         f"{json.dumps(pipeline_metadata, ensure_ascii=False)}\n\n"
-        "CURRENT VISIBLE CANVAS SNAPSHOT (authoritative UI state):\n"
-        f"{json.dumps(_graph_for_agent_context(canvas_graph), ensure_ascii=False)}\n\n"
-        "CURRENT BACKEND GRAPH SNAPSHOT (Neo4j state after canvas reconciliation):\n"
-        f"{json.dumps(_graph_for_agent_context(backend_graph), ensure_ascii=False)}\n\n"
+        f"{snapshots}"
         "Answer and act from the visible canvas snapshot first. If the user asks for "
         "current status, summarize this snapshot instead of relying on older chat "
         "memory. If a tool is needed, the backend has already been reconciled to this "
