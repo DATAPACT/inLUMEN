@@ -12,8 +12,6 @@ control plane and the tests, so both run the code that a bundle runs.
 
 from __future__ import annotations
 
-import json
-import shutil
 from pathlib import Path
 from typing import Iterable
 
@@ -37,34 +35,7 @@ def parameter_environment(parameters: dict[object, object]) -> dict[str, str]:
     A parameter named ``QUESTION`` is available as ``os.getenv("QUESTION")``.
     The prefixed aliases remain available for older generated Task code.
     """
-    normalized = {
-        str(key): value
-        for key, value in parameters.items()
-        if str(key).strip() and str(key) not in {"model_plan", "output_artifacts"}
-    }
-    environment: dict[str, str] = {}
-    if normalized:
-        environment["PIPELINE_PARAMS_JSON"] = json.dumps(
-            normalized, ensure_ascii=False, sort_keys=True
-        )
-    for key, value in sorted(normalized.items()):
-        legacy_name = "PIPELINE_PARAM_" + "".join(
-            char if char.isalnum() else "_" for char in key.upper()
-        ).strip("_")
-        if legacy_name != "PIPELINE_PARAM_":
-            environment[legacy_name] = str(value)
-        direct_name = direct_parameter_environment_name(key)
-        if direct_name:
-            environment[direct_name] = str(value)
-    return environment
-
-
-def task_environment(input_dir: Path | str, output_dir: Path | str) -> dict[str, str]:
-    """Return the complete public environment contract for a Task process."""
-    return {
-        PIPELINE_INPUT_DIR: str(Path(input_dir).resolve()),
-        PIPELINE_OUTPUT_DIR: str(Path(output_dir).resolve()),
-    }
+    return handoff._parameter_environment(parameters)
 
 
 def stage_input_directories(
@@ -111,20 +82,6 @@ def normalize_single_output_port(
     Task with several output ports must write each result into its port folder.
     """
     return handoff._normalize_single_output_port(Path(output_dir), output_ports)
-
-
-def prepare_workspace(
-    workspace_dir: Path | str,
-    source_directories: Iterable[Path | str],
-) -> tuple[Path, Path]:
-    """Create the standard ``/workspace/input`` and ``/workspace/output`` layout."""
-    workspace = Path(workspace_dir)
-    input_dir = stage_input_directories(source_directories, workspace / "input")
-    output_dir = workspace / "output"
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return input_dir, output_dir
 
 
 def validate_output_ports(output_dir: Path | str, required_ports: Iterable[str]) -> None:
@@ -276,23 +233,7 @@ _SHELL_COMMAND_SOURCE = r'''class ShellCommand(dg.Component, dg.Model, dg.Resolv
                 "PIPELINE_INPUT_DIR": str(input_dir.resolve()),
                 "PIPELINE_OUTPUT_DIR": str(output_dir.resolve()),
             })
-            parameters = {
-                str(key): value for key, value in self.parameters.items()
-                if str(key).strip() and str(key) not in {"model_plan", "output_artifacts"}
-            }
-            if parameters:
-                env["PIPELINE_PARAMS_JSON"] = json.dumps(
-                    parameters, ensure_ascii=False, sort_keys=True
-                )
-            for key, value in sorted(parameters.items()):
-                env_name = "PIPELINE_PARAM_" + "".join(
-                    char if char.isalnum() else "_" for char in key.upper()
-                ).strip("_")
-                if env_name != "PIPELINE_PARAM_":
-                    env[env_name] = str(value)
-                direct_name = _direct_parameter_environment_name(key)
-                if direct_name:
-                    env[direct_name] = str(value)
+            env.update(_parameter_environment(self.parameters))
             for key, source_env_name in sorted(self.secret_environment.items()):
                 target = "PIPELINE_PARAM_" + "".join(
                     char if char.isalnum() else "_" for char in str(key).upper()
