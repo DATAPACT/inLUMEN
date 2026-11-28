@@ -896,7 +896,9 @@ def build_pipeline_editor_tools(
           {"id": "check", "type": "flow", "template": "Condition", "label": "...",
            "description": "...", "expression": "value.is_valid == true", "after": "orders"},
           {"id": "price", "type": "task", "label": "...", "description": "...",
-           "after": "check", "source_port": "when_true"}],
+           "after": "check", "source_port": "when_true"},
+          {"id": "rejected", "type": "destination", "label": "...", "description": "...",
+           "after": "check", "source_port": "when_false"}],
          "connections": [{"source": "orders", "target": "join", "target_port": "orders"}]}
         "pipeline" is optional: give it when you design or rebuild a pipeline,
         to set its name and a fresh description of the complete behavior. Omit

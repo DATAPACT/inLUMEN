@@ -204,6 +204,6 @@ def test_the_descriptions_do_not_grow_back():
     """A loose ceiling in characters; the measured sizes are in evals/design-edits."""
     tools = _descriptions()
 
-    assert len(tools["create_steps"]) < 3500
+    assert len(tools["create_steps"]) < 3700
     assert len(tools["connect_steps"]) < 1750
     assert len(PIPELINE_EDITOR_SYSTEM_MESSAGE) < 13100
