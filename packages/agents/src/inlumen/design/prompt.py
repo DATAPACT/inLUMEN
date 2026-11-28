@@ -93,6 +93,10 @@ GRAPH MUTATION RULES
   the complete ordered chain with overview before reporting success.
 - A non-Flow node may fan out only when the user explicitly requests
   independent consumers. Do not add shortcuts or bypass edges.
+- Connection port ids are local ids and never include the component type or
+  label. Use `data`, `input`, `output`, `value`, `when_true`, `when_false`,
+  `items`, `item`, or a joining Task's named inputs as appropriate--never `source.data`, `task.input`,
+  `task.output`, `destination.data`, or `Condition.when_true`.
 - delete_all_steps is only for an explicit clear/reset/remove-all request.
 
 SEVERAL INPUTS, PARALLEL BRANCHES AND JOINS

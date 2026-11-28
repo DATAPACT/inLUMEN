@@ -189,15 +189,15 @@ def test_rules_cut_from_the_system_prompt_are_stated_by_a_tool():
 
     # Removed from the rules because these tools say the same.
     assert "create_steps is the only tool that creates steps" not in rules
-    assert "Connection port ids are local ids" not in rules
     assert "After delete_step on a branch point" not in rules
     assert "only tool that creates steps" in tools["create_steps"]
-    assert "Port ids are local ids" in tools["connect_steps"]
     assert "use connect_steps explicitly after deleting" in tools["delete_step"]
     # Not stated by a tool, so they stay in the rules.
     assert "only when the user explicitly requests" in rules
     assert "Do not add shortcuts or bypass edges" in rules
     assert "send ONE create_steps call" in rules
+    # Kept in the rules: a backend test requires the port-id rule there.
+    assert "never `source.data`" in rules
 
 
 def test_the_descriptions_do_not_grow_back():
@@ -206,4 +206,4 @@ def test_the_descriptions_do_not_grow_back():
 
     assert len(tools["create_steps"]) < 3500
     assert len(tools["connect_steps"]) < 1750
-    assert len(PIPELINE_EDITOR_SYSTEM_MESSAGE) < 12800
+    assert len(PIPELINE_EDITOR_SYSTEM_MESSAGE) < 13100
