@@ -17,32 +17,24 @@ volumes:
 
 services:
   postgres:
+    extends:
+      file: docker-compose.base.yml
+      service: postgres
     image: postgres:17-alpine
     container_name: inlumen_postgres
     hostname: postgres
-    restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-inlumen}
-      POSTGRES_USER: ${POSTGRES_USER:-inlumen}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-inlumen}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-    networks:
-      - datapact_network
 
   neo4j:
+    extends:
+      file: docker-compose.base.yml
+      service: neo4j
     image: neo4j:5-community
     container_name: inlumen_neo4j
     hostname: datapact-neo4j-db
-    mem_limit: ${NEO4J_MEM_LIMIT:-2G}
-    restart: unless-stopped
     ports:
       - "${NEO4J_HTTP_PORT:-7474}:7474"
       - "${NEO4J_BOLT_PORT:-7687}:7687"
@@ -53,36 +45,14 @@ services:
       - ./neo4j_plugins_volume:/plugins
     environment:
       NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/password}
-      NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP_INITIAL_SIZE:-512m}
-      NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_MAX_SIZE:-512m}
-      NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE_SIZE:-512m}
-    healthcheck:
-      # cypher-shell launches a JVM for every probe. Under Docker Desktop
-      # pressure those probes can overlap after timeout, exhaust the 2 GiB
-      # container limit, and make an otherwise started database unresponsive.
-      # Neo4j only exposes HTTP after the database is ready to accept traffic.
-      test:
-        - CMD
-        - wget
-        - --quiet
-        - --spider
-        - --timeout=3
-        - http://127.0.0.1:7474/
-      interval: 10s
-      timeout: 5s
-      retries: 24
-      start_period: 60s
-    networks:
-      datapact_network:
-        aliases:
-          - datapact-neo4j-db
 
   minio:
+    extends:
+      file: docker-compose.base.yml
+      service: minio
     image: minio/minio:latest
     container_name: inlumen_minio
     hostname: datapact-minio-db
-    command: server --address 0.0.0.0:9000 --console-address ":9099" /data
-    restart: unless-stopped
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio-datapact}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio-datapact}
@@ -91,19 +61,13 @@ services:
       - "${MINIO_CONSOLE_PORT:-9099}:9099"
     volumes:
       - ./minio_data:/data
-    networks:
-      datapact_network:
-        aliases:
-          - datapact-minio-db
 
   backend:
-    build:
-      context: ./backend
-      additional_contexts:
-        agents: ./packages/agents
+    extends:
+      file: docker-compose.base.yml
+      service: backend
     container_name: inlumen_backend
     hostname: inlumen-backend
-    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -122,7 +86,6 @@ services:
       - ./backend:/usr/inlumen
       - ./packages/agents/src:/opt/inlumen-agents/src
     environment:
-      PYTHONUNBUFFERED: "1"
       FRONTEND_PORT: ${FRONTEND_PORT:-8080}
       INLUMEN_API_PORT: ${INLUMEN_API_PORT:-5000}
       NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/password}
@@ -135,19 +98,11 @@ services:
       KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-}
       KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-}
       KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:-}
-      KEYCLOAK_CLOCK_SKEW_SECONDS: ${KEYCLOAK_CLOCK_SKEW_SECONDS:-5}
       INLUMEN_CODEGEN_SERVICE_URL: ${INLUMEN_CODEGEN_SERVICE_URL:-http://codegen:8010}
       INLUMEN_CODEGEN_SERVICE_API_KEY: ${INLUMEN_CODEGEN_SERVICE_API_KEY:-inlumen-local-codegen-token}
-      INLUMEN_CODEGEN_INPUT_MAX_BYTES: ${INLUMEN_CODEGEN_INPUT_MAX_BYTES:-52428800}
-      INLUMEN_CODEGEN_INPUT_TOTAL_MAX_BYTES: ${INLUMEN_CODEGEN_INPUT_TOTAL_MAX_BYTES:-104857600}
-      INLUMEN_CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_CODEGEN_NODE_REQUEST_TIMEOUT_SECONDS:-300}
-      INLUMEN_CODEGEN_PIPELINE_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_CODEGEN_PIPELINE_REQUEST_TIMEOUT_SECONDS:-1200}
       INLUMEN_CODEGEN_RUN_DB_PATH: ${INLUMEN_CODEGEN_RUN_DB_PATH:-/usr/inlumen/state/codegen-runs.sqlite3}
-      INLUMEN_CODEGEN_DEPLOYMENT_TIMEOUT_SECONDS: ${INLUMEN_CODEGEN_DEPLOYMENT_TIMEOUT_SECONDS:-1800}
       INLUMEN_RUNNER_SERVICE_URL: ${INLUMEN_RUNNER_SERVICE_URL:-http://runner:8020}
       INLUMEN_RUNNER_SERVICE_API_KEY: ${INLUMEN_RUNNER_SERVICE_API_KEY:-inlumen-local-runner-token}
-      INLUMEN_RUNNER_REQUEST_TIMEOUT_SECONDS: ${INLUMEN_RUNNER_REQUEST_TIMEOUT_SECONDS:-10}
-      WATCH_INTERVAL_SECONDS: ${WATCH_INTERVAL_SECONDS:-1.0}
     command:
       - python
       - dev_runner.py
@@ -162,24 +117,20 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
-    networks:
-      - datapact_network
 
   runner:
-    build:
-      context: ./runner
+    extends:
+      file: docker-compose.base.yml
+      service: runner
     image: inlumen-runner-service:local
     pull_policy: build
     container_name: inlumen_runner
     hostname: runner
-    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
       neo4j:
         condition: service_healthy
-    expose:
-      - "8020"
     volumes:
       - ./runner/app:/app/app
       - runner_state:/app/state
@@ -190,38 +141,24 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-inlumen}:${POSTGRES_PASSWORD:-inlumen}@postgres:5432/${POSTGRES_DB:-inlumen}
       APP_ENV: development
       RUNNER_ARTIFACT_ROOT: ${RUNNER_ARTIFACT_ROOT:-/app/state/artifacts}
-      RUNNER_ADAPTER: ${RUNNER_ADAPTER:-dagster}
       INLUMEN_CODEGEN_SERVICE_URL: ${INLUMEN_CODEGEN_SERVICE_URL:-http://codegen:8010}
       INLUMEN_CODEGEN_SERVICE_API_KEY: ${INLUMEN_CODEGEN_SERVICE_API_KEY:-inlumen-local-codegen-token}
-      RUNNER_DAGSTER_TIMEOUT_SECONDS: ${RUNNER_DAGSTER_TIMEOUT_SECONDS:-1800}
       NEO4J_URI: ${NEO4J_URI:-bolt://datapact-neo4j-db:7687}
       NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/password}
     command: uvicorn app.main:app --host 0.0.0.0 --port 8020 --reload
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8020/ready', timeout=5)"
       interval: 5s
-      timeout: 5s
       retries: 24
       start_period: 10s
-    networks:
-      - datapact_network
 
   codegen:
-    build:
-      context: ./codegen
-      additional_contexts:
-        agents: ./packages/agents
+    extends:
+      file: docker-compose.base.yml
+      service: codegen
     image: inlumen-codegen-service:local
     pull_policy: build
     container_name: inlumen_codegen
     hostname: codegen
-    restart: unless-stopped
-    expose:
-      - "8010"
     depends_on:
       postgres:
         condition: service_healthy
@@ -239,40 +176,16 @@ services:
       CODEGEN_JOB_DB_PATH: ${CODEGEN_JOB_DB_PATH:-/app/state/codegen-jobs.sqlite3}
       DATABASE_URL: postgresql://${POSTGRES_USER:-inlumen}:${POSTGRES_PASSWORD:-inlumen}@postgres:5432/${POSTGRES_DB:-inlumen}
       APP_ENV: development
-      CODEGEN_DOCKER_VALIDATION_ENABLED: ${CODEGEN_DOCKER_VALIDATION_ENABLED:-true}
       CODEGEN_VALIDATION_WORKDIR: ${CODEGEN_VALIDATION_WORKDIR:-/tmp/inlumen-codegen-workspaces}
-      CODEGEN_PIPELINE_CACHE_TTL_SECONDS: ${CODEGEN_PIPELINE_CACHE_TTL_SECONDS:-3600}
-      CODEGEN_PIPELINE_CACHE_MAX_ENTRIES: ${CODEGEN_PIPELINE_CACHE_MAX_ENTRIES:-32}
-      CODEGEN_ALLOW_DETERMINISTIC_FALLBACK: "false"
-      CODEGEN_DEPENDENCY_INSTALL_TIMEOUT_SECONDS: ${CODEGEN_DEPENDENCY_INSTALL_TIMEOUT_SECONDS:-600}
-      # Dagster workers create persistent per-workspace caches on demand.
-      INLUMEN_MODEL_STORE_VOLUME: ${INLUMEN_MODEL_STORE_VOLUME:-inlumen_model_store}
-      # Runs join this Docker network when it exists; see docs/plugins.md.
-      INLUMEN_RUN_TOOL_NETWORK: ${INLUMEN_RUN_TOOL_NETWORK:-inlumen_tools}
       CODEGEN_INPUT_FILE_BASE_URL: ${CODEGEN_INPUT_FILE_BASE_URL:-http://backend:${INLUMEN_API_PORT:-5000}/api/files/content}
       CODEGEN_INPUT_FILE_ALLOW_INSECURE_HTTP: ${CODEGEN_INPUT_FILE_ALLOW_INSECURE_HTTP:-true}
-      CODEGEN_INPUT_FILE_MAX_BYTES: ${CODEGEN_INPUT_FILE_MAX_BYTES:-52428800}
-      # Step outputs are uploaded to MinIO after each run and passed to the
-      # runner and backend by reference. Set to "inline" to keep them on the runner.
-      INLUMEN_RUN_ARTIFACT_STORAGE: ${INLUMEN_RUN_ARTIFACT_STORAGE:-minio}
-      INLUMEN_RUN_ARTIFACT_RETENTION_DAYS: ${INLUMEN_RUN_ARTIFACT_RETENTION_DAYS:-30}
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-datapact-minio-db:9000}
-      MINIO_SECURE: ${MINIO_SECURE:-false}
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio-datapact}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio-datapact}
     command: uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/ready', timeout=5)"
       interval: 5s
-      timeout: 5s
       retries: 24
       start_period: 10s
-    networks:
-      - datapact_network
 
   frontend:
     build:

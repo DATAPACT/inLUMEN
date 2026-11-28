@@ -40,7 +40,7 @@ Modules are imported by their full path, for example `from graph.neo4j_api impor
 
 ## Files at the root
 
-- `docker-compose.yml` and `docker-compose-prod.yml`: the development and production stacks.
+- `docker-compose.yml` and `docker-compose-prod.yml`: the development and production stacks. The settings that both share are in `docker-compose.base.yml`, which each service takes with `extends`; that file is not started alone.
 - `.env.example` and `.env.production.example`: templates for the two environment files.
 - `requirements-test.txt`: installs the backend, the agents library and the codegen service for local test runs.
 
