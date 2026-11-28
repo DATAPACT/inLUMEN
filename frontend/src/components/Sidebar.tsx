@@ -744,7 +744,7 @@ export function Sidebar({
 
   return (
     <>
-    <div className={cn("flex w-64 min-w-0 flex-col overflow-hidden border-r border-border bg-card", className)}>
+    <div data-tour="library" className={cn("flex w-64 min-w-0 flex-col overflow-hidden border-r border-border bg-card", className)}>
       <Tabs value={activeTab} onValueChange={onTabChange} className="w-full">
         <TabsList className="grid h-12 w-full grid-cols-3 rounded-none border-b border-border p-1">
           <TabsTrigger value="lab" className="min-w-0 gap-1 px-1.5 text-xs">
@@ -755,7 +755,7 @@ export function Sidebar({
             <BarChart3 className="h-3.5 w-3.5 shrink-0" />
             <span className="truncate">Overview</span>
           </TabsTrigger>
-          <TabsTrigger value="simulate" className="min-w-0 gap-1 px-1.5 text-xs">
+          <TabsTrigger value="simulate" data-tour="run-tab" className="min-w-0 gap-1 px-1.5 text-xs">
             <PlayCircle className="h-3.5 w-3.5 shrink-0" />
             Run
           </TabsTrigger>

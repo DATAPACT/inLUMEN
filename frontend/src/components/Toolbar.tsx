@@ -121,6 +121,7 @@ export function Toolbar({
           aria-pressed={isLibraryOpen}
           onClick={onToggleLibrary}
           title="Toggle node library"
+          data-tour="library-toggle"
         >
           <PanelLeft className="h-3.5 w-3.5" />
           <span className="hidden lg:inline">Library</span>
@@ -132,6 +133,7 @@ export function Toolbar({
           aria-pressed={isInspectorOpen}
           onClick={onToggleInspector}
           title="Toggle node inspector"
+          data-tour="inspector-toggle"
         >
           <SlidersHorizontal className="h-3.5 w-3.5" />
           <span className="hidden lg:inline">Inspector</span>
@@ -143,6 +145,7 @@ export function Toolbar({
           aria-pressed={isChatOpen}
           onClick={onToggleChat}
           title="Toggle pipeline chat"
+          data-tour="chat-toggle"
         >
           <MessageSquare className="h-3.5 w-3.5" />
           <span className="hidden lg:inline">Chat</span>
@@ -202,7 +205,7 @@ export function Toolbar({
           </AlertDialogContent>
         </AlertDialog>
 
-        <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={onOpenHelp}>
+        <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={onOpenHelp} data-tour="help">
           <HelpCircle className="h-3.5 w-3.5 mr-1" />
           <span className="hidden sm:inline">Help</span>
         </Button>

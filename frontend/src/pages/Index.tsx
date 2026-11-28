@@ -7,6 +7,8 @@ const Sidebar = lazy(() => import('@/components/Sidebar').then((module) => ({ de
 import type { PropertyNodeData } from '@/components/properties/PropertiesPanel';
 const PropertiesPanel = lazy(() => import('@/components/properties/PropertiesPanel').then((module) => ({ default: module.PropertiesPanel })));
 import { Toolbar } from '@/components/Toolbar';
+import { Tutorial, TutorialHelpEntry } from '@/features/tutorial/Tutorial';
+import { useTutorial } from '@/features/tutorial/useTutorial';
 import { WrappedFlowCanvas, FlowCanvasRef } from '@/components/flow/FlowCanvas';
 import { ChatPanel } from '@/components/chat/ChatPanel';
 const GraphChangePreviewDialog = lazy(() => import('@/components/chat/GraphChangePreviewDialog').then((module) => ({ default: module.GraphChangePreviewDialog })));
@@ -243,6 +245,7 @@ const Index = () => {
   const [pendingGraphPreview, setPendingGraphPreview] = useState<PendingGraphPreview | null>(null);
   const [isApplyingGraphPreview, setIsApplyingGraphPreview] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
+  const tutorial = useTutorial();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSharedLLMSettingsOpen, setIsSharedLLMSettingsOpen] = useState(false);
   const { session, authEnabled } = useAuthSession();
@@ -1463,7 +1466,7 @@ const Index = () => {
               defaultSize={isLibraryOpen ? (rightPanel ? 50 : 75) : (rightPanel ? 75 : 100)}
               minSize={35}
             >
-              <div className="h-full bg-background">
+              <div className="h-full bg-background" data-tour="canvas">
                 <WrappedFlowCanvas
                   onNodeSelect={onNodeSelect}
                   onNodesChange={onNodesChange}
@@ -1557,6 +1560,8 @@ const Index = () => {
         )}
       </div>
 
+      <Tutorial open={tutorial.open} onClose={tutorial.close} />
+
       <Dialog open={isHelpOpen} onOpenChange={setIsHelpOpen}>
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
@@ -1591,6 +1596,7 @@ const Index = () => {
               </div>
               Select a node to open the Inspector automatically. Use canvas Save to create a named version.
             </div>
+            <TutorialHelpEntry onStart={() => { setIsHelpOpen(false); tutorial.start(); }} />
           </div>
         </DialogContent>
       </Dialog>
