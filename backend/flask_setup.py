@@ -1,10 +1,15 @@
-"""Bounded request diagnostics without logging prompts, bodies, or credentials."""
+"""Setup shared by the backend Flask apps: CORS headers and request diagnostics.
+
+The diagnostics log no prompts, bodies or credentials.
+"""
 import json
 import logging
 import re
 import time
 import uuid
 from flask import g, request
+
+from runtime_config import add_cors_headers
 
 LOGGER = logging.getLogger('inlumen.requests')
 LOGGER.setLevel(logging.INFO)
@@ -35,3 +40,14 @@ def install_request_observability(app):
             'duration_ms': round((time.monotonic() - g.request_started) * 1000, 1),
         }))
         return response
+
+
+def install_cors(app):
+    """Add the CORS headers to every response of the app.
+
+    Flask runs after_request hooks in reverse order of registration, so the
+    place of this call in a module decides which later hooks see the headers.
+    """
+    @app.after_request
+    def apply_cors(response):
+        return add_cors_headers(response, request.headers.get("Origin"))

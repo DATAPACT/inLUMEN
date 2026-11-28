@@ -6,7 +6,7 @@ import os
 import datetime
 import mimetypes
 import tempfile
-from runtime_config import add_cors_headers
+from flask_setup import install_cors
 from workspaces.workspace_storage import (
     bucket_belongs_to_workspace,
     node_bucket_name,
@@ -16,10 +16,7 @@ from workspaces.workspace_storage import (
 
 app = Flask(__name__)
 
-# Apply the CORS function to all routes using the after_request decorator
-@app.after_request
-def apply_cors(response):
-    return add_cors_headers(response, request.headers.get("Origin"))
+install_cors(app)
 
 
 @app.route('/health', methods=['GET'])

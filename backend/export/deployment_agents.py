@@ -667,95 +667,6 @@ def _deterministic_python_dockerfile(
     return f"Dockerfile.{_sanitize_fragment(flow_id, 'step')}", content
 
 
-def _managed_adapter_main_source(adapter_spec: dict[str, Any]) -> str:
-    embedded_spec = json.dumps(adapter_spec, sort_keys=True)
-    return f'''import base64
-import json
-import os
-import shutil
-from pathlib import Path
-
-
-ADAPTER_SPEC = json.loads({embedded_spec!r})
-
-
-def _read_entries(manifest_path: Path):
-    if not manifest_path.is_file():
-        return []
-    with manifest_path.open("r", encoding="utf-8") as handle:
-        manifest = json.load(handle)
-    entries = manifest.get("inputs") or manifest.get("outputs") or manifest.get("files") or []
-    return [dict(entry) for entry in entries if isinstance(entry, dict)]
-
-
-def _source_outputs(entries, output_dir: Path):
-    resolved = []
-    for index, entry in enumerate(entries):
-        filename = str(
-            entry.get("filename") or entry.get("name") or f"input-{{index + 1}}"
-        ).replace("\\\\", "/").lstrip("/")
-        if not filename or ".." in Path(filename).parts:
-            raise ValueError(f"Source adapter received unsafe filename: {{filename!r}}")
-        source_path = Path(str(entry.get("path") or filename))
-        if not source_path.is_absolute():
-            source_path = Path(os.environ["INLUMEN_INPUT_MANIFEST"]).parent / source_path
-        if not source_path.is_file():
-            raise FileNotFoundError(f"Source adapter input does not exist: {{source_path}}")
-        resolved.append((entry, filename, source_path))
-
-    outputs = []
-    for entry, filename, source_path in resolved:
-        destination_path = output_dir / filename
-        destination_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, destination_path)
-        output = dict(entry)
-        output["name"] = str(output.get("name") or Path(filename).stem)
-        output["filename"] = filename
-        output["path"] = str(destination_path.resolve())
-        outputs.append(output)
-    return outputs
-
-
-def _destination_outputs(entries, output_dir: Path):
-    receipt_path = output_dir / "delivery-receipt.json"
-    receipt = {{
-        "adapter": ADAPTER_SPEC,
-        "mode": str(os.getenv("INLUMEN_RUN_MODE") or "test"),
-        "received": [
-            str(entry.get("filename") or entry.get("name") or "")
-            for entry in entries
-        ],
-    }}
-    with receipt_path.open("w", encoding="utf-8") as handle:
-        json.dump(receipt, handle, indent=2)
-    return [{{
-        "name": "delivery_receipt",
-        "filename": receipt_path.name,
-        "path": str(receipt_path.resolve()),
-        "kind": "json",
-        "format": "json",
-    }}]
-
-
-def main():
-    input_dir = Path(os.environ["PIPELINE_INPUT_DIR"])
-    output_dir = Path(os.environ["PIPELINE_OUTPUT_DIR"])
-    output_dir.mkdir(parents=True, exist_ok=True)
-    entries = [{{
-        "filename": path.relative_to(input_dir).as_posix(),
-        "path": str(path),
-    }} for path in sorted(input_dir.rglob("*")) if path.is_file()]
-    if ADAPTER_SPEC["kind"] == "source":
-        _source_outputs(entries, output_dir)
-    else:
-        _destination_outputs(entries, output_dir)
-
-
-if __name__ == "__main__":
-    main()
-'''
-
-
 def _managed_adapter_main_source_v2(adapter_spec: dict[str, Any]) -> str:
     """Return the runtime for database extraction and object-store delivery."""
     embedded_spec = json.dumps(json.dumps(adapter_spec, sort_keys=True))
@@ -2486,7 +2397,7 @@ async def _read_attached_python_runtime(
 
     if "inlumen.task.json" in filenames:
         from storage.artifact_content import decode_artifact_content
-        checked = validate_package({item["filename"]: decode_artifact_content(item) for item in runtime_files})
+        validate_package({item["filename"]: decode_artifact_content(item) for item in runtime_files})
 
     main_file = next(
         (item for item in runtime_files if item["filename"] == "main.py"),

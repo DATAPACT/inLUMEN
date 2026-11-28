@@ -103,7 +103,7 @@ from runs.run_artifact_access import (
     stream_object,
 )
 from export.runtime_environment import discover_runtime_environment, runtime_environment_from_files
-from runtime_config import add_cors_headers, get_service_port
+from runtime_config import get_service_port
 from inlumen.contracts.step_types import normalize_step_type
 from workspaces.workspace_store import (
     LOCAL_TENANT_ID,
@@ -152,7 +152,7 @@ CHATBOT_CONFIGS_PATH = Path(
 )
 
 app = Flask(__name__)
-from observability import install_request_observability
+from flask_setup import install_cors, install_request_observability
 install_request_observability(app)
 validate_production_auth_configuration()
 validate_auth_mode_configuration()
@@ -234,13 +234,16 @@ app.add_url_rule(
 
 
 @app.after_request
-def apply_cors(response):
+def graph_revision_headers(response):
     if getattr(g, "graph_response_etag", None):
         response.headers["ETag"] = g.graph_response_etag
         # Keep the graph revision when this gateway rebuilds a storage/cleanup
         # response. Unlike ETag, this header is unaffected by proxy compression.
         response.headers["X-InLumen-Graph-Revision"] = g.graph_response_etag.strip('"')
-    return add_cors_headers(response, request.headers.get("Origin"))
+    return response
+
+
+install_cors(app)
 
 
 def _preflight_response():
