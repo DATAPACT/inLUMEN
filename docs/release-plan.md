@@ -40,11 +40,11 @@ Direction only; no commitment.
 | Issue | Summary |
 |---|---|
 | #205 | Reduce duplication and split the largest files (first item done in #219) |
-| #222 | Attach code and data when a design is imported from a bundle or a code ZIP (done for a bundle; open for a code ZIP) |
 
 #98 (a design from existing code or a deployment artifact) was closed by #220
-and #221. Of its follow-ups, #224 (Argo conditions and loops) is done and
-#223 (a preview before the import) was not planned; #222 is still open.
+and #221. Of its follow-ups, #224 (Argo conditions and loops) and
+#222 (code and data attached on import) are done, and #223 (a preview before
+the import) was not planned.
 
 ## Outside release criteria
 

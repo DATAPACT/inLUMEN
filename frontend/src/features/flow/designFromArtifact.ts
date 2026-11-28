@@ -9,7 +9,11 @@ export type ArtifactDesign = {
   notes: string[];
   step_count: number;
   connection_count: number;
+  /** For a ZIP of code: the input file of the ZIP that belongs to each Source. */
+  source_files?: SourceFile[];
 };
+
+export type SourceFile = { node_id: string; label: string; path: string };
 
 /** A ZIP of code: nothing is built until the user agrees to send these files to the model. */
 export type CodeZipConsentRequest = {

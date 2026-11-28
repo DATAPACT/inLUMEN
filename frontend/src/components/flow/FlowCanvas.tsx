@@ -68,7 +68,7 @@ import {
 import { createProjectDocument, projectDocumentToGraph } from '@/features/flow/projectIr';
 import { artifactKindLabel, designFromArtifact, isArtifactFile, isArtifactJson, needsModelConsent, type ArtifactDesign, type CodeZipConsentRequest } from '@/features/flow/designFromArtifact';
 import { CodeImportConsentDialog, ImportSummaryDialog } from './ArtifactImportDialogs';
-import { attachBundleFiles } from '@/features/flow/bundleAttachments';
+import { attachBundleFiles, attachSourceFiles } from '@/features/flow/bundleAttachments';
 import {
   effectiveGenerationStatus,
   GENERATION_TERMINAL_STATUSES,
@@ -2007,16 +2007,24 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
     requestGraphViewportFit(); // show the whole imported design
     let attached = '';
     if (artifact && afterSave) {
-      const attaching = toast.loading('Attaching the code and data of the bundle…');
+      const attaching = toast.loading(artifact.kind === 'code-zip' ? 'Attaching the input files…' : 'Attaching the code and data of the bundle…');
       try {
         const notes = await afterSave();
         attached = notes[0] ? ` ${notes[0]}` : '';
-        artifact = { ...artifact, notes: [...notes, ...artifact.notes] };
+        // For code the first note is the caution on the model's reading; keep it first.
+        artifact = {
+          ...artifact,
+          notes: artifact.kind === 'code-zip' ? [...artifact.notes, ...notes] : [...notes, ...artifact.notes],
+        };
         // The attachments changed the saved graph; show them on the canvas.
         await syncFromBackend();
       } catch (error) {
         const reason = error instanceof Error ? error.message : 'unknown error';
-        artifact = { ...artifact, notes: [`The code and data of the bundle were not attached (${reason}).`, ...artifact.notes] };
+        const failed = `The files were not attached (${reason}).`;
+        artifact = {
+          ...artifact,
+          notes: artifact.kind === 'code-zip' ? [...artifact.notes, failed] : [failed, ...artifact.notes],
+        };
       } finally {
         toast.dismiss(attaching);
       }
@@ -2025,7 +2033,7 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       const summary = artifact;
       toast.success(`Design imported from ${artifactKindLabel(artifact.kind)}`, {
         description: `${artifact.step_count} steps and ${artifact.connection_count} connections.`
-          + (artifact.kind === 'code-zip' ? ' Inferred by the model: check each step.' : attached)
+          + (artifact.kind === 'code-zip' ? ' Inferred by the model: check each step.' : '') + attached
           + replaced,
         action: { label: 'Details', onClick: () => setImportSummary(summary) },
         cancel: undoImport,
@@ -2090,7 +2098,14 @@ export const FlowCanvas = forwardRef<FlowCanvasRef, FlowCanvasProps>(({
       });
       if (needsModelConsent(design)) throw new Error('The design was not built.');
       setCodeImport(null);
-      await applyImportedDesign(design.project, design);
+      // The input files that the design names are attached to their Sources.
+      const codeZip = codeImport.file;
+      const sourceFiles = design.source_files ?? [];
+      await applyImportedDesign(
+        design.project,
+        design,
+        sourceFiles.length > 0 ? () => attachSourceFiles(codeZip, sourceFiles) : undefined,
+      );
     } catch (error) {
       setCodeImport(null);
       reportImportError(error);

@@ -6,6 +6,7 @@ import {
   type PackageReport,
 } from '@/features/flow/taskPackages';
 import { uploadNodeFile } from '@/features/nodes/nodePersistence';
+import type { SourceFile } from '@/features/flow/designFromArtifact';
 
 /**
  * Attach what an inLUMEN bundle ZIP holds for the steps of its design.
@@ -174,4 +175,34 @@ export async function attachBundleFiles(
   if (summary.length === 0 && result.notes.length === 0) summary.push('The bundle holds no Task code and no input files to attach.');
   result.notes = [...summary, ...result.notes];
   return result;
+}
+
+/**
+ * Attach the input files of a ZIP of code to the Sources of the design that
+ * was inferred from it. The backend has checked each path against the ZIP.
+ * Returns notes; a file that could not be attached is named, never thrown.
+ */
+export async function attachSourceFiles(
+  file: Blob,
+  sourceFiles: SourceFile[],
+  upload: typeof uploadNodeFile = uploadNodeFile,
+): Promise<string[]> {
+  if (sourceFiles.length === 0) return [];
+  const archive = await JSZip.loadAsync(file);
+  const attached: string[] = [];
+  const notes: string[] = [];
+  for (const item of sourceFiles) {
+    const entry = archive.files[item.path] ?? archive.files[item.path.replace(/\//g, '\\')];
+    try {
+      if (!entry || entry.dir) throw new Error('the file is not in the ZIP');
+      await upload(item.node_id, new File([await entry.async('arraybuffer')], basename(item.path)), 'data');
+      attached.push(`${basename(item.path)} to ${item.label}`);
+    } catch (error) {
+      notes.push(`${item.label}: ${basename(item.path)} was not attached (${error instanceof Error ? error.message : 'upload failed'}).`);
+    }
+  }
+  if (attached.length > 0) {
+    notes.unshift(`${attached.length} input file${attached.length === 1 ? ' was' : 's were'} attached: ${attached.join(', ')}.`);
+  }
+  return notes;
 }

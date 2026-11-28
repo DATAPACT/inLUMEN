@@ -157,7 +157,15 @@ What to expect:
 - The design is the model's reading of the code. Check each step against the
   code. Two imports of the same ZIP can give different designs, for example
   one Task or three for the same function.
-- No code or data is attached to the steps.
+- **Input data is attached, code is not.** The model names the input file of
+  each Source when the ZIP holds it, for example `sample_input/readings.csv`.
+  After the design is on the canvas, each of these files is attached to its
+  Source, as the inspector does. The file is stored in inLUMEN; of a table
+  only the first line went to the model. A name that is not a visible file of
+  the ZIP is not used, and the message says so. No code is attached to the
+  Tasks: the code of the ZIP is not in inLUMEN's Task format. Each Task
+  description names the function or file it stands for, and **Generate code**
+  writes the Task code.
 - The first line of a table is sent as it is. If a table has no header row,
   that line is data.
 - Do not import code that you may not share with the provider of the selected
@@ -174,7 +182,9 @@ stores nothing.
 For a ZIP of code the first answer holds no design: `needs_model` is true and
 `files_to_send` and `files_not_sent` list the files. Send the request again
 with the form fields `consent=true` and `llm_config` (JSON) to build the
-design.
+design. That answer also holds `source_files`: for each Source whose input
+file is in the ZIP, its `node_id`, `label` and the `path` of the file. The
+canvas reads these files from the ZIP and attaches them.
 
 Limits: 50 MiB for a ZIP, 5 MiB for a manifest or workflow file, 500 steps,
 4096 ZIP entries.
@@ -182,5 +192,5 @@ Limits: 50 MiB for a ZIP, 5 MiB for a manifest or workflow file, 500 steps,
 ## Not covered
 
 Dagster projects and other workflow formats are not read by rule; inside a
-ZIP they are treated as code. A design inferred from a ZIP of code gets no
-code or data attached.
+ZIP they are treated as code. A design inferred from a ZIP of code gets its
+input data attached, but no Task code.
