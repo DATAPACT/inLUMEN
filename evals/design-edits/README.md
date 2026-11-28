@@ -83,6 +83,14 @@ is met for 30 of 33. "Change Collect invoices to a Parallel Map" still took 4
 and 15 calls in two of three runs: the agent made several edits, so the turn
 was not a single edit and kept its repair round.
 
+Since then the rule covers that case: when the turn ends invalid and every
+change in it was an edit that carried the note, all of these edits are undone
+without a repair round. A turn with one change that carried no note keeps its
+repair round. Scripted tests in `packages/agents/tests/test_design.py` cover
+both. The effect on model calls is not measured: the table above was not
+repeated with a real model after this change, so the 4 and 15 calls are still
+the latest measured values for the Flow behavior switch.
+
 ## Simple edits, 27 Nov 2026
 
 `openai/gpt-oss-120b` through OpenRouter, low reasoning. "Full agent" is the
